@@ -54,6 +54,15 @@ App（组装器 + 生命周期管理，app.rs:85）
   - `App::empty()` 默认 `runner = run_once`（`app.rs:152`）——**只跑一帧就退出**；
   - **这就是 hello_world 只打印一行"hello world"就结束的原因**：它连 DefaultPlugins 都没加（全文件 6 行），默认 runner 是 run_once。平时感觉"Bevy 程序一直在转"，是因为 DefaultPlugins 里的 `WinitPlugin` 把 runner 换成了 winit 事件循环（每收到一次红raw事件/每帧调一次 update）；
   - 无窗口时用 `ScheduleRunnerPlugin::run_loop(1/60)` 手动给个循环（`examples/app/headless.rs` 的做法）。
+- **runner 真身表**（2026-09-14 补核实）——有趣的事实：**DefaultPlugins 里其实有 `ScheduleRunnerPlugin` 条目**，只是带门控 `#[custom(cfg(not(feature = "bevy_window")))]`（`bevy_internal/src/default_plugins.rs:19-20`）：
+
+  | 构建 | 生效的 runner | 说明 |
+  |---|---|---|
+  | 桌面（默认） | `WinitPlugin` 的 winit_runner | ScheduleRunnerPlugin 条目被剔除；循环在 OS 消息泵（`EventLoop::run_app` 各事件回调内调 `app.update()`） |
+  | headless（禁 `bevy_window`） | `ScheduleRunnerPlugin`，默认 `RunMode::Loop { wait: None }`（`schedule_runner.rs:33`） | **全速空转、不 sleep**——headless 例程要自己 `run_loop(Duration)` 限拍 |
+  | 裸 `App`（无插件） | `run_once` | 一帧退出（hello_world） |
+
+  `set_runner` 是"**后来者赢**"：DefaultPlugins 里 ScheduleRunnerPlugin（第 19 行）先 build、WinitPlugin（第 40 行）后 build，后者覆盖前者。ScheduleRunner 的 loop 体就三件事（`schedule_runner.rs:97-125`）：`app.update()` → `should_exit` 检查 → 可选 `sleep(wait - 耗时)`；首循环前履行 `finish()`/`cleanup()`（Plugin 生命周期后两段归 runner）。
 - **hello_world 逐行**：
   ```rust
   App::new()                          // App::default()：建 main SubApp + World + Main 调度
@@ -85,6 +94,33 @@ runner tick（winit 事件 / ScheduleRunner 定时 / run_once 单次）
    └─ （若有）各 SubApp：extract(主World→副World 拷贝) → 跑自己的调度（如 Render）
 ```
 
+**`app.update()` 内部三层**（2026-09-14 补核实，每层都薄得意外）：
+
+1. **`App::update()`**（`app.rs:161-166`）：一个 `is_building_plugins` panic 卫兵 + 一行 `self.sub_apps.update()`——完。
+2. **`SubApps::update()`**（`sub_app.rs:574-591`）：①`main.run_default_schedule()`；②for 每个 SubApp：`extract(&mut main.world)` → `update()`；③`main.world.clear_trackers()`。
+   - `SubApp::update()` = `run_default_schedule()` + `self.world.clear_trackers()`（`sub_app.rs:155-159`）；
+   - `run_default_schedule()` = 跑 `update_schedule` 指向的调度——**SubApp 生下来 `update_schedule: None`，不设就静默空转**。
+3. **Main 调度的真身**：不是特殊结构，就是一个 **SingleThreadedExecutor 的普通调度 + 唯一系统 `Main::run_main`**（`main_schedule.rs:313-315`）：
+
+   ```rust
+   pub fn run_main(world: &mut World, mut run_at_least_once: Local<bool>) {
+       if !*run_at_least_once {
+           for &label in &order.startup_labels {      // [PreStartup, Startup, PostStartup]
+               world.try_run_schedule(label);
+           }
+           *run_at_least_once = true;
+       }
+       for &label in &order.labels {                  // 每帧七段
+           world.try_run_schedule(label);
+       }
+   }
+   ```
+
+   两个此前悬着的疑问在此闭合：
+   - **"Startup 只跑一次" = 一个 `Local<bool>` 标志**（首帧跑完 startup 三连后翻转），没有任何特殊机制；
+   - **"调度顺序" = `MainScheduleOrder` 资源里的两个 Vec + for 循环**（`main_schedule.rs:214-233`）——`insert_after`/`insert_startup_before` 都是往 Vec 插位，bevy_state 插 `StateTransitions` 用的就是这个机制。
+   - 变更检测的"每帧结算"发生在 `clear_trackers()`：`is_changed()` 的窗口是一帧，因为帧尾把 tracker 清了。
+
 ## 6. 与 Unity 的映射（速查）
 
 | Bevy | Unity 近似物 | 关键差异 |
@@ -101,5 +137,5 @@ Plugin 的添加机制、生命周期四段、PluginGroup/`plugin_group!` 宏展
 
 ## 8. 遗留与下一步
 
-- 第一步四问进度：**Q1（启动到第一帧）✅ 本篇第 3、5 节；Q3（system 时机/变换传播位置）✅ 本篇第 2 节**；Q2（禁 RenderPlugin 后剩什么）→ 下一步清点 `crates/bevy_internal/src/default_plugins.rs` 做三分类清单；Q4（glTF 链路）→ 待读 `bevy_asset`/`bevy_scene`。
-- 待深挖（按需，不阻塞）：`RunFixedMainLoop`/`FixedMain` 的定点步细节；`extract` 的具体调用时机（`SubApps::update` 源码）。
+- 第一步四问进度：**Q1（启动到第一帧）✅ 本篇第 3、5 节（2026-09-14 增补 runner 真身表 + update() 内部三层）；Q3（system 时机/变换传播位置）✅ 本篇第 2 节**；Q2（禁 RenderPlugin 后剩什么）✅《DefaultPlugins分类.md》；Q4（glTF 链路）→ 消费端半篇见《BSN场景语法与Unity场景对比.md》，剩 glTF 加载链路。
+- 待深挖（按需，不阻塞）：`RunFixedMainLoop`/`FixedMain` 的定点步细节（`FixedMain::run_fixed_main` 同款 Vec 遍历，`main_schedule.rs`）。~~extract 的具体调用时机~~ ✅ 2026-09-14 已核实（第 5 节 `SubApps::update` 三步）。
