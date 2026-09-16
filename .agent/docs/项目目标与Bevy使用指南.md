@@ -145,11 +145,12 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 - `step1-熟悉Bevy结构/Bevy结构笔记.md`（ECS 核心概念笔记：App/SubApp/Schedule/World + 一帧时间线 + runner 真身表 + update() 内部三层，随学习进度增补）
 - `step1-熟悉Bevy结构/SubApp机制与取舍.md`（SubApp 定位与判断标准、并行性真相、开销与风险账、对本项目的演进结论；§7 补遗：3d_scene 三 SubApp 创建者与渲染线程交接）
 - `step1-熟悉Bevy结构/Plugin与PluginGroup机制.md`（Plugin 添加=build 与生命周期四段、Plugin 添加 Plugin 的两种形式、`plugin_group!` 宏展开（`:::`/`#[custom]`）与 set/disable 链、disable::<RenderPlugin> 的完整语义）
-- `step1-熟悉Bevy结构/World与Resource.md`（World 字段解剖、Resource=隐形实体上的组件、变更检测 tick、Commands 延迟同步点、基础概念盘点表）
 - `step1-熟悉Bevy结构/DefaultPlugins分类.md`（Q2：渲染族禁用名单 8 个、0.19.1 数据/渲染 crate 解耦、PbrPlugin 优雅降级核实、M1 验证清单）
 - `step1-熟悉Bevy结构/BSN场景语法与Unity场景对比.md`（BSN 是什么/怎么用/功能盘点 + 与 Unity scene YAML 逐维度对比；Template/HandleTemplate/补丁机制；Q4 消费端半篇）
 - `step1-熟悉Bevy结构/Bevy编辑器路线与代码热重载.md`（Bevy editor-last 立场三座山、BRP/.bsn 基建现状；Rust 热重载三堵墙与原生热重载光谱；数据热/逻辑冷分工）
-- `step1-熟悉Bevy结构/Entity与Asset.md`（两套带世代 ID 体系：Entity 位布局/防悬空/万物统一身份；Asset 双存储/Handle 强弱/异步生命周期；对本项目 bindless 池 key 的落点）
+- `step1-熟悉Bevy结构/数据层全景：World、Entity、Resource与Asset.md`（2026-09-16 合并原《World与Resource》《Entity与Asset》去重：World 字段解剖、Entity 位布局/世代防悬空、Resource=隐形实体+唯一性原理、Assets 双存储/Handle 强弱、tick 变更检测、数据放哪三层判定、同构表与 bindless 池落点）
+- `step1-熟悉Bevy结构/System与调度DSL.md`（add_systems 四跳链、ScheduleLabel/Interned、System 运行时对象、IntoScheduleConfigs 配置树 DSL、复杂传参三层机制、建图→编译→执行、Schedule 心智模型与 Unity DOTS 对照、并行规则、对 barrier 推导的落点）
+- `step1-熟悉Bevy结构/System参数与数据访问.md`（0.19.1 参数全量目录：Query D/F 模板与 Single/Populated 验证跳过、资源类/命令类/消息事件类/独占类/工具类/插件型参数、Commands 同步点三时机与手动控制、Local 详解、多 Query 共存规则、高频问答速查）
 - `开发工具与语法笔记.md`（**非引擎结构**的工具层知识：Rust 宏语法、cargo、调试工具等，随读源码沉淀）
 
 上游知识库（`C:\Users\zengkaixiang\.agents\docs\游戏制作\游戏引擎\渲染\渲染管线\`，绝对路径引用）：

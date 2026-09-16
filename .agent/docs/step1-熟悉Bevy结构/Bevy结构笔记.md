@@ -23,7 +23,7 @@ App（组装器 + 生命周期管理，app.rs:85）
 
 ## 1. World —— 数据总仓库
 
-> 深入版（字段解剖、Resource=隐形实体组件、变更检测 tick、Commands 延迟）见《[World与Resource](World与Resource.md)》。
+> 深入版（字段解剖、Resource=隐形实体组件、Entity/Asset 两套 ID、变更检测 tick）见《[数据层全景：World、Entity、Resource与Asset](数据层全景：World、Entity、Resource与Asset.md)》。
 
 - 装三样东西：**实体+组件**（ECS 的数据行）、**资源**（全局单例，如 `Time`、`Assets<Mesh>`）、以及——容易忽略的——**调度器集合 `Schedules` 也是一个存在 World 里的资源**（`sub_app.rs` 的 `SubApp::default()` 里就是 `world.init_resource::<Schedules>()`）。
 - World 是**被动的**：它不跑逻辑，只被系统读写。"世界在动"其实是"挂在它上面的 Schedule 在跑"。
