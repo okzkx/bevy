@@ -12,6 +12,7 @@
 - `BSN场景语法与Unity场景对比.md`——Q4 消费端半篇：BSN 语法/Template 机制/功能盘点 + Unity scene YAML 对比（glTF 加载链路另算）
 - `System与调度DSL.md`——调度体系专题：add_systems 四跳链、ScheduleLabel/Interned、System 运行时对象、IntoScheduleConfigs 配置树、建图→编译→执行、Schedule 心智模型 + Unity DOTS 对照、并行规则
 - `System参数与数据访问.md`——参数全家桶专题（2026-09-16，收编待深入①②）：0.19.1 参数全量目录、Query D/F 模板与 Single/Populated 验证跳过、Commands 同步点三时机与手动控制、Local 详解、多 Query 共存规则、高频问答
+- `实体写路径：Bundle、Commands与Query改值.md`——写路径专题（2026-09-17）：Bundle=出生组件清单与一步落位 archetype、Commands API 分组与错误处理、独占系统立即写、Query `&mut` 值路径与变更检测、结构/值两路径对比与选型口诀
 - `Bevy编辑器路线与代码热重载.md`——Bevy editor-last 立场与 BRP/.bsn 基建；Rust 热重载三堵墙与原生热重载光谱
 - 另：《Bevy结构笔记》已增补 runner 真身表 + update() 内部三层；《SubApp机制与取舍》已增补 §7 三创建者与渲染线程交接；《开发工具与语法笔记》已增补 repr 内存布局条目（2026-09-14）、add_systems 泛型套路条目（2026-09-16）
 - 运行记录与截图（按需，尚未产生）
