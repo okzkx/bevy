@@ -19,8 +19,9 @@
 - 《[窗口链路侦察：WinitPlugin、RawHandleWrapper与事件进ECS.md](窗口链路侦察：WinitPlugin、RawHandleWrapper与事件进ECS.md)》——开篇侦察（2026-09-21）：窗口创建是事件驱动（首窗在 runner `resumed`，非 PreStartup）、**`WinitWindows` 0.19.1 已改 thread_local 的路线图修正**、`RawHandleWrapper` 两条 surface 路径（ash-window trait / 手写 vkCreateWin32SurfaceKHR）、runner 帧心跳结构（about_to_wait → app.update()）
 - 《[VulkanContext字段释义：从Entry到Swapchain.md](VulkanContext字段释义：从Entry到Swapchain.md)》——施工③配套（2026-09-21）：每个字段的"是什么/为什么拆这层/Unity-D3D 映射"，创建链依赖图 + 生命周期四层表（施工④的模块拆分依据；标题为历史名，类型现名 `vulkan::Context`）
 - 《[Context与Swapchain分家：按生命周期拆分.md](Context与Swapchain分家：按生命周期拆分.md)》——施工④配套（2026-09-21）：为什么按寿命切对象（一统结构的三笔账）、三兄弟分家清单、`rebuild` 先拆后建的求值顺序教训、帧级与 swapchain 解耦原理、Unity-D3D 映射与命名定案
-- 《[错误处理语法糖：frenderer syntax与ash_renderer移植.md](../错误处理语法糖：frenderer syntax与ash_renderer移植.md)》——收官后增补（2026-09-21）：frenderer 自写错误处理糖全图谱 + `ash_renderer/src/syntax.rs` 移植记录（控制流族 8 宏 + LogDebug/WarnOrDefault，未搬三件及理由，糖/显式/panic 使用分界）；`draw_frame` 两处错误分支已糖化
-- 《宿主壳搭建记录.md》——主产出：§1-§4 四项施工全部完工（落位/禁渲染/句柄链/帧循环），坑与解法随施工累积
+- 《[错误处理语法糖：frenderer syntax与ash_renderer移植.md](../错误处理语法糖：frenderer syntax与ash_renderer移植.md)》——收官后增补（2026-09-21）：frenderer 自写错误处理糖全图谱 + `ash_renderer/src/syntax.rs` 移植记录（控制流族 8 宏 + LogDebug/WarnOrDefault + 新增第 9 件 `unwrap_or_panic!`（家族 panic 位，现无调用点））——**工具篇**
+- 《[错误处理体系：两Tier思想与优雅退出.md](../错误处理体系：两Tier思想与优雅退出.md)》——收官后增补（2026-09-21）：**宪法篇**——用户两 Tier 错误处理思想（非必要不 panic：①不影响运行 warn 丢弃继续 ②影响运行冒泡 main 优雅退出）、VulkanError 类型层、try_init `?` 串链 + AppExit 优雅退出全链、`?` 可用=失败处理集中、实测证据与后续纪律；init 全程零 panic
+- 《宿主壳搭建记录.md》——主产出（2026-09-21 **收官重写为终态总结**：一句话总结/终态架构（模块分层+main.rs 编排+关键决策表）/四项施工精要/合并坑表/证据汇总/step3 接口；逐施工原始记录在 git 历史）
 
 ## 待决问题
 
