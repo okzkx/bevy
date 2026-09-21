@@ -5,21 +5,24 @@
 **目的**：验证本项目根基——`DefaultPlugins.build().disable::<RenderPlugin>()` 与 winit 窗口、自建 Vulkan 能否共存。
 **完成标准**：清屏窗口稳定运行、resize 不崩、退出干净；全程无 wgpu 初始化（RenderDoc / 调试日志确认）。
 
+**状态：✅ 收官（2026-09-21）**——四项施工全部完成并通过实测（清屏窗口颜色呼吸、最大化/还原重建两次、WM_CLOSE 干净退出，证据见《宿主壳搭建记录》§4）。
+
 ## 施工顺序（对应路线图"做什么"）
 
 1. ✅ **定渲染器 crate 落位**（2026-09-21 已决：workspace member，crate 名 `ash_renderer`，位于仓库根，决策依据与验证见《宿主壳搭建记录》§1）；
 2. ✅ **建 crate：组装 App，禁渲染族插件**（2026-09-21 完成：disable 名单 = 8 件渲染族 + 连带禁项 PbrPlugin + 手动 `CompressedImageFormatSupport(NONE)`；0.20.0-dev 实测启动无 WARN、无 wgpu，见《宿主壳搭建记录》§2）；
-3. 窗口句柄链（侦察结论）：`PrimaryWindow` 实体 → `RawHandleWrapper` 组件 → ash Instance/Device/Surface/Swapchain，全程主线程；
-4. 帧循环：acquire → 清屏 → present，resize 重建 swapchain，`AppExit` 时反序拆除。
+3. ✅ **窗口句柄链**（2026-09-21 完成：surface 方案已决 = 手写 Win32；`VulkanContext` 全链 Entry→Instance→Surface→Device→Swapchain 实测建链成功（RTX 2060，1600×900×3），见《宿主壳搭建记录》§3）；
+4. ✅ **帧循环**（2026-09-21 完成：`draw_frame` = acquire→动态渲染清屏→present，两帧在飞；resize 消息驱动 `Swapchain::rebuild`（最大化/还原实测两次）；退出走官方 `OnAppExitSystems` 钩子按帧级→resize级→进程级反序拆除，WM_CLOSE 实测干净退出。首个真 Vulkan bug `ERROR_NATIVE_WINDOW_IN_USE_KHR`（先建后拆）当场抓获并修复。见《宿主壳搭建记录》§4）。
 
 ## 材料清单
 
 - 《[窗口链路侦察：WinitPlugin、RawHandleWrapper与事件进ECS.md](窗口链路侦察：WinitPlugin、RawHandleWrapper与事件进ECS.md)》——开篇侦察（2026-09-21）：窗口创建是事件驱动（首窗在 runner `resumed`，非 PreStartup）、**`WinitWindows` 0.19.1 已改 thread_local 的路线图修正**、`RawHandleWrapper` 两条 surface 路径（ash-window trait / 手写 vkCreateWin32SurfaceKHR）、runner 帧心跳结构（about_to_wait → app.update()）
-- 《宿主壳搭建记录.md》——主产出：已开档，落位决策见 §1（2026-09-21），坑与解法随施工累积
+- 《[VulkanContext字段释义：从Entry到Swapchain.md](VulkanContext字段释义：从Entry到Swapchain.md)》——施工③配套（2026-09-21）：每个字段的"是什么/为什么拆这层/Unity-D3D 映射"，创建链依赖图 + 生命周期四层表（施工④的模块拆分依据）
+- 《宿主壳搭建记录.md》——主产出：§1-§4 四项施工全部完工（落位/禁渲染/句柄链/帧循环），坑与解法随施工累积
 
 ## 待决问题
 
 - [x] crate 落位：**已决（2026-09-21）workspace member**，crate 名 `ash_renderer`，决策依据见《宿主壳搭建记录》§1
-- [ ] surface 方案：ash-window crate vs 手写 Win32 surface（侦察篇 §3 有两条路径对比）
+- [x] surface 方案：**已决（2026-09-21）手写 Win32 surface**（零新依赖 + 练 Vulkan + 仅 Windows；ash-window 弃），依据见《宿主壳搭建记录》§3
 - [x] 禁插件后的连带报错清单：**已实测（2026-09-21）**——`PbrPlugin` 必炸（`Assets<Shader>` 注册在 RenderPlugin 里）→ 连带禁；`CompressedImageFormatSupport` 需手动初始化；详见《宿主壳搭建记录》§2
-- [ ] 退出顺序设计：Vulkan 对象拆除 vs bevy runner 清场的时序（侦察篇 §5 风险备忘）
+- [x] 退出顺序设计：**已决并实测（2026-09-21）**——`teardown_vulkan` 挂 `Last → OnAppExitSystems`（bevy_time 同款官方钩子），在 `despawn_windows` 销毁 hwnd 前按帧级→resize级→进程级反序 `remove_resource`；不能等 `exiting` 回调的 `clear_all()`（顺序任意且窗口已死）。详见《宿主壳搭建记录》§4

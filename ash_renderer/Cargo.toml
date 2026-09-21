@@ -12,3 +12,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 bevy = { path = ".." }
 ash = "0.38.0"
+# bevy 依赖 rwh 0.6 但未再出口，读 RawHandleWrapper 里的 Win32 句柄需要它
+raw-window-handle = "0.6"
+# 类型化错误：帧循环要对 ERROR_OUT_OF_DATE_KHR 做"重建重试"分支，String 无法 match
+thiserror = "2"
