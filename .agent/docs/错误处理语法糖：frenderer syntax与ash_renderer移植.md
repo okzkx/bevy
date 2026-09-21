@@ -1,10 +1,10 @@
 # 错误处理语法糖：frenderer syntax 与 ash_renderer 移植
 
-> 2026-09-21 沉淀。起因：施工④收官后用户提出"错误处理可以更优雅"，要求总结其为 frenderer 写的宏语法糖（`F:\okzkx\rust-frenderer\modules\common\syntax`，依赖仅 anyhow + log + paste），随后拍板"控制流族全搬"进 ash_renderer。本文 = 糖的完整图谱 + 移植定案 + 使用分界。
+> 2026-09-21 沉淀。起因：施工④收官后用户提出"错误处理可以更优雅"，要求总结其为 frenderer 写的宏语法糖（`F:\okzkx\rust-frenderer\modules\common\syntax`，依赖仅 anyhow + log + paste），随后拍板"控制流族全搬"进 ash_renderer。本文 = 糖的完整图谱 + 移植定案 + 使用分界。**错误处理的思想与架构（两 Tier、优雅退出链路）已独立成篇《[错误处理体系：两Tier思想与优雅退出](错误处理体系：两Tier思想与优雅退出.md)》——糖是 Tier① 的工具箱，宪法在那边。**
 
 ## 0. 一句话结论
 
-一套"**错误就地消化**"的应用层错误处理风格：anyhow 单类型底座 + 3 个扩展 trait + 8 个控制流宏——错误永远"打日志 + 安全降级继续跑"，不上浮、不 panic；Option 与 Result 用同一套语法消化。ash_renderer 已移植控制流族 + 两个 trait（`ash_renderer/src/syntax.rs`），与 thiserror 类型化错误**互补而非替代**（§6）。
+一套"**错误就地消化**"的应用层错误处理风格：anyhow 单类型底座 + 3 个扩展 trait + 8 个控制流宏——错误永远"打日志 + 安全降级继续跑"，不上浮、不 panic；Option 与 Result 用同一套语法消化。ash_renderer 已移植控制流族 + 两个 trait，并新增第 9 件 `unwrap_or_panic!`（补初始化路径的家族位，见 §3/§5）（`ash_renderer/src/syntax.rs`），与 thiserror 类型化错误**互补而非替代**（§6）。
 
 ## 1. 底座：anyhow 单类型错误
 
@@ -35,6 +35,7 @@
 | `or` / `or_return` | bool | 同上 | 同上 | 74 / 153 |
 | `matches_or` / `matches_or_return` | 任意模式 let-else | 同上 | 同上 | 18 / 13 |
 | `lock_mutex`（未搬） | Mutex | 中毒 → `anyhow!` 或 return | — | 9 |
+| `unwrap_or_panic`（**ash_renderer 新增**） | Result + Option（经 `UnwrapPanic` trait 统一） | `panic!`（双参版拼上下文，单参版裸 panic） | — | frenderer 无此件 |
 
 - let-else 族（unwrap/warn_unwrap/matches）的发散性由**编译器强制**——`else` 分支必须发散，传普通表达式直接编译失败；唯 `or!`/`or_return!` 是 `if !e { stmt }` 形式，发散性不经检查（frenderer 原样保留，ash_renderer 移植版注释里明示只传 `return`/`continue`）；
 - 典型形态（frenderer `render_params.rs:35`，逐 element 收集渲染包）：
@@ -49,7 +50,7 @@ let pack = warn_unwrap_or!(render_tool_pack_index_sp_map().get_mut(idx), continu
 
 ## 4. ash_renderer 移植版（`ash_renderer/src/syntax.rs`）
 
-**搬入**：控制流宏 8 件 + `LogDebug`（warn/info/warn_ok）+ `WarnOrDefault`（warn_unwrap_or_default）。
+**搬入**：控制流宏 8 件 + `LogDebug`（warn/info/warn_ok）+ `WarnOrDefault`（warn_unwrap_or_default）。另新增 `unwrap_or_panic!` + `UnwrapPanic` trait（Result/Option 统一解包，错误转 String 走 Display）——家族的 panic 位；**现役调用点=无**（工程原则"非必要不 panic"，init 的时序断言也已并入 Tier② 优雅退出，见 §5），仅供真正必要的断言场景备用。frenderer 的初始化路径是裸 match/expect，无此宏。
 
 四个适配（相对 frenderer 原版）：
 
@@ -60,16 +61,20 @@ let pack = warn_unwrap_or!(render_tool_pack_index_sp_map().get_mut(idx), continu
 
 **未搬三件及理由**：`singleton` 系列（bevy `Resource` 就是全局状态的正解，搬进来反而诱导反模式）；`lock_mutex!`（bevy 调度器管并发，系统内不持手动锁，首个后台线程出现时再议）；`Option::some()`（anyhow `?` 链专用，本 crate 的 Option 早退已由 `unwrap_or_*` 覆盖）。
 
-## 5. 使用分界（ash_renderer 约定）
+## 5. 使用分界（用户错误处理思想，两 Tier，**非必要不 panic**）
 
-| 场景 | 用法 | 例 |
-|---|---|---|
-| 通用兜底（失败=跳过，无上下文要加） | 糖 | `warn_unwrap_or_return!(frames.wait_and_reset());` |
-| 失败消息要带业务上下文 | 显式 `if let` + 自写日志 | resize 后重建失败 |
-| 错误是控制流（要分支决策） | 显式 `match` | acquire/present 的 OUT_OF_DATE → rebuild → 重试 |
-| 初始化失败 | panic | `init_vulkan` 的三个 `match ... panic!` |
+> 本节思想与 Tier② 优雅退出链路的完整展开在《[错误处理体系：两Tier思想与优雅退出](错误处理体系：两Tier思想与优雅退出.md)》，此处只留工具视角的速查。
 
-一句话：**糖管"这帧算了别崩"，显式管"这事有讲究"**。
+用户的工程级失败策略（2026-09-21 明确）——**全部失败只落两层**：
+
+| Tier | 场景 | 处置 | ash_renderer 例 |
+|---|---|---|---|
+| ① 不影响运行 | 帧循环内可跳过的失败 | **warn 后丢弃，继续运行**（糖家族） | `warn_unwrap_or_return!(frames.wait_and_reset())`、`unwrap_or!(x, continue)`；要业务上下文用显式 `if let`（resize 重建）、要分支决策用显式 `match`（OUT_OF_DATE 分流） |
+| ② 影响运行 | 初始化/装配失败（含时序断言） | **Error 冒泡到 main，优雅退出** | `try_init_vulkan` 全程 `?`（`single()` 失败也 `map_err` 冒泡）→ init_vulkan 单点 match：`error!` + `AppExit::error()` → teardown 反序拆除、窗口自关、退出码 1；`draw_frame` 挂 `run_if(resource_exists::<Context>)` 守卫失败帧 |
+
+panic 只在真正"必要"时出场（断言不可恢复的内部不变量且需要 backtrace 取证）——本工程现无此类点位；`unwrap_or_panic!` 作为家族的 panic 位保留备用。**一句话：Tier① 管"这帧算了"，Tier② 管"程序起不来"，panic 不设岗。**
+
+为什么 Tier② 比 panic 强（Vulkan 视角）：panic 的 unwind 析构 App 时对 Resource 的 drop 顺序任意，Swapchain 可能死于 Device 之后（Vulkan 未定义行为）；优雅退出走 teardown 反序拆除（hwnd 还活着时正确销毁 Vulkan），且 bevy 已为 `AppExit` 实现 `Termination`——`fn main() -> AppExit` 退出码自然传出（Error=1）。
 
 ## 6. 与 bevy 的关系（为什么糖在 bevy 里比 anyhow 更顺）
 

@@ -6,6 +6,11 @@
 //! 帧循环住在 bevy runner 里（侦察篇 §4）：winit `about_to_wait` 驱动 `app.update()`，
 //! 本 crate 的 Update 系统做 acquire → 清屏 → present。三个 Vulkan 资源按生命周期分层
 //! —— Context（进程级）/ Swapchain（resize 级）/ FramePool（帧级）。
+//!
+//! 失败策略（用户错误处理思想，两 Tier，**非必要不 panic**）：
+//! ① 不影响运行 → warning 后丢弃继续（syntax 糖家族兜底）；
+//! ② 影响运行 → error 冒泡到 main 优雅退出（try_init `?` 串链 → `AppExit::error()` →
+//!    teardown 反序拆除、窗口自关、退出码 1；panic 的 App 析构对 Resource 是任意序，弃用）。
 
 use ash_renderer::{
     error::VulkanError,
@@ -30,7 +35,9 @@ use bevy::{
     window::{PrimaryWindow, RawHandleWrapper, WindowResized},
 };
 
-fn main() {
+/// main 返回 AppExit：bevy 已 impl Termination（AppExit → ExitCode，Success=0/Error=1），
+/// 失败路径的"优雅"才算闭环（调用方能拿到退出码）
+fn main() -> AppExit {
     App::new()
         // 0.20 文档化的用户责任（bevy_image/src/image.rs:2467）：该资源原本由 RenderPlugin
         // 的 wgpu finish() 从 device.features() 生成，禁渲染后须自报。NONE = 诚实初值——
@@ -53,7 +60,9 @@ fn main() {
                 .disable::<PbrPlugin>(),
         )
         .add_systems(Startup, (announce, init_vulkan))
-        .add_systems(Update, draw_frame)
+        // 守卫：初始化失败时资源不插入（全有或全无），缺 Context 本帧直接跳过，
+        // 等 AppExit 走退出链——否则 Res<Context> 会在 Update 里 panic，优雅退出前功尽弃
+        .add_systems(Update, draw_frame.run_if(resource_exists::<Context>))
         // 退出拆除（官方先例 = bevy_time 的 silence_delayed_command_queues_on_exit）：
         // OnAppExitSystems 在 AppExit 写入之后、despawn_windows 销毁 winit 窗口之前跑——
         // Vulkan 对象必须死在 hwnd 之前（侦察篇 §3/§5 的硬边界）。
@@ -63,31 +72,29 @@ fn main() {
                 .in_set(OnAppExitSystems)
                 .run_if(|messages: Res<Messages<AppExit>>| !messages.is_empty()),
         )
-        .run();
+        .run()
 }
 
 /// 施工③：窗口句柄链入口。首窗在 runner `resumed` 回调里建好（侦察篇 §1），
 /// Startup 时 `RawHandleWrapper` 必在；`NonSendMarker` 把初始化钉在主线程
 ///（侦察篇 §2/§3：Win32 句柄与 Vulkan 均主线程亲和）。
+///
+/// 失败统一走 Tier② 冒泡：`try_init_vulkan` 内部一切失败（含"时序假设被打破"——
+/// 同样当可预期失败处理，工程原则**非必要不 panic**）折叠成 `VulkanError`，
+/// 此处单点 match：记日志 + `AppExit::error()` 优雅退出。
 fn init_vulkan(
     wrapper: Query<&RawHandleWrapper, With<PrimaryWindow>>,
     _main_thread: NonSendMarker,
     mut commands: Commands,
+    mut exit: MessageWriter<AppExit>,
 ) {
-    let Ok(wrapper) = wrapper.single() else {
-        panic!("PrimaryWindow 上没有 RawHandleWrapper：窗口未在 Startup 前建好，时序假设被打破");
-    };
-    let ctx = match Context::new(wrapper) {
-        Ok(ctx) => ctx,
-        Err(e) => panic!("Vulkan 初始化失败: {e}"),
-    };
-    let swapchain = match Swapchain::new(&ctx) {
-        Ok(swapchain) => swapchain,
-        Err(e) => panic!("swapchain 创建失败: {e}"),
-    };
-    let frames = match FramePool::new(&ctx) {
-        Ok(frames) => frames,
-        Err(e) => panic!("帧资源创建失败: {e}"),
+    let (ctx, swapchain, frames) = match try_init_vulkan(&wrapper) {
+        Ok(ok) => ok,
+        Err(e) => {
+            error!("Vulkan 初始化失败，宿主壳优雅退出: {e}");
+            exit.write(AppExit::error());
+            return; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过
+        }
     };
     info!(
         "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞；清屏循环自下一 Update 起"
@@ -96,6 +103,22 @@ fn init_vulkan(
     commands.insert_resource(ctx);
     commands.insert_resource(swapchain);
     commands.insert_resource(frames);
+}
+
+/// 初始化链路本体：`?` 串起创建链，任一层失败即短路返回 `VulkanError`——
+/// 这里能优雅地用 `?`，靠的是"失败处理集中在调用方（init_vulkan 的 match）"，
+/// 而不是每个系统都能 `?`（bevy 系统返回 `()`）。
+/// 时序假设（`wrapper.single()`）同样当可预期失败处理：ok_or 转成 Init 错误冒泡。
+fn try_init_vulkan(
+    wrapper: &Query<&RawHandleWrapper, With<PrimaryWindow>>,
+) -> Result<(Context, Swapchain, FramePool), VulkanError> {
+    let wrapper = wrapper.single().map_err(|_| {
+        VulkanError::Init("PrimaryWindow 上没有 RawHandleWrapper：窗口未在 Startup 前建好，时序假设被打破".into())
+    })?;
+    let ctx = Context::new(wrapper)?;
+    let swapchain = Swapchain::new(&ctx)?;
+    let frames = FramePool::new(&ctx)?;
+    Ok((ctx, swapchain, frames))
 }
 
 /// 施工④：ash 帧循环。一次 update = 一帧：
@@ -188,10 +211,14 @@ fn clear_color(t: f64) -> [f32; 4] {
 /// 不能等 runner `exiting` 回调的 `world.clear_all()`：那里清场顺序对 Resource 是任意的，
 /// 且 winit 窗口（hwnd）已先行销毁，surface 等不到合法的宿主。
 fn teardown_vulkan(world: &mut World) {
+    let had_vulkan = world.get_resource::<Context>().is_some();
     world.remove_resource::<FramePool>();
     world.remove_resource::<Swapchain>();
     world.remove_resource::<Context>();
-    info!("退出拆除完成：Vulkan 资源已按帧级→resize级→进程级反序移除");
+    // 初始化失败路径资源从未插入，此处静默即可——error! 已在 init_vulkan 记过根因
+    if had_vulkan {
+        info!("退出拆除完成：Vulkan 资源已按帧级→resize级→进程级反序移除");
+    }
 }
 
 fn announce() {
