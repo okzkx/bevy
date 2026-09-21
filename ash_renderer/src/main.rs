@@ -11,6 +11,7 @@ use ash_renderer::{
     error::VulkanError,
     frames::{FramePool, MAX_FRAMES_IN_FLIGHT},
     swapchain::{AcquireOutcome, PresentOutcome, Swapchain},
+    syntax::warn_unwrap_or_return,
     vulkan::Context,
 };
 use bevy::{
@@ -122,11 +123,8 @@ fn draw_frame(
         }
     }
 
-    // 1) 等本槽位上一轮提交完成，重置 fence 与命令缓冲
-    if let Err(e) = frames.wait_and_reset() {
-        bevy::log::error!("等待帧 fence 失败: {e}");
-        return;
-    }
+    // 1) 等本槽位上一轮提交完成，重置 fence 与命令缓冲（失败：warn 后跳过本帧）
+    warn_unwrap_or_return!(frames.wait_and_reset());
 
     // 2) acquire：拿到一张可画的 image；OUT_OF_DATE → 重建后下一帧再来
     let mut rebuild_after_present = false;
@@ -148,19 +146,16 @@ fn draw_frame(
         }
     };
 
-    // 3) 录制 + 提交（清屏颜色随时间缓慢呼吸，肉眼可证"帧在动"）
+    // 3) 录制 + 提交（清屏颜色随时间缓慢呼吸，肉眼可证"帧在动"；失败：warn 后跳过本帧）
     let image = swapchain.images[index as usize];
     let view = swapchain.views[index as usize];
-    if let Err(e) = frames.record_clear_and_submit(
+    warn_unwrap_or_return!(frames.record_clear_and_submit(
         &ctx,
         image,
         view,
         swapchain.extent,
         clear_color(time.elapsed_secs_f64()),
-    ) {
-        bevy::log::error!("录制/提交失败: {e}");
-        return;
-    }
+    ));
 
     // 4) present：把画好的 image 交给 present engine。SUBOPTIMAL/OUT_OF_DATE 都重建；
     // acquire 阶段已报次优的，present 就算正常也要重建（下一次 acquire 大概率 OUT_OF_DATE）

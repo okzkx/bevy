@@ -4,13 +4,15 @@
 //! 负责组装禁渲染的 Bevy 并驱动 ash 清屏帧循环；本 lib 从 step3 起承接
 //! ash 侧的资源上传与绘制。施工记录见 `.agent/docs/step2-宿主壳/`。
 //!
-//! 模块按生命周期分层（VulkanContext字段释义.md §12）：
+//! 模块按生命周期分层（VulkanContext字段释义：从Entry到Swapchain.md §12）：
 //! - [`vulkan`]：进程级——Entry/Instance/Surface/Device/Queue；
 //! - [`swapchain`]：resize 级——swapchain + images/views，随窗口尺寸重建；
 //! - [`frames`]：帧级——命令缓冲与同步对象，跨重建轮转复用；
-//! - [`error`]：类型化错误（OUT_OF_DATE 是控制流，不是失败）。
+//! - [`error`]：类型化错误（OUT_OF_DATE 是控制流，不是失败）；
+//! - [`syntax`]：错误处理语法糖（移植自 frenderer syntax crate，warn + 早退哲学）。
 
 pub mod error;
 pub mod frames;
 pub mod swapchain;
+pub mod syntax;
 pub mod vulkan;
