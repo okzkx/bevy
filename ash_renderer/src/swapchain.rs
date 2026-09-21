@@ -1,6 +1,6 @@
 //! Swapchain（施工④从 vulkan.rs 拆出）：resize 级生命周期。
 //!
-//! 生命周期四层里的"resize 级"（VulkanContext字段释义.md §12）：窗口尺寸一变整体重建，
+//! 生命周期四层里的"resize 级"（VulkanContext字段释义：从Entry到Swapchain.md §12）：窗口尺寸一变整体重建，
 //! images/views/format/extent 全换；而 fence/信号量/命令缓冲不挂在任何一张 swapchain
 //! image 上（在 [`crate::frames`]），跨重建复用——这正是拆分点：重建 swapchain 时
 //! 同步对象原地不动。
@@ -12,7 +12,7 @@ use ash::{khr::swapchain, vk, Device};
 use bevy::log::info;
 
 use crate::error::VulkanError;
-use crate::vulkan::VulkanContext;
+use crate::vulkan::Context;
 
 /// acquire 的三种结局。SUBOPTIMAL 拿得到图但下次要重建——照常渲染完这帧再重建。
 #[derive(Debug, Clone, Copy)]
@@ -42,7 +42,7 @@ pub struct Swapchain {
 }
 
 impl Swapchain {
-    pub fn new(ctx: &VulkanContext) -> Result<Self, VulkanError> {
+    pub fn new(ctx: &Context) -> Result<Self, VulkanError> {
         let fns = swapchain::Device::new(&ctx.instance, &ctx.device);
 
         // 每次重建都重查 caps：current_extent 是驱动认定的窗口尺寸，唯一的权威来源
@@ -143,7 +143,7 @@ impl Swapchain {
     /// resize 后重建。两个幂等出口：
     /// - 最小化时 current_extent=0，建 0 尺寸 swapchain 非法——保留旧的，恢复后靠下一次 resize 消息重建；
     /// - 尺寸没变就不动。
-    pub fn rebuild(&mut self, ctx: &VulkanContext) -> Result<(), VulkanError> {
+    pub fn rebuild(&mut self, ctx: &Context) -> Result<(), VulkanError> {
         let caps = unsafe {
             ctx.surface_fns
                 .get_physical_device_surface_capabilities(ctx.physical_device, ctx.surface)
@@ -225,7 +225,7 @@ impl Swapchain {
 impl Drop for Swapchain {
     fn drop(&mut self) {
         // view 先于 swapchain。Device/Instance 的存活由拆除顺序保证：
-        // 正常退出走 main.rs teardown（FramePool → 本结构 → VulkanContext）；
+        // 正常退出走 main.rs teardown（FramePool → 本结构 → Context）；
         // panic 时 Resource drop 顺序不定，进程本就注定终止。
         self.destroy();
     }

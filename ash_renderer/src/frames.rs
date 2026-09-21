@@ -1,6 +1,6 @@
 //! 帧级资源（施工④从 vulkan.rs 拆出）：命令池/命令缓冲 + 每帧"双信号量 + fence"。
 //!
-//! 生命周期四层里的"帧级"（VulkanContext字段释义.md §12）：MAX_FRAMES_IN_FLIGHT 组
+//! 生命周期四层里的"帧级"（VulkanContext字段释义：从Entry到Swapchain.md §12）：MAX_FRAMES_IN_FLIGHT 组
 //! 轮转复用，CPU 最多领先 GPU 这么多帧；与 swapchain 解耦——同步对象不挂在任何一张
 //! swapchain image 上，swapchain 重建时原地不动。复用安全的前提：同组资源两次使用
 //! 至少隔 `MAX_FRAMES_IN_FLIGHT` 帧，且 fence 保证上一轮提交已全部执行完。
@@ -16,7 +16,7 @@ use ash::{vk, Device};
 use bevy::log::info;
 
 use crate::error::VulkanError;
-use crate::vulkan::VulkanContext;
+use crate::vulkan::Context;
 
 /// CPU 领先 GPU 的最大帧数：第 N 帧要等第 N-2 帧的组资源空出来才能重录。
 pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
@@ -40,7 +40,7 @@ pub struct FramePool {
 }
 
 impl FramePool {
-    pub fn new(ctx: &VulkanContext) -> Result<Self, VulkanError> {
+    pub fn new(ctx: &Context) -> Result<Self, VulkanError> {
         let command_pool = unsafe {
             ctx.device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
@@ -119,7 +119,7 @@ impl FramePool {
     /// queue_submit。提交等 acquire 的 image_available，完成时发 render_finished + fence。
     pub fn record_clear_and_submit(
         &self,
-        ctx: &VulkanContext,
+        ctx: &Context,
         image: vk::Image,
         view: vk::ImageView,
         extent: vk::Extent2D,

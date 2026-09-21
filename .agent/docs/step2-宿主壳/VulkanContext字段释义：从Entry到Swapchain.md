@@ -1,6 +1,7 @@
 # VulkanContext 字段释义：从 Entry 到 Swapchain
 
 > 2026-09-21，step2 施工③配套。对象 = `ash_renderer/src/vulkan.rs` 的 `VulkanContext`（施工③版）。
+> **勘误（2026-09-21 施工④）**：该类型已按生命周期拆分并更名 `vulkan::Context`（swapchain 族与帧级同步对象各自成篇），本文标题沿用历史名，字段内容仍有效；拆分依据见《[Context与Swapchain分家：按生命周期拆分.md](Context与Swapchain分家：按生命周期拆分.md)》。
 > 读者约定：Unity 图形程序员，每个字段回答三问——**是什么 / Vulkan 为什么要拆出这一层 / 对应 Unity-D3D 里的什么**。
 > 配套：建链过程与 ash 0.38 事实见《宿主壳搭建记录》§3；生命周期分层讨论见当轮对话（§11 摘录）。
 
