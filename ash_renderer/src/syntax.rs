@@ -4,7 +4,8 @@
 //! 全库 anyhow 单类型 + 零裸 unwrap；本 crate 借用其控制流族，`log` 换 `bevy::log`。
 //!
 //! 搬入清单与取舍：
-//! - ✅ 控制流宏 8 件 + `LogDebug`/`WarnOrDefault`——bevy 系统返回 `()`，`?` 不可用，
+//! - ✅ 控制流宏 9 件（8 件 frenderer 原件 + `unwrap_or_panic!` 为 ash_renderer 新增，
+//!   补初始化路径的家族位）+ `LogDebug`/`WarnOrDefault`——bevy 系统返回 `()`，`?` 不可用，
 //!   "warn + 早退"正是 `()` 系统里的传播形式；step3 起逐实体收集（Query → 绘制列表）
 //!   就是 `unwrap_or!(x, continue)` 的主场（frenderer render_params.rs:35 同形状）；
 //! - ❌ `singleton` 系列：bevy `Resource` 就是全局状态的正解，搬进来反而诱导反模式；
@@ -15,7 +16,10 @@
 //! 前缀：`unwrap_`=Option、`warn_unwrap_`=Result（先打 warn 日志）、`or_`=bool、
 //! `matches_`=任意模式 let-else。
 //! 后缀：`_return` 结尾 = `return 值`（单参版返回 `Default::default()`）；
-//! 无后缀 = 执行给定的发散语句（循环里几乎全是 `continue`）。
+//! 无后缀 = 执行给定的发散语句（循环里几乎全是 `continue`）；
+//! `_panic` = 家族的 panic 位（**工程原则"非必要不 panic"——现无现役调用点**，
+//! 仅供真正必要的断言场景：不可恢复的内部不变量且需要 backtrace 取证；经
+//! `UnwrapPanic` trait 同时吃 Option 与 Result）。
 //! 用法：`use ash_renderer::syntax::宏名;`——宏内部用 `$crate::` 全限定调 trait 方法，
 //! 调用方无需导 trait。多数宏为 step3+ 预备，本模块关闭 `unused_macros`。
 
@@ -65,6 +69,24 @@ impl<T: Default, D: std::fmt::Debug> WarnOrDefault<T> for std::result::Result<T,
             Ok::<T, D>(Default::default())
         })
         .unwrap_or_default()
+    }
+}
+
+/// Option 与 Result 的统一解包底座（`unwrap_or_panic!` 用）：错误统一成 `String`（Display）。
+/// 两个 blanket impl 实现"Option 与 Result 同一套语法"——frenderer 哲学的延伸件。
+pub trait UnwrapPanic<T> {
+    fn into_result(self) -> std::result::Result<T, String>;
+}
+
+impl<T, E: std::fmt::Display> UnwrapPanic<T> for std::result::Result<T, E> {
+    fn into_result(self) -> std::result::Result<T, String> {
+        self.map_err(|e| e.to_string())
+    }
+}
+
+impl<T> UnwrapPanic<T> for Option<T> {
+    fn into_result(self) -> std::result::Result<T, String> {
+        self.ok_or_else(|| "None".to_string())
     }
 }
 
@@ -126,6 +148,27 @@ macro_rules! unwrap_or {
     }};
 }
 
+/// 失败 → panic（初始化路径专用，ash_renderer 新增件；frenderel 无此宏）。
+/// 同时吃 Result（错误走 Display）与 Option（报 "None"）——一次性装配代码
+/// 没有"安全降级"可言，fail fast：根因必须钉在启动现场，而不是延后失真。
+/// 双参版 `panic!("{上下文}: {错误}")`，单参版直接 panic 错误。
+#[macro_export]
+macro_rules! unwrap_or_panic {
+    ($res_value:expr, $panic_message:expr) => {
+        match $crate::syntax::UnwrapPanic::into_result($res_value) {
+            Ok(t) => t,
+            Err(msg) => panic!("{}: {msg}", $panic_message),
+        }
+    };
+
+    ($res_value:expr) => {
+        match $crate::syntax::UnwrapPanic::into_result($res_value) {
+            Ok(t) => t,
+            Err(msg) => panic!("{msg}"),
+        }
+    };
+}
+
 /// 布尔卫语句：false → `return Default::default()`。
 /// 注意与 let-else 族不同，这里 `$e2` 不经编译器强制发散（沿用 frenderer 原样），
 /// 传非发散表达式会静默继续——只传 `return`/`continue`。
@@ -174,6 +217,6 @@ macro_rules! matches_or {
 }
 
 pub use {
-    matches_or, matches_or_return, or, or_return, unwrap_or, unwrap_or_return,
-    warn_unwrap_or, warn_unwrap_or_return,
+    matches_or, matches_or_return, or, or_return, unwrap_or, unwrap_or_panic,
+    unwrap_or_return, warn_unwrap_or, warn_unwrap_or_return,
 };
