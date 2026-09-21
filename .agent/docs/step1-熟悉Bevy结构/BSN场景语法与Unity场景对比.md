@@ -148,6 +148,23 @@ fn scene() -> impl SceneList {
 
 `SceneComponent`（`scene_component.rs:13`）= `Component + FromTemplate` + 关联 `Props` + `fn scene(props) -> impl Scene`。用 `@Player { score: 0 }` 语法引入时，**组件本身和它的整棵场景一起 spawn**——系统查到 `Player` 组件即可假设配套场景都在。它和 Required Components 的取舍（lib.rs:838-861）：SceneComponent 是"层级化、依赖感知、可补丁、只在 spawn 期生效"；Required Components 是"扁平、即时、不可补丁、处处生效"。含层级/依赖/要 World 的用前者，纯平铺初始化用后者。
 
+### 4.4 BSN 场景 vs Commands 在 Setup 直接构造（2026-09-18 补）
+
+问答沉淀："用 `bsn!` 生成场景"和"在 setup 里用 `Commands.spawn` 生成场景"有什么区别。结论先行：**两者最终都把组件写进 World，区别不在"能不能做到"，而在组件值在哪里构造、依赖从哪来、怎么表达差异**——BSN 是更高层的声明式入口，`Commands.spawn` 是底层命令式入口，BSN 落地仍走 Commands（`scene.spawn()` 就是把 `fn() -> impl SceneList` 包成 `FnMut(&mut World)` 系统塞进 Startup）。
+
+| 维度 | Commands + Setup | BSN |
+|---|---|---|
+| 组件构造 | 手写完整值 + `..Default::default()` | 补丁语义：只写差异字段，其余走类型 `Default` |
+| 资产引用 | 必须 `Res<AssetServer>` / `ResMut<Assets<T>>` 拿句柄逐层传参 | Handle 字段直接写 `"player.png"` 路径，或 `asset_value` 内联注册，**依赖不外泄** |
+| 嵌套/层级 | `children![]` 可内联，但子实体的资产依赖要一路穿层传递 | `Children [ ... ]` 内联，子场景自带依赖解析 |
+| 实体互引 | 手动 `.id()` 接线，顺序敏感 | `#Name` 作用域引用，spawn 期 `EntityTemplate` 解析 |
+| 观察者 | `.observe(...)` 链式调用 | `on(\|press: On<Pointer<Press>>\| {...})` 写在场景里 |
+| 组合复用 | 函数返回 Bundle，参数手动传 | 场景函数 + 补丁叠加即变体 |
+| 失败语义 | 构造值阶段失败=编译错误，运行期基本不半途失败 | `spawn_scene` 依赖未加载会报错（改用 queued 等待）；spawn 中途出错回滚半成品实体 |
+| 缓存 | 每次全量构造 | `:"a.bsn"` 场景缓存（CoW），重复实例化只 resolve 顶层补丁 |
+
+关键洞察（release note `next-generation-scenes.md` 的官方对比）：老写法的本质痛点是**依赖外泄**——bundle 函数必须知道自己内部用了什么资产，把 `&AssetServer` 一路传进嵌套结构；BSN 靠 Template 能在 spawn 期访问 World，场景函数签名完全不需要资产参数。**类型安全两者打平**（都是 Rust 代码，编译期全查），BSN 的类型优势是相对文本场景格式而言。选型：一次性几行实体的简单 setup 用 Commands 少一层间接；有资产引用、深层嵌套、需要复用变体的场景（尤其 UI）用 BSN。
+
 ## 5. 功能盘点：建场景要的能力，BSN 有没有
 
 | 能力 | 状态 | 说明 |

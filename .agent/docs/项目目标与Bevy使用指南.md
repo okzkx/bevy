@@ -152,6 +152,8 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 - `step1-熟悉Bevy结构/System与调度DSL.md`（add_systems 四跳链、ScheduleLabel/Interned、System 运行时对象、IntoScheduleConfigs 配置树 DSL、复杂传参三层机制、建图→编译→执行、Schedule 心智模型与 Unity DOTS 对照、并行规则、对 barrier 推导的落点）
 - `step1-熟悉Bevy结构/System参数与数据访问.md`（0.19.1 参数全量目录：Query D/F 模板与 Single/Populated 验证跳过、资源类/命令类/消息事件类/独占类/工具类/插件型参数、Commands 同步点三时机与手动控制、Local 详解、多 Query 共存规则、高频问答速查）
 - `step1-熟悉Bevy结构/实体写路径：Bundle、Commands与Query改值.md`（spawn 的 Bundle 语义=静态组件清单一步落位 archetype、Commands API 全貌与错误处理、"不走 Commands"的独占系统、Query `&mut` 值路径与自动变更检测、结构路径 vs 值路径对比表与选型口诀）
+- `step1-熟悉Bevy结构/事件系统全景：Message队列与Observer回调.md`（Messages 双缓冲+游标机制、Event/Observer 同步触发链路与防重入、一帧时序对比、ProjectStorm 实体事件对照与借鉴点）
+- `step1-熟悉Bevy结构/glTF加载链路：从磁盘到Mesh3d.md`（Q4 收尾：AssetServer→GltfLoader→WorldAsset→WorldAssetRoot 五站、RenderAssetUsages 声明式数据用途、0.19 材质解耦与 GltfExtensionHandler 接入缝、frenderer 同链路对照与资源管理层薄弱点）
 - `开发工具与语法笔记.md`（**非引擎结构**的工具层知识：Rust 宏语法、cargo、调试工具等，随读源码沉淀）
 
 上游知识库（`C:\Users\zengkaixiang\.agents\docs\游戏制作\游戏引擎\渲染\渲染管线\`，绝对路径引用）：
