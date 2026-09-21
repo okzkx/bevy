@@ -1,7 +1,7 @@
 //! ash Vulkan 进程级上下文（step2 施工③④拆分）：Entry → Instance(+验证层) →
 //! Win32 Surface → PhysicalDevice → Device(+dynamicRendering) → Queue。
 //!
-//! 生命周期四层（详见 .agent/docs/step2-宿主壳/VulkanContext字段释义.md §12）：
+//! 生命周期四层（详见 .agent/docs/step2-宿主壳/VulkanContext字段释义：从Entry到Swapchain.md §12）：
 //! - 本结构 = 进程级（随进程活）+ Surface（窗口级，单窗宿主壳中并入）；
 //! - resize 级的 Swapchain 已拆去 [`crate::swapchain`]；
 //! - 帧级的命令缓冲/fence/信号量在 [`crate::frames`]。
@@ -56,7 +56,7 @@ unsafe extern "system" fn debug_callback(
 
 /// 进程级 Vulkan 上下文。字段顺序即声明层级；`Drop` 手动反序（ash 无自动 Drop）。
 #[derive(bevy::prelude::Resource)]
-pub struct VulkanContext {
+pub struct Context {
     /// 持 libloading 句柄防 vulkan-1.dll 提前卸载（所有 fn 指针已在 new 时拷走，字段本身不再读）
     #[expect(dead_code, reason = "entry 仅作生命周期锚：Library 在即 Vulkan 可用")]
     entry: Entry,
@@ -71,7 +71,7 @@ pub struct VulkanContext {
     pub queue: vk::Queue,
 }
 
-impl VulkanContext {
+impl Context {
     pub fn new(wrapper: &bevy::window::RawHandleWrapper) -> Result<Self, VulkanError> {
         // ---- 窗口句柄（Win32；hinstance 缺失时进程句柄兜底）----
         let (hwnd, hinstance) = match wrapper.get_window_handle() {
@@ -238,7 +238,7 @@ impl VulkanContext {
     }
 }
 
-impl Drop for VulkanContext {
+impl Drop for Context {
     fn drop(&mut self) {
         // 手动反序拆除（ash 0.38 无自动 Drop）：先等队列安静，再按依赖逆序拆。
         // 注意 swapchain/image view 不在这里——它们在 Swapchain 的 Drop 里，且正常退出

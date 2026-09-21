@@ -5,13 +5,13 @@
 //!
 //! 帧循环住在 bevy runner 里（侦察篇 §4）：winit `about_to_wait` 驱动 `app.update()`，
 //! 本 crate 的 Update 系统做 acquire → 清屏 → present。三个 Vulkan 资源按生命周期分层
-//! —— VulkanContext（进程级）/ Swapchain（resize 级）/ FramePool（帧级）。
+//! —— Context（进程级）/ Swapchain（resize 级）/ FramePool（帧级）。
 
 use ash_renderer::{
     error::VulkanError,
     frames::{FramePool, MAX_FRAMES_IN_FLIGHT},
     swapchain::{AcquireOutcome, PresentOutcome, Swapchain},
-    vulkan::VulkanContext,
+    vulkan::Context,
 };
 use bevy::{
     anti_alias::AntiAliasPlugin,
@@ -76,7 +76,7 @@ fn init_vulkan(
     let Ok(wrapper) = wrapper.single() else {
         panic!("PrimaryWindow 上没有 RawHandleWrapper：窗口未在 Startup 前建好，时序假设被打破");
     };
-    let ctx = match VulkanContext::new(wrapper) {
+    let ctx = match Context::new(wrapper) {
         Ok(ctx) => ctx,
         Err(e) => panic!("Vulkan 初始化失败: {e}"),
     };
@@ -101,7 +101,7 @@ fn init_vulkan(
 /// resize 消息驱动重建 → 等帧槽位空出 → acquire → 录制清屏并提交 → present。
 /// 资源内聚在各模块：本系统只做编排和错误分流（OUT_OF_DATE 是"重试"不是"失败"）。
 fn draw_frame(
-    ctx: Res<VulkanContext>,
+    ctx: Res<Context>,
     mut swapchain: ResMut<Swapchain>,
     mut frames: ResMut<FramePool>,
     resized: MessageReader<WindowResized>,
@@ -189,13 +189,13 @@ fn clear_color(t: f64) -> [f32; 4] {
 }
 
 /// 退出拆除：按创建的相反顺序移除资源触发 Drop——FramePool（帧级）→ Swapchain
-/// （resize 级）→ VulkanContext（进程级，销毁 Surface/Instance/Device）。
+/// （resize 级）→ Context（进程级，销毁 Surface/Instance/Device）。
 /// 不能等 runner `exiting` 回调的 `world.clear_all()`：那里清场顺序对 Resource 是任意的，
 /// 且 winit 窗口（hwnd）已先行销毁，surface 等不到合法的宿主。
 fn teardown_vulkan(world: &mut World) {
     world.remove_resource::<FramePool>();
     world.remove_resource::<Swapchain>();
-    world.remove_resource::<VulkanContext>();
+    world.remove_resource::<Context>();
     info!("退出拆除完成：Vulkan 资源已按帧级→resize级→进程级反序移除");
 }
 
