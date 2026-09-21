@@ -155,6 +155,7 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 - `step1-熟悉Bevy结构/事件系统全景：Message队列与Observer回调.md`（Messages 双缓冲+游标机制、Event/Observer 同步触发链路与防重入、一帧时序对比、ProjectStorm 实体事件对照与借鉴点）
 - `step1-熟悉Bevy结构/glTF加载链路：从磁盘到Mesh3d.md`（Q4 收尾：AssetServer→GltfLoader→WorldAsset→WorldAssetRoot 五站、RenderAssetUsages 声明式数据用途、0.19 材质解耦与 GltfExtensionHandler 接入缝、frenderer 同链路对照与资源管理层薄弱点）
 - `开发工具与语法笔记.md`（**非引擎结构**的工具层知识：Rust 宏语法、cargo、调试工具等，随读源码沉淀）
+- `错误处理语法糖：frenderer syntax与ash_renderer移植.md`（frenderer 自写错误处理宏语法糖全图谱：anyhow 单类型底座 + LogDebug 扩展 + 8 控制流宏（前缀定输入/后缀定出口）、"错误就地消化"哲学、ash_renderer 移植版四适配与未搬三件、糖/显式/panic 三层使用分界、与 bevy `()` 系统及 BevyError 的关系）
 
 上游知识库（`C:\Users\zengkaixiang\.agents\docs\游戏制作\游戏引擎\渲染\渲染管线\`，绝对路径引用）：
 
