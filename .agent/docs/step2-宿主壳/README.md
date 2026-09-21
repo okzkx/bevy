@@ -8,7 +8,7 @@
 ## 施工顺序（对应路线图"做什么"）
 
 1. ✅ **定渲染器 crate 落位**（2026-09-21 已决：workspace member，crate 名 `ash_renderer`，位于仓库根，决策依据与验证见《宿主壳搭建记录》§1）；
-2. 建 crate：组装 App，禁渲染族插件（名单 = step1《DefaultPlugins分类.md》禁 8 件，报错实测后增补连带禁项）；
+2. ✅ **建 crate：组装 App，禁渲染族插件**（2026-09-21 完成：disable 名单 = 8 件渲染族 + 连带禁项 PbrPlugin + 手动 `CompressedImageFormatSupport(NONE)`；0.20.0-dev 实测启动无 WARN、无 wgpu，见《宿主壳搭建记录》§2）；
 3. 窗口句柄链（侦察结论）：`PrimaryWindow` 实体 → `RawHandleWrapper` 组件 → ash Instance/Device/Surface/Swapchain，全程主线程；
 4. 帧循环：acquire → 清屏 → present，resize 重建 swapchain，`AppExit` 时反序拆除。
 
@@ -21,5 +21,5 @@
 
 - [x] crate 落位：**已决（2026-09-21）workspace member**，crate 名 `ash_renderer`，决策依据见《宿主壳搭建记录》§1
 - [ ] surface 方案：ash-window crate vs 手写 Win32 surface（侦察篇 §3 有两条路径对比）
-- [ ] 禁插件后的连带报错清单（实测，对照 step1 分类表补名单）
+- [x] 禁插件后的连带报错清单：**已实测（2026-09-21）**——`PbrPlugin` 必炸（`Assets<Shader>` 注册在 RenderPlugin 里）→ 连带禁；`CompressedImageFormatSupport` 需手动初始化；详见《宿主壳搭建记录》§2
 - [ ] 退出顺序设计：Vulkan 对象拆除 vs bevy runner 清场的时序（侦察篇 §5 风险备忘）
