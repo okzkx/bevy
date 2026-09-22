@@ -2,7 +2,7 @@
 //!
 //! 生命周期四层里的"resize 级"（VulkanContext字段释义：从Entry到Swapchain.md §12）：窗口尺寸一变整体重建，
 //! images/views/format/extent 全换；而 fence/信号量/命令缓冲不挂在任何一张 swapchain
-//! image 上（在 [`crate::frames`]），跨重建复用——这正是拆分点：重建 swapchain 时
+//! image 上（在 `crate::vulkan::frames`），跨重建复用——这正是拆分点：重建 swapchain 时
 //! 同步对象原地不动。
 //!
 //! `pre_transform`/`composite_alpha`/`present_mode` 等选型与创建链（施工③）一致：

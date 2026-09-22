@@ -3,8 +3,7 @@
 //!
 //! 生命周期四层（详见 .agent/docs/2-宿主壳/材料/VulkanContext字段释义：从Entry到Swapchain.md §12）：
 //! - 本结构 = 进程级（随进程活）+ Surface（窗口级，单窗宿主壳中并入）；
-//! - resize 级的 Swapchain 已拆去 [`crate::swapchain`]；
-//! - 帧级的命令缓冲/fence/信号量在 [`crate::frames`]。
+//! - resize 级的 Swapchain 与帧级的命令缓冲/fence/信号量在同层 `swapchain` / `frames` 子模块。
 //!
 //! 其余约束来源（step2《窗口链路侦察》）：
 //! - 句柄取自 `RawHandleWrapper::get_window_handle()`（bevy 的安全方法），Win32 路径

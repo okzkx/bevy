@@ -9,8 +9,8 @@
 //! | `Last` | `teardown_vulkan.in_set(OnAppExitSystems)` | AppExit 写入后、despawn_windows 杀 hwnd 前反序拆除 |
 //!
 //! 本模块不持有 Vulkan 状态，只编排三个生命周期模块暴露的类型：
-//! 创建链细节在 [`crate::vulkan`]（Context）/ [`crate::swapchain`]（rebuild 幂等）/
-//! [`crate::frames`]（录制与提交），本模块只做接线和错误分流。
+//! 创建链细节在 [`crate::vulkan`]：`context`（进程级）/ `swapchain`（rebuild 幂等）/
+//! `frames`（录制与提交），本模块只做接线和错误分流。
 //!
 //! 失败策略（用户错误处理思想，两 Tier，**非必要不 panic**）：
 //! ① 不影响运行 → warning 后丢弃继续（syntax 糖家族兜底）；
@@ -27,10 +27,8 @@ use bevy::{
 
 use crate::{
     error::VulkanError,
-    frames::{FramePool, MAX_FRAMES_IN_FLIGHT},
-    swapchain::{AcquireOutcome, PresentOutcome, Swapchain},
     syntax::warn_unwrap_or_return,
-    vulkan::Context,
+    vulkan::{AcquireOutcome, Context, FramePool, MAX_FRAMES_IN_FLIGHT, PresentOutcome, Swapchain},
 };
 
 /// 宿主桥插件：禁渲染补位（`CompressedImageFormatSupport` 自报）+ Vulkan 三系统进调度。
