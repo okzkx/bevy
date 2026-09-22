@@ -2,7 +2,7 @@
 
 对应 [学习目标实现步骤.md](../学习目标实现步骤.md) 步骤 3，本文件夹存放该步的全部产出。主计划（`施工计划：….md`）与 README 留根，施工段各自成文件夹。（编号约定：段 = 3.1~3.5，任务 = 3.x.y，见路线图"编号约定"）
 
-**目的**：打通入口篇"渲染前准备"第 1 层（bindless 常驻池）的静态版本：spawn 一个 glTF 场景 → 渲染系统 Query 采集 → 上传 ash buffer/VkImage → descriptor indexing（bindless 起步形态）→ 画出来。
+**目的**：打通入口篇"渲染前准备"第 1 层（bindless 常驻池）的静态版本：实例化一个 glTF WorldAsset → 渲染系统 Query 采集 → 上传 ash buffer/VkImage → descriptor indexing（bindless 起步形态）→ 画出来。
 
 **完成标准**：与 bevy 自带 wgpu 渲染同屏对照，几何、贴图、光照方向一致。
 
@@ -12,7 +12,7 @@
 
 | 段 | 文件夹 | 内容 | 状态 |
 |---|---|---|---|
-| 3.1 | [3.1-ECS侧取数/](3.1-ECS侧取数/README.md) | 材质缝接线（自写 GltfExtensionHandler）+ glTF 场景/相机/灯光 spawn + PostUpdate 采集系统，零 Vulkan 代码 | 🚧 3.1.1 ✅ |
+| 3.1 | [3.1-ECS侧取数/](3.1-ECS侧取数/README.md) | 材质缝接线（自写 GltfExtensionHandler）+ glTF WorldAsset 实例化/相机/灯光 spawn + PostUpdate 采集系统，零 Vulkan 代码 | 🚧 3.1.1–3.1.2 ✅ |
 | 3.2 | [3.2-buffer侧上传/](3.2-buffer侧上传/README.md) | Context 扩展（transfer 队列 + Vulkan12 特性）+ 顶点/索引大池 + 合批 staging 上传 + timeline 信号量 | ⬜ |
 | 3.3 | [3.3-贴图与bindless描述符/](3.3-贴图与bindless描述符/README.md) | VkImage 上传 + 采样器 + descriptor indexing 全套（UPDATE_AFTER_BIND / PARTIALLY_BOUND / nonuniform）+ 描述符原理篇 | ⬜ |
 | 3.4 | [3.4-管线与绘制/](3.4-管线与绘制/README.md) | WGSL 着色器（naga→SPIR-V）+ 图形管线 + 深度缓冲 + 帧循环从清屏长成绘制 | ⬜ |
@@ -28,5 +28,5 @@
 
 ## 待决问题
 
-- [ ] 测试资产：FlightHelmet（`assets/models/FlightHelmet/`，4 材质 5 贴图，经典 PBR 对照模型）——是否够用，施工 3.4 看到画面再定
+- [ ] 测试资产：FlightHelmet（`assets/models/FlightHelmet/`，6 材质 15 贴图，经典 PBR 对照模型；早版记"4 材质 5 贴图"系笔误，2026-09-22 实测订正）——是否够用，施工 3.4 看到画面再定
 - [ ] 同屏对照载体：临时跑 bevy 官方 wgpu 示例 vs 本 crate，具体形态施工 3.5 定

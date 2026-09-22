@@ -79,7 +79,7 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 2. Startup：`asset_server.load` FlightHelmet + spawn `WorldAssetRoot`；手动 spawn 相机（`Camera` + `Projection` + `Transform`）与方向光/环境光；
 3. PostUpdate 采集系统 `collect_scene`：Query 采集 `Mesh3d`/`GlobalTransform`/`MeshMaterial3d`，`Assets::get` 容忍空帧（异步到货），日志报实体数/顶点数/材质数。
 
-**验证**：日志稳定报出 FlightHelmet 的实体数、每 primitive 顶点数、4 材质 5 贴图；无 panic；清屏循环不受影响。
+**验证**：日志稳定报出 FlightHelmet 的实体数、每 primitive 顶点数、6 材质 15 贴图；无 panic；清屏循环不受影响。
 
 ### [施工 3.2：buffer 侧上传](3.2-buffer侧上传/README.md)（顶点/索引进池）
 
@@ -145,5 +145,5 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 5. `PerspectiveProjection`/`Projection` 在 bevy_camera/src/projection.rs；
 6. naga 30.0.1 已在依赖树（bevy_shader 经 wesl 间接依赖），加 `naga = { features = ["wgsl", "spv"] }` 即得 WGSL→SPIR-V，本机无需 Vulkan SDK；
 7. 本机无 glslangValidator/glslc/Vulkan SDK（2026-09-22 实查）——着色器编译只能走 naga 路线；
-8. FlightHelmet：1 gltf + 1 bin + 15 png（4 材质，BaseColor/Normal/OcclusionRoughMetal 各 5 张），无内嵌相机灯光，需手动 spawn；
+8. FlightHelmet：1 gltf + 1 bin + 15 png（6 材质，BaseColor/Normal/OcclusionRoughMetal 三类共 15 张；早版记"4 材质"系笔误，2026-09-22 实测订正），无内嵌相机灯光，需手动 spawn；
 9. 禁渲染后 `Assets<Mesh>` 主世界数据永久可读（步骤 2《搭建记录》§6，glTF 链路篇 §6 结论）。
