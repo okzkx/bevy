@@ -157,6 +157,7 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 - `开发工具与语法笔记.md`（**非引擎结构**的工具层知识：Rust 宏语法、cargo、调试工具等，随读源码沉淀）
 - `错误处理语法糖：frenderer syntax与ash_renderer移植.md`（frenderer 自写错误处理宏语法糖全图谱：anyhow 单类型底座 + LogDebug 扩展 + 9 控制流宏（8 件原件 + ash_renderer 新增 unwrap_or_panic!；前缀定输入/后缀定出口）、"错误就地消化"哲学、ash_renderer 移植版四适配与未搬三件——**工具篇**）
 - `错误处理体系：两Tier思想与优雅退出.md`（**宪法篇**：用户两 Tier 错误处理思想（非必要不 panic——①不影响运行 warn 丢弃继续 ②影响运行冒泡 main 优雅退出）、VulkanError 类型层、try_init `?` 串链 + AppExit 优雅退出全链、`?` 可用=失败处理集中、两 Tier 实测证据、后续纪律）
+- `step3-静态取数链路/`（M2 施工目录，2026-09-22 开工：《施工计划：Bindless起步五段拆解》= bind 模型痛点→descriptor indexing 四件套入门 + 终态设计决策表 + 五段拆解（一次一段节奏）+ 已核实事实清单；索引见该目录 README）
 
 上游知识库（`C:\Users\zengkaixiang\.agents\docs\游戏制作\游戏引擎\渲染\渲染管线\`，绝对路径引用）：
 
