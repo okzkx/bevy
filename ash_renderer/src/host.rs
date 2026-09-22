@@ -44,7 +44,12 @@ impl Plugin for AshHostPlugin {
         // 0.20 文档化的用户责任（bevy_image/src/image.rs:2467）：该资源原本由 RenderPlugin
         // 的 wgpu finish() 从 device.features() 生成，禁渲染后须自报。NONE = 诚实初值——
         // step3 接 ash 后按实际查询到的 VkFormat 支持改写。
+        // 补位的另一半：TexturePlugin::finish（bevy_render/src/texture/mod.rs:46-60）用该资源
+        // 注册真正的 ImageLoader（pending → ready）。渲染族禁用后无人注册，ImageLoader 永远
+        // Pending，一切贴图 load 卡在 Loading（嵌套 recv() 无广播方，2026-09-22 实测）。
+        // 贴图解码不依赖 GPU；NONE 只表示不解压缩纹理格式（basis/ktx2），png/jpeg 照常。
         app.insert_resource(CompressedImageFormatSupport(CompressedImageFormats::NONE))
+            .register_asset_loader(bevy::image::ImageLoader::new(CompressedImageFormats::NONE))
             .add_systems(Startup, (announce, init_vulkan))
             // 守卫：初始化失败时资源不插入（全有或全无），缺 Context 本帧直接跳过，
             // 等 AppExit 走退出链——否则 Res<Context> 会在 Update 里 panic，优雅退出前功尽弃

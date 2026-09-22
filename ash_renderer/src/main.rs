@@ -10,7 +10,10 @@
 //! 帧循环住在 bevy runner 里（侦察篇 §4）：winit `about_to_wait` 驱动 `app.update()`。
 //! 失败策略（两 Tier，非必要不 panic）见 host 模块文档与《错误处理体系：两Tier思想与优雅退出》篇。
 
-use ash_renderer::{host::AshHostPlugin, scene::AshMaterialHookPlugin};
+use ash_renderer::{
+    host::AshHostPlugin,
+    scene::{AshMaterialHookPlugin, SceneEntryPlugin},
+};
 use bevy::{
     anti_alias::AntiAliasPlugin,
     core_pipeline::CorePipelinePlugin,
@@ -29,6 +32,14 @@ fn main() -> AppExit {
     App::new()
         .add_plugins(
             DefaultPlugins.build()
+                // 资产根指到仓库根 assets/（bevy 自带 FlightHelmet 在此）：默认按
+                // CARGO_MANIFEST_DIR（cargo run → ash_renderer/）或 exe 目录（直跑 →
+                // target/debug/）解析，两种跑法都到不了仓库根，故编译期拼出确定位置。
+                // 装配级配置，属 main 的统筹地盘。
+                .set(AssetPlugin {
+                    file_path: format!("{}/../assets", env!("CARGO_MANIFEST_DIR")),
+                    ..default()
+                })
                 .disable::<RenderPlugin>()
                 .disable::<PipelinedRenderingPlugin>()
                 .disable::<CorePipelinePlugin>()
@@ -45,6 +56,8 @@ fn main() -> AppExit {
         )
         // 材质缝接线（step3 任务 3.1.1）：init_asset + AshMaterialHook 三钩子进 GltfExtensionHandlers
         .add_plugins(AshMaterialHookPlugin)
+        // 场景进场（step3 任务 3.1.2）：load FlightHelmet + spawn WorldAssetRoot + 到货统计
+        .add_plugins(SceneEntryPlugin)
         // 宿主桥：禁渲染补位 + init/draw_frame/teardown 三系统进调度
         .add_plugins(AshHostPlugin)
         .run()
