@@ -1,11 +1,11 @@
 # 材质交接面:StandardMaterial 与 GltfExtensionHandlerPbr 在数据链里的位置
 
 > 2026-09-22。施工 3.1.1 的机制讲解篇,回答"这两个东西对我们项目有什么帮助、为什么要接入"。
-> 实现细节、loader 侧调用契约(带行号)与验证证据见[《材质缝接线:自写AshMaterialHook三钩子》](材质缝接线：自写AshMaterialHook三钩子.md);glTF 加载五站全景见 步骤 1《glTF加载链路:从磁盘到Mesh3d.md》。
+> 实现细节、loader 侧调用契约(带行号)与验证证据见[《材质缝接线:自写AshMaterialHook三钩子》](3.1.1-材质缝接线：自写AshMaterialHook三钩子.md);glTF 加载五站全景见 步骤 1《glTF加载链路:从磁盘到Mesh3d.md》。
 
 ## §0 主线一句话
 
-**Bevy 管"材质是什么"(语义与生命周期),我们管"材质怎么画"(GPU 表示);`StandardMaterial` 是两边的数据契约,`GltfExtensionHandlerPbr` 是把 glTF 翻译进这份契约的加载现场装配工。** 不接入的后果是静默缺料:glTF 场景照样 spawn,但每个 primitive 实体只有 `Mesh3d`、没有 `MeshMaterial3d`——采集系统(3.1.4)查到的是"知道形状、不知道穿什么"的裸网格,取数链路从实体侧断头。
+**Bevy 管"材质是什么"(语义与生命周期),我们管"材质怎么画"(GPU 表示);`StandardMaterial` 是两边的数据契约,`GltfExtensionHandlerPbr` 是把 glTF 翻译进这份契约的加载现场装配工。** 不接入的后果是静默缺料:glTF WorldAsset 照样展开,但每个 primitive 实体只有 `Mesh3d`、没有 `MeshMaterial3d`——采集系统(3.1.4)查到的是"知道形状、不知道穿什么"的裸网格,取数链路从实体侧断头。
 
 ## §1 为什么拆成两层:bevy_gltf 故意不产渲染语义
 
