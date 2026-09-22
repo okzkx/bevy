@@ -5,7 +5,7 @@
 //! swapchain image 上，swapchain 重建时原地不动。复用安全的前提：同组资源两次使用
 //! 至少隔 `MAX_FRAMES_IN_FLIGHT` 帧，且 fence 保证上一轮提交已全部执行完。
 //!
-//! 清屏本身走 Vulkan 1.3 动态渲染（feature 在 vulkan.rs 设备创建时已开）：
+//! 清屏本身走 Vulkan 1.3 动态渲染（feature 在 `super::context` 设备创建时已开）：
 //! 无 RenderPass/Framebuffer/管线，`loadOp=CLEAR` 就是清屏——本步要的是"颜色对了 +
 //! 帧在动"，管线是 step3 的事。两个布局屏障是每帧的进出场纪律：
 //! acquire 后的 image 布局不确定 → COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR。
