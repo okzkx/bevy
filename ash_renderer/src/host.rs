@@ -5,7 +5,7 @@
 //! | 时机 | 系统 | 职责 |
 //! |---|---|---|
 //! | `Startup` | `init_vulkan` | `try_init_vulkan` 用 `?` 串链创建三资源（**全有或全无**）；失败 → `error!` + `AppExit::error()` 优雅退出 |
-//! | `Last` | `draw_frame.run_if(resource_exists::<Context>)` | 帧循环（排在采集之后、`OnAppExitSystems` 之前）：resize 闸门（最小化让路 / 停歇重建）→ 等 fence → acquire → 录制清屏并提交 → present |
+//! | `Last` | `draw_frame.run_if(resource_exists::<Context>)` | 帧循环（排在采集之后、`OnAppExitSystems` 之前）：resize 闸门（最小化整帧让路；尺寸变化帧首按需重建）→ 等 fence → acquire → 录制清屏并提交 → present |
 //! | `Last` | `teardown_vulkan.in_set(OnAppExitSystems)` | AppExit 写入后、despawn_windows 杀 hwnd 前反序拆除 |
 //!
 //! 本模块不持有 Vulkan 状态，只编排三个生命周期模块暴露的类型：
@@ -16,8 +16,6 @@
 //! ① 不影响运行 → warning 后丢弃继续（syntax 糖家族兜底）；
 //! ② 影响运行 → error 冒泡到 main 优雅退出（try_init `?` 串链 → `AppExit::error()` →
 //!    teardown 反序拆除、窗口自关、退出码 1；panic 的 App 析构对 Resource 是任意序，弃用）。
-
-use std::time::{Duration, Instant};
 
 use bevy::{
     app::OnAppExitSystems,
@@ -50,6 +48,14 @@ impl Plugin for AshHostPlugin {
         // 贴图解码不依赖 GPU；NONE 只表示不解压缩纹理格式（basis/ktx2），png/jpeg 照常。
         app.insert_resource(CompressedImageFormatSupport(CompressedImageFormats::NONE))
             .register_asset_loader(bevy::image::ImageLoader::new(CompressedImageFormats::NONE))
+            // update 节流（frenderer `try_draw_new_frame` 同款思路，用官方旋钮）：MAILBOX
+            // 的 present 不再提供 vsync 背压，默认 Continuous 会让 update 以事件循环速度
+            // 裸奔（实测 >200% CPU）；Reactive(1/60) 让空闲时 update 按主屏刷新率封顶，
+            // 事件（拖拽/输入）仍即时驱动。最小化失焦走 reactive_low_power 同款 60Hz。
+            .insert_resource(bevy::winit::WinitSettings {
+                focused_mode: bevy::winit::UpdateMode::reactive(std::time::Duration::from_secs_f64(1.0 / 60.0)),
+                unfocused_mode: bevy::winit::UpdateMode::reactive_low_power(std::time::Duration::from_secs_f64(1.0 / 60.0)),
+            })
             .add_systems(Startup, (announce, init_vulkan))
             // 守卫：初始化失败时资源不插入（全有或全无），缺 Context 直接跳过，
             // 等 AppExit 走退出链——否则 Res<Context> 会在帧循环里 panic，优雅退出前功尽弃
@@ -121,35 +127,25 @@ fn try_init_vulkan(
     Ok((ctx, swapchain, frames))
 }
 
-/// 最后一条 resize 消息之后隔多久才算"拖拽停歇"、允许重建（实测标定：重建一次
-/// ≈ wait_idle 32ms + destroy 6ms + create 22ms，拖拽中每步重建就是卡顿感的来源；
-/// 调参点：调小 → 内容跟上更快但中途插入更多停顿）。
-const DRAG_QUIET: Duration = Duration::from_millis(150);
-
 /// 帧循环的 resize 闸门状态（`draw_frame` 私有，`Local` 跨帧保持）。
 ///
-/// Windows 宿主的三个实测事实（2026-09-22，探针数据见施工记录）：
-/// ① 最小化即发 `Resized(0,0)`（winit event_loop.rs WM_SIZE 无条件转发），
-///    且此后对 stale swapchain 的 `acquire` **无限阻塞**（驱动对不可见 surface 的
-///    FIFO 行为）——阻塞点在 runner 的 `app.update()` 里，消息泵随之冻死，任务栏
-///    的还原点击（WM_SYSCOMMAND）永远轮不到处理，即"最小化后无法还原"的死锁。
-/// ② 尺寸失配不限于最小化：拖拽中若继续 acquire/present 与窗口尺寸失配的
-///    swapchain，同样会阻塞（实测拖拽第 3 步挂死）——**尺寸不一致期间整个
-///    present 通道都不可信，必须整帧让路**。
-/// ③ 拖拽中每步重建 ≈60ms（wait_idle+destroy+create），每步都建就是"resize
-///    卡顿感"的来源；停歇后一次重建到位则完全无感。
+/// Windows 宿主的两个实测事实（2026-09-22，探针数据见《窗口闸门》专项篇）：
+/// ① 最小化即发 `Resized(0,0)`，此后对 stale swapchain 的 `acquire` 无限阻塞
+///    （驱动对不可见 surface 的 FIFO 行为）——阻塞点在 runner 的 `app.update()`
+///    里，消息泵冻死，任务栏的还原点击永远轮不到处理（"最小化后无法还原"）。
+/// ② FIFO present mode 下 acquire 会在显示队列满/表面失配时阻塞，拖拽中尤甚
+///    （实测挂死）；MAILBOX（frenderer 同款选型）让 present 直接替换未上屏帧、
+///    acquire 永不排队。
 ///
-/// 对策统一进闸门：窗口尺寸与 swapchain 不一致期间（消息持续到达、未停歇），
-/// 整帧让路不碰 Vulkan——画面由 DWM 持有的最后一帧拉伸顶住（主流引擎同款）；
-/// 消息停歇 [`DRAG_QUIET`] 后重建一次再恢复渲染。
+/// 对策：最小化整帧让路（闸门②）；尺寸变化只标 pending、帧首按需重建（rebuild
+/// 幂等）——acquire 永远落在新 swapchain 上，拖拽中帧循环持续流动（用户拍板：
+/// 宁要渲染卡顿，不要冻结）。
 #[derive(Default)]
 struct ResizeGate {
     /// 最新一条 resize 消息是 (0,0) = 窗口最小化中；恢复尺寸的非零消息重开闸门
     minimized: bool,
-    /// 尺寸变了 / 驱动报次优，等停歇后要重建一次（rebuild 幂等，多设无害）
+    /// 尺寸变了 / 驱动报次优，下个帧首按需重建（多设无害，rebuild 幂等）
     pending: bool,
-    /// 最后一条非零 resize 消息的时刻，用于判定拖拽停歇
-    last_resize: Option<Instant>,
     /// 状态转移日志去重：minimized 闸门的开关各报一次，不逐帧刷屏
     logged_minimized: bool,
 }
@@ -182,7 +178,6 @@ fn draw_frame(
         } else {
             gate.minimized = false;
             gate.pending = true;
-            gate.last_resize = Some(Instant::now());
         }
     }
     // —— 闸门②：最小化整帧让路（事实①的死锁）。此刻 surface 没有 presentable
@@ -199,17 +194,13 @@ fn draw_frame(
         gate.logged_minimized = false;
         info!("窗口脱离最小化：闸门重开");
     }
-    // —— 闸门③：尺寸不一致期间整帧让路（事实②），停歇后重建一次（事实③）。
-    // 拖拽进行中不重建也不绘制——对失配 swapchain 的 acquire/present 会阻塞；
-    // 画面由 DWM 持有的最后一帧拉伸顶住。rebuild 幂等（尺寸没变就空手而归）。
-    // acquire 报的 OUT_OF_DATE 走不到这里（下方立即重建），那个状态连一帧都画不了。
-    let quiet = gate.last_resize.is_none_or(|t| t.elapsed() >= DRAG_QUIET);
+    // —— 闸门③：尺寸变化 → 帧首按需重建（frenderer 的 dirty_swapchain 同款时机，
+    // 移到 acquire 之前）。rebuild 幂等（尺寸没变就空手而归），拖拽中每步一建、
+    // 帧循环不断流——acquire 永远落在新 swapchain 上（对失配 swapchain 的 acquire
+    // 会阻塞，见结构注释②）。重建日志由 swapchain 的"swapchain 就绪"承担（只在
+    // 真重建时打）。acquire 报的 OUT_OF_DATE 走不到这里（下方立即重建）。
     if gate.pending {
-        if !quiet {
-            return;
-        }
         gate.pending = false;
-        info!("resize 停歇（≥{DRAG_QUIET:?}）：按需重建 swapchain（尺寸未变则空过）");
         if let Err(e) = swapchain.rebuild(&ctx) {
             bevy::log::warn!("resize 后重建失败，下帧重试: {e}");
             gate.pending = true;
@@ -221,12 +212,11 @@ fn draw_frame(
     warn_unwrap_or_return!(frames.wait_and_reset());
 
     // 2) acquire：拿到一张可画的 image；OUT_OF_DATE = 这个 swapchain 已不可用
-    //（最小化/恢复/独占模式切换等），必须立即重建——去抖等不了它
+    //（最小化/恢复/独占模式切换等），必须立即重建——等不得下一帧
     let index = match swapchain.acquire(frames.current().image_available) {
         Ok(AcquireOutcome::Ready(index)) => index,
         Ok(AcquireOutcome::Suboptimal(index)) => {
-            // 拿得到图但尺寸不理想：照常画完这帧（DWM 拉伸顶住），标 pending——
-            // 停歇前闸门③会拦住后续帧，不会再碰这个失配的 swapchain
+            // 拿得到图但尺寸不理想：照常画完这帧，标 pending——下个帧首重建
             gate.pending = true;
             index
         }
@@ -254,7 +244,7 @@ fn draw_frame(
     ));
 
     // 4) present：把画好的 image 交给 present engine。SUBOPTIMAL/OUT_OF_DATE 都只是
-    // 标记 pending（同 acquire 的次优），重建交给闸门③的停歇时机
+    // 标记 pending（同 acquire 的次优），重建交给下个帧首的闸门③
     if let Err(e) = swapchain.present(ctx.queue, frames.current().render_finished, index) {
         match e {
             VulkanError::SwapchainOutOfDate => gate.pending = true,
