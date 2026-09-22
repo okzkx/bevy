@@ -43,7 +43,7 @@ App（组装器 + 生命周期管理，app.rs:85）
   - `RunFixedMainLoop`：定点步循环的壳，`FixedMain` 在里面按固定频率跑（物理类逻辑）；
   - **`SpawnScene` 在 Update 之后、PostUpdate 之前**：glTF/BSN 场景 spawn 的延迟队列在这里应用——这解释了"spawn 场景后要过一两帧实体才齐"；
   - 插件可用 `insert_after/insert_before` 插队（如 bevy_state 把 `StateTransitions` 插进 PreUpdate 后）。**0.19.1 默认列表里没有 StateTransitions**，它是被 bevy_state 插进来的。
-- **执行器自动并行**：同一 Schedule 内无数据冲突的系统自动多线程跑，冲突判定来自系统参数的访问签名（`Query<&mut T>` 与 `Query<&T>` 冲突等）。你要跨调度保序，用 `.after(bevy_transform::TransformSystems::TransformPropagate)` 这类链式约束（入口篇已记）。
+- **执行器自动并行**：同一 Schedule 内无数据冲突的系统自动多线程跑，冲突判定来自系统参数的访问签名（`Query<&mut T>` 与 `Query<&T>` 冲突等）。你要跨调度保序，用 `.after(bevy_transform::TransformSystems::Propagate)` 这类链式约束（入口篇已记；0.20.0-dev 该枚举唯一变体为 `Propagate`，旧名 `TransformPropagate` 已订正）。
 - Unity 类比：≈ PlayerLoop 的阶段划分（Update/LateUpdate/…），但阶段在 Bevy 里是**可插拔的数据结构**，且阶段内自动并行。
 
 ## 3. App —— 组装器与生命周期

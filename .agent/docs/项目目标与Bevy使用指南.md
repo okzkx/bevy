@@ -74,7 +74,7 @@
 
 1. **App 与 Plugin**：一切从 `App::new().add_plugins(...)` 开始；自研渲染器就是一个普通 `Plugin`——build 时建 VkInstance/Device、插资源、注册系统。参考 `examples/app/empty.rs`。
 2. **ECS 三件套**：Entity（id）/ Component（数据）/ System（函数，参数即查询）。系统参数：`Query`、`Res`/`ResMut`、`Commands`、`Local`、`NonSend`。完整教程见 `examples/ecs/ecs_guide.rs`。
-3. **Schedule 与排序**：`Startup` → 每帧 `PreUpdate`/`Update`/`PostUpdate`/`Last`。渲染采集挂 `PostUpdate`；与变换传播的顺序用 `.after(bevy_transform::TransformSystems::TransformPropagate)` 显式约束（注意 0.19.1 枚举名是复数 `TransformSystems`，`crates/bevy_transform/src/plugins.rs:13`）。链式约束 `.before`/`.after` 是唯一的确定性排序手段。
+3. **Schedule 与排序**：`Startup` → 每帧 `PreUpdate`/`Update`/`PostUpdate`/`Last`。渲染采集挂 `PostUpdate`；与变换传播的顺序用 `.after(bevy_transform::TransformSystems::Propagate)` 显式约束（0.20.0-dev 实名：枚举 `TransformSystems` 唯一变体为 `Propagate`，旧名 `TransformPropagate` 系 0.19.1 记忆，`crates/bevy_transform/src/plugins.rs:13`）。链式约束 `.before`/`.after` 是唯一的确定性排序手段。
 4. **变更检测（增量上传的核心）**：`Added<T>`（首见）、`Changed<T>`（写访问触发）、`RemovedComponents<T>`（删除，用 Drains 迭代）。关键规则：只有 `DerefMut` 式可变访问才打 Changed 标记，读数据的系统别拿可变引用。参考 `examples/ecs/change_detection.rs`、`examples/ecs/removal_detection.rs`。
 5. **资产系统**：`Handle<T>` 是弱引用，真数据在 `Assets<T>` 资源里。glTF 加载是异步的——spawn 后前几帧 `Assets::get()` 可能是 `None`，采集系统必须容忍；文件变更默认自动热重载。参考 `examples/asset/asset_loading.rs`、`examples/asset/hot_asset_reloading.rs`。
 6. **变换层级**：`ChildOf`/`Children` 关系 + `Transform`（本地）→ `GlobalTransform`（传播结果）。传播在 PostUpdate，所以渲染系统排其后拿到的才是本帧最终矩阵。参考 `examples/ecs/hierarchy.rs`、`examples/3d/parenting.rs`。
