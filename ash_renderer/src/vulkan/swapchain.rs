@@ -6,7 +6,7 @@
 //! 同步对象原地不动。
 //!
 //! `pre_transform`/`composite_alpha`/`present_mode` 等选型与创建链（施工③）一致：
-//! FIFO 恒可用、BGRA8_UNORM 优先、EXCLUSIVE 共享、clipped。
+//! MAILBOX 优先（FIFO 兜底）、BGRA8_UNORM 优先、EXCLUSIVE 共享、clipped。
 
 use ash::{khr::swapchain, vk, Device};
 use bevy::log::info;
@@ -65,7 +65,25 @@ impl Swapchain {
         if caps.current_extent.width == u32::MAX {
             return Err(VulkanError::Init("current_extent 未定义（窗口尚未定型），本步不做显式尺寸回退".into()));
         }
+        // present mode：MAILBOX 优先（frenderer 同款选型，2026-09-22 定案）。FIFO 的
+        // acquire 会在显示队列满/表面失配时阻塞（最小化死锁、拖拽冻结的根源）；
+        // MAILBOX 的 present 直接替换未上屏的帧、acquire 永不排队——拖拽中帧循环
+        // 持续流动。MAILBOX 不保证恒可用，FIFO 兜底（规范唯一保证）。
+        let present_modes = unsafe {
+            ctx.surface_fns
+                .get_physical_device_surface_present_modes(ctx.physical_device, ctx.surface)
+        }?;
+        let present_mode = if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
+            vk::PresentModeKHR::MAILBOX
+        } else {
+            vk::PresentModeKHR::FIFO
+        };
+        // MAILBOX 的语义要 ≥3 张 image 才成立（呈现中 + 被替换的入队帧 + 可 acquire），
+        // min+1 通常恰为 3；不足则加到 3（仍尊重 max_image_count）。
         let mut image_count = caps.min_image_count + 1;
+        if present_mode == vk::PresentModeKHR::MAILBOX && image_count < 3 {
+            image_count = 3;
+        }
         if caps.max_image_count > 0 && image_count > caps.max_image_count {
             image_count = caps.max_image_count;
         }
@@ -83,7 +101,7 @@ impl Swapchain {
                     .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
                     .pre_transform(caps.current_transform)
                     .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-                    .present_mode(vk::PresentModeKHR::FIFO)
+                    .present_mode(present_mode)
                     .clipped(true),
                 None,
             )
@@ -122,11 +140,12 @@ impl Swapchain {
             .collect::<Result<Vec<_>, _>>()?;
 
         info!(
-            "swapchain 就绪: {}x{}，{} images，{:?}",
+            "swapchain 就绪: {}x{}，{} images，{:?}，present={:?}",
             caps.current_extent.width,
             caps.current_extent.height,
             images.len(),
             surface_format.format,
+            present_mode,
         );
 
         Ok(Self {
