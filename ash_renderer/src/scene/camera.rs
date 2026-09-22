@@ -81,7 +81,7 @@ pub(super) fn sync_projection_aspect(
 /// 相机就位核验（Update，报一次即歇）：相机 1 台且 GlobalTransform 前向
 /// 精确指向 [`CAMERA_TARGET`]——相机是根实体、无父链，Transform require 的
 /// GlobalTransform 种子值即终值，looking_at 语义逐字成立。带父链的传播验证
-/// 与逐帧采集随 3.1.4 兑现。
+/// 与逐帧采集已随 3.1.4 兑现（`super::collect`）。
 #[derive(Default)]
 pub(super) struct CameraSetupState {
     done: bool,
