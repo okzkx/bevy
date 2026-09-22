@@ -1,7 +1,7 @@
 //! ash Vulkan 进程级上下文（step2 施工③④拆分）：Entry → Instance(+验证层) →
 //! Win32 Surface → PhysicalDevice → Device(+dynamicRendering) → Queue。
 //!
-//! 生命周期四层（详见 .agent/docs/step2-宿主壳/VulkanContext字段释义：从Entry到Swapchain.md §12）：
+//! 生命周期四层（详见 .agent/docs/2-宿主壳/材料/VulkanContext字段释义：从Entry到Swapchain.md §12）：
 //! - 本结构 = 进程级（随进程活）+ Surface（窗口级，单窗宿主壳中并入）；
 //! - resize 级的 Swapchain 已拆去 [`crate::swapchain`]；
 //! - 帧级的命令缓冲/fence/信号量在 [`crate::frames`]。
@@ -16,6 +16,7 @@
 //!   走 main.rs 的 `teardown_vulkan`（OnAppExitSystems）反序拆除，本 Drop 只是兜底。
 
 use std::ffi::{c_char, c_void};
+use std::num::NonZeroIsize;
 
 use ash::{
     ext::debug_utils,
@@ -34,6 +35,11 @@ unsafe extern "system" {
     fn GetModuleHandleW(lp_module_name: *const u16) -> isize;
 }
 
+/// Vulkan 验证层回调：WARNING/ERROR 直打 stderr（返回 FALSE = 不被截获）。
+///
+/// # Safety
+/// 本函数不被本项目调用——由 Vulkan 实现按回调契约调用，`p_callback_data`
+/// 依约定为合法指针或空；`_user_data` 未使用不触碰。
 unsafe extern "system" fn debug_callback(
     severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     _message_types: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -76,11 +82,9 @@ impl Context {
         // ---- 窗口句柄（Win32；hinstance 缺失时进程句柄兜底）----
         let (hwnd, hinstance) = match wrapper.get_window_handle() {
             RawWindowHandle::Win32(w) => (
-                w.hwnd.get() as isize,
-                w.hinstance.map_or_else(
-                    || unsafe { GetModuleHandleW(std::ptr::null()) },
-                    |v| v.get() as isize,
-                ),
+                w.hwnd.get(),
+                w.hinstance
+                    .map_or_else(|| unsafe { GetModuleHandleW(std::ptr::null()) }, NonZeroIsize::get),
             ),
             other => {
                 return Err(VulkanError::Init(format!(
@@ -109,8 +113,11 @@ impl Context {
         if validation {
             ext_names.push(debug_utils::NAME.as_ptr());
         }
-        let layer_names: Vec<*const c_char> =
-            validation.then(|| vec![VALIDATION_LAYER.as_ptr()]).unwrap_or_default();
+        let layer_names: Vec<*const c_char> = if validation {
+            vec![VALIDATION_LAYER.as_ptr()]
+        } else {
+            Vec::new()
+        };
 
         let app_name = c"ash_renderer";
         let app_info = vk::ApplicationInfo::default()
@@ -196,10 +203,10 @@ impl Context {
         // 动态渲染是帧循环清屏的载体（swapchain.rs 录制部分）：不用建 RenderPass/Framebuffer，
         // 但它是 1.3 feature，必须在 vkCreateDevice 里显式开启
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
-        let mut queue_priority = [1.0f32];
+        let queue_priority = [1.0f32];
         let queue_info = vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
-            .queue_priorities(&mut queue_priority);
+            .queue_priorities(&queue_priority);
         let device_exts = [ash::khr::swapchain::NAME.as_ptr()];
         let device = unsafe {
             instance.create_device(
