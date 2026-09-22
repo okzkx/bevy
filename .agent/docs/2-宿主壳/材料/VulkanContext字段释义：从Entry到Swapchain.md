@@ -110,7 +110,7 @@ ash 0.38 的 loader 结构，内容就是两个字段：`{ fp: 函数指针表, 
 
 **为什么至少 min+1 张（我们拿了 3 张）**：显示器逐行扫描第 i 张画面的同时，CPU/GPU 在画第 i+1 张——不能画正在被扫描的那张。双缓冲 = 2 张（一读一画，互相等），三缓冲 = 3 张（读 N、画 N+1、还备着 N+1，等待更少、延迟略高）。`min_image_count + 1` 是"比最小要求多备一张"的惯用起手。
 
-**为什么 present 模式选 FIFO**：FIFO（垂直同步语义）是规范**唯一保证所有平台可用**的模式；MAILBOX/IMMEDIATE 等要查了 `present_modes` 再选——施工④若要"不锁帧"在这里换。
+**为什么 present 模式选 MAILBOX（2026-09-22 订正，初版选 FIFO）**：FIFO（垂直同步语义）虽是规范唯一保证可用的模式，但其 acquire 会在显示队列满/表面失配时**阻塞**（最小化死锁、拖拽卡顿的根源）；MAILBOX 的 present 直接替换未上屏帧、acquire 永不排队。定案 MAILBOX 优先、FIFO 兜底（查询 `present_modes` 后选，frender 同款）——返工账与实测见《[窗口闸门：最小化死锁与resize卡顿的实测与修复](窗口闸门：最小化死锁与resize卡顿的实测与修复.md)》§2。
 
 **所有权规则**：`swapchain_images` 里的 image **归租约所有**——swapchain 销毁时它们一起没了，所以 `Drop` 里**只** destroy swapchain、绝不手动 destroy 这些 image（验证层会抓）。这个"租约含画布"的所有权模型，跟 M2 以后"自管 VkImage/缓冲"形成对照。
 

@@ -55,7 +55,7 @@ FramePool 的 2 组资源按**帧槽位**轮转，不按 image 索引：
 
 - `image_available` / `render_finished` 信号量桥接的是"present engine ↔ GPU ↔ present engine"，不认识具体哪张 image；
 - `in_flight` fence 是 CPU 闸门：同组资源两次使用至少隔 `MAX_FRAMES_IN_FLIGHT=2` 帧，fence 保证上一轮提交已全部执行完，重录才安全——这是"每 image 一份同步对象"之外的合法简化，前提恰恰是**轮转与 swapchain 重建完全解耦**；
-- 因此 `frame 游标`（`current`，MOD 2）与 `acquire 返回的 image index`（MOD image 数，FIFO 下 3）是两个独立循环，绝不互相推导。
+- 因此 `frame 游标`（`current`，MOD 2）与 `acquire 返回的 image index`（MOD image 数，3 张）是两个独立循环，绝不互相推导。
 
 resize 重建 swapchain 时，帧资源原地不动、命令池不动——分家之前这靠"都在一个大 struct 里所以一起活着"的巧合，分家之后这是结构本身。
 

@@ -23,7 +23,7 @@
 逐个展开（Unity/D3D 类比随行）：
 
 - **Context = 地基。** 回答"在这台机器上，Vulkan 世界长什么样"：loader、实例、窗口 surface、物理设备、逻辑设备、队列。全项目**任何** Vulkan 动作都从这里出发。类比 Unity 的 `GfxDevice` / D3D 的 `ID3D11Device + IDXGIFactory` 绑 HWND 的持久集合。注意它捎带 Surface（窗口级）——单窗宿主壳的暂时并入，多窗时要升格独立（分家文档 §6）。
-- **Swapchain = 画布租约。** 它不是"一块显存"，是 present engine 手里那排 backbuffer 的**使用权**：格式（BGRA8_UNORM 优先）、尺寸（`caps.current_extent`，驱动说了算）、几张图（min+1，FIFO 下 3）。窗口一变，整个租约重签——类比 `IDXGISwapChain`，`rebuild` ≈ `ResizeBuffers`（D3D 隐式处理，Vulkan 手动先拆后建）。
+- **Swapchain = 画布租约。** 它不是"一块显存"，是 present engine 手里那排 backbuffer 的**使用权**：格式（BGRA8_UNORM 优先）、尺寸（`caps.current_extent`，驱动说了算）、几张图（min+1=3，MAILBOX 语义所需）。窗口一变，整个租约重签——类比 `IDXGISwapChain`，`rebuild` ≈ `ResizeBuffers`（D3D 隐式处理，Vulkan 手动先拆后建）。
 - **FramePool = 节拍器 + 工具包。** 节拍器：`MAX_FRAMES_IN_FLIGHT = 2`，CPU 提交最多领先 GPU 两帧，第 N 帧要等第 N−2 帧的槽位空出来；工具包：每帧一组"命令缓冲 + 进场信号量 + 出场信号量 + 重录闸门 fence"。类比 D3D12 的 frame resources（frame fence + command allocator 每帧轮转）。
 
 ## 2. 一张图：一根两枝三层次
@@ -92,7 +92,7 @@ FramePool  ███████████████████████
 | | 轮转主体 | 周期 | 驱动者 |
 |---|---|---|---|
 | 帧槽位游标 `frames.current` | FramePool 的 2 组资源 | MOD 2 | CPU 提交节奏（`advance`） |
-| image index（acquire 返回值） | Swapchain 的 N 张图 | MOD N（FIFO 下 3） | present engine 的出图节奏 |
+| image index（acquire 返回值） | Swapchain 的 N 张图 | MOD N（3 张） | present engine 的出图节奏 |
 
 两枝每帧仍要**握手两次**：acquire 用 FramePool 的 `image_available`，present 用它的 `render_finished`——但注意 API 形状：`Swapchain::acquire(&self, semaphore: vk::Semaphore)` 信号量是**参数传入**，不是字段持有。分家解耦的是**所有权**，不解除**协作**；每帧握手走函数参数，正是"重建时同步对象原地不动"在代码形状上的保证。原理详解见分家文档 §4。
 
