@@ -74,7 +74,7 @@ submit 若等执行完才返回，CPU 就得陪跑 GPU，两帧在飞无从谈�
 
 ## 5. OUT_OF_DATE：控制流不是失败
 
-acquire 阶段报 → 立即重建、本帧跳过；present 阶段报 → 图已交出，标记下轮重建；SUBOPTIMAL → 画完这帧再重建。`rebuild` 里的 `device_wait_idle` 是 CPU 唯一一次全量等 GPU（在飞帧还引用旧 image，拆早了是未定义行为）。
+acquire 阶段报 → 立即重建、本帧跳过；present 阶段报 → 图已交出，标记待重建；SUBOPTIMAL → 画完这帧、标 pending。**2026-09-22 起重建时机由 `host.rs` 的 `ResizeGate` 统一节拍**：窗口尺寸与 swapchain 失配期间（最小化、拖拽中）整帧让路——对失配 swapchain 的 acquire/present 在 Windows 驱动上会无限阻塞（最小化后无法还原的死锁根因），消息停歇 150ms 后一次重建到位。机制与实测见《[窗口闸门：最小化死锁与resize卡顿的实测与修复](窗口闸门：最小化死锁与resize卡顿的实测与修复.md)》。`rebuild` 里的 `device_wait_idle` 是 CPU 唯一一次全量等 GPU（在飞帧还引用旧 image，拆早了是未定义行为）。
 
 ## 6. Unity / D3D 映射
 
