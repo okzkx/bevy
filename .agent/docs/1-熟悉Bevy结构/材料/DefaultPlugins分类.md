@@ -7,7 +7,7 @@
 
 1. **渲染族只需禁 8 个**（默认 feature 下实际在跑的），全是渲染族 crate 出品；
 2. **意外的好消息：0.19.1 已把数据与渲染 crate 彻底解耦**——逐一核实 Cargo.toml，`bevy_image`/`bevy_mesh`/`bevy_camera`/`bevy_light`/`bevy_text`/`bevy_ui`/`bevy_scene`/`bevy_animation`/`bevy_gltf`/`bevy_sprite`/`bevy_state`/`bevy_window` **全部 0 依赖 bevy_render**。所以 Mesh/Camera/Light/Image 这些"看起来像渲染"的插件其实全是宿主侧数据插件，照常保留；
-3. 唯一的琥珀项 `PbrPlugin` 已核实**优雅降级**：build 里全是 `if let Some(render_app) = app.get_sub_app_mut(RenderApp)` 模式（`bevy_pbr/src/lib.rs:301/332/357`），缺 RenderApp 时渲染部分静默跳过，而 `Assets<StandardMaterial>` 的注册发生在主世界——**保留它**，正好是取数表需要的材质容器。**〔0.20-dev 勘误 2026-09-21：此结论错——build 里还有无条件 `load_shader_library!`（0.19.1 未验证的最后一点），实测必炸，PbrPlugin 已移入禁用名单，详见 步骤 2《宿主壳搭建记录》§2〕**
+3. 唯一的琥珀项 `PbrPlugin` 已核实**优雅降级**：build 里全是 `if let Some(render_app) = app.get_sub_app_mut(RenderApp)` 模式（`bevy_pbr/src/lib.rs:301/332/357`），缺 RenderApp 时渲染部分静默跳过，而 `Assets<StandardMaterial>` 的注册发生在主世界——**保留它**，正好是取数表需要的材质容器。**〔0.20-dev 勘误 2026-09-21：此结论错——build 里还有无条件 `load_shader_library!`（0.19.1 未验证的最后一点），实测必炸，PbrPlugin 已移入禁用名单，详见 步骤 2《2-宿主壳搭建记录》§2〕**
 
 ## 1. 渲染族（禁用名单，8 个）
 

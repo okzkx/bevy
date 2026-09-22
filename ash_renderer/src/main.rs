@@ -6,7 +6,7 @@
 //! 装配与编排一次分家）；ECS 侧材质缝在 [`ash_renderer::scene`]。
 //!
 //! 禁用名单 = step1《DefaultPlugins分类.md》§1 的渲染族 8 件
-//! （0.20.0-dev 下路径逐一复核未变，见 .agent/docs/2-宿主壳/宿主壳搭建记录.md §2）。
+//! （0.20.0-dev 下路径逐一复核未变，见 .agent/docs/2-宿主壳/2-宿主壳搭建记录.md §2）。
 //! 帧循环住在 bevy runner 里（侦察篇 §4）：winit `about_to_wait` 驱动 `app.update()`。
 //! 失败策略（两 Tier，非必要不 panic）见 host 模块文档与《错误处理体系：两Tier思想与优雅退出》篇。
 

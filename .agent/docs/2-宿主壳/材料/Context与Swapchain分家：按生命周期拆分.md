@@ -1,6 +1,6 @@
 # Context与Swapchain分家：按生命周期拆分
 
-> 2026-09-21，施工④产物 + 命名定案（`VulkanContext` → `vulkan::Context`）。配套阅读：《VulkanContext字段释义：从Entry到Swapchain.md》（逐字段详解，文中类型名为历史名）、《宿主壳搭建记录.md》§4（施工过程与实测证据）。
+> 2026-09-21，施工④产物 + 命名定案（`VulkanContext` → `vulkan::Context`）。配套阅读：《VulkanContext字段释义：从Entry到Swapchain.md》（逐字段详解，文中类型名为历史名）、《2-宿主壳搭建记录.md》§4（施工过程与实测证据）。
 
 ## 0. 一句话结论
 

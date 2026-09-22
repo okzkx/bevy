@@ -20,7 +20,7 @@
 - `材料/glTF加载链路：从磁盘到Mesh3d.md`——Q4 收尾篇（2026-09-20）：AssetServer→GltfLoader→WorldAsset→WorldAssetRoot 五站链路、RenderAssetUsages 声明式数据用途、0.19 材质解耦（GltfMaterial→GltfExtensionHandler）、frenderer 同链路逐维度对照（最薄弱环=资源管理层）
 - `材料/关系与层级：ChildOf、Children与变换传播.md`——待深入最后一项（2026-09-21）：与 Unity ECS 同构对照（ChildOf↔Parent、Children↔Child buffer）、Relationship 框架 hook 自动维护链路、写路径 API 全家、despawn 递归语义、变换传播三系统（脏标记/set_if_neq/静态子树跳过）+ 项目四落点
 - `材料/Bevy编辑器路线与代码热重载.md`——Bevy editor-last 立场与 BRP/.bsn 基建；Rust 热重载三堵墙与原生热重载光谱
-- 另：《Bevy结构笔记》已增补 runner 真身表 + update() 内部三层；《SubApp机制与取舍》已增补 §7 三创建者与渲染线程交接；《开发工具与语法笔记》（根目录）已增补 repr 内存布局条目（2026-09-14）、add_systems 泛型套路条目（2026-09-16）
+- 另：《Bevy结构笔记》已增补 runner 真身表 + update() 内部三层；《SubApp机制与取舍》已增补 §7 三创建者与渲染线程交接；《开发工具与语法笔记》（笔记/）已增补 repr 内存布局条目（2026-09-14）、add_systems 泛型套路条目（2026-09-16）
 - 运行记录与截图（按需，尚未产生）
 
 ## 待深入清单（遗漏记录，2026-09-14）
