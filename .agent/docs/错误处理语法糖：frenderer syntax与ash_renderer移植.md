@@ -1,6 +1,6 @@
 # 错误处理语法糖：frenderer syntax 与 ash_renderer 移植
 
-> 2026-09-21 沉淀。起因：施工④收官后用户提出"错误处理可以更优雅"，要求总结其为 frenderer 写的宏语法糖（`F:\okzkx\rust-frenderer\modules\common\syntax`，依赖仅 anyhow + log + paste），随后拍板"控制流族全搬"进 ash_renderer。本文 = 糖的完整图谱 + 移植定案 + 使用分界。**错误处理的思想与架构（两 Tier、优雅退出链路）已独立成篇《[错误处理体系：两Tier思想与优雅退出](错误处理体系：两Tier思想与优雅退出.md)》——糖是 Tier① 的工具箱，宪法在那边。**
+> 2026-09-21 沉淀。起因：施工 2.4（步骤 2 帧循环）收官后用户提出"错误处理可以更优雅"，要求总结其为 frenderer 写的宏语法糖（`F:\okzkx\rust-frenderer\modules\common\syntax`，依赖仅 anyhow + log + paste），随后拍板"控制流族全搬"进 ash_renderer。本文 = 糖的完整图谱 + 移植定案 + 使用分界。**错误处理的思想与架构（两 Tier、优雅退出链路）已独立成篇《[错误处理体系：两Tier思想与优雅退出](错误处理体系：两Tier思想与优雅退出.md)》——糖是 Tier① 的工具箱，宪法在那边。**
 
 ## 0. 一句话结论
 
@@ -44,7 +44,7 @@
 let pack = warn_unwrap_or!(render_tool_pack_index_sp_map().get_mut(idx), continue);
 ```
 
-——缺数据打条日志跳过这个 element，绝不让一帧崩掉。这正是 ash_renderer step3 逐实体收集绘制数据要写的同款代码。
+——缺数据打条日志跳过这个 element，绝不让一帧崩掉。这正是 ash_renderer 步骤 3 逐实体收集绘制数据要写的同款代码。
 
 **设计哲学三点**：①错误就地 warn + 降级继续跑（非 anyhow 正统的向上传播）——对渲染器是对的，丢一帧/缺一个材质不该杀进程；②Option 与 Result 同一套语法消化（`.some()` 升格、`unwrap_or_*` 降格）；③全库零裸 `unwrap()` 零 panic——失败永远是"日志 + 安全默认值"。
 
@@ -57,7 +57,7 @@ let pack = warn_unwrap_or!(render_tool_pack_index_sp_map().get_mut(idx), continu
 1. `log` → `bevy::log`（宏名相同，tracing 直换）；
 2. 宏内用 `$crate::syntax::LogDebug::warn(...)` **全限定调 trait 方法**——调用方只导宏、免导 trait，宏自包含（frenderel 靠 `use syntax::*` 一揽子导入，我们选择显式）；
 3. 全部 `#[macro_export]`（跨 crate 导出的硬要求，漏了报 E0364）+ 模块内 `pub use` 提供 `syntax::宏名` 路径——`ash_renderer::宏名` 与 `ash_renderer::syntax::宏名` 双通道；
-4. 模块级 `#![allow(unused_macros)]`——多数宏为 step3+ 预备（逐实体收集 = `unwrap_or!(x, continue)` 主场），当前仅 `warn_unwrap_or_return!` 在 draw_frame 就业。
+4. 模块级 `#![allow(unused_macros)]`——多数宏为 步骤 3+ 预备（逐实体收集 = `unwrap_or!(x, continue)` 主场），当前仅 `warn_unwrap_or_return!` 在 draw_frame 就业。
 
 **未搬三件及理由**：`singleton` 系列（bevy `Resource` 就是全局状态的正解，搬进来反而诱导反模式）；`lock_mutex!`（bevy 调度器管并发，系统内不持手动锁，首个后台线程出现时再议）；`Option::some()`（anyhow `?` 链专用，本 crate 的 Option 早退已由 `unwrap_or_*` 覆盖）。
 

@@ -6,7 +6,7 @@ publish = false
 license = "MIT OR Apache-2.0"
 
 # 自研 ash Vulkan 渲染器（lib）+ 宿主壳（bin）。
-# 落位决策与施工记录：.agent/docs/step2-宿主壳/
+# 落位决策与施工记录：.agent/docs/2-宿主壳/
 # bevy 用默认 feature，对齐 step1《DefaultPlugins分类》"默认 feature 下 34 条插件"的审计口径；
 # 渲染族插件在运行时 disable（step2 施工项②，实测后再评估是否收窄 feature 面）。
 [dependencies]

@@ -35,7 +35,7 @@ members = [
   "examples/large_scenes/caldera_hotel",
   "examples/large_scenes/bevy_city",
   "examples/large_scenes/zero_day",
-  # 学习项目：宿主壳 + 自研 ash Vulkan 渲染器（.agent/docs/step2-宿主壳）
+  # 学习项目：宿主壳 + 自研 ash Vulkan 渲染器（.agent/docs/2-宿主壳）
   "ash_renderer",
   # Mipmap generator for testing large bevy scenes with mips and texture compression.
   "examples/large_scenes/mipmap_generator",

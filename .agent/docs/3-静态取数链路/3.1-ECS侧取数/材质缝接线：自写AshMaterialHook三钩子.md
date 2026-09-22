@@ -1,0 +1,93 @@
+# 材质缝接线:自写 AshMaterialHook 三钩子(任务 3.1.1)
+
+> 2026-09-22 施工。对应[任务面板](README.md)任务 3.1.1,补 步骤 2 连带禁用 PbrPlugin 留下的材质缝。
+> 机制讲解(这两个东西是什么、为什么接)见[《材质交接面:StandardMaterial与GltfExtensionHandlerPbr》](材质交接面：StandardMaterial与GltfExtensionHandlerPbr.md);本文是施工记录视角——缝怎么断、契约怎么读、代码怎么落。
+> 代码落点:`ash_renderer/src/scene.rs`(新模块,ECS 侧取数的家;接线全部收在 AshMaterialHookPlugin 内,main 只 `add_plugins`)。
+
+## §0 判定线(本步完成标准,做到哪条亮哪条)
+
+| 项 | 状态 |
+|---|---|
+| `init_asset::<StandardMaterial>()` 容器注册 | ✅ 运行自检日志"已注册" |
+| AshMaterialHook 三钩子进 `GltfExtensionHandlers` | ✅ 自检报挂载 1 个 handler |
+| 编译纪律:`cargo clippy --all-targets -- -D warnings` | ✅ 全干净 |
+| 清屏循环零回退(实测运行 8s,启动链外零新增日志) | ✅ |
+| **hook 实际触发**(4 材质经 on_material 进容器) | ⏳ 留 3.1.2"场景进场"——没有资产加载,触发无从验证,本步不谎报 |
+
+## §1 缝在哪里断:PbrPlugin 连带禁用的两处失守
+
+步骤 2《搭建记录》§2 的结论,这里补全机制细节。PbrPlugin::build 与材质相关的两件事,禁用后**双双无人接手**:
+
+1. **容器失守**:`Assets<StandardMaterial>` 原本经 `MaterialPlugin<StandardMaterial>` 注册(PbrPlugin::build 内默认挂载)。禁渲染宿主壳里没人 init 它——glTF loader 转换出的 StandardMaterial 无处可放。
+2. **handler 失守**:官方 PBR handler 的注册点 `add_gltf`(bevy_pbr/src/gltf.rs:13)由 PbrPlugin::build 调用(bevy_pbr/src/lib.rs:252)。且官方类型 `GltfExtensionHandlerPbr` 本身是 `pub(crate)`(gltf.rs:102)——外部连 `Box::new(GltfExtensionHandlerPbr)` 都写不出来。
+
+后果不是报错,是**静默缺料**:loader 逐 primitive 遍历 handlers 时,空列表无人应答,spawn 出来的实体只有 `Mesh3d` 没有 `MeshMaterial3d`。glTF 链路不会失败,材质数据链路从此断头——这正是要把 3.1.1 排在首位的原因:采集系统(3.1.4)Query 的就是这条缝的产物。
+
+## §2 复刻依据:loader 侧的调用契约
+
+自写 hook 之前先回答:官方 hook 被谁调、何时调、传什么?全部可从 loader 源码读出(0.20.0-dev 实读):
+
+**资源与时机**——`GltfPlugin::build`(bevy_gltf/src/lib.rs:276-284)创建 `GltfExtensionHandlers` 资源(`Arc<RwLock<Vec<Box<dyn ErasedGltfExtensionHandler>>>>`),GltfPlugin 在 DefaultPlugins 内、不依赖渲染,资源照常存在。`finish`(:302-309)把 `extensions.0.clone()` 装进 GltfLoader——**克隆的是 Arc 不是 Vec**,loader 与资源共享同一个 Vec,handler 何时注册都可见;但惯例是在插件 build 期注册(官方 add_gltf 也是 build 期),我们照做。
+
+**逐 primitive 的调用序**(bevy_gltf/src/loader/mod.rs,每 mesh primitive 一轮):
+
+1. `primitive.material()` **永远返回 Material**:glTF 文件里写了 → 带索引的真材质;没写 → gltf-rs 合成的默认材质(index = None);
+2. `material_label()`(loader/gltf_ext/material.rs:162-171)折算标签:有索引 → `Material{index}`(负缩放实例附 `" (inverted)"` 后缀),None → `DefaultMaterial`(loader/mod.rs:1639);
+3. 该标签的 `GltfMaterial` 尚未入库时:`load_material` 解析 → `add_labeled_asset(label, GltfMaterial)` → **逐 handler 调 `on_material`**(:1655)——hook 在此把 `GltfMaterial` 转成 `StandardMaterial`,以 `{label}/std` 入库;
+4. spawn mesh 实体(`Mesh3d` + 变换 + Aabb…)→ **逐 handler 调 `on_spawn_mesh_and_material`**(:1754),把**同一个 label 字符串**交给你——hook 在此按 `{label}/std` 取回 handle,插 `MeshMaterial3d`。
+
+三条推论,每条都直接变成代码:
+
+- **标签契约 = `{material_label}/std`**:on_material 写、on_spawn_mesh_and_material 读,两端都是我们自己的 hook,字符串一致即互相命中;错一个字,写入的材质永远无人认领。loader 传进来的就是 Display 化字符串,hook 只需跟随,无需复刻 `GltfAssetLabel` 的 Display 细节。
+- **on_root 是兜底件**:无材质 primitive 落在 `DefaultMaterial` 标签,若根上没有预置 `DefaultMaterial/std`,`get_label_handle` 只能拿到悬空 handle。FlightHelmet 的 4 个材质都有索引,用不到这层,但官方语义要完整复刻(官方 on_root,gltf.rs:108-122,用 `GltfMaterial::default()` 预置)。
+- **材质转换不手写**:`standard_material_from_gltf_material` 是 pub(bevy_pbr/src/gltf.rs:33),30 余字段连 feature-gate 的贴图通道全处理了。自己照抄一份,bevy 编译 feature 一变就漏字段——直接调用官方函数,自写的只剩三钩子骨架。
+
+## §3 代码落点:scene.rs 的四个件
+
+`ash_renderer/src/scene.rs`(新模块,后续 collect_scene 等取数件都归这里):
+
+1. **`AshMaterialHookPlugin::build`**——补位 PbrPlugin 的注册动作:
+   - `init_resource::<GltfExtensionHandlers>()`:**防御性幂等**。正常路径 GltfPlugin::build(DefaultPlugins 内、不依赖渲染)已建好资源,这句是空操作;万一将来有人拆掉 GltfPlugin,缺的是资产 loader,失败会在资产加载时以"无 loader"冒泡(Tier② 优雅退出),而不是本插件 `resource_mut` 直接 panic。装配期不埋 panic 点,失败一律后移到有错误处理链的位置。
+   - `init_asset::<StandardMaterial>()`:补容器。
+   - `write_blocking().push(...)`:async_lock RwLock 的原生阻塞写(非 wasm 路径,官方 add_gltf 同款)。
+2. **`AshMaterialHook`**——实现 `GltfExtensionHandler` 三钩子,与官方逐字同构(§2 契约):`on_root` 预置 `DefaultMaterial/std`、`on_material` 转换入库、`on_spawn_mesh_and_material` 取 handle 插 `MeshMaterial3d`。`dyn_clone` 必须实现(trait 要求,storage 用 Box<dyn> 克隆)。
+3. **`report_material_seam`**——Startup 自检系统:缝的两侧各报一句(容器在不在、handler 挂几个)。运行时期望值 = 1(KHR 扩展不走 handler 注册,是 loader 在 `load_material` 里内联解析的,bevy_gltf/src/loader/mod.rs:1420-1428)。
+4. **接线收口在插件本体**:自检系统由 `AshMaterialHookPlugin::build` 自己注册(`add_systems(Startup, report_material_seam)`);main 只 `.add_plugins(AshMaterialHookPlugin)`(DefaultPlugins 之后)。(2026-09-22 结构整理:原实现由 main.rs 代注册自检,整理后模块完全自含,main 不引用 scene 内部件。)
+
+**实编译踩坑:两个 `Gltf` 名字体系**。trait 钩子签名里的 `gltf::Gltf` 是 **gltf-rs crate** 的类型(经 `bevy_gltf` 再出口,bevy_gltf/src/lib.rs:171 `pub use gltf`),不是 `bevy::gltf::Gltf`(bevy 自己的 glTF 资产容器)。`use bevy::gltf::{self, ...}` 把 bevy_gltf 绑成 `gltf`,`on_root` 的参数类型就错位(E0053:期望 gltf-rs 的 Gltf,实给 bevy 的 Gltf)。正确写法:
+
+```rust
+use bevy::gltf::{gltf, GltfMaterial, ...};   // gltf = gltf-rs crate 的再出口
+// glTF 数据结构(Material/Mesh/Primitive)与 bevy 资产类型(Gltf/GltfMaterial)是两套名字
+```
+
+一句话分家:**`gltf::` 前缀下是 glTF 文件的数据结构,`bevy::gltf::` 直下是 bevy 加工后的资产类型**。material_label、三钩子签名、`on_root` 的 `Gltf` 全在前者。
+
+## §4 验证证据
+
+- `cargo clippy -p ash_renderer --all-targets -- -D warnings`:通过(见 §5,存量告警一并清零);
+- 实测运行 8s(`target/debug/ash_renderer.exe`),启动日志:
+
+```text
+INFO ash_renderer: 宿主壳启动:渲染族 8 插件已禁用,无 RenderApp / 无 wgpu 初始化
+INFO ash_renderer::scene: 材质缝自检:Assets<StandardMaterial> 已注册;GltfExtensionHandlers 挂载 1 个 handler(期望 1 = AshMaterialHook)
+INFO ash_renderer::vulkan: Vulkan 进程级上下文就绪: API v1.3.289  设备 NVIDIA GeForce RTX 2060 ...
+INFO ash_renderer: Vulkan 全链就绪:Context + Swapchain + 2 帧在飞;清屏循环自下一 Update 起
+```
+
+8 秒内启动链之外零新增日志,清屏循环照常。验证层未启用的 ERROR 是既有已知态(本机无 Vulkan SDK,步骤 2 已记录,施工 3.3 装 SDK 后兑现)。
+
+## §5 顺手修复:步骤 2 存量的 8 条 clippy 告警
+
+`-D warnings` 口径下 clippy 1.98 报出 8 条,全部位于 步骤 2 存量代码(syntax.rs 1 条、vulkan.rs 5 条、main.rs 2 条),本步代码零告警。属于"新 clippy 版本新增 lint + 步骤 2 当时未以 -D warnings 全目标口径验收"的存量,机械修复零行为变化,顺手清掉:
+
+| 位置 | lint | 改法 |
+|---|---|---|
+| syntax.rs `LogDebug::info` | option_map_unit_fn | `.map(\|l\| info!(…))` → `.inspect(…)` |
+| vulkan.rs `debug_callback` | missing_safety_doc | 补 `# Safety` 段(回调不由本项目调用,依 Vulkan 契约) |
+| vulkan.rs 句柄解包 ×2 | unnecessary_cast | `NonZeroIsize::get()` 本就返回 isize,去掉 `as isize` |
+| vulkan.rs layer_names | obfuscated_if_else | `.then(…).unwrap_or_default()` → if/else |
+| vulkan.rs queue_priorities | unnecessary_mut_passed + unused_mut | `&mut` → `&` |
+| main.rs resize/present 重建 ×2 | collapsible_if | if 连写 `if A && let Err(e) = …`(let-chains,仓库 edition 2024) |
+
+修后同一口径复跑:全目标干净。

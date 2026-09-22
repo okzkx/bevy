@@ -68,7 +68,7 @@ resize 重建 swapchain 时，帧资源原地不动、命令池不动——分�
 | `frames::FramePool` | D3D12 的 frame fence + command allocator 每帧轮转 | "帧槽位"概念 D3D12 官方化（FrameIndex vs BackBufferIndex 两个索引），Vulkan 靠自己组合 |
 | `VulkanError::SwapchainOutOfDate` | D3D 无对应错误——`ResizeBuffers` 隐式处理 | Vulkan 把"交换链过时"显式化为可 match 的返回值，重建责任在调用方 |
 
-## 6. 分家后的生长点（step3 起往哪长）
+## 6. 分家后的生长点（步骤 3 起往哪长）
 
 - **管线/描述符/bindless 池**：在 `frames.rs` 的 `record_clear_and_submit` 录制段里生长，同步骨架（2 帧在飞 + 双信号量 + fence）不变；
 - **`gpu_allocator`（M2）**：接管内存分配后，`Context` 增一个 allocator 字段即可，Swapchain/FramePool 无感；

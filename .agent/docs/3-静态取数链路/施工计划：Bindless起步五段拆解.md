@@ -1,6 +1,6 @@
 # 施工计划：Bindless 起步五段拆解
 
-> 2026-09-22 建档。Step3 主计划，对应 [README](README.md)。行号/结论基于本仓库 checkout（0.20.0-dev）。
+> 2026-09-22 建档。步骤 3 主计划，对应 [README](README.md)。行号/结论基于本仓库 checkout（0.20.0-dev）。
 > 你此前没写过 Bindless——§1 先把机制讲透再拆活；每段施工配套的深水区（描述符细节、同步细节）在**当段的记录文档**里展开，本文只立骨架。
 
 ## §0 判定线（完成标准，不可退让）
@@ -13,7 +13,7 @@
 
 ## §1 Bindless 入门：它到底改了什么
 
-**先看 bind 模型的形状**（frenderer 就是你写过/读过的基准，step6 还要拿它做 A/B）：
+**先看 bind 模型的形状**（frenderer 就是你写过/读过的基准，步骤 6 还要拿它做 A/B）：
 
 ```text
 每个 draw 之前，CPU 要把这个 draw 用到的资源"绑"到管线槽位上：
@@ -35,7 +35,7 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 - draw 时不再 bind 贴图——**push constant 里带一个 `tex_index`**，shader 自己去数组里取；
 - set 只分配一次、终身复用，draw 之间的 CPU 装配成本从"换 set"塌缩成"传一个整数"。
 
-**四件套 feature**（全部 Vulkan 1.2 `VkPhysicalDeviceVulkan12Features`，设备创建时一次性打开，细节施工③逐个讲）：
+**四件套 feature**（全部 Vulkan 1.2 `VkPhysicalDeviceVulkan12Features`，设备创建时一次性打开，细节施工 3.3 逐个讲）：
 
 | feature | 回答的问题 |
 |---|---|
@@ -46,7 +46,7 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 
 **Unity 映射**：bind→bindless 的演进同构于 SRP Batcher（减少 SetPassCall 的换绑成本）→ GPU Resident Drawer（GPU 自取数据，CPU 每对象成本趋零）。你练的本步 = 后者的数据侧地基：**索引常驻、按需补槽**。
 
-**本步边界**：bindless 起步形态 = **贴图走 descriptor indexing**；顶点数据仍走传统顶点缓冲（大池 + 偏移），UBO 走每帧一份。descriptor buffer（Vulkan 1.4 的后继方案）按路线图留到 step6 收尾替换。
+**本步边界**：bindless 起步形态 = **贴图走 descriptor indexing**；顶点数据仍走传统顶点缓冲（大池 + 偏移），UBO 走每帧一份。descriptor buffer（Vulkan 1.4 的后继方案）按路线图留到 步骤 6 收尾替换。
 
 ## §2 终态设计（一帧之内）
 
@@ -59,28 +59,29 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 | 顶点布局 | SoA→交错重排 `pos+normal+uv`（32B） | bevy 分列存储，GPU 顶点取数要交错；一次重排终身受益 |
 | 池策略 | 顶点/索引各一个 DEVICE_LOCAL 大池 + bump 偏移 | 超越 frenderer"每 buffer 独立 allocate + wait_idle" |
 | 上传 | 合批 staging，一次 flush 一个提交 | 同上；拷贝队列起步（路线图原话），RTX 2060 有专用 transfer 族 |
-| 跨队列同步 | **timeline 信号量**（1.2 特性） | 拷贝完成 → 绘制才读；二进制信号量表达不了"第 N 批完成"；step4 增量上传直接复用 |
-| bindless | set0 = 贴图数组（1024 槽，UPDATE_AFTER_BIND + PARTIALLY_BOUND，一次分配终身用）；set1 = 每帧在飞一份 UBO（相机+灯光，×2） | 前者终身不变，后者每帧变——寿命不同必须分家（step2 分家思想的延续） |
+| 跨队列同步 | **timeline 信号量**（1.2 特性） | 拷贝完成 → 绘制才读；二进制信号量表达不了"第 N 批完成"；步骤 4 增量上传直接复用 |
+| bindless | set0 = 贴图数组（1024 槽，UPDATE_AFTER_BIND + PARTIALLY_BOUND，一次分配终身用）；set1 = 每帧在飞一份 UBO（相机+灯光，×2） | 前者终身不变，后者每帧变——寿命不同必须分家（步骤 2 分家思想的延续） |
 | per-draw 参数 | push constants：`model` 矩阵 + `tex_index` + `base_color` | 84B < 128B 保底上限；draw 间零换绑 |
-| 着色语言 | **WGSL**，naga（依赖树内 30.0.1）编译 SPIR-V | 本机无 Vulkan SDK/glslang；顺路对齐 bevy 着色语言，step5/6 抄 WGSL 内核不吃第二遍语法 |
-| 深度 | D32_SFLOAT，随 swapchain 重建建/拆 | resize 级寿命，归 Swapchain 管（step2 分家清单补员） |
+| 着色语言 | **WGSL**，naga（依赖树内 30.0.1）编译 SPIR-V | 本机无 Vulkan SDK/glslang；顺路对齐 bevy 着色语言，步骤 5/6 抄 WGSL 内核不吃第二遍语法 |
+| 深度 | D32_SFLOAT，随 swapchain 重建建/拆 | resize 级寿命，归 Swapchain 管（步骤 2 分家清单补员） |
 | 采集时机 | PostUpdate，`.after(TransformSystems::TransformPropagate)` | 入口篇既定架构（帧末直读），拿到本帧最终矩阵 |
-| 帧循环 | `draw_frame` 编排不动，录制段从清屏长成"上传 flush + 清屏 + 绘制" | step2《搭建记录》§6 给 step3 的接口承诺 |
+| 帧循环 | `draw_frame` 编排不动，录制段从清屏长成"上传 flush + 清屏 + 绘制" | 步骤 2《搭建记录》§6 给 步骤 3 的接口承诺 |
+| 代码结构 | main 只做统筹（插件组装，零 Vulkan 符号），编排住 `host.rs` 宿主桥（2026-09-22 开工整理） | 3.2~3.5 每段都要长帧循环，装配与编排一次分家；新模块照 scene 样式自含插件落位，见[《代码结构整理：main只做统筹（宿主桥分家）》](材料/代码结构整理：main只做统筹（宿主桥分家）.md) |
 
 ## §3 五段拆解（一次一段；每段一个子文件夹存放该段任务面板与施工文档）
 
-### [施工①：ECS 侧取数](施工①-ECS侧取数/README.md)（零 Vulkan 代码）
+### [施工 3.1：ECS 侧取数](3.1-ECS侧取数/README.md)（零 Vulkan 代码）
 
 **目的**：先让数据在 ECS 里看得见——这是"取数链路"的取数半边，Vulkan 半边全部后置。
 
 **做什么**：
-1. 材质缝接线（step2 遗留）：`init_asset::<StandardMaterial>()` 注册容器；官方 `GltfExtensionHandlerPbr` 是 `pub(crate)` 拿不到，但转换函数 `standard_material_from_gltf_material` 是 pub——**自写 AshMaterialHook 实现三钩子**（on_root 兜底材质 / on_material 转换 / on_spawn_mesh_and_material 插 `MeshMaterial3d`），注册进 `GltfExtensionHandlers`；
+1. 材质缝接线（步骤 2 遗留）：`init_asset::<StandardMaterial>()` 注册容器；官方 `GltfExtensionHandlerPbr` 是 `pub(crate)` 拿不到，但转换函数 `standard_material_from_gltf_material` 是 pub——**自写 AshMaterialHook 实现三钩子**（on_root 兜底材质 / on_material 转换 / on_spawn_mesh_and_material 插 `MeshMaterial3d`），注册进 `GltfExtensionHandlers`；
 2. Startup：`asset_server.load` FlightHelmet + spawn `WorldAssetRoot`；手动 spawn 相机（`Camera` + `Projection` + `Transform`）与方向光/环境光；
 3. PostUpdate 采集系统 `collect_scene`：Query 采集 `Mesh3d`/`GlobalTransform`/`MeshMaterial3d`，`Assets::get` 容忍空帧（异步到货），日志报实体数/顶点数/材质数。
 
 **验证**：日志稳定报出 FlightHelmet 的实体数、每 primitive 顶点数、4 材质 5 贴图；无 panic；清屏循环不受影响。
 
-### [施工②：buffer 侧上传](施工②-buffer侧上传/README.md)（顶点/索引进池）
+### [施工 3.2：buffer 侧上传](3.2-buffer侧上传/README.md)（顶点/索引进池）
 
 **目的**：数据从 `Assets<Mesh>` 进 GPU 大池，合批 + 拷贝队列起步。
 
@@ -91,7 +92,7 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 
 **验证**：上传字节日志与 Assets 侧统计一致；RenderDoc 确认池 buffer 就位；连续加载无 `wait_idle`（对比 frenderer 基准）。
 
-### [施工③：贴图 + bindless 描述符](施工③-贴图与bindless描述符/README.md)
+### [施工 3.3：贴图 + bindless 描述符](3.3-贴图与bindless描述符/README.md)
 
 **目的**：贴图上 GPU + descriptor indexing 全套落地——**本步的练习核心**。
 
@@ -102,7 +103,7 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 
 **验证**：验证层零告警（本步最值钱的检查点，装 SDK 补验证层的建议兑现）；RenderDoc 可见贴图数组。
 
-### [施工④：管线与绘制](施工④-管线与绘制/README.md)（第一次看到头盔）
+### [施工 3.4：管线与绘制](3.4-管线与绘制/README.md)（第一次看到头盔）
 
 **目的**：从"清屏"长成"画场景"。
 
@@ -114,7 +115,7 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 
 **验证**：头盔出现在窗口，几何完整无破面；resize/退出链路复测不回退。
 
-### [施工⑤：光照与同屏对照](施工⑤-光照与同屏对照/README.md)（收官）
+### [施工 3.5：光照与同屏对照](3.5-光照与同屏对照/README.md)（收官）
 
 **目的**：过 §0 判定线，落文档。
 
@@ -127,9 +128,9 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 
 ## §4 本步不做（防 scope 蔓延）
 
-- 增量上传/热重载/脏标记（step4）；mipmap 生成（贴图 mip0 直出，step6 流送再议）；多材质管线变体（alpha blend 等，本步只画 opaque，透明材质记录后丢弃）；蒙皮/动画；GPU 剔除与 indirect（step5/6）；descriptor buffer（step6）；完整 PBR（本步 Lambert 级漫反射即可支撑"光照方向一致"判定，材质参数暂只取 base_color + 贴图，metallic/roughness 留 step4+）。
+- 增量上传/热重载/脏标记（步骤 4）；mipmap 生成（贴图 mip0 直出，步骤 6 流送再议）；多材质管线变体（alpha blend 等，本步只画 opaque，透明材质记录后丢弃）；蒙皮/动画；GPU 剔除与 indirect（步骤 5/6）；descriptor buffer（步骤 6）；完整 PBR（本步 Lambert 级漫反射即可支撑"光照方向一致"判定，材质参数暂只取 base_color + 贴图，metallic/roughness 留 步骤 4+）。
 
-## §5 节奏约定（本步与 step2 的差异）
+## §5 节奏约定（本步与 步骤 2 的差异）
 
 - **一次只施工一段**：段落跑通即停，我（agent）结合代码讲解该段核心机制 → 你消化/提问/复述 → 你确认后才进下一段；
 - 每段产出小节记录（可并入当段讲解，踩坑即记不攒）；
@@ -145,4 +146,4 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 6. naga 30.0.1 已在依赖树（bevy_shader 经 wesl 间接依赖），加 `naga = { features = ["wgsl", "spv"] }` 即得 WGSL→SPIR-V，本机无需 Vulkan SDK；
 7. 本机无 glslangValidator/glslc/Vulkan SDK（2026-09-22 实查）——着色器编译只能走 naga 路线；
 8. FlightHelmet：1 gltf + 1 bin + 15 png（4 材质，BaseColor/Normal/OcclusionRoughMetal 各 5 张），无内嵌相机灯光，需手动 spawn；
-9. 禁渲染后 `Assets<Mesh>` 主世界数据永久可读（step2《搭建记录》§6，glTF 链路篇 §6 结论）。
+9. 禁渲染后 `Assets<Mesh>` 主世界数据永久可读（步骤 2《搭建记录》§6，glTF 链路篇 §6 结论）。
