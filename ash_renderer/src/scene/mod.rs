@@ -1,4 +1,4 @@
-//! ECS 侧取数（step3 施工 3.1）：glTF 材质缝接线、场景进场与相机灯光，零 Vulkan 代码。
+//! ECS 侧取数（step3 施工 3.1）：glTF 材质缝接线、场景进场、相机灯光与场景采集，零 Vulkan 代码。
 //!
 //! 本层只从 bevy 的资产容器与 World 里取渲染要用的数，全部系统不碰 Vulkan 符号。
 //! 按职责拆五个子模块：
@@ -9,16 +9,19 @@
 //! | [`world_asset`] | 场景进场：load FlightHelmet + 到货统计 | 3.1.2 |
 //! | [`camera`] | 相机组：裸 Camera 三件套 + 宽高比补位 + 就位核验 | 3.1.3 |
 //! | [`lights`] | 灯光组：方向光 spawn + 环境光资源核验 | 3.1.3 |
+//! | [`collect`] | 场景采集：PostUpdate 帧末直读 primitive 三样，产 CollectedScene 快照 | 3.1.4 |
 //! | `util` | 子模块公共小工具 | — |
 //!
 //! 机制与证据：`.agent/docs/3-静态取数链路/3.1-ECS侧取数/`
 
 mod camera;
+mod collect;
 mod lights;
 mod material_hook;
 mod util;
 mod world_asset;
 
+pub use collect::AshCollectPlugin;
 pub use material_hook::AshMaterialHookPlugin;
 
 use bevy::prelude::*;

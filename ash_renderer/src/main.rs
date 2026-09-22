@@ -12,7 +12,7 @@
 
 use ash_renderer::{
     host::AshHostPlugin,
-    scene::{AshMaterialHookPlugin, SceneEntryPlugin},
+    scene::{AshCollectPlugin, AshMaterialHookPlugin, SceneEntryPlugin},
 };
 use bevy::{
     anti_alias::AntiAliasPlugin,
@@ -58,6 +58,8 @@ fn main() -> AppExit {
         .add_plugins(AshMaterialHookPlugin)
         // 场景进场（step3 任务 3.1.2）：load FlightHelmet + spawn WorldAssetRoot + 到货统计
         .add_plugins(SceneEntryPlugin)
+        // 场景采集（step3 任务 3.1.4）：PostUpdate 帧末直读 primitive 三样，产 CollectedScene 快照
+        .add_plugins(AshCollectPlugin)
         // 宿主桥：禁渲染补位 + init/draw_frame/teardown 三系统进调度
         .add_plugins(AshHostPlugin)
         .run()
