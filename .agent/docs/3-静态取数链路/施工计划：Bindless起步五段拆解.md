@@ -141,7 +141,7 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 1. `GltfExtensionHandlerPbr` 是 `pub(crate)`（bevy_pbr/src/gltf.rs:102），外部不可注册；`standard_material_from_gltf_material` 是 pub（同文件 :33），三钩子逻辑可自写复刻；
 2. `GltfExtensionHandler` trait 在 bevy_gltf/src/loader/extensions/mod.rs:62，`on_root` 有默认空实现，`dyn_clone` 必须实现；
 3. `GltfPlugin`（含 `GltfExtensionHandlers` 资源）独立于 RenderPlugin，禁渲染下照常工作；
-4. `DirectionalLight`/`AmbientLight` 在 bevy_light crate（0.20 拆分后），方向光沿实体 forward 照射（directional_light.rs:25）；`AmbientLight` 是全局 Resource；
+4. `DirectionalLight`/`AmbientLight` 在 bevy_light crate（0.20 拆分后），方向光沿实体 forward 照射（directional_light.rs:25）；**全局环境光真身 = `GlobalAmbientLight` 资源（LightPlugin 预插，默认亮度 80）**——`AmbientLight` 在 0.20-dev 已是组件（ambient_light.rs:11 `#[require(Camera)]`，挂相机覆盖全局），早版记"AmbientLight 是全局 Resource"系按旧版记忆，2026-09-22 侦察订正（见 3.1.3 §3）；
 5. `PerspectiveProjection`/`Projection` 在 bevy_camera/src/projection.rs；
 6. naga 30.0.1 已在依赖树（bevy_shader 经 wesl 间接依赖），加 `naga = { features = ["wgsl", "spv"] }` 即得 WGSL→SPIR-V，本机无需 Vulkan SDK；
 7. 本机无 glslangValidator/glslc/Vulkan SDK（2026-09-22 实查）——着色器编译只能走 naga 路线；
