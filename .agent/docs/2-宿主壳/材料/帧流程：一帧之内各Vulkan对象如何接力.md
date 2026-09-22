@@ -52,13 +52,13 @@ submit 若等执行完才返回，CPU 就得陪跑 GPU，两帧在飞无从谈�
 ### in_flight：CPU 的重录闸门
 
 - 提交执行完置位，CPU 下轮重录同组命令缓冲前等它——重录安全的全部含义；
-- 管重录安全，不管节流（节流在 FIFO 显示队列）；初值 `SIGNALED`，第 1 帧立即过闸。
+- 管重录安全，不管节流（节流原在 FIFO 显示队列；2026-09-22 换 MAILBOX 后归 CPU 侧 `WinitSettings::Reactive(1/60)`）；初值 `SIGNALED`，第 1 帧立即过闸。
 
 ## 3. 一张图的旅程
 
 ![一张画布的旅程：两个信号量串起的闭环](_assets/image-journey-loop.png)
 
-可画 →（图空时置位 `image_available`）→ GPU 画 →（执行完置位 `render_finished`）→ 呈现引擎接图、FIFO 排队上屏 → 显示完毕 → 重新可画。**`image_available` 的置位是"上一轮显示结束"干的事**，acquire 只是登记了发令方。整圈没有一步需要 CPU 在场。
+可画 →（图空时置位 `image_available`）→ GPU 画 →（执行完置位 `render_finished`）→ 呈现引擎接图、按 present mode 上屏（MAILBOX 替换未上屏帧，FIFO 排队）→ 显示完毕 → 重新可画。**`image_available` 的置位是"上一轮显示结束"干的事**，acquire 只是登记了发令方。整圈没有一步需要 CPU 在场。
 
 ## 4. 两帧在飞
 
@@ -70,7 +70,7 @@ submit 若等执行完才返回，CPU 就得陪跑 GPU，两帧在飞无从谈�
 | 2 | 等 B（立即过）→ 提交 → advance 到 A | 还在执行第 1 帧 |
 | 3 | 等 A——**撞闸**，第 1 帧执行完才能重录 A 组 | 执行第 2 帧 |
 
-闸门是安全带不是油门：常规节流在 acquire（FIFO 显示队列满）。信号量一次一发一收，每次 acquire 都要干净的信号量——同槽位两次至少隔 2 帧，这就是按槽位备两套的前提。
+闸门是安全带不是油门：FIFO 时代常规节流在 acquire（显示队列满），MAILBOX 下 acquire 不再背压，节流归 CPU 侧 `WinitSettings::Reactive(1/60)`。信号量一次一发一收，每次 acquire 都要干净的信号量——同槽位两次至少隔 2 帧，这就是按槽位备两套的前提。
 
 ## 5. OUT_OF_DATE：控制流不是失败
 
