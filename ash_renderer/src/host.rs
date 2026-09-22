@@ -5,7 +5,7 @@
 //! | 时机 | 系统 | 职责 |
 //! |---|---|---|
 //! | `Startup` | `init_vulkan` | `try_init_vulkan` 用 `?` 串链创建三资源（**全有或全无**）；失败 → `error!` + `AppExit::error()` 优雅退出 |
-//! | `Update` | `draw_frame.run_if(resource_exists::<Context>)` | 一 update = 一帧：等 fence → acquire → 录制清屏并提交 → present；OUT_OF_DATE = 重建重试（控制流） |
+//! | `Last` | `draw_frame.run_if(resource_exists::<Context>)` | 帧循环（排在采集之后、`OnAppExitSystems` 之前）：等 fence → acquire → 录制清屏并提交 → present；OUT_OF_DATE = 重建重试（控制流） |
 //! | `Last` | `teardown_vulkan.in_set(OnAppExitSystems)` | AppExit 写入后、despawn_windows 杀 hwnd 前反序拆除 |
 //!
 //! 本模块不持有 Vulkan 状态，只编排三个生命周期模块暴露的类型：
@@ -49,9 +49,14 @@ impl Plugin for AshHostPlugin {
         app.insert_resource(CompressedImageFormatSupport(CompressedImageFormats::NONE))
             .register_asset_loader(bevy::image::ImageLoader::new(CompressedImageFormats::NONE))
             .add_systems(Startup, (announce, init_vulkan))
-            // 守卫：初始化失败时资源不插入（全有或全无），缺 Context 本帧直接跳过，
-            // 等 AppExit 走退出链——否则 Res<Context> 会在 Update 里 panic，优雅退出前功尽弃
-            .add_systems(Update, draw_frame.run_if(resource_exists::<Context>));
+            // 守卫：初始化失败时资源不插入（全有或全无），缺 Context 直接跳过，
+            // 等 AppExit 走退出链——否则 Res<Context> 会在帧循环里 panic，优雅退出前功尽弃
+            .add_systems(
+                Last,
+                draw_frame
+                    .run_if(resource_exists::<Context>)
+                    .before(OnAppExitSystems),
+            );
         // 退出拆除（官方先例 = bevy_time 的 silence_delayed_command_queues_on_exit）：
         // OnAppExitSystems 在 AppExit 写入之后、despawn_windows 销毁 winit 窗口之前跑——
         // Vulkan 对象必须死在 hwnd 之前（侦察篇 §3/§5 的硬边界）。
@@ -90,7 +95,7 @@ fn init_vulkan(
         }
     };
     info!(
-        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞；清屏循环自下一 Update 起"
+        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞；清屏循环自下一帧（Last）起"
     );
     // 插入顺序 = 创建顺序；World 清场顺序不定，退出时的反序拆除见 teardown_vulkan
     commands.insert_resource(ctx);
@@ -117,6 +122,14 @@ fn try_init_vulkan(
 /// ash 帧循环。一次 update = 一帧：
 /// resize 消息驱动重建 → 等帧槽位空出 → acquire → 录制清屏并提交 → present。
 /// 资源内聚在各模块：本系统只做编排和错误分流（OUT_OF_DATE 是"重试"不是"失败"）。
+///
+/// 住址：`Last`（2026-09-22 自 Update 挪正）。帧内 relay 同帧闭环——Update 变更 →
+/// PostUpdate 传播+采集（`scene::collect` 产快照）→ Last 提交，与官方 bevy 未开
+/// 流水线的"帧末收集、同帧提交"同形；原 Update 钉位是步骤 2 清屏时代的产物，
+/// "N 帧末采、N+1 帧初画"的跨帧滞后在单线程宿主里买不到任何并行（伪流水线纯支出），
+/// 故归位。显式 `.before(OnAppExitSystems)` 钉退出帧次序：本帧照常画完，teardown
+/// 才反序拆除。resize 消息不受影响——缓冲在 `First` 换（bevy_app/src/sub_app.rs），
+/// winit 回调写入的消息本帧 Update/Last 都可读。
 fn draw_frame(
     ctx: Res<Context>,
     mut swapchain: ResMut<Swapchain>,
