@@ -23,7 +23,7 @@ App（组装器 + 生命周期管理，app.rs:85）
 
 ## 1. World —— 数据总仓库
 
-> 深入版（字段解剖、Resource=隐形实体组件、Entity/Asset 两套 ID、变更检测 tick）见《[数据层全景：World、Entity、Resource与Asset](数据层全景：World、Entity、Resource与Asset.md)》。
+> 深入版（字段解剖、Resource=隐形实体组件、Entity/Asset 两套 ID、变更检测 tick）见《[数据层全景：World、Entity、Resource与Asset](材料/数据层全景：World、Entity、Resource与Asset.md)》。
 
 - 装三样东西：**实体+组件**（ECS 的数据行）、**资源**（全局单例，如 `Time`、`Assets<Mesh>`）、以及——容易忽略的——**调度器集合 `Schedules` 也是一个存在 World 里的资源**（`sub_app.rs` 的 `SubApp::default()` 里就是 `world.init_resource::<Schedules>()`）。
 - World 是**被动的**：它不跑逻辑，只被系统读写。"世界在动"其实是"挂在它上面的 Schedule 在跑"。
@@ -133,7 +133,7 @@ runner tick（winit 事件 / ScheduleRunner 定时 / run_once 单次）
 
 ## 7. Plugin 机制 → 已独立成篇
 
-Plugin 的添加机制、生命周期四段、PluginGroup/`plugin_group!` 宏展开与 `set`/`disable` 链式调用，2026-09-14 从本篇拆出为同目录《[Plugin与PluginGroup机制](Plugin与PluginGroup机制.md)》。
+Plugin 的添加机制、生命周期四段、PluginGroup/`plugin_group!` 宏展开与 `set`/`disable` 链式调用，2026-09-14 从本篇拆出为[材料](材料/Plugin与PluginGroup机制.md)《[Plugin与PluginGroup机制](材料/Plugin与PluginGroup机制.md)》。
 
 ## 8. 遗留与下一步
 

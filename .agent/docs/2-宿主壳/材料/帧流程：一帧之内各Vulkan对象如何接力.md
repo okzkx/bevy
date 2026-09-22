@@ -1,6 +1,6 @@
 # 帧流程：CPU 与 GPU 的两条时间线
 
-> 2026-09-22 定稿（同日两轮重写：初版抽象看不懂，二版图误导"信号量状态传回 CPU"）。配套：分家篇（对象怎么拆）、宿主壳搭建记录 §4。代码锚点：`ash_renderer/src/main.rs` 的 `draw_frame`。
+> 2026-09-22 定稿（同日两轮重写：初版抽象看不懂，二版图误导"信号量状态传回 CPU"）。配套：分家篇（对象怎么拆）、宿主壳搭建记录 §4。代码锚点：`ash_renderer/src/host.rs` 的 `draw_frame`（2026-09-22 步骤 3 开工结构整理自 main.rs 迁入，函数名与编排不变）。
 
 ## 0. 一句话结论
 
@@ -85,6 +85,6 @@ acquire 阶段报 → 立即重建、本帧跳过；present 阶段报 → 图已
 | `in_flight` fence | D3D12 帧 fence | FrameIndex vs BackBufferIndex，Vulkan 自己组合 |
 | 在飞数 = 2 | 三重缓冲 CPU 领先上限 | 与 image 数解耦的常数 |
 
-## 7. step3 生长点
+## 7. 步骤 3 生长点
 
 同步骨架不动，管线 / 顶点 / 描述符都往录制段长；引入 transfer 队列时三段接力按队列重新分家，判定线不变。

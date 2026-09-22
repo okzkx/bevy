@@ -35,7 +35,7 @@ Unity 映射：Tier① ≈ catch 后 log + 跳过（frame 不会因单个对象�
 ### Tier① 落地（帧循环，warn 丢弃继续）
 
 - 通用兜底：`warn_unwrap_or_return!(frames.wait_and_reset())`——失败打 warn 跳过本帧；
-- 循环跳元素：`unwrap_or!(x, continue)`（step3 逐实体收集的主场）；
+- 循环跳元素：`unwrap_or!(x, continue)`（步骤 3 逐实体收集的主场）；
 - 要业务上下文：显式 `if let` + 自写日志（resize 后重建失败）；
 - **错误当控制流**：显式 `match`（acquire/present 的 OUT_OF_DATE → rebuild → 重试）——两 Tier 的边界示范：不是所有 Err 都该丢弃，OUT_OF_DATE 的"重试"分支是逻辑本身。
 

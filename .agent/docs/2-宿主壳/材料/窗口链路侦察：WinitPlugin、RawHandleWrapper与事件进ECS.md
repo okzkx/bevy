@@ -1,6 +1,6 @@
 # 窗口链路侦察：WinitPlugin、RawHandleWrapper 与事件进 ECS
 
-> 2026-09-21，step2 开篇侦察（原 step1 做什么第 6 项"窗口链路定点侦察"，推迟到本步做）。源码：`crates/bevy_winit/src/{lib,state,system,winit_windows}.rs`、`crates/bevy_window/src/raw_handle.rs`。
+> 2026-09-21，步骤 2 开篇侦察（原 步骤 1 做什么第 6 项"窗口链路定点侦察"，推迟到本步做）。源码：`crates/bevy_winit/src/{lib,state,system,winit_windows}.rs`、`crates/bevy_window/src/raw_handle.rs`。
 
 ## 0. 一句话结论
 
@@ -63,7 +63,7 @@ pub struct RawHandleWrapper {
 
 ## 5. 宿主壳接线清单（ash 侧）
 
-1. App 骨架：`DefaultPlugins.build().disable::<RenderPlugin>()`（渲染族名单 = step1《DefaultPlugins分类.md》禁 8 件，报错实测后增补）；
+1. App 骨架：`DefaultPlugins.build().disable::<RenderPlugin>()`（渲染族名单 = 步骤 1《DefaultPlugins分类.md》禁 8 件，报错实测后增补）；
 2. `commands.spawn((Window::default(), PrimaryWindow))`；
 3. **Startup**（此时 `resumed` 已跑过，`RawHandleWrapper` 必在）：`Query<&RawHandleWrapper, With<PrimaryWindow>>` → ash entry → Instance → Surface（路径 1 或 2）→ Device → Swapchain——全程主线程；
 4. Update：acquire → 清屏 → present；`MessageReader<WindowResized>` 触发重建；`AppExit` 时按 Instance ← Surface ← Device 反序拆除。

@@ -16,7 +16,7 @@
 
 | | 一句话 | 持有（全部字段） | 寿命与重建 | Drop 销毁序 |
 |---|---|---|---|---|
-| `vulkan::Context` | **地基**：我在哪块 GPU 上、哪个实例、窗口在哪 | Entry / Instance / surface_fns / **Surface** / messenger / PhysicalDevice / Device / queue_family_index / Queue | 进程级；**不重建** | wait_idle → Surface → Messenger → Device → Instance（vulkan.rs:241） |
+| `vulkan::Context` | **地基**：我在哪块 GPU 上、哪个实例、窗口在哪 | Entry / Instance / surface_fns / **Surface** / messenger / PhysicalDevice / Device / queue_family_index / Queue | 进程级；**不重建** | wait_idle → Surface → Messenger → Device → Instance（vulkan.rs:248） |
 | `swapchain::Swapchain` | **画布租约**：present engine 那排 backbuffer 的使用权与规格 | fns / Device(clone) / swapchain / images / views / format / extent | resize 级；`rebuild()` 整体重签（swapchain.rs:146） | views → swapchain，幂等 |
 | `frames::FramePool` | **节拍器 + 每帧工具包**：CPU 领先 GPU 的闸门与轮转资源 | Device(clone) / command_pool / 2×Frame（命令缓冲+双信号量+fence）/ current 游标 | 帧级；**不重建，跨重建轮转复用**（frames.rs:22） | 同步对象逐个 → 命令池 |
 
@@ -32,7 +32,7 @@
 
 *图为结构总览：蓝 = 根（进程级），绿 = 画布租约（resize 级），橙 = 节拍器+每帧工具包（帧级）；两枝间断线即"互不引用"，两侧长箭头是出生/拆除方向。精确字段与 file:line 锚点以下方三个视图的文本为准。*
 
-**视图一：创建期依赖（Startup，一次，main.rs:112）**
+**视图一：创建期依赖（Startup，一次，host.rs:102 try_init_vulkan）**
 
 ```
 Entry → Instance → messenger
@@ -48,10 +48,10 @@ Context::new(wrapper)
 全部往来走 draw_frame 的函数参数，不走对象字段。
 ```
 
-**视图二：一帧内的分工（运行期，每帧，main.rs:127）**
+**视图二：一帧内的分工（运行期，每帧，host.rs:117）**
 
 ```
-draw_frame 一步一环（main.rs draw_frame）：
+draw_frame 一步一环（host.rs draw_frame）：
   wait_and_reset   FramePool 出面 —— in_flight fence 等 GPU 追平，重置命令缓冲
   rebuild          Swapchain 出面 —— 重查 caps、先拆旧后建新（借 ctx 的 PD/Surface/Device）
   acquire          Swapchain 出面 —— 递出一张可画 image + index；信号量是 FramePool 的
@@ -62,7 +62,7 @@ draw_frame 一步一环（main.rs draw_frame）：
 
 五步接力的逐对象细节（谁等谁的信号量、fence 何时置位、三帧时间线看两帧在飞）见《帧流程》原理篇——本表只回答"每步谁出面"。
 
-**视图三：寿命时间轴（拆除反序，main.rs:213 teardown_vulkan）**
+**视图三：寿命时间轴（拆除反序，host.rs:203 teardown_vulkan）**
 
 ```
 Context    ████████████████████████████████████  进程活它活，不重建
@@ -75,7 +75,7 @@ FramePool  ███████████████████████
 
 | 视角 | 平行吗 | 关系实质 |
 |---|---|---|
-| **ECS 存储**（Bevy World） | ✅ 平行 | 三个并列 Resource；insert 顺序 = 创建顺序（main.rs:103），但 World 清场对 Resource 顺序任意——这正是退出必须手动反序 `remove_resource` 的原因 |
+| **ECS 存储**（Bevy World） | ✅ 平行 | 三个并列 Resource；insert 顺序 = 创建顺序（host.rs:93），但 World 清场对 Resource 顺序任意——这正是退出必须手动反序 `remove_resource` 的原因 |
 | **对象图**（谁离不开谁） | ❌ 一根两枝 | Context 是根：两个枝的创建链都必经它；Swapchain 与 FramePool 之间零依赖——**swapchain 整体重建时 FramePool 一根毫毛不动**（分家文档 §2 的判定线） |
 | **时间轴**（寿命） | ❌ 三层楼 | 进程级 > resize级 > 帧级；出生正序、死亡反序，拆错序 = `IN_USE` / use-after-destroy 类崩溃 |
 
@@ -103,10 +103,10 @@ FramePool  ███████████████████████
 | 根是谁、一切资源从哪出发 | `Context`（进程级） | `ID3D11Device` + `IDXGIFactory` ≈ Unity `GfxDevice` |
 | 画布挂在哪、跟帧同步有无关系 | `Swapchain` 挂 Surface，与帧资源无关 | `IDXGISwapChain` 挂 device，与 frame fence 互不相干 |
 | 帧资源怎么轮转、几个索引 | FramePool 槽位 MOD 2 × image index MOD 3 | D3D12 官方化两索引：`FrameIndex` vs `BackBufferIndex` |
-| "过时"归谁管 | `SwapchainOutOfDate` 由 Swapchain 报、main.rs 编排重建 | D3D `ResizeBuffers` 隐式处理，无对应错误码 |
+| "过时"归谁管 | `SwapchainOutOfDate` 由 Swapchain 报、host.rs 编排重建 | D3D `ResizeBuffers` 隐式处理，无对应错误码 |
 
 同一根两枝的形状在 D3D/Unity 里也存在，只是被引擎藏起来了：Vulkan 的教学价值恰恰是亲手把这三层摆上桌面。
 
 ## 6. 收束
 
-为什么这个形状是"对的"？分家文档 §1 给过三笔账（重建动作合法化、Drop 责任代码化、错误语义可 match），本文换一个角度收束：**名字即寿命，寿命即结构**——看到 `Context` 知道它跟进程同寿，看到 `Swapchain` 就该预期一个 `rebuild`，看到 `FramePool` 就该预期轮转。step3 的管线/描述符/bindless 池将长在 FramePool 的录制段里，同步骨架不动（分家文档 §6）。
+为什么这个形状是"对的"？分家文档 §1 给过三笔账（重建动作合法化、Drop 责任代码化、错误语义可 match），本文换一个角度收束：**名字即寿命，寿命即结构**——看到 `Context` 知道它跟进程同寿，看到 `Swapchain` 就该预期一个 `rebuild`，看到 `FramePool` 就该预期轮转。步骤 3 的管线/描述符/bindless 池将长在 FramePool 的录制段里，同步骨架不动（分家文档 §6）。
