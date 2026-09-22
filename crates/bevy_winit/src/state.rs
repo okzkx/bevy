@@ -252,9 +252,23 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
                 }
 
                 match event {
-                    WindowEvent::Resized(size) => self
-                        .bevy_window_events
-                        .send(react_to_resize(window, &mut win, size)),
+                    WindowEvent::Resized(size) => {
+                        // Windows 最小化时会发 Resized(0,0)。把 0 尺寸写进 Window 组件会
+                        // 把分辨率污染成 0（最小化期间查询窗口尺寸得 0），还给
+                        // `changed_windows` 的尺寸回写（request_inner_size(0x0) → 对图标态
+                        // 窗口 SetWindowPos 强制还原）开了通道。这里只广播消息、不写组件
+                        // ——组件分辨率保持最后的有效尺寸，窗口安分待在最小化。
+                        if size.width > 0 && size.height > 0 {
+                            self.bevy_window_events
+                                .send(react_to_resize(window, &mut win, size));
+                        } else {
+                            self.bevy_window_events.send(WindowResized {
+                                window,
+                                width: 0.0,
+                                height: 0.0,
+                            });
+                        }
+                    }
                     WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                         let (window_backend_scale_factor_changed, window_scale_factor_changed) =
                             react_to_scale_factor_change(window, &mut win, scale_factor);

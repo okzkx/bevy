@@ -143,6 +143,9 @@ impl Swapchain {
     /// resize 后重建。两个幂等出口：
     /// - 最小化时 current_extent=0，建 0 尺寸 swapchain 非法——保留旧的，恢复后靠下一次 resize 消息重建；
     /// - 尺寸没变就不动。
+    ///
+    /// 单次真重建 ≈ 60ms（wait_idle+destroy+create，2026-09-22 实测）——调用方必须
+    /// 去抖（host::draw_frame 的 `ResizeGate`），不要在拖拽的每个尺寸步进上调用。
     pub fn rebuild(&mut self, ctx: &Context) -> Result<(), VulkanError> {
         let caps = unsafe {
             ctx.surface_fns
