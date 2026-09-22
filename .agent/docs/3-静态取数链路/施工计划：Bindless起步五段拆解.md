@@ -50,7 +50,7 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 
 ## §2 终态设计（一帧之内）
 
-![一帧之内的数据接力：左栏第 N 帧采集阶段（PostUpdate）产出待上传清单与绘制清单（DrawList），两条蓝色折线跨帧传给右栏第 N+1 帧绘制阶段（Update）——待上传清单进步①合批上传（transfer 队列），DrawList 进步③录制命令（push constants 带模型矩阵+贴图编号）；紫色连线是 timeline 信号量，把步①"拷贝完成置位"与步④"提交前等待"连起来，上传未完成前渲染命令不会上队列](_assets/frame-collect-draw-relay.png)
+![一帧之内的数据接力（2026-09-22 旧形状存档）：左栏第 N 帧采集阶段（PostUpdate）产出待上传清单与绘制清单（DrawList），两条蓝色折线跨帧传给右栏第 N+1 帧绘制阶段（Update）——**relay 已改同帧（draw_frame 住 Last，见 3.1.4 记录 §6），本图待按"Update 变更 → PostUpdate 传播+采集 → Last 上传 flush+清屏+逐 draw"重制（3.2 开工首图），行文以本表为准**；待上传清单进步①合批上传（transfer 队列），DrawList 进步③录制命令（push constants 带模型矩阵+贴图编号）；紫色连线是 timeline 信号量，把步①"拷贝完成置位"与步④"提交前等待"连起来，上传未完成前渲染命令不会上队列](_assets/frame-collect-draw-relay.png)
 
 关键决策（每条的取舍在当段记录里展开）：
 
@@ -64,8 +64,8 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 | per-draw 参数 | push constants：`model` 矩阵 + `tex_index` + `base_color` | 84B < 128B 保底上限；draw 间零换绑 |
 | 着色语言 | **WGSL**，naga（依赖树内 30.0.1）编译 SPIR-V | 本机无 Vulkan SDK/glslang；顺路对齐 bevy 着色语言，步骤 5/6 抄 WGSL 内核不吃第二遍语法 |
 | 深度 | D32_SFLOAT，随 swapchain 重建建/拆 | resize 级寿命，归 Swapchain 管（步骤 2 分家清单补员） |
-| 采集时机 | PostUpdate，`.after(TransformSystems::TransformPropagate)` | 入口篇既定架构（帧末直读），拿到本帧最终矩阵 |
-| 帧循环 | `draw_frame` 编排不动，录制段从清屏长成"上传 flush + 清屏 + 绘制" | 步骤 2《搭建记录》§6 给 步骤 3 的接口承诺 |
+| 采集时机 | PostUpdate，`.after(TransformSystems::Propagate)`（0.20.0-dev 实名） | 入口篇既定架构（帧末直读），拿到本帧最终矩阵；消费端 `draw_frame` 住 Last，**同帧闭环**（2026-09-22 归位，原"帧末采、次帧画"跨帧形状废弃，见 3.1.4 记录 §6） |
+| 帧循环 | `draw_frame` 住 Last（2026-09-22 自 Update 归位，单线程宿主里跨帧滞后买不到并行），录制段从清屏长成"上传 flush + 清屏 + 绘制" | 步骤 2《搭建记录》§6 承诺的"编排住 host.rs + 录制段生长"不变，只是调度槽归位；理由与 checklist 见 3.1.4 记录 §6 |
 | 代码结构 | main 只做统筹（插件组装，零 Vulkan 符号），编排住 `host.rs` 宿主桥（2026-09-22 开工整理） | 3.2~3.5 每段都要长帧循环，装配与编排一次分家；新模块照 scene 样式自含插件落位，见[《代码结构整理：main只做统筹（宿主桥分家）》](材料/代码结构整理：main只做统筹（宿主桥分家）.md) |
 
 ## §3 五段拆解（一次一段；每段一个子文件夹存放该段任务面板与施工文档）
