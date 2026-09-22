@@ -1,9 +1,11 @@
 # 窗口闸门：最小化死锁与 resize 卡顿的实测与修复
 
 > 2026-09-22，3.1 段收官后的窗口缺陷专项。两个用户可见 bug、一次设计返工、一轮调试方法论教训。
-> 改动落点：`ash_renderer/src/host.rs`（`draw_frame` 的 `ResizeGate`，重写编排）+
-> `crates/bevy_winit/src/state.rs`（**fork 内修**：`Resized(0,0)` 不写 Window 组件）+
-> `ash_renderer/src/vulkan/swapchain.rs`（仅注释：rebuild 成本契约）。
+> 改动落点：`ash_renderer/src/host.rs`（`draw_frame` 的 `ResizeGate` + `WinitSettings` 节流）+
+> `ash_renderer/src/vulkan/swapchain.rs`（**MAILBOX 优先选型**）+
+> `crates/bevy_winit/src/state.rs`（**fork 内修**：`Resized(0,0)` 不写 Window 组件）。
+> 定案修订（同日）：初版"拖拽中整帧让路"被用户否决——**宁要渲染卡顿，不要冻结**；
+> 翻出 frenderer 当年的解法（MAILBOX + dirty 下帧重建 + CPU 侧帧率门）照方抓药。
 
 ## §0 判定线（修复后全部实测通过）
 
@@ -11,8 +13,8 @@
 |---|---|---|
 | 最小化保持 | SC_MINIMIZE 后窗口保持最小化、不冻结（`hung=False`） | ✅ 2s+ 稳定 |
 | 任务栏还原 | WM_SYSCOMMAND(SC_RESTORE) 还原到**原始全尺寸**，闸门重开恢复渲染 | ✅ 应用日志`窗口脱离最小化：闸门重开` |
-| 拖拽流畅 | 25 步程序化拖拽（每步 +16px/16ms）→ **零中途重建**、零挂死 | ✅ |
-| 停歇重建 | 停歇 ≥150ms 后**恰好一次**重建到位 | ✅ `swapchain 就绪: 2100x901` |
+| 拖拽持续 | 25 步程序化拖拽（每步 +16px/16ms）→ **帧持续流动零冻结**、每步恰好一次重建、零挂死 | ✅ 26=启动1+25步，循环墙钟 1.16s |
+| 渲染节奏 | MAILBOX 去背压后 update 以官方 `WinitSettings` Reactive(1/60) 节流 | ✅ 空闲 CPU 214%→37% |
 | 渲染恢复 | 还原/重建后帧循环恢复满节奏 | ✅ CPU 增量 ≈1.1s/2s（vsync 节拍） |
 | 优雅退出 | WM_CLOSE → 反序拆除 → 进程退出 | ✅ `退出拆除完成` |
 
@@ -42,17 +44,24 @@
 
 另测得拖拽期间 DWM 不提供 vsync 背压：acquire 不再阻塞，帧循环以 ECS 更新速度裸奔（3~5ms/帧），徒然灌满 present 队列。
 
-## §2 设计返工：从"去抖重建"到"统一闸门"
+## §2 设计两轮返工：冻结被否决，frender 解法胜出
 
-第一版修复（**错误，已废弃**）：最小化整帧让路 + 拖拽中去抖、停歇后重建，但拖拽中**继续 present 旧尺寸帧**（DWM 拉伸顶住）。实测拖拽第 3 步即挂死（`hung=True`）——**尺寸失配不限于最小化：对失配 swapchain 的反复 acquire/present 同样阻塞驱动**。旧代码"消息一到就先重建"恰好歪打正着地避开了它。
+**第一版（停歇去抖）**：最小化整帧让路 + 拖拽中去抖、停歇后重建，但拖拽中**继续 present 旧尺寸帧**。实测拖拽第 3 步即挂死（`hung=True`）——**对失配 swapchain 的反复 acquire/present 同样阻塞驱动**（FIFO 下）。旧代码"消息一到就先重建"恰好歪打正着地避开了它。
 
-定案（统一闸门，主流引擎"拖拽冻结画面、松手重排"同款）：
+**第二版（统一闸门，整帧让路）**：失配期间不碰 Vulkan，画面由 DWM 持有的最后一帧顶住。判定线全过——但**用户拍板否决冻结**："与其冻结，不如渲染卡顿，目标应当是减少卡顿"，并指路 frenderer 当年解决过同一问题。
 
-> **窗口尺寸与 swapchain 不一致期间（消息持续到达、未停歇）整帧让路，一次 Vulkan 都不碰；消息停歇 [`DRAG_QUIET=150ms`] 后重建一次，再恢复渲染。**
+**第三版（终案，frenderer 三件套移植）：**
 
-- 最小化 = 失配的特例（(0,0) 消息置 `minimized`），同一闸门覆盖；
-- acquire 仍保留两道防线：SUBOPTIMAL → 画完这帧、标 pending（闸门随即拦住后续帧）；OUT_OF_DATE → 立即重建（那个状态连一帧都画不了）；
-- `device_wait_idle` 保留（严格规范安全的经典模式）；重建降为停歇后的一次性动作，60ms 不可感知。
+| frenderer 先例 | ash_renderer 落地 | 效果 |
+|---|---|---|
+| `PresentMode::MAILBOX`（FIFO 兜底，swapchain_context.rs:78） | 同款选型 + MAILBOX 时 image_count 提到 ≥3 | present 替换不排队、acquire 永不阻塞 → 拖拽中帧循环不断流，FIFO 的 acquire 阻塞（死锁根源）整体消失 |
+| `dirty_swapchain` 标记 → 下一帧 `MainEventsCleared` 时 drop+重建（render_window.rs:174） | `ResizeGate.pending` → 帧首按需重建（幂等），acquire 永远落在新 swapchain 上 | 每步一建、内容持续跟上 |
+| `try_draw_new_frame` 帧率门（1/刷新率，render_window.rs:82） | 官方旋钮 `WinitSettings::Reactive(1/60)`（focused/unfocused 同 60Hz） | MAILBOX 无背压不再烧 CPU：空闲 214%→37% |
+
+- 最小化闸门保留：失配特例，整帧让路保消息泵（§1 死锁的唯一直接解）；
+- acquire 两道防线不变：SUBOPTIMAL 画完标 pending、OUT_OF_DATE 立即重建；
+- `device_wait_idle` 保留（严格规范安全）；MAILBOX 下在途 present ≤1，排干代价更小；
+- 已知取舍：拖拽中每步重建 ≈28~60ms 的顿挫仍在（MAILBOX 让它不再叠加 acquire 阻塞），按用户定案"接受卡顿、消灭冻结"；后续若要再压，方向是 wait_idle→frame-fence 化（3.4 后再议）。
 
 ## §3 fork 内修：`Resized(0,0)` 不写 Window 组件
 
@@ -73,7 +82,7 @@
 
 ## §5 涉及文件与要点
 
-- `host.rs`：`ResizeGate`（`Local`，minimized/pending/last_resize/logged_minimized）+ `draw_frame` 三道闸门；`DRAG_QUIET=150ms` 是调参点（调小→内容跟上更快但中途停顿更频繁）。
+- `host.rs`：`ResizeGate`（`Local`，minimized/pending/logged_minimized）+ `draw_frame` 三道闸门；`AshHostPlugin` 插入 `WinitSettings::Reactive(1/60)` 节流（官方机制，节住整个 update 循环）。
 - `bevy_winit/src/state.rs`：`Resized(0,0)` 过滤（§3）——**fork 分歧点，同步上游时需重放**。
 - `swapchain.rs`：`rebuild` 文档补成本契约（≈60ms/次，调用方必须去抖）。
 - Unity/D3D 对照：D3D 交换链 `ResizeBuffers` 无需销毁重建整条链、且 DXGI 有 `DXGI_STATUS_OCCLUDED` 可查询；Vulkan WSI 的"失配即阻塞"只能靠应用层闸门——本篇的闸门即 Vulkan 世界的 `OCCLUDED` 处理位。
