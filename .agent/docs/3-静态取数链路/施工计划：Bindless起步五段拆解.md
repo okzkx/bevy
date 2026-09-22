@@ -146,4 +146,5 @@ vec4 base = texture(textures[nonuniformEXT(push.tex_index)], uv);
 6. naga 30.0.1 已在依赖树（bevy_shader 经 wesl 间接依赖），加 `naga = { features = ["wgsl", "spv"] }` 即得 WGSL→SPIR-V，本机无需 Vulkan SDK；
 7. 本机无 glslangValidator/glslc/Vulkan SDK（2026-09-22 实查）——着色器编译只能走 naga 路线；
 8. FlightHelmet：1 gltf + 1 bin + 15 png（6 材质，BaseColor/Normal/OcclusionRoughMetal 三类共 15 张；早版记"4 材质"系笔误，2026-09-22 实测订正），无内嵌相机灯光，需手动 spawn；
-9. 禁渲染后 `Assets<Mesh>` 主世界数据永久可读（步骤 2《搭建记录》§6，glTF 链路篇 §6 结论）。
+9. 禁渲染后 `Assets<Mesh>` 主世界数据永久可读（步骤 2《搭建记录》§6，glTF 链路篇 §6 结论）；
+10. 采集系统 API 订正（2026-09-22 实施核实）：§3.1 行文的 `TransformSystems::TransformPropagate` 是旧版名，0.20.0-dev 该枚举唯一变体为 `Propagate`（bevy_transform/src/plugins.rs:13）；`GlobalTransform` 出矩阵用 `to_matrix()`（global_transform.rs:114，旧名 compute_matrix）。
