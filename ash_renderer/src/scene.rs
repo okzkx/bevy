@@ -1,4 +1,4 @@
-//! ECS 侧取数（step3 施工 3.1）：glTF 材质缝接线，零 Vulkan 代码。
+//! ECS 侧取数（step3 施工 3.1）：glTF 材质缝接线与场景进场，零 Vulkan 代码。
 //!
 //! step2 连带禁用 PbrPlugin 后，官方材质缝两头失守：`Assets<StandardMaterial>`
 //! 容器无人注册；官方 `GltfExtensionHandlerPbr` 是 `pub(crate)`，其注册点
@@ -19,8 +19,10 @@ use bevy::{
         gltf,
         GltfAssetLabel, GltfLoaderSettings, GltfMaterial,
     },
+    image::Image,
     pbr::{gltf::standard_material_from_gltf_material, MeshMaterial3d, StandardMaterial},
     prelude::*,
+    world_serialization::WorldAssetRoot,
 };
 
 /// 材质缝接线插件：注册 `Assets<StandardMaterial>` 容器，挂 [`AshMaterialHook`]，
@@ -37,6 +39,12 @@ impl Plugin for AshMaterialHookPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GltfExtensionHandlers>()
             .init_asset::<StandardMaterial>()
+            // 官方在 PbrPlugin（register_asset_reflect）与 MaterialPlugin::<StandardMaterial>
+            // （register_type，bevy_pbr/src/material.rs:448）里做——两者都被连带禁用。
+            // 不补这个注册，WorldAssetRoot 展开实体树时反射写入 MeshMaterial3d 直接 panic
+            //（world_asset_spawner.rs:635，2026-09-22 实测）。
+            .register_asset_reflect::<StandardMaterial>()
+            .register_type::<MeshMaterial3d<StandardMaterial>>()
             .add_systems(Startup, report_material_seam);
         app.world_mut()
             .resource_mut::<GltfExtensionHandlers>()
@@ -124,4 +132,73 @@ pub fn report_material_seam(
         .unwrap_or(0);
     let container = if materials.is_some() { "已注册" } else { "未注册" };
     info!("材质缝自检：Assets<StandardMaterial> {container}；GltfExtensionHandlers 挂载 {hook_count} 个 handler（期望 1 = AshMaterialHook）");
+}
+
+/// 场景进场插件（施工 3.1.2）：Startup 发出 FlightHelmet 加载请求并 spawn
+/// [`WorldAssetRoot`]，Update 轮询实体树展开结果、到货即报一次统计。
+///
+/// 到货统计同时兑现 3.1.1 留下的"hook 实际触发"验证：
+/// `Assets<StandardMaterial>` 出现 6 材质 + 1 兜底 = 7 份 ⇔ `on_material`/`on_root` 已跑；
+/// primitive 实体带 `MeshMaterial3d` ⇔ `on_spawn_mesh_and_material` 已跑。
+pub struct SceneEntryPlugin;
+
+impl Plugin for SceneEntryPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, load_flight_helmet)
+            .add_systems(Update, report_scene_arrival);
+    }
+}
+
+/// FlightHelmet 在 assets/ 下的相对路径（1 gltf + 1 bin + 15 png；
+/// 6 材质 = Hose/RubberWood/GlassPlastic/MetalParts/LeatherParts/Lenses，
+/// 施工计划 §6.8 早版写的"4 材质"与本文件不符，已订正）。
+const FLIGHT_HELMET: &str = "models/FlightHelmet/FlightHelmet.gltf";
+
+/// 场景进场请求（Startup）：`load` 立即返回占位 Handle、数据异步到货；
+/// [`WorldAssetRoot`] 的组件 Add hook（bevy_world_serialization/src/lib.rs:96）
+/// 在依赖就绪后把整棵实体树展开进主 World——这里只发"进场请求"，不等数据。
+fn load_flight_helmet(mut commands: Commands, server: Res<AssetServer>) {
+    let scene = server.load(GltfAssetLabel::Scene(0).from_asset(FLIGHT_HELMET));
+    commands.spawn(WorldAssetRoot(scene));
+    info!("场景进场：已请求 {FLIGHT_HELMET}#Scene0，实体树待依赖就绪后异步展开");
+}
+
+/// 到货报告（Update，报一次即歇）：primitive 实体出现 = 实体树已展开，
+/// 此刻的容器统计就是三钩子的实际触发证据。10s 未见实体按 Tier① warn 一次
+///（加载失败不是本系统可修的，根因看资产侧错误日志），帧循环照常。
+#[derive(Default)]
+struct ArrivalState {
+    done: bool,
+    waited_secs: f32,
+}
+
+fn report_scene_arrival(
+    mut state: Local<ArrivalState>,
+    time: Res<Time>,
+    meshes: Res<Assets<Mesh>>,
+    std_materials: Res<Assets<StandardMaterial>>,
+    images: Res<Assets<Image>>,
+    primitives: Query<(), With<Mesh3d>>,
+    with_material: Query<(), (With<Mesh3d>, With<MeshMaterial3d<StandardMaterial>>)>,
+) {
+    if state.done {
+        return;
+    }
+    let total = primitives.iter().count();
+    if total == 0 {
+        state.waited_secs += time.delta_secs();
+        if state.waited_secs > 10.0 {
+            warn!("场景进场 10s 未见 primitive 实体——资产路径/loader/依赖链有问题，根因看上方加载错误日志");
+            state.done = true;
+        }
+        return;
+    }
+    let with_material = with_material.iter().count();
+    info!(
+        "场景进场到货：primitive 实体 {total}（期望 6），带 MeshMaterial3d {with_material}/{total}（期望 6/6）；容器——Mesh {}（期望 6）、StandardMaterial {}（期望 6 = 每材质一份，兜底 DefaultMaterial 无人持柄不驻留）、Image {}（期望 17 = 内置 2 + 文件 15）",
+        meshes.len(),
+        std_materials.len(),
+        images.len(),
+    );
+    state.done = true;
 }

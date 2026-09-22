@@ -8,7 +8,7 @@
 //! - [`vulkan`]：进程级——Entry/Instance/Surface/Device/Queue；
 //! - [`swapchain`]：resize 级——swapchain + images/views，随窗口尺寸重建；
 //! - [`frames`]：帧级——命令缓冲与同步对象，跨重建轮转复用；
-//! - [`scene`]：ECS 侧取数（step3 施工 3.1）——glTF 材质缝接线与场景采集，零 Vulkan 代码；
+//! - [`scene`]：ECS 侧取数（step3 施工 3.1）——glTF 材质缝接线、场景进场与采集，零 Vulkan 代码；
 //! - [`host`]：宿主桥——bevy 调度侧接线（init/draw_frame/teardown 三系统 + 禁渲染补位），
 //!   步骤 3 开工前的结构整理中自 main.rs 迁入；
 //! - [`error`]：类型化错误（OUT_OF_DATE 是控制流，不是失败）；
