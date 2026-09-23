@@ -5,7 +5,7 @@
 **目的**：验证本项目根基——`DefaultPlugins.build().disable::<RenderPlugin>()` 与 winit 窗口、自建 Vulkan 能否共存。
 **完成标准**：清屏窗口稳定运行、resize 不崩、退出干净；全程无 wgpu 初始化（RenderDoc / 调试日志确认）。
 
-**状态：✅ 收官（2026-09-21）**——四项施工全部完成并通过实测（清屏窗口颜色呼吸、最大化/还原重建两次、WM_CLOSE 干净退出，证据见《2-宿主壳搭建记录》§4）。
+**状态：✅ 历史收官（2026-09-21）**——四项施工的清屏、重建和 WM_CLOSE 实跑记录保留。**2026-09-23 新增源码复核：fence 提前重置、present 信号量复用和退出等待时机仍有缺陷，未修复。**旧成功路径不替代同步验收，见[已实现缺陷与修复验收](../3-静态取数链路/材料/已实现缺陷与修复验收.md)；继续 3.2 上传前需关闭。
 
 ## 施工顺序（对应路线图"做什么"）
 
@@ -15,6 +15,8 @@
 4. ✅ **帧循环**（2026-09-21 完成：`draw_frame` = acquire→动态渲染清屏→present，两帧在飞；resize 消息驱动 `Swapchain::rebuild`（最大化/还原实测两次）；退出走官方 `OnAppExitSystems` 钩子按帧级→resize级→进程级反序拆除，WM_CLOSE 实测干净退出。首个真 Vulkan bug `ERROR_NATIVE_WINDOW_IN_USE_KHR`（先建后拆）当场抓获并修复。见《2-宿主壳搭建记录》§4）。
 
 ## 材料清单
+
+- [已实现缺陷与修复验收](../3-静态取数链路/材料/已实现缺陷与修复验收.md)——2026-09-23 复核；本步帧同步与退出问题的当前状态和修复验收，旧图示/记录不能覆盖此勘误。
 
 - 《[窗口链路侦察：WinitPlugin、RawHandleWrapper与事件进ECS.md](材料/窗口链路侦察：WinitPlugin、RawHandleWrapper与事件进ECS.md)》——开篇侦察（2026-09-21）：窗口创建是事件驱动（首窗在 runner `resumed`，非 PreStartup）、**`WinitWindows` 0.19.1 已改 thread_local 的路线图修正**、`RawHandleWrapper` 两条 surface 路径（ash-window trait / 手写 vkCreateWin32SurfaceKHR）、runner 帧心跳结构（about_to_wait → app.update()）
 - 《[VulkanContext字段释义：从Entry到Swapchain.md](材料/VulkanContext字段释义：从Entry到Swapchain.md)》——施工③配套（2026-09-21）：每个字段的"是什么/为什么拆这层/Unity-D3D 映射"，创建链依赖图 + 生命周期四层表（施工④的模块拆分依据；标题为历史名，类型现名 `vulkan::Context`）
