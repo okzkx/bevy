@@ -128,16 +128,27 @@ impl Context {
         let app_info = vk::ApplicationInfo::default()
             .application_name(app_name)
             .api_version(vk::API_VERSION_1_3);
-        let instance = unsafe {
-            entry.create_instance(
-                &vk::InstanceCreateInfo::default()
-                    .application_info(&app_info)
-                    .enabled_extension_names(&ext_names)
-                    .enabled_layer_names(&layer_names),
-                None,
-            )
+        // 同步验证（VkValidationFeaturesEXT）：核心检查不覆盖跨对象同步时序——
+        // fence/信号量的 signal-wait 配对、present 复用、在飞销毁，这正是缺陷
+        // D2/D3/D4 的执法面（V1 前置闸门的裁判本体）。同步验证有帧时间开销，
+        // 3.4 真实绘制后若受限，把 enables 换成空数组即降回核心检查。
+        let sync_enables = if validation {
+            Some([vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION])
+        } else {
+            None
+        };
+        let mut sync_validation = vk::ValidationFeaturesEXT::default();
+        let mut instance_info = vk::InstanceCreateInfo::default()
+            .application_info(&app_info)
+            .enabled_extension_names(&ext_names)
+            .enabled_layer_names(&layer_names);
+        if let Some(enables) = &sync_enables {
+            // enables/sync_validation 都须活到 create_instance 返回（pNext 存指针）
+            sync_validation = sync_validation.enabled_validation_features(enables);
+            instance_info = instance_info.push_next(&mut sync_validation);
         }
-        .map_err(|e| VulkanError::Init(format!("vkCreateInstance 失败: {e}")))?;
+        let instance = unsafe { entry.create_instance(&instance_info, None) }
+            .map_err(|e| VulkanError::Init(format!("vkCreateInstance 失败: {e}")))?;
 
         // ---- 验证层 messenger（WARNING/ERROR 全接）----
         let debug = if validation {

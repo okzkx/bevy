@@ -144,8 +144,13 @@ impl FramePool {
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
 
-            // 进场：旧布局不关心（loadOp 全清），等 TOP_OF_PIPE 后可改写；
-            // 写访问到 COLOR_ATTACHMENT_OUTPUT 阶段才发生，屏障不需要更早可见
+            // 进场：布局迁移是一次写访问，必须排在 acquire 对 image 的读之后——
+            // 提交在 COLOR_ATTACHMENT_OUTPUT 阶段等 image_available（等待点语义见
+            // 下方提交段），屏障 srcStage 就提到这里，让迁移写落在信号量等待的
+            // dst 作用域内；写 TOP_OF_PIPE 会被同步验证执法为 WRITE_AFTER_READ
+            //（V1 首轮实抓，缺陷 D6）。dst_access 带上 COLOR_ATTACHMENT_WRITE：
+            // 执行依赖不排序两次写，后续 loadOp 清屏写与迁移写之间靠这条内存
+            // 依赖收口（WRITE_AFTER_WRITE 执法项，同属 D6）。
             let to_color_attachment = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -157,10 +162,11 @@ impl FramePool {
                         .aspect_mask(vk::ImageAspectFlags::COLOR)
                         .level_count(1)
                         .layer_count(1),
-                );
+                )
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
             self.device.cmd_pipeline_barrier(
                 frame.command_buffer,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 vk::DependencyFlags::empty(),
                 &[],

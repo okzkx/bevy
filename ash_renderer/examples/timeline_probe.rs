@@ -89,16 +89,23 @@ fn main() {
     } else {
         Vec::new()
     };
-    let instance = unsafe {
-        entry.create_instance(
-            &vk::InstanceCreateInfo::default()
-                .application_info(&app_info)
-                .enabled_extension_names(&ext_names)
-                .enabled_layer_names(&layer_names),
-            None,
-        )
+    // 同步验证随主工程同款（VkValidationFeaturesEXT）：组 A 的 signal/wait 配对
+    // 要在执法面下跑通才算数。enables 须活到 create_instance 返回（pNext 存指针）。
+    let sync_enables = if validation_installed {
+        Some([vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION])
+    } else {
+        None
+    };
+    let mut sync_validation = vk::ValidationFeaturesEXT::default();
+    let mut instance_info = vk::InstanceCreateInfo::default()
+        .application_info(&app_info)
+        .enabled_extension_names(&ext_names)
+        .enabled_layer_names(&layer_names);
+    if let Some(enables) = &sync_enables {
+        sync_validation = sync_validation.enabled_validation_features(enables);
+        instance_info = instance_info.push_next(&mut sync_validation);
     }
-    .expect("vkCreateInstance");
+    let instance = unsafe { entry.create_instance(&instance_info, None) }.expect("vkCreateInstance");
 
     let _debug = validation_installed.then(|| {
         let loader = debug_utils::Instance::new(&entry, &instance);
@@ -178,6 +185,11 @@ fn main() {
         unsafe { device.destroy_device(None) };
     }
 
+    // messenger 先于 instance 销毁——ash 0.38 无自动 Drop，漏了会被 VUID-00629 收账
+    if let Some(messenger) = _debug {
+        let loader = debug_utils::Instance::new(&entry, &instance);
+        unsafe { loader.destroy_debug_utils_messenger(messenger, None) };
+    }
     unsafe { instance.destroy_instance(None) };
 
     println!("\n== 验证层 VUID 收账 ==");
