@@ -21,7 +21,8 @@
 
 ## 材料清单
 
-- [3.2.1-Context扩展：transfer队列族与timeline信号量开关.md](3.2.1-Context扩展：transfer队列族与timeline信号量开关.md)（2026-09-23：RTX 2060 命中专用 transfer 族 1，退回取舍已记）
+- [3.2.1-Context扩展：transfer队列族与timeline信号量开关.md](3.2.1-Context扩展：transfer队列族与timeline信号量开关.md)（2026-09-23：RTX 2060 命中专用 transfer 族 1，退回取舍已记；同日 1.3 基线定案与校验复核，§3 含 timeline 机制讲解）
+- timeline 校验探针：`ash_renderer/examples/timeline_probe.rs`（`cargo run --example timeline_probe` 可复跑 A/B 实测）
 
 ## 待决问题
 
