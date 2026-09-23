@@ -4,11 +4,11 @@
 
 **目的**：数据从 `Assets<Mesh>` 进 GPU 大池；合批上传 + 拷贝队列起步（路线图原话），超越 frenderer"每 primitive 两次 wait_idle"。
 
-**状态：⬜ 未开工**
+**状态：🚧 施工中（3.2.1 已完成）**
 
 ## 任务清单
 
-- [ ] **3.2.1 Context 扩展**：寻找 transfer 专用队列族（`QUEUE_TRANSFER` 且无 GRAPHICS；没有则退回 graphics 队列合批并记录取舍）；设备创建开 `Vulkan12Features.timelineSemaphore`；
+- [x] **3.2.1 Context 扩展**：寻找 transfer 专用队列族（`QUEUE_TRANSFER` 且无 GRAPHICS；没有则退回 graphics 队列合批并记录取舍）；设备创建开 `Vulkan12Features.timelineSemaphore`；
 - [ ] **3.2.2 新模块 `resources.rs`**：内存类型选择 helper（memory type index 查询）、顶点/索引池（DEVICE_LOCAL 大池 + bump 偏移分配）、staging 池（HOST_VISIBLE）；
 - [ ] **3.2.3 顶点交错重排**：bevy SoA 分列（POSITION/NORMAL/UV_0）→ 交错 `pos+normal+uv`（32B）+ U16/U32 索引，进 pending 队列；
 - [ ] **3.2.4 `flush_uploads`**：一次 flush = 一个 staging buffer + 一个提交 + timeline 信号量置位；draw_frame 渲染提交等 timeline（dst stage = `VERTEX_INPUT`）。
@@ -21,7 +21,7 @@
 
 ## 材料清单
 
-- （施工进行中陆续增补）
+- [3.2.1-Context扩展：transfer队列族与timeline信号量开关.md](3.2.1-Context扩展：transfer队列族与timeline信号量开关.md)（2026-09-23：RTX 2060 命中专用 transfer 族 1，退回取舍已记）
 
 ## 待决问题
 
