@@ -1,9 +1,10 @@
 //! Swapchain（施工④从 vulkan.rs 拆出）：resize 级生命周期。
 //!
 //! 生命周期四层里的"resize 级"（VulkanContext字段释义：从Entry到Swapchain.md §12）：窗口尺寸一变整体重建，
-//! images/views/format/extent 全换；而 fence/信号量/命令缓冲不挂在任何一张 swapchain
-//! image 上（在 `crate::vulkan::frames`），跨重建复用——这正是拆分点：重建 swapchain 时
-//! 同步对象原地不动。
+//! images/views/format/extent 全换。帧槽对象（fence / image_available / 命令缓冲）跨重建
+//! 复用；而 render_finished（present-wait 信号量）D3 修复后**按 image 分配**、挂在本结构
+//! 下随重建换血——同一 image 再次被 acquire 即证明上一轮 present 已被消费完，这是
+//! 唯一有依据的复用闸门，帧槽轮转给不了这个保证（详见 frames.rs 模块注释）。
 //!
 //! `pre_transform`/`composite_alpha`/`present_mode` 等选型与创建链（施工③）一致：
 //! MAILBOX 优先（FIFO 兜底）、BGRA8_UNORM 优先、EXCLUSIVE 共享、clipped。
@@ -37,6 +38,10 @@ pub struct Swapchain {
     pub swapchain: vk::SwapchainKHR,
     pub images: Vec<vk::Image>,
     pub views: Vec<vk::ImageView>,
+    /// D3：按 image index 分配的 present-wait 信号量（render_finished）。
+    /// host.rs 按 acquire 返回的 index 取用，**不是**按帧槽轮转；生命周期与
+    /// swapchain 绑定，重建时随旧 image 集合一起销毁。
+    pub render_finished: Vec<vk::Semaphore>,
     pub format: vk::Format,
     pub extent: vk::Extent2D,
 }
@@ -139,13 +144,25 @@ impl Swapchain {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        // D3：每张 image 一个 present-wait 信号量，数量与 image 集合一一对应，
+        // 不与帧槽数挂钩——两帧在飞对三张 image 的错峰复用由"同 image 重 acquire"
+        // 背书，不靠帧 fence 越权担保 present engine 的消费进度。
+        let render_finished = images
+            .iter()
+            .map(|_| {
+                unsafe { ctx.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }
+                    .map_err(VulkanError::from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         info!(
-            "swapchain 就绪: {}x{}，{} images，{:?}，present={:?}",
+            "swapchain 就绪: {}x{}，{} images，{:?}，present={:?}，render_finished 按 image 配 {} 个",
             caps.current_extent.width,
             caps.current_extent.height,
             images.len(),
             surface_format.format,
             present_mode,
+            render_finished.len(),
         );
 
         Ok(Self {
@@ -154,6 +171,7 @@ impl Swapchain {
             swapchain,
             images,
             views,
+            render_finished,
             format: surface_format.format,
             extent: caps.current_extent,
         })
@@ -177,7 +195,11 @@ impl Swapchain {
         if caps.current_extent == self.extent {
             return Ok(());
         }
-        // 在飞帧还在引用旧 image，必须先等全部完成再拆
+        // 在飞帧还在引用旧 image，必须先等全部完成再拆。WSI 边界（缺陷文档 §4）：
+        // wait_idle 只保证队列操作完成，不担保 presentation engine 消费完
+        // render_finished；Win32 同一 hwnd 只容一个 swapchain，"先拆旧再建新"是
+        // 强制时序，旧件延迟回收在本平台不可行——余量论证与严格方案
+        //（present_wait / present_fence，待 V1 验证环境建立后评估）记录在缺陷文档。
         unsafe { ctx.device.device_wait_idle() }?;
         // Win32 的 WSI 限制：同一个 hwnd 同时只能挂一个 swapchain——
         // 必须先拆旧再建新（`*self = Self::new(ctx)` 的 RHS 先求值，是"先建后拆"，必炸）
@@ -186,10 +208,15 @@ impl Swapchain {
         Ok(())
     }
 
-    /// 销毁 views + swapchain（幂等：句柄清 null 后重复调用是空操作）。
+    /// 销毁 views + render_finished + swapchain（幂等：句柄清 null 后重复调用是空操作）。
     fn destroy(&mut self) {
         for view in self.views.drain(..) {
             unsafe { self.device.destroy_image_view(view, None) };
+        }
+        // 信号量先于 swapchain（创建的逆序）：present 引用的是两者，销毁顺序本身
+        // 不解除 present 在途的引用，安全边际由调用方的 wait_idle 时序承担（见 rebuild）
+        for sem in self.render_finished.drain(..) {
+            unsafe { self.device.destroy_semaphore(sem, None) };
         }
         if self.swapchain != vk::SwapchainKHR::null() {
             unsafe { self.fns.destroy_swapchain(self.swapchain, None) };

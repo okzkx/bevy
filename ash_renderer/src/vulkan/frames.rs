@@ -1,9 +1,16 @@
-//! 帧级资源（施工④从 vulkan.rs 拆出）：命令池/命令缓冲 + 每帧"双信号量 + fence"。
+//! 帧级资源（施工④从 vulkan.rs 拆出）：命令池/命令缓冲 + 每帧"image_available + fence"。
 //!
 //! 生命周期四层里的"帧级"（VulkanContext字段释义：从Entry到Swapchain.md §12）：MAX_FRAMES_IN_FLIGHT 组
-//! 轮转复用，CPU 最多领先 GPU 这么多帧；与 swapchain 解耦——同步对象不挂在任何一张
-//! swapchain image 上，swapchain 重建时原地不动。复用安全的前提：同组资源两次使用
-//! 至少隔 `MAX_FRAMES_IN_FLIGHT` 帧，且 fence 保证上一轮提交已全部执行完。
+//! 轮转复用，CPU 最多领先 GPU 这么多帧。与 swapchain 解耦的是帧槽对象，修复后各归其位：
+//! - in_flight fence：GPU → CPU 重录闸门，按帧槽轮转；
+//! - image_available：present engine → GPU 渲染，按帧槽轮转（复用安全前提：同槽两次
+//!   acquire 隔 MAX_FRAMES_IN_FLIGHT 帧，且 fence 保证上一轮提交真的执行完了——
+//!   提交失败路径一律 Tier② 退出，不留"signal 无人等"的残局）；
+//! - render_finished（GPU → present engine）：**按 swapchain image 分配**，住在
+//!   [`super::swapchain::Swapchain`]（D3）。同一 image 再次被 acquire 即证明其上一轮
+//!   present 已被 present engine 消费完——这是帧 fence 给不了的保证（fence 只证提交
+//!   完成，不证 present engine 的消费进度；依据 Khronos Vulkan Guide "Swapchain
+//!   semaphore reuse"；同一队列上提交有序，下一次 signal 排在前一个 present 消费之后）。
 //!
 //! 清屏本身走 Vulkan 1.3 动态渲染（feature 在 `super::context` 设备创建时已开）：
 //! 无 RenderPass/Framebuffer/管线，`loadOp=CLEAR` 就是清屏——本步要的是"颜色对了 +
@@ -21,12 +28,11 @@ use crate::vulkan::Context;
 /// CPU 领先 GPU 的最大帧数：第 N 帧要等第 N-2 帧的组资源空出来才能重录。
 pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
-/// 一组在飞资源。三个对象各管一段：image_available 桥接 present engine → GPU 渲染，
-/// render_finished 桥接 GPU → present engine，in_flight 桥接 GPU → CPU（重录闸门）。
+/// 一组在飞资源。image_available 桥接 present engine → GPU 渲染，in_flight 桥接
+/// GPU → CPU（重录闸门）；present 方向的 render_finished 按 image 住在 Swapchain（D3）。
 pub struct Frame {
     pub command_buffer: vk::CommandBuffer,
     pub image_available: vk::Semaphore,
-    pub render_finished: vk::Semaphore,
     pub in_flight: vk::Fence,
 }
 
@@ -66,9 +72,6 @@ impl FramePool {
                     image_available: unsafe {
                         ctx.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                     }?,
-                    render_finished: unsafe {
-                        ctx.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-                    }?,
                     // 初值 SIGNALED：第一帧"等上一轮完成"立即通过
                     in_flight: unsafe {
                         ctx.device.create_fence(
@@ -80,7 +83,9 @@ impl FramePool {
                 })
             })
             .collect::<Result<Vec<_>, VulkanError>>()?;
-        info!("帧资源就绪：{MAX_FRAMES_IN_FLIGHT} 组在飞（命令缓冲 + 双信号量 + fence）");
+        info!(
+            "帧资源就绪：{MAX_FRAMES_IN_FLIGHT} 组在飞（命令缓冲 + image_available + fence；render_finished 按 image 住在 Swapchain）"
+        );
         Ok(Self {
             device: ctx.device.clone(),
             command_pool,
@@ -99,14 +104,18 @@ impl FramePool {
         self.current = (self.current + 1) % self.frames.len();
     }
 
-    /// 等本槽位上一轮提交完成（GPU 侧 fence），然后重置 fence 与命令缓冲。
-    pub fn wait_and_reset(&self) -> Result<(), VulkanError> {
+    /// 帧首：等本槽位上一轮提交完成（GPU 侧 fence），重置命令缓冲。
+    ///
+    /// D2 定案：这里**只等不重置 fence**。fence 的重置挪到
+    /// [`Self::record_clear_and_submit`] 提交前一刻——若在帧首重置，其后任何提前
+    /// return（acquire OUT_OF_DATE / acquire 失败 / 重建失败）都会留下一个永远
+    /// 无人 signal 的 unsignaled fence，下一帧 `wait_for_fences(u64::MAX)`
+    /// 永久阻塞主线程和消息泵。
+    pub fn wait_for_slot(&self) -> Result<(), VulkanError> {
         let frame = &self.frames[self.current];
         unsafe {
             self.device
                 .wait_for_fences(slice::from_ref(&frame.in_flight), true, u64::MAX)?;
-            self.device
-                .reset_fences(slice::from_ref(&frame.in_flight))?;
             self.device.reset_command_buffer(
                 frame.command_buffer,
                 vk::CommandBufferResetFlags::empty(),
@@ -117,9 +126,11 @@ impl FramePool {
 
     /// 录制并提交一帧清屏：进场屏障 → dynamic rendering（loadOp 上色）→ 出场屏障 →
     /// queue_submit。提交等 acquire 的 image_available，完成时发 render_finished + fence。
+    /// `render_finished` 按 acquire 的 image index 从 Swapchain 取（D3），不按帧槽轮转。
     pub fn record_clear_and_submit(
         &self,
         ctx: &Context,
+        render_finished: vk::Semaphore,
         image: vk::Image,
         view: vk::ImageView,
         extent: vk::Extent2D,
@@ -203,6 +214,13 @@ impl FramePool {
             );
             self.device.end_command_buffer(frame.command_buffer)?;
 
+            // D2：fence 在提交前一刻才重置。此处到 queue_submit 之间没有任何提前
+            // return：reset 失败 → fence 保持 signaled，下帧等待照常通过；
+            // submit 失败 → 无任何提交负责 signal 这个 fence，帧循环按 Tier② 退出
+            //（host.rs），不会带着残局回来等待——"等无人 signal 的 fence"死锁面关闭。
+            self.device
+                .reset_fences(slice::from_ref(&frame.in_flight))?;
+
             // 等待点语义：COLOR_ATTACHMENT_OUTPUT 起才真正需要 image 已到手——
             // 之前的顶点处理等可以和 acquire 重叠（清屏阶段用不上，但这是以后画东西的正确姿势）
             let wait_dst_stage = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -212,7 +230,7 @@ impl FramePool {
                     .wait_semaphores(slice::from_ref(&frame.image_available))
                     .wait_dst_stage_mask(&wait_dst_stage)
                     .command_buffers(slice::from_ref(&frame.command_buffer))
-                    .signal_semaphores(slice::from_ref(&frame.render_finished))],
+                    .signal_semaphores(slice::from_ref(&render_finished))],
                 frame.in_flight,
             )?;
         }
@@ -226,7 +244,6 @@ impl Drop for FramePool {
         for frame in self.frames.drain(..) {
             unsafe {
                 self.device.destroy_semaphore(frame.image_available, None);
-                self.device.destroy_semaphore(frame.render_finished, None);
                 self.device.destroy_fence(frame.in_flight, None);
             }
         }
