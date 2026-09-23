@@ -1,5 +1,6 @@
 //! ash Vulkan 进程级上下文（step2 施工③④拆分）：Entry → Instance(+验证层) →
-//! Win32 Surface → PhysicalDevice → Device(+dynamicRendering) → Queue。
+//! Win32 Surface → PhysicalDevice → Device(+dynamicRendering+timelineSemaphore) →
+//! Queue（图形 + transfer，同族则合一）。
 //!
 //! 生命周期四层（详见 .agent/docs/2-宿主壳/材料/VulkanContext字段释义：从Entry到Swapchain.md §12）：
 //! - 本结构 = 进程级（随进程活）+ Surface（窗口级，单窗宿主壳中并入）；
@@ -74,6 +75,11 @@ pub struct Context {
     /// graphics 与 present 同族（桌面 GPU 普适；异族需求出现时再拆）
     pub queue_family_index: u32,
     pub queue: vk::Queue,
+    /// transfer 队列族与队列：3.2 起拷贝提交走这里，与图形提交互不排队。
+    /// 没有"TRANSFER 且无 GRAPHICS"的专用族时与 graphics 同族同队列（合批退回，
+    /// 取舍记录见 3.2.1 施工记录）；下游比对两个族号即可分辨。
+    pub transfer_queue_family_index: u32,
+    pub transfer_queue: vk::Queue,
 }
 
 impl Context {
@@ -198,32 +204,70 @@ impl Context {
             return Err(VulkanError::Init("没有 graphics+present 同支持的物理设备".into()));
         };
 
-        // ---- Device：单个通用队列族 + swapchain 扩展 + 1.3 dynamicRendering ----
+        // ---- transfer 专用队列族：拷贝提交与图形提交分流（3.2 合批上传的载体）----
+        // 条件照施工计划：有 TRANSFER 且无 GRAPHICS 的独立族（纯 DMA 引擎，不与图形
+        // 抢占）；不要求 present/compute——拷贝队列只做拷贝。找不到是桌面 GPU 常态
+        // （多数驱动的 transfer 能力就长在 graphics 族上），退回 graphics 合批并记日志，
+        // 不为凑专用族改变设备选择。
+        let families = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let transfer_queue_family_index = families
+            .iter()
+            .enumerate()
+            .find(|(_, f)| {
+                f.queue_flags.contains(vk::QueueFlags::TRANSFER)
+                    && !f.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+            })
+            .map(|(i, _)| i as u32)
+            .unwrap_or(queue_family_index);
+
+        // ---- Device：图形队列族（+ 独立 transfer 族若有）+ swapchain 扩展 + 1.3 dynamicRendering ----
         // 动态渲染是帧循环清屏的载体（swapchain.rs 录制部分）：不用建 RenderPass/Framebuffer，
-        // 但它是 1.3 feature，必须在 vkCreateDevice 里显式开启
+        // 但它是 1.3 feature，必须在 vkCreateDevice 里显式开启。
+        // timelineSemaphore 走 Vulkan12Features：1.3 已把它收进核心（无需 feature bit），
+        // 但显式开 1.2 bit 让"依赖 timeline 信号量"在设备创建处可见，且兼容 1.2-only 设备
+        // ——1.3 设备上该 bit 必报支持，开着零成本。
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
+        let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
         let queue_priority = [1.0f32];
-        let queue_info = vk::DeviceQueueCreateInfo::default()
+        let mut queue_infos = vec![vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
-            .queue_priorities(&queue_priority);
+            .queue_priorities(&queue_priority)];
+        if transfer_queue_family_index != queue_family_index {
+            queue_infos.push(
+                vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(transfer_queue_family_index)
+                    .queue_priorities(&queue_priority),
+            );
+        }
         let device_exts = [ash::khr::swapchain::NAME.as_ptr()];
         let device = unsafe {
             instance.create_device(
                 physical_device,
                 &vk::DeviceCreateInfo::default()
-                    .queue_create_infos(std::slice::from_ref(&queue_info))
+                    .queue_create_infos(&queue_infos)
                     .enabled_extension_names(&device_exts)
+                    .push_next(&mut vulkan12)
                     .push_next(&mut vulkan13),
                 None,
             )
         }
         .map_err(|e| VulkanError::Init(format!("vkCreateDevice 失败: {e}")))?;
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+        let transfer_queue = if transfer_queue_family_index == queue_family_index {
+            queue
+        } else {
+            unsafe { device.get_device_queue(transfer_queue_family_index, 0) }
+        };
 
         let dev_props = unsafe { instance.get_physical_device_properties(physical_device) };
         let dev_name = unsafe { std::ffi::CStr::from_ptr(dev_props.device_name.as_ptr()) }.to_string_lossy();
+        let transfer_note = if transfer_queue_family_index == queue_family_index {
+            "与 graphics 同族（无专用 transfer 族，合批退回）"
+        } else {
+            "专用 transfer 族（无 GRAPHICS）"
+        };
         info!(
-            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  队列族 {queue_family_index}",
+            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  timelineSemaphore=on",
             vk::api_version_major(dev_props.api_version),
             vk::api_version_minor(dev_props.api_version),
             vk::api_version_patch(dev_props.api_version),
@@ -240,6 +284,8 @@ impl Context {
             device,
             queue_family_index,
             queue,
+            transfer_queue_family_index,
+            transfer_queue,
         })
     }
 }
