@@ -171,11 +171,26 @@ impl Context {
         }
         .map_err(|e| VulkanError::Init(format!("vkCreateWin32SurfaceKHR 失败: {e}")))?;
 
-        // ---- PhysicalDevice：graphics+present 同族，离散卡优先 ----
+        // ---- PhysicalDevice：1.3 基线硬校验（学习工程，不做老设备兼容路径）+ graphics+present 同族，离散卡优先 ----
         let physical_devices = unsafe { instance.enumerate_physical_devices() }
             .map_err(|e| VulkanError::Init(format!("枚举物理设备失败: {e}")))?;
         let mut best: Option<(u32, u32, vk::PhysicalDevice)> = None; // (score, family_index, pd)
         for pd in physical_devices {
+            let props = unsafe { instance.get_physical_device_properties(pd) };
+            // 1.3 闸门：timeline 信号量在 1.3 是无条件核心（features 无位可开），
+            // dynamicRendering 等 1.3 feature 结构也不能喂给 1.2 设备——不达标的设备
+            // 在这里出局并记日志，比创建后莫名崩溃便宜；全部出局 = Init 报错冒泡退出
+            if props.api_version < vk::API_VERSION_1_3 {
+                let name =
+                    unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy();
+                info!(
+                    "跳过物理设备 {name}：报 API v{}.{}.{}，低于本项目 1.3 基线",
+                    vk::api_version_major(props.api_version),
+                    vk::api_version_minor(props.api_version),
+                    vk::api_version_patch(props.api_version),
+                );
+                continue;
+            }
             let families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
             let Some(family) = families
                 .iter()
@@ -191,7 +206,7 @@ impl Context {
             else {
                 continue;
             };
-            let score = match unsafe { instance.get_physical_device_properties(pd) }.device_type {
+            let score = match props.device_type {
                 vk::PhysicalDeviceType::DISCRETE_GPU => 1000,
                 vk::PhysicalDeviceType::INTEGRATED_GPU => 100,
                 _ => 1,
@@ -201,7 +216,9 @@ impl Context {
             }
         }
         let Some((_score, queue_family_index, physical_device)) = best else {
-            return Err(VulkanError::Init("没有 graphics+present 同支持的物理设备".into()));
+            return Err(VulkanError::Init(
+                "没有报支持 Vulkan 1.3 且 graphics+present 同支持的物理设备".into(),
+            ));
         };
 
         // ---- transfer 专用队列族：拷贝提交与图形提交分流（3.2 合批上传的载体）----
@@ -223,11 +240,10 @@ impl Context {
         // ---- Device：图形队列族（+ 独立 transfer 族若有）+ swapchain 扩展 + 1.3 dynamicRendering ----
         // 动态渲染是帧循环清屏的载体（swapchain.rs 录制部分）：不用建 RenderPass/Framebuffer，
         // 但它是 1.3 feature，必须在 vkCreateDevice 里显式开启。
-        // timelineSemaphore 走 Vulkan12Features：1.3 已把它收进核心（无需 feature bit），
-        // 但显式开 1.2 bit 让"依赖 timeline 信号量"在设备创建处可见，且兼容 1.2-only 设备
-        // ——1.3 设备上该 bit 必报支持，开着零成本。
+        // timeline 信号量不需要 features 位：1.3 起无条件核心（Vulkan12Features 里的
+        // timelineSemaphore 位在 1.3 设备上恒为 true，链不链无行为差）；1.3 基线已在
+        // 物理设备选择处硬校验，这里只需声明 dynamicRendering 这个真正的可选 feature。
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
-        let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
         let queue_priority = [1.0f32];
         let mut queue_infos = vec![vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
@@ -246,7 +262,6 @@ impl Context {
                 &vk::DeviceCreateInfo::default()
                     .queue_create_infos(&queue_infos)
                     .enabled_extension_names(&device_exts)
-                    .push_next(&mut vulkan12)
                     .push_next(&mut vulkan13),
                 None,
             )
