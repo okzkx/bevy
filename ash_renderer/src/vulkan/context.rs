@@ -237,12 +237,28 @@ impl Context {
             .map(|(i, _)| i as u32)
             .unwrap_or(queue_family_index);
 
-        // ---- Device：图形队列族（+ 独立 transfer 族若有）+ swapchain 扩展 + 1.3 dynamicRendering ----
-        // 动态渲染是帧循环清屏的载体（swapchain.rs 录制部分）：不用建 RenderPass/Framebuffer，
-        // 但它是 1.3 feature，必须在 vkCreateDevice 里显式开启。
-        // timeline 信号量不需要 features 位：1.3 起无条件核心（Vulkan12Features 里的
-        // timelineSemaphore 位在 1.3 设备上恒为 true，链不链无行为差）；1.3 基线已在
-        // 物理设备选择处硬校验，这里只需声明 dynamicRendering 这个真正的可选 feature。
+        // ---- Device：图形队列族（+ 独立 transfer 族若有）+ swapchain 扩展 + 1.3 features ----
+        // 支持与启用是两件事（缺陷 D1 定案）：features2 查询回答"驱动支持吗"，
+        // vkCreateDevice 的 feature 结构声明"本逻辑设备要用哪些"——1.2 收编核心起
+        // timeline 支持即 mandatory，但"默认启用"从不存在（features.adoc L105-106：
+        // 用到的细粒度 feature 必须在设备创建时启用；VUID-VkSemaphoreTypeCreateInfo-
+        // timelineSemaphore-03252 执法）。Vulkan12Features 是 1.2 晋升特性的聚合启用位，
+        // 1.3 设备照用；Vulkan13Features 不列 timeline 是晋升年代不同，不是取消启用位。
+        let mut vk12_query = vk::PhysicalDeviceVulkan12Features::default();
+        let mut vk13_query = vk::PhysicalDeviceVulkan13Features::default();
+        let mut features2 = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut vk12_query)
+            .push_next(&mut vk13_query);
+        unsafe { instance.get_physical_device_features2(physical_device, &mut features2) };
+        // 与 1.3 基线同款的硬校验：要用而驱动不支持 = 出局，不创建半残设备
+        if vk12_query.timeline_semaphore == 0 || vk13_query.dynamic_rendering == 0 {
+            return Err(VulkanError::Init(format!(
+                "物理设备 feature 不足：timelineSemaphore 支持={} dynamicRendering 支持={}（1.3 实现必须为 1）",
+                vk12_query.timeline_semaphore, vk13_query.dynamic_rendering
+            )));
+        }
+        // 显式启用本工程用到的每个 feature 位，不依赖"查询为 true"的惯性
+        let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
         let queue_priority = [1.0f32];
         let mut queue_infos = vec![vk::DeviceQueueCreateInfo::default()
@@ -262,6 +278,7 @@ impl Context {
                 &vk::DeviceCreateInfo::default()
                     .queue_create_infos(&queue_infos)
                     .enabled_extension_names(&device_exts)
+                    .push_next(&mut vulkan12)
                     .push_next(&mut vulkan13),
                 None,
             )
@@ -282,11 +299,14 @@ impl Context {
             "专用 transfer 族（无 GRAPHICS）"
         };
         info!(
-            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  timelineSemaphore=on",
+            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  features[支持→已启用]: timelineSemaphore {}→on  dynamicRendering {}→on  验证层 {}",
             vk::api_version_major(dev_props.api_version),
             vk::api_version_minor(dev_props.api_version),
             vk::api_version_patch(dev_props.api_version),
             dev_props.device_type,
+            vk12_query.timeline_semaphore != 0,
+            vk13_query.dynamic_rendering != 0,
+            if validation { "on" } else { "未找到" },
         );
 
         Ok(Self {
@@ -307,9 +327,11 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        // 手动反序拆除（ash 0.38 无自动 Drop）：先等队列安静，再按依赖逆序拆。
-        // 注意 swapchain/image view 不在这里——它们在 Swapchain 的 Drop 里，且正常退出
-        // 时 teardown_vulkan 已保证 FramePool → Swapchain → 本结构 的反序。
+        // 手动反序拆除（ash 0.38 无自动 Drop）。device_wait_idle 在正常退出里只是
+        // 兜底——teardown_vulkan 已在销毁任何 GPU 资源前排空过队列（D4：等待必须
+        // 先于销毁，本 Drop 的等待保护不了早已拆掉的兄弟资源）；它真正服务的是
+        // panic 清场这类拆毁顺序不定、无人排空的路径。swapchain/image view 在
+        // Swapchain 的 Drop 里，不归本结构管。
         unsafe {
             let _ = self.device.device_wait_idle();
             self.surface_fns.destroy_surface(self.surface, None);
