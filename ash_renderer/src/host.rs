@@ -5,6 +5,7 @@
 //! | 时机 | 系统 | 职责 |
 //! |---|---|---|
 //! | `Startup` | `init_vulkan` | `try_init_vulkan` 用 `?` 串链创建三资源（**全有或全无**）；失败 → `error!` + `AppExit::error()` 优雅退出 |
+//! | `Last` | `flush_uploads`（upload 模块的 `AshUploadPlugin` 注册，before 本表下一行） | 3.2.4 上传链：快照去重 → 合批 transfer 提交，先于帧循环 |
 //! | `Last` | `draw_frame.run_if(resource_exists::<Context>)` | 帧循环（排在采集之后、`OnAppExitSystems` 之前）：resize 闸门（最小化整帧让路；尺寸变化帧首按需重建）→ 等 fence → acquire → 录制清屏并提交 → present |
 //! | `Last` | `teardown_vulkan.in_set(OnAppExitSystems)` | AppExit 写入后、despawn_windows 杀 hwnd 前反序拆除 |
 //!
@@ -31,7 +32,9 @@ use bevy::{
 
 use crate::{
     error::VulkanError,
-    vulkan::{AcquireOutcome, Context, FramePool, MAX_FRAMES_IN_FLIGHT, Swapchain},
+    vulkan::{
+        AcquireOutcome, Context, FramePool, MeshPool, Swapchain, Uploader, MAX_FRAMES_IN_FLIGHT,
+    },
 };
 
 /// 宿主桥插件：禁渲染补位（`CompressedImageFormatSupport` 自报）+ Vulkan 三系统进调度。
@@ -56,8 +59,12 @@ impl Plugin for AshHostPlugin {
             // 裸奔（实测 >200% CPU）；Reactive(1/60) 让空闲时 update 按主屏刷新率封顶，
             // 事件（拖拽/输入）仍即时驱动。最小化失焦走 reactive_low_power 同款 60Hz。
             .insert_resource(bevy::winit::WinitSettings {
-                focused_mode: bevy::winit::UpdateMode::reactive(std::time::Duration::from_secs_f64(1.0 / 60.0)),
-                unfocused_mode: bevy::winit::UpdateMode::reactive_low_power(std::time::Duration::from_secs_f64(1.0 / 60.0)),
+                focused_mode: bevy::winit::UpdateMode::reactive(
+                    std::time::Duration::from_secs_f64(1.0 / 60.0),
+                ),
+                unfocused_mode: bevy::winit::UpdateMode::reactive_low_power(
+                    std::time::Duration::from_secs_f64(1.0 / 60.0),
+                ),
             })
             .add_systems(Startup, (announce, init_vulkan))
             // 守卫：初始化失败时资源不插入（全有或全无），缺 Context 直接跳过，
@@ -97,7 +104,7 @@ fn init_vulkan(
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let (ctx, swapchain, frames) = match try_init_vulkan(&wrapper) {
+    let (ctx, swapchain, frames, pool, uploader) = match try_init_vulkan(&wrapper) {
         Ok(ok) => ok,
         Err(e) => {
             error!("Vulkan 初始化失败，宿主壳优雅退出: {e}");
@@ -106,12 +113,14 @@ fn init_vulkan(
         }
     };
     info!(
-        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞；清屏循环自下一帧（Last）起"
+        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞 + MeshPool/Uploader（3.2 上传链）；清屏循环自下一帧（Last）起"
     );
     // 插入顺序 = 创建顺序；World 清场顺序不定，退出时的反序拆除见 teardown_vulkan
     commands.insert_resource(ctx);
     commands.insert_resource(swapchain);
     commands.insert_resource(frames);
+    commands.insert_resource(pool);
+    commands.insert_resource(uploader);
 }
 
 /// 初始化链路本体：`?` 串起创建链，任一层失败即短路返回 `VulkanError`——
@@ -120,14 +129,26 @@ fn init_vulkan(
 /// 时序假设（`wrapper.single()`）同样当可预期失败处理：ok_or 转成 Init 错误冒泡。
 fn try_init_vulkan(
     wrapper: &Query<&RawHandleWrapper, With<PrimaryWindow>>,
-) -> Result<(Context, Swapchain, FramePool), VulkanError> {
+) -> Result<(Context, Swapchain, FramePool, MeshPool, Uploader), VulkanError> {
     let wrapper = wrapper.single().map_err(|_| {
-        VulkanError::Init("PrimaryWindow 上没有 RawHandleWrapper：窗口未在 Startup 前建好，时序假设被打破".into())
+        VulkanError::Init(
+            "PrimaryWindow 上没有 RawHandleWrapper：窗口未在 Startup 前建好，时序假设被打破".into(),
+        )
     })?;
     let ctx = Context::new(wrapper)?;
     let swapchain = Swapchain::new(&ctx)?;
     let frames = FramePool::new(&ctx)?;
-    Ok((ctx, swapchain, frames))
+    // 3.2 上传链:池懒建(首帧按需分配),staging 环 2 槽 × 1MiB 起步(按需扩)
+    let pool = MeshPool::new(&ctx.device, ctx.memory_contract());
+    let uploader = Uploader::new(
+        &ctx.device,
+        ctx.memory_contract(),
+        ctx.transfer_queue_family_index,
+        ctx.transfer_queue,
+        1024 * 1024,
+        2,
+    )?;
+    Ok((ctx, swapchain, frames, pool, uploader))
 }
 
 /// 帧循环的 resize 闸门状态（`draw_frame` 私有，`Local` 跨帧保持）。
@@ -144,7 +165,7 @@ fn try_init_vulkan(
 /// 幂等）——acquire 永远落在新 swapchain 上，拖拽中帧循环持续流动（用户拍板：
 /// 宁要渲染卡顿，不要冻结）。
 #[derive(Default)]
-struct ResizeGate {
+pub(crate) struct ResizeGate {
     /// 最新一条 resize 消息是 (0,0) = 窗口最小化中；恢复尺寸的非零消息重开闸门
     minimized: bool,
     /// 尺寸变了 / 驱动报次优，下个帧首按需重建（多设无害，rebuild 幂等）
@@ -168,7 +189,7 @@ struct ResizeGate {
     clippy::too_many_arguments,
     reason = "bevy 系统的参数表即依赖注入清单，逐项声明是框架惯例，非函数签名设计味道"
 )]
-fn draw_frame(
+pub(crate) fn draw_frame(
     ctx: Res<Context>,
     mut swapchain: ResMut<Swapchain>,
     mut frames: ResMut<FramePool>,
@@ -269,8 +290,7 @@ fn draw_frame(
     // 4) present：把画好的 image 交给 present engine，等它的信号量按 acquire 的
     // image index 取（D3），不按帧槽轮转。SUBOPTIMAL/OUT_OF_DATE 都只是标记 pending
     //（同 acquire 的次优），重建交给下个帧首的闸门③；其余真失败 Tier② 冒泡
-    if let Err(e) = swapchain.present(ctx.queue, swapchain.render_finished[index as usize], index)
-    {
+    if let Err(e) = swapchain.present(ctx.queue, swapchain.render_finished[index as usize], index) {
         match e {
             VulkanError::SwapchainOutOfDate => gate.pending = true,
             e => {
@@ -308,9 +328,13 @@ fn teardown_vulkan(world: &mut World) {
     }
     world.remove_resource::<FramePool>();
     world.remove_resource::<Swapchain>();
+    // 3.2 上传链随帧级之后拆除(对象依赖只到 Device,顺序相对自由;Context 必须
+    // 最后——Device 归它销毁)
+    world.remove_resource::<Uploader>();
+    world.remove_resource::<MeshPool>();
     world.remove_resource::<Context>();
     // 初始化失败路径资源从未插入，此处静默即可——error! 已在 init_vulkan 记过根因
     if had_vulkan {
-        info!("退出拆除完成：排空 → 帧级 → resize 级 → 进程级");
+        info!("退出拆除完成：排空 → 帧级 → resize 级 → 资产级(池/上传) → 进程级");
     }
 }

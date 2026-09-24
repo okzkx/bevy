@@ -13,6 +13,8 @@ pub enum VulkanError {
     SwapchainOutOfDate,
     #[error("Vulkan 调用失败: {0}")]
     Vk(#[from] vk::Result),
+    #[error("上传/资源编排契约被打破: {0}")]
+    Upload(String),
     #[error("{0}")]
     Init(String),
 }

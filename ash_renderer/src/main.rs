@@ -13,6 +13,7 @@
 use ash_renderer::{
     host::AshHostPlugin,
     scene::{AshCollectPlugin, AshMaterialHookPlugin, SceneEntryPlugin},
+    upload::AshUploadPlugin,
 };
 use bevy::{
     anti_alias::AntiAliasPlugin,
@@ -31,7 +32,8 @@ use bevy::{
 fn main() -> AppExit {
     App::new()
         .add_plugins(
-            DefaultPlugins.build()
+            DefaultPlugins
+                .build()
                 // 资产根指到仓库根 assets/（bevy 自带 FlightHelmet 在此）：默认按
                 // CARGO_MANIFEST_DIR（cargo run → ash_renderer/）或 exe 目录（直跑 →
                 // target/debug/）解析，两种跑法都到不了仓库根，故编译期拼出确定位置。
@@ -60,6 +62,8 @@ fn main() -> AppExit {
         .add_plugins(SceneEntryPlugin)
         // 场景采集（step3 任务 3.1.4）：PostUpdate 帧末直读 primitive 三样，产 CollectedScene 快照
         .add_plugins(AshCollectPlugin)
+        // buffer 侧上传（3.2.4）：Last 里快照去重 → 合批进 GPU 池,先于帧循环
+        .add_plugins(AshUploadPlugin)
         // 宿主桥：禁渲染补位 + init/draw_frame/teardown 三系统进调度
         .add_plugins(AshHostPlugin)
         .run()
