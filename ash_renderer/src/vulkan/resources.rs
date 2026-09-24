@@ -112,7 +112,9 @@ pub fn align_up(value: u64, alignment: u64) -> u64 {
 }
 
 /// 内存契约:设备侧不可变事实(内存类型/堆表 + `nonCoherentAtomSize`)创建时一次
-/// 查询冻结,类型选择的唯一裁判。
+/// 查询冻结,类型选择的唯一裁判。设备事实恒定,克隆即拷贝快照(池/上传各持一份,
+/// 原件住 [`super::Context`])。
+#[derive(Clone)]
 pub struct MemoryContract {
     properties: vk::PhysicalDeviceMemoryProperties,
     non_coherent_atom_size: u64,
@@ -352,11 +354,12 @@ impl GpuBuffer {
     }
 
     /// 宿主写一段:拷入映射区;非 coherent 时按 atom 对齐 flush(写区向两端舍入,
-    /// 只波及含写入字节的边界 atom)。越界一律报错,绝不越界写。
+    /// 只波及含写入字节的边界 atom)。越界一律报错,绝不越界写。`&mut self` 是
+    /// 映射指针的独占门:并发写同一映射在类型层不可能(见 impl Send/Sync)。
     ///
     /// # Errors
     /// buffer 非 host-visible,或写入范围越出分配整体。
-    pub fn write(&self, offset: u64, bytes: &[u8]) -> Result<(), VulkanError> {
+    pub fn write(&mut self, offset: u64, bytes: &[u8]) -> Result<(), VulkanError> {
         if !self.host_visible() {
             return Err(VulkanError::Init(format!(
                 "host 写要求 HOST_VISIBLE,本 buffer 类型属性 {:?}",
@@ -384,11 +387,12 @@ impl GpuBuffer {
     }
 
     /// 宿主读一段:非 coherent 时先按 atom 对齐 invalidate(设备写对宿主可见),
-    /// 再拷出。与 `write` 一样不做 GPU 在飞防护——那是提交侧票据纪律。
+    /// 再拷出。与 `write` 一样不做 GPU 在飞防护——那是提交侧票据纪律;
+    /// `&mut self` 同 write(映射指针独占门)。
     ///
     /// # Errors
     /// buffer 非 host-visible,或读取范围越出分配整体。
-    pub fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), VulkanError> {
+    pub fn read(&mut self, offset: u64, out: &mut [u8]) -> Result<(), VulkanError> {
         if !self.host_visible() {
             return Err(VulkanError::Init(format!(
                 "host 读要求 HOST_VISIBLE,本 buffer 类型属性 {:?}",
@@ -432,7 +436,7 @@ impl GpuBuffer {
 
     /// 写侧 flush:`[offset, offset+len)` 向两端舍入到 atom 边界后 flush。
     /// 舍入只扩到含写入字节的两个边界 atom,未写 atom 永不进范围。
-    fn coherent_flush(&self, offset: u64, len: u64) -> Result<(), VulkanError> {
+    fn coherent_flush(&mut self, offset: u64, len: u64) -> Result<(), VulkanError> {
         let Some((start, size)) = self.atom_range(offset, len) else {
             return Ok(());
         };
@@ -450,7 +454,7 @@ impl GpuBuffer {
     }
 
     /// 读侧 invalidate:与 flush 同一套舍入与跳过规则。
-    fn coherent_invalidate(&self, offset: u64, len: u64) -> Result<(), VulkanError> {
+    fn coherent_invalidate(&mut self, offset: u64, len: u64) -> Result<(), VulkanError> {
         let Some((start, size)) = self.atom_range(offset, len) else {
             return Ok(());
         };
@@ -490,6 +494,15 @@ fn flush_policy(flags: vk::MemoryPropertyFlags) -> &'static str {
         "纯设备内存:无宿主映射"
     }
 }
+
+/// # Safety
+/// 映射指针 `mapped` 只经 `write`/`read`(`&mut self`,独占门)触达:同一映射的
+/// 宿主访问在类型层不可能并发——`Send` 允许整体移交到别的线程(移交后原线程
+/// 失去所有权,仍无并发);`Sync` 下 `&GpuBuffer` 只暴露 Copy 型证据查询口
+/// (`buffer`/`allocation_size`/`host_visible` 等),不解引用指针。宿主侧之外的
+/// 竞争(GPU 在飞读写)按契约由提交侧票据纪律防护,与线程安全无关。
+unsafe impl Send for GpuBuffer {}
+unsafe impl Sync for GpuBuffer {}
 
 impl Drop for GpuBuffer {
     fn drop(&mut self) {

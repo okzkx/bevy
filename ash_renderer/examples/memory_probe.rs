@@ -152,7 +152,7 @@ fn main() {
             );
         }
 
-        let staging = GpuBuffer::create(&device, &contract, 1 << 20, BufferRole::Staging)
+        let mut staging = GpuBuffer::create(&device, &contract, 1 << 20, BufferRole::Staging)
             .expect("staging 按契约创建");
         println!(
             "[契约①] staging: 请求 {}B → 分配 {}B,内存类型 {}({:?}) host_visible={} host_coherent={} → flush 策略走 {}",
@@ -212,7 +212,7 @@ fn main() {
             "离散卡上 pool 不应有宿主映射(集成卡合法例外,见打印)"
         );
 
-        let readback = GpuBuffer::create(&device, &contract, 1 << 20, BufferRole::Readback)
+        let mut readback = GpuBuffer::create(&device, &contract, 1 << 20, BufferRole::Readback)
             .expect("readback 按契约创建");
         println!(
             "[类型③] readback: 内存类型 {}({:?}) host_coherent={}",

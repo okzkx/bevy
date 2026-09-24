@@ -80,6 +80,9 @@ pub struct Context {
     /// 取舍记录见 3.2.1 施工记录）；下游比对两个族号即可分辨。
     pub transfer_queue_family_index: u32,
     pub transfer_queue: vk::Queue,
+    /// 内存契约（设备侧事实一次查询冻结：类型/堆表 + nonCoherentAtomSize），
+    /// 3.2.2.1 定案的选型唯一裁判。池/上传按引用取用，不各自重查。
+    memory_contract: crate::vulkan::MemoryContract,
 }
 
 impl Context {
@@ -88,8 +91,10 @@ impl Context {
         let (hwnd, hinstance) = match wrapper.get_window_handle() {
             RawWindowHandle::Win32(w) => (
                 w.hwnd.get(),
-                w.hinstance
-                    .map_or_else(|| unsafe { GetModuleHandleW(std::ptr::null()) }, NonZeroIsize::get),
+                w.hinstance.map_or_else(
+                    || unsafe { GetModuleHandleW(std::ptr::null()) },
+                    NonZeroIsize::get,
+                ),
             ),
             other => {
                 return Err(VulkanError::Init(format!(
@@ -164,8 +169,9 @@ impl Context {
                         | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
                 )
                 .pfn_user_callback(Some(debug_callback));
-            let messenger = unsafe { loader.create_debug_utils_messenger(&messenger_info, None) }
-                .map_err(|e| VulkanError::Init(format!("创建验证 messenger 失败: {e}")))?;
+            let messenger =
+                unsafe { loader.create_debug_utils_messenger(&messenger_info, None) }
+                    .map_err(|e| VulkanError::Init(format!("创建验证 messenger 失败: {e}")))?;
             Some((loader, messenger))
         } else {
             None
@@ -176,7 +182,9 @@ impl Context {
         let win32_fns = win32_surface::Instance::new(&entry, &instance);
         let surface = unsafe {
             win32_fns.create_win32_surface(
-                &vk::Win32SurfaceCreateInfoKHR::default().hinstance(hinstance).hwnd(hwnd),
+                &vk::Win32SurfaceCreateInfoKHR::default()
+                    .hinstance(hinstance)
+                    .hwnd(hwnd),
                 None,
             )
         }
@@ -192,8 +200,8 @@ impl Context {
             // dynamicRendering 等 1.3 feature 结构也不能喂给 1.2 设备——不达标的设备
             // 在这里出局并记日志，比创建后莫名崩溃便宜；全部出局 = Init 报错冒泡退出
             if props.api_version < vk::API_VERSION_1_3 {
-                let name =
-                    unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy();
+                let name = unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }
+                    .to_string_lossy();
                 info!(
                     "跳过物理设备 {name}：报 API v{}.{}.{}，低于本项目 1.3 基线",
                     vk::api_version_major(props.api_version),
@@ -237,7 +245,8 @@ impl Context {
         // 抢占）；不要求 present/compute——拷贝队列只做拷贝。找不到是桌面 GPU 常态
         // （多数驱动的 transfer 能力就长在 graphics 族上），退回 graphics 合批并记日志，
         // 不为凑专用族改变设备选择。
-        let families = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let families =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
         let transfer_queue_family_index = families
             .iter()
             .enumerate()
@@ -303,12 +312,17 @@ impl Context {
         };
 
         let dev_props = unsafe { instance.get_physical_device_properties(physical_device) };
-        let dev_name = unsafe { std::ffi::CStr::from_ptr(dev_props.device_name.as_ptr()) }.to_string_lossy();
+        let dev_name =
+            unsafe { std::ffi::CStr::from_ptr(dev_props.device_name.as_ptr()).to_string_lossy() };
         let transfer_note = if transfer_queue_family_index == queue_family_index {
             "与 graphics 同族（无专用 transfer 族，合批退回）"
         } else {
             "专用 transfer 族（无 GRAPHICS）"
         };
+        // # Safety:physical_device 来自成功枚举、instance 未销毁(ash 约定参数
+        // 合法性由调用方担保);契约在设备存活期内恒定
+        let memory_contract =
+            unsafe { crate::vulkan::MemoryContract::new(&instance, physical_device) };
         info!(
             "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  features[支持→已启用]: timelineSemaphore {}→on  dynamicRendering {}→on  验证层 {}",
             vk::api_version_major(dev_props.api_version),
@@ -332,7 +346,14 @@ impl Context {
             queue,
             transfer_queue_family_index,
             transfer_queue,
+            memory_contract,
         })
+    }
+
+    /// 冻结的内存契约(类型选择/atom 舍入的唯一裁判,3.2.2.1 定案)。
+    #[must_use]
+    pub fn memory_contract(&self) -> &crate::vulkan::MemoryContract {
+        &self.memory_contract
     }
 }
 

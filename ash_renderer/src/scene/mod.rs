@@ -21,7 +21,7 @@ mod material_hook;
 mod util;
 mod world_asset;
 
-pub use collect::AshCollectPlugin;
+pub use collect::{AshCollectPlugin, CollectedPrimitive, CollectedScene};
 pub use material_hook::AshMaterialHookPlugin;
 
 use bevy::prelude::*;
