@@ -4,7 +4,7 @@
 
 **目的**：将 `Assets<Mesh>` 数据去重送入 GPU 大池，验证合批、transfer 提交、跨队列依赖和资源安全复用。
 
-**状态：🚧 施工中；前置闸门四项已全部关闭（2026-09-23，见[缺陷文档 §9/§10](已实现缺陷与修复验收.md)），3.2.1 已验收，3.2.2～3.2.4 尚未实现。**
+**状态：🚧 施工中；前置闸门四项已全部关闭（2026-09-23，见[缺陷文档 §9/§10](已实现缺陷与修复验收.md)），3.2.1、3.2.2.1 已验收，3.2.2.2～3.2.4 尚未实现。**
 
 ## 前置闸门
 
@@ -16,7 +16,7 @@
 
 - [x] **3.2.1 Context 扩展（已验收 2026-09-23）**：transfer 族选择与 Vulkan 1.3 硬校验落地；`Vulkan12Features.timeline_semaphore(true)` 已恢复显式启用（features2 查询 + 硬校验 + 日志报"支持→已启用"）。验证层开启下 timeline 创建/signal/wait 全链通过、负例被 VUID-03252 精准收账（缺陷文档 §10），不只看 `timelineSemaphore=on` 或探针 PASS。
 - [ ] **3.2.2 资源模块**：在 `vulkan/` 内落位 `resources.rs` 或职责等价子模块，main 不加 Vulkan 细节。
-  - [ ] **3.2.2.1 内存契约**：memory type、usage、绑定要求与对齐；staging 为 HOST_VISIBLE，是否 HOST_COHERENT 明确，必要时 flush 按 `nonCoherentAtomSize` 对齐。
+  - [x] **3.2.2.1 内存契约（已验收 2026-09-24）**：memory type、usage、绑定要求与对齐；staging 为 HOST_VISIBLE，是否 HOST_COHERENT 明确，必要时 flush 按 `nonCoherentAtomSize` 对齐。（落位 `vulkan/resources.rs`：角色定案表 + `find_type` 必需/优先两级选型 + offset 0 绑定 + persistent map + write/read 内建 coherent 分支；探针 `ash_renderer/examples/memory_probe.rs` 组 A 零 VUID、拷贝闭环逐字节一致，组 B 负例被对齐条款收账；非 coherent flush 分支本机无该内存类型、未实测，记录见[施工记录 §3](3.2.2.1-内存契约：memory type、usage、绑定与对齐.md)）
   - [ ] **3.2.2.2 池与缓存**：顶点/索引 DEVICE_LOCAL 池 + bump 偏移；按资产身份去重缓存；初次容量按收齐的静态需求加余量分配，不因每帧快照重复分配。
   - [ ] **3.2.2.3 容量和销毁**：不足时走明确的维护/扩容路径，不写越界；等待旧使用完成后迁移/销毁，记录维护停顿。正常上传与维护分账。
 - [ ] **3.2.3 顶点与索引转换**：POSITION/NORMAL/UV_0 → 选择的交错 32B vertex-input 布局；正确处理 U16/U32、字节偏移、对齐和 draw 的 firstIndex/vertexOffset；验证缺字段/不支持拓扑策略。
@@ -42,6 +42,9 @@
 - [3.2.1-Context扩展：transfer队列族与timeline信号量开关.md](3.2.1-Context扩展：transfer队列族与timeline信号量开关.md)：队列选择、1.3 基线、支持与启用的勘误；保留历史实跑与新增探针的证据边界。
 - timeline 探针 v2：`ash_renderer/examples/timeline_probe.rs`，从仓库根可用 `cargo run -p ash_renderer --example timeline_probe` 运行。**已修正（2026-09-23）**：请求验证层 + 同步验证 + synchronization2/timeline 显式启用，组 A（合法观察组）零 VUID、组 B（负例诊断组）被 VUID-03252 精准收账——可作为验收工具；旧 A/B 运行记录仅作历史观察保留。
 - [验证层：CPU侧的规范执法者——它查什么、怎么查、保证到哪.md](验证层：CPU侧的规范执法者——它查什么、怎么查、保证到哪.md)：机制篇（2026-09-23）——驱动按契约假设你合法、layer 链与三个开关、四类执法面 + GPU-AV、保证的四条边界、"合同模拟执行者 vs GPU 监工"的复述校准。
+- [3.2.2.1-内存契约：memory type、usage、绑定与对齐.md](3.2.2.1-内存契约：memory type、usage、绑定与对齐.md)：施工记录（2026-09-24）——角色定案表、绑定四条款、coherent 分支与 atom 舍入三细则、探针证据与未实测边界；`vulkan/resources.rs` 与 memory_probe 的设计依据。
+- [GpuBuffer：契约、用法与frenderer三分法对照.md](GpuBuffer：契约、用法与frenderer三分法对照.md)：设计对照篇（2026-09-24）——GpuBuffer 定位与用法速查、与 frenderer RO/RW/MRW 的轴对照（角色表达用法 + 运行时同步语义 + 类型层留白）、Bindless 对 buffer 的"稳定与寿命"要求、宿主可见内存的两码头角色与 3.5 每帧 UBO 展望。
+- 内存契约探针：`ash_renderer/examples/memory_probe.rs`，从仓库根可用 `cargo run -p ash_renderer --example memory_probe` 运行。组 A（合同正路）在验证层 + 同步验证下零 VUID，含 staging→池→回读的最小 copyBuffer 闭环；组 B（绑定负例）被 VUID-10739（即 v1.3.289 的 memoryOffset-01036）收账。
 - [已实现缺陷与修复验收](已实现缺陷与修复验收.md)：本段前置的存量代码与探针问题（D1~D6 + V1），不与尚未开发的上传功能混记。
 
 ## 待决问题

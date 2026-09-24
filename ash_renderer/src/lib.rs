@@ -5,9 +5,10 @@
 //! 施工记录见 `.agent/docs/2-宿主壳/`。
 //!
 //! 模块按职责分层（进程级→编排→资源→数据，VulkanContext字段释义：从Entry到Swapchain.md §12）：
-//! - [`vulkan`]：Vulkan 资源层——按生命周期分三个子模块：`context`（进程级：
+//! - [`vulkan`]：Vulkan 资源层——按生命周期分子模块：`context`（进程级：
 //!   Entry/Instance/Surface/Device/Queue）、`swapchain`（resize 级：随窗口尺寸重建）、
-//!   `frames`（帧级：命令缓冲与同步对象，跨重建轮转复用）；
+//!   `frames`（帧级：命令缓冲与同步对象，跨重建轮转复用）、`resources`（资产级：
+//!   内存契约,3.2.2.1 定案 memory type/usage/绑定/对齐,池与缓存随 3.2.2.2 进驻）；
 //! - [`scene`]：ECS 侧取数（step3 施工 3.1）——材质缝接线 / 场景进场 / 相机 / 灯光
 //!   按场景元素各自成组 + 采集（PostUpdate 帧末直读产 CollectedScene 快照），零 Vulkan 代码；
 //! - [`host`]：宿主桥——bevy 调度侧接线（init/draw_frame/teardown 三系统 + 禁渲染补位），
