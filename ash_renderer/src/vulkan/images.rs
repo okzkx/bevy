@@ -317,7 +317,9 @@ impl GpuImage {
         self.view
     }
 
-    /// 采样器句柄(3.3.3 描述符表从这里取;M2 每图一个,去重策略归 3.3.4 待决)。
+    /// 采样器句柄(3.3.3 描述符表从这里取;去重按 [`sampler_key`] 的功能参数,
+    /// 同键贴图共享一个描述符槽位——注意槽里存的是"首个发布者"的句柄,见
+    /// descriptors.rs 的 retire 前置条件)。
     #[must_use]
     pub fn sampler(&self) -> vk::Sampler {
         self.sampler
@@ -357,17 +359,18 @@ impl Drop for GpuImage {
 
 /// `bevy::image::Image` 资产身份 → 驻留票据。与 [`super::MeshPool`] 的驻留缓存同责:
 /// 每帧快照带着同一批柄来,只有"查无此身份"的才创建上传(重复快照零重复上传);
-/// 票据记录"这份数据何时可用"。槽位分配/发布是 3.3.4 的事,本类型不排槽。
+/// 票据记录"这份数据何时可用"。槽位绑定由 [`super::BindlessTables`] 分配、随
+/// commit 一并登记(3.3.4)。
 #[derive(bevy::prelude::Resource, Default)]
 pub struct ImageCache {
-    resident: HashMap<AssetId<BevyImage>, (GpuImage, Ticket)>,
+    resident: HashMap<AssetId<BevyImage>, (GpuImage, Ticket, super::descriptors::SlotBinding)>,
 }
 
 impl ImageCache {
     /// 身份是否已驻留;在则返回其上传完成票据(消费方等待的凭据)。
     #[must_use]
     pub fn resident(&self, id: AssetId<BevyImage>) -> Option<Ticket> {
-        self.resident.get(&id).map(|(_, ticket)| *ticket)
+        self.resident.get(&id).map(|(_, ticket, _)| *ticket)
     }
 
     /// 已驻留贴图数(日志与"全部驻留"收账用)。
@@ -377,14 +380,28 @@ impl ImageCache {
     }
 
     /// 驻留登记:仅在对应批次提交成功后调用(失败路径不留账本行,与 pool.commit 同责)。
-    pub fn commit(&mut self, id: AssetId<BevyImage>, image: GpuImage, ticket: Ticket) {
-        self.resident.insert(id, (image, ticket));
+    /// 槽位绑定由 [`super::BindlessTables::publish`] 先行分配。
+    pub fn commit(
+        &mut self,
+        id: AssetId<BevyImage>,
+        image: GpuImage,
+        ticket: Ticket,
+        slots: super::descriptors::SlotBinding,
+    ) {
+        self.resident.insert(id, (image, ticket, slots));
     }
 
-    /// 按身份取驻留贴图(3.3.3 描述符表、3.4 DrawList 的取数口)。
+    /// 按身份取驻留贴图(3.4 DrawList 的取数口)。
     #[must_use]
     pub fn image(&self, id: AssetId<BevyImage>) -> Option<&GpuImage> {
-        self.resident.get(&id).map(|(image, _)| image)
+        self.resident.get(&id).map(|(image, _, _)| image)
+    }
+
+    /// 按身份取槽位绑定(3.4 DrawList 组装 per-draw 参数的取数口;缺资源时
+    /// 消费方走 fallback 槽或暂缓 draw——`BindlessTables::fallback_slots`)。
+    #[must_use]
+    pub fn slots(&self, id: AssetId<BevyImage>) -> Option<super::descriptors::SlotBinding> {
+        self.resident.get(&id).map(|(_, _, slots)| *slots)
     }
 }
 
@@ -392,6 +409,46 @@ fn filter(f: ImageFilterMode) -> vk::Filter {
     match f {
         ImageFilterMode::Nearest => vk::Filter::NEAREST,
         ImageFilterMode::Linear => vk::Filter::LINEAR,
+    }
+}
+
+/// 采样器功能参数键(3.3.4 去重定案):VkSampler 的全部功能入参——滤波两轴 +
+/// mip 模式、寻址三轴、比较、边框色。两个钉号背景:
+/// - **格式解释挂 image view,VkSampler 无格式参数**(订正 e61781d2c),所以
+///   sRGB/线性色彩角色不进键——同键贴图共享采样器槽,与色彩角色无关;
+/// - lod clamp 与 anisotropy 在 [`GpuImage::create_sampler`] 里被本步全局策略
+///   钉死(max_lod=0、aniso off、bias 0),对全部采样器同值,不进键。
+///
+/// 同键 ⇒ 同一 VkSampler 配方 ⇒ 可共享描述符槽位。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SamplerKey {
+    mag: i32,
+    min: i32,
+    mip: i32,
+    u: i32,
+    v: i32,
+    w: i32,
+    /// None = 比较关闭(与 Some(NEVER) 的 compare_enable=true 是两个功能形态)
+    compare: Option<i32>,
+    border: i32,
+}
+
+/// bevy 采样描述符 → [`SamplerKey`](映射与 [`GpuImage::create_sampler`] 消费的
+/// 参数一一对应,改其一必改其二)。
+#[must_use]
+pub fn sampler_key(d: &ImageSamplerDescriptor) -> SamplerKey {
+    SamplerKey {
+        mag: filter(d.mag_filter).as_raw(),
+        min: filter(d.min_filter).as_raw(),
+        mip: mipmap_mode(d.mipmap_filter).as_raw(),
+        u: address_mode(d.address_mode_u).as_raw(),
+        v: address_mode(d.address_mode_v).as_raw(),
+        w: address_mode(d.address_mode_w).as_raw(),
+        compare: d.compare.map(|c| compare_op(c).as_raw()),
+        border: d
+            .border_color
+            .map_or(vk::BorderColor::FLOAT_TRANSPARENT_BLACK, border_color)
+            .as_raw(),
     }
 }
 

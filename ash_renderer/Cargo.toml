@@ -22,6 +22,11 @@ wgpu-types = { version = "30.0.1", default-features = false }
 
 # WGSL → SPIR-V 编译（3.3 前置闸门）：精确锁版锁行为（选型记录 2026-09-24），
 # lock 内已有 30.0.1（wgpu 传递依赖），features 恰为 wgsl-in/spv-out 两个方向。
-# 探针（examples）专用；正式 3.3 施工若走 build.rs 再挪 build-dependencies。
+# build-dependencies = 正式编译路径（build.rs 编译 examples/shaders/*.wgsl，3.3.3
+# 起兑现"runtime+capability 补丁器"定案）；dev-dependencies = bindless_probe 的
+# 内联编译路径（闸门探针保持自含）。
+[build-dependencies]
+naga = { version = "=30.0.1", features = ["wgsl-in", "spv-out"] }
+
 [dev-dependencies]
 naga = { version = "=30.0.1", features = ["wgsl-in", "spv-out"] }

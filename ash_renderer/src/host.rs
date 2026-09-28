@@ -33,8 +33,8 @@ use bevy::{
 use crate::{
     error::VulkanError,
     vulkan::{
-        AcquireOutcome, Context, FramePool, ImageCache, MeshPool, Swapchain, Uploader,
-        MAX_FRAMES_IN_FLIGHT,
+        AcquireOutcome, BindlessTables, Context, FramePool, ImageCache, MeshPool, Swapchain,
+        Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
 
@@ -105,7 +105,8 @@ fn init_vulkan(
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let (ctx, swapchain, frames, pool, uploader, image_cache) = match try_init_vulkan(&wrapper) {
+    let (ctx, swapchain, frames, pool, uploader, image_cache, tables) = match try_init_vulkan(&wrapper)
+    {
         Ok(ok) => ok,
         Err(e) => {
             error!("Vulkan 初始化失败，宿主壳优雅退出: {e}");
@@ -114,7 +115,7 @@ fn init_vulkan(
         }
     };
     info!(
-        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞 + MeshPool/Uploader（3.2 上传链）+ ImageCache（3.3 贴图）；清屏循环自下一帧（Last）起"
+        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞 + MeshPool/Uploader（3.2 上传链）+ ImageCache（3.3.1 贴图）+ BindlessTables（3.3.3 常驻表，容量 {TABLE_CAPACITY}）；清屏循环自下一帧（Last）起"
     );
     // 插入顺序 = 创建顺序；World 清场顺序不定，退出时的反序拆除见 teardown_vulkan
     commands.insert_resource(ctx);
@@ -123,15 +124,25 @@ fn init_vulkan(
     commands.insert_resource(pool);
     commands.insert_resource(uploader);
     commands.insert_resource(image_cache);
+    commands.insert_resource(tables);
 }
 
 /// 初始化链路本体：`?` 串起创建链，任一层失败即短路返回 `VulkanError`——
 /// 这里能优雅地用 `?`，靠的是"失败处理集中在调用方（init_vulkan 的 match）"，
 /// 而不是每个系统都能 `?`（bevy 系统返回 `()`）。
 /// 时序假设（`wrapper.single()`）同样当可预期失败处理：ok_or 转成 Init 错误冒泡。
-fn try_init_vulkan(
-    wrapper: &Query<&RawHandleWrapper, With<PrimaryWindow>>,
-) -> Result<(Context, Swapchain, FramePool, MeshPool, Uploader, ImageCache), VulkanError> {
+/// 初始化链一次成型的资源束（顺序即创建序 = 退出反序拆除序）。
+type InitChain = (
+    Context,
+    Swapchain,
+    FramePool,
+    MeshPool,
+    Uploader,
+    ImageCache,
+    BindlessTables,
+);
+
+fn try_init_vulkan(wrapper: &Query<&RawHandleWrapper, With<PrimaryWindow>>) -> Result<InitChain, VulkanError> {
     let wrapper = wrapper.single().map_err(|_| {
         VulkanError::Init(
             "PrimaryWindow 上没有 RawHandleWrapper：窗口未在 Startup 前建好，时序假设被打破".into(),
@@ -142,7 +153,7 @@ fn try_init_vulkan(
     let frames = FramePool::new(&ctx)?;
     // 3.2 上传链:池懒建(首帧按需分配),staging 环 2 槽 × 1MiB 起步(按需扩)
     let pool = MeshPool::new(&ctx.device, ctx.memory_contract());
-    let uploader = Uploader::new(
+    let mut uploader = Uploader::new(
         &ctx.device,
         ctx.memory_contract(),
         ctx.transfer_queue_family_index,
@@ -152,7 +163,18 @@ fn try_init_vulkan(
     )?;
     // 3.3 贴图:驻留缓存空建,首帧随上传链按需进图(3.3.1)
     let image_cache = ImageCache::default();
-    Ok((ctx, swapchain, frames, pool, uploader, image_cache))
+    // 3.3.3/3.3.4:常驻描述符表(限额对账在表内做,失败即 Tier②)+ fallback 白图
+    // 走同一上传链占 0 号双槽;真实贴图自首帧 flush_uploads 起从 1 号槽发布
+    let tables = BindlessTables::new(
+        &ctx.device,
+        &ctx.instance,
+        ctx.physical_device,
+        ctx.memory_contract(),
+        &mut uploader,
+        ctx.queue_family_index,
+        TABLE_CAPACITY,
+    )?;
+    Ok((ctx, swapchain, frames, pool, uploader, image_cache, tables))
 }
 
 /// 帧循环的 resize 闸门状态（`draw_frame` 私有，`Local` 跨帧保持）。
@@ -333,13 +355,15 @@ fn teardown_vulkan(world: &mut World) {
     world.remove_resource::<FramePool>();
     world.remove_resource::<Swapchain>();
     // 3.2/3.3 上传链与资产件随帧级之后拆除(对象依赖只到 Device,顺序相对自由;
-    // Context 必须最后——Device 归它销毁)
+    // Context 必须最后——Device 归它销毁)。BindlessTables 先于 ImageCache:其
+    // 描述符集里的 view/sampler 句柄是贴图缓存资源的借用,先拆账本再拆本体
     world.remove_resource::<Uploader>();
     world.remove_resource::<MeshPool>();
+    world.remove_resource::<BindlessTables>();
     world.remove_resource::<ImageCache>();
     world.remove_resource::<Context>();
     // 初始化失败路径资源从未插入，此处静默即可——error! 已在 init_vulkan 记过根因
     if had_vulkan {
-        info!("退出拆除完成：排空 → 帧级 → resize 级 → 资产级(池/上传/贴图缓存) → 进程级");
+        info!("退出拆除完成：排空 → 帧级 → resize 级 → 资产级(池/上传/描述符表/贴图缓存) → 进程级");
     }
 }
