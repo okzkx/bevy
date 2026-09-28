@@ -53,6 +53,8 @@
 
 3.3.2-3.3.4 施工记录（2026-09-28）：[3.3.2-3.3.4-描述符与槽位：特性解禁、常驻描述符表与发布链路](3.3.2-3.3.4-描述符与槽位：特性解禁、常驻描述符表与发布链路.md)——context.rs 五位启用+D1 全量落账；新模块 `vulkan/descriptors.rs`（限额对账/常驻双表/free list/fallback/发布）；build.rs 补丁器落地（定案兑现，naga 挪 build-dependencies，spirv-val 闸门+补丁+复验）；探针 `descriptor_probe` 三组全绿（发布/去重/耗尽负例/生产表采样/UAB 更新实证）零 VUID；宿主实跑三批发布 15 贴图→采样器槽 2 种、零 VUID、exit 0；**新钉号：SAMPLER-UAB 无需特性位已实测收账、空槽访问 UB 验证层不保证能抓、UAB 限额在 properties2 扩展结构、VUID-03252（特性集须覆盖全部消费者）、VUID-00312（无 FREE 位 pool 整体回收）**。
 
+机制篇（2026-09-28）：[bindless机制：从换绑到索引——frenderer锚点与Unity批处理对照](bindless机制：从换绑到索引——frenderer锚点与Unity批处理对照.md)——§0 判定线=资源选择权从绑定状态搬进索引数据；以 frenderer 传统 set 循环为锚点讲换位、四条契约↔四类开关；"容量 vs 占用"回答是否需要开局全量加载；与 SRP Batcher/Instancing/Indirect 的四刀对照（bindless=Unity 未暴露的贴图刀，GPU Resident Drawer=全家桶）；Texture2DArray 对照表反衬特性位买到什么；待核验项（Unity 6 平台清单）与 3.5 钩子（bevy MaterialBind 对照）。
+
 ## 待决问题
 
 - ~~naga 原生 WGSL 扩展输出到 raw Vulkan 的完整合法性：前置小样例决定，不凭依赖存在推断。~~（2026-09-28 已决：接口能表达能编译，但 runtime 数组输出缺 `RuntimeDescriptorArray` capability 被 VUID-04680 拒——capability 补丁后合法；定长数组原生合法。新待决如下）
