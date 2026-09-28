@@ -39,6 +39,10 @@
 
 施工结果尚未产生；当前依据为[施工计划 §1～§3](../施工计划：Bindless起步五段拆解.md)与本面板，完成后登记实际证据。
 
+选型记录（2026-09-24）：[着色器源语言 WGSL，HLSL 为备用路线](选型记录：WGSL源语言与HLSL备用路线.md)——核查 naga 30.0.1 无 `hlsl-in` 后维持 WGSL/naga 选型；HLSL→DXC 仅作备用，切换须落账并重跑小样例。
+
+前置机制篇（2026-09-24）：[显存机制：Buffer与Image之别、swizzle不透明与访问路径特化](显存机制：Buffer与Image之别、swizzle不透明与访问路径特化.md)——§0 判定线给出 3.3 三条实现约束：上传/读回必须走拷贝命令、image 分配独立于 MeshPool、layout 转换不能套 buffer barrier 模板。
+
 ## 待决问题
 
 - naga 原生 WGSL 扩展输出到 raw Vulkan 的完整合法性：前置小样例决定，不凭依赖存在推断。
