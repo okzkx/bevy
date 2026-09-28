@@ -107,3 +107,19 @@ Unity 类比：`TextureFormat.RGBA32`（存储布局）与 `GraphicsFormat.R8G8B
   ```
 
   不做成"输出必编码"的全局默认，理由与读端同构：render target 多是中间产物（HDR 光照缓冲、G-buffer、后处理链），无条件编码会污染一切非最终写入。所以两端共用同一设计——**资源格式声明色彩语义**：读端用 UNORM 豁免解码（数据贴图），写端用线性格式豁免编码（HDR/G-buffer），只有"给显示的最终颜色"两头都声明 SRGB。而 present 本身不做像素变换（swapchain 图是显示控制器的直接数据源），编码必须落在进 swapchain 的最后一步写入——ROP（声明 SRGB surface/视图）或最后一批着色器，正是上面那个二选一。
+
+## 7. A/B 审计：frenderer 的同题答卷（2026-09-28）
+
+> frenderer 归档前没有色彩域概念（用户自述"当时对这块了解不清晰"），本节按本篇判定线逐段审计其纹理链路。结论：**"结果对"= 一条合法路线（全局 UNORM + 着色器手动转换）+ 一类恰好严格正确（直显）+ 一类自洽失真（未转换的受光材质）的混合体**——不是机制对，也不是巧合。
+
+实测链路（rust-frenderer）：
+
+- **解码**：同款 `image` crate，一律归一化 RGBA8（texture_from.rs `change_color_type_to_rgba_u8`）；env/HDR 走 Rgba32F——`.hdr` 文件本就线性存储，float 直读，这段对。
+- **格式**：`vk_format_form_types`（rt_from_texture.rs:4）Rgba8→R8G8B8A8_UNORM——颜色/数据不分，全 UNORM；swapchain B8G8R8A8_UNORM。硬件固定功能全程零转换。
+- **着色器层责任分岔**（成败的分水岭）：
+  - `anisotropic.hlsl`（Unity URP PBR 移植）在片元两端手动补了转换：`GammaToLinearSpace(albedo)`（Unity URP 同款三项多项式近似）进 PBR、`LinearToGammaSpace`（精确 sRGB 编码式 1.055·x^(1/2.4)−0.055）出——**机制正确**，即 §6"着色器端手动转换"路线。且只转 albedo（颜色角色）、mask/法线不转——**角色划分与 §3 线性名单一致**：当年虽不知格式机制，但按 Unity 语义搬运时把"颜色转、数据不转"的纪律带对了位置。等价于把 Unity 编辑器在 target 上做的两条硬件转换，搬进了 shader 的进/出口。
+  - 其余材质（mat_cap_role / fur / item_face）不转：光照直接跑在编码值上。"两端不转"互相抵消，整体亮度感守恒、人眼看不出破绽，但 N·L 响应、高光衰减不物理——**自洽失真**（风格化无妨，物理光照有实差）。
+  - GUI/贴图直显：bytes 透传（采样不转→写出不转→上屏与原图语义相同），等价浏览器看图——恰好严格正确。
+  - tone_mapping compute 的 pow(0.4545)（开关默认关）是第三处转换点，归后处理。
+
+代价与启示：frenderer 把色彩域正确性全压给 shader 纪律——忘转无任何执法（验证层不管，格式系统帮不上），且同一贴图在"转"与"不转"的 shader 间混用会双重失真。本篇路线（格式声明 + 固定功能）把这两件事交给硬件。**对 3.4 的直接输入**：若拍板"swapchain SRGB 格式"路线，从 frenderer/Unity URP 移植 shader 时必须删掉手动出口转换（LinearToGammaSpace），否则双重编码；若选着色器端路线，则沿用 anisotropic.hlsl 的手动惯例。
