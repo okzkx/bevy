@@ -33,7 +33,10 @@ use bevy::{
 
 use crate::{
     scene::CollectedScene,
-    vulkan::{GpuImage, ImageCache, ImageRelease, MeshPool, StagingImageCopy, UploadBatch, Uploader},
+    vulkan::{
+        sampler_key, GpuImage, ImageCache, ImageRelease, MeshPool, StagingImageCopy, UploadBatch,
+        Uploader,
+    },
 };
 
 /// StandardMaterial 的贴图槽清单(3.1.4 核验同款五槽;M2 口径)。
@@ -59,6 +62,7 @@ impl Plugin for AshUploadPlugin {
             flush_uploads
                 .run_if(resource_exists::<MeshPool>)
                 .run_if(resource_exists::<ImageCache>)
+                .run_if(resource_exists::<crate::vulkan::BindlessTables>)
                 .before(crate::host::draw_frame)
                 .before(OnAppExitSystems),
         );
@@ -94,6 +98,7 @@ pub(crate) fn flush_uploads(
     data: UploadData,
     mut pool: ResMut<MeshPool>,
     mut image_cache: ResMut<ImageCache>,
+    mut tables: ResMut<crate::vulkan::BindlessTables>,
     mut uploader: ResMut<Uploader>,
     mut state: Local<UploadState>,
     mut exit: MessageWriter<AppExit>,
@@ -306,8 +311,24 @@ pub(crate) fn flush_uploads(
                     return;
                 }
             }
-            for (id, gpu) in gpu_images {
-                image_cache.commit(id, gpu, ticket);
+            // —— 3.3.4 槽位发布:提交成功 → 分槽(采样器按功能键去重) → 驻留登记
+            // 带槽位。只写 free list 的新槽,覆盖竞态在结构上不存在;采样 draw 的
+            // "上传完成才可使用"由票据承担(3.4 接 draw 时挂 ticket 信号量等待)。
+            // 发布失败 = 槽容量耗尽,按 Tier② 冒泡(施工计划:不静默截断)
+            let mut sampler_slots_hit = HashSet::new();
+            for ((id, _, spec), (gid, gpu)) in image_specs.iter().zip(gpu_images) {
+                debug_assert_eq!(*id, gid, "image_specs 与 gpu_images 同序构建,错位即内部矛盾");
+                let slots =
+                    match tables.publish(gpu.view(), gpu.sampler(), &sampler_key(&spec.sampler)) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!("贴图 {id:?} 槽位发布失败,上传链无法继续,优雅退出: {e}");
+                            exit.write(AppExit::error());
+                            return;
+                        }
+                    };
+                sampler_slots_hit.insert(slots.sampler);
+                image_cache.commit(*id, gpu, ticket, slots);
             }
             let srgb_count = image_specs
                 .iter()
@@ -316,12 +337,17 @@ pub(crate) fn flush_uploads(
             info!(
                 "上传批次 #{ticket}:mesh {planned_count} 个(顶点 {vertex_bytes}B / 索引 {index_bytes}B)\
                  + 贴图 {} 张({image_bytes}B,sRGB 角色 {srgb_count} / 线性 {});\
+                 槽位发布:纹理槽 {}/{}(含 fallback 0 号)、采样器槽 {} 种(本批涉及 {new_sampler});\
                  未到货跳过 mesh {pending} / 贴图 {pending_images}(材质缺 {materials_pending});\
                  已驻留 mesh {} / 贴图 {}",
                 image_specs.len(),
                 image_specs.len() - srgb_count,
+                tables.used_texture_slots(),
+                tables.capacity(),
+                tables.used_sampler_slots(),
                 pool.resident_count(),
                 image_cache.resident_count(),
+                new_sampler = sampler_slots_hit.len(),
             );
         }
         // staging 非空的批次必有提交;空批已在入口 return。此分支按内部契约

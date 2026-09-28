@@ -277,8 +277,69 @@ impl Context {
                 vk12_query.timeline_semaphore, vk13_query.dynamic_rendering
             )));
         }
+        // 3.3.2 硬校验：bindless 路线的五个必需位（总开关不解锁任何行为，具体位
+        // 缺哪个都走不通）。施工计划 §1 定案"缺少必要能力时明确报错，不建传统
+        // bound 回退渲染器"——缺一即出局，与 1.3 基线同款待遇。
+        let required_di: [(&str, u32); 5] = [
+            ("descriptor_indexing", vk12_query.descriptor_indexing),
+            (
+                "runtime_descriptor_array",
+                vk12_query.runtime_descriptor_array,
+            ),
+            (
+                "shader_sampled_image_array_non_uniform_indexing",
+                vk12_query.shader_sampled_image_array_non_uniform_indexing,
+            ),
+            (
+                "descriptor_binding_sampled_image_update_after_bind",
+                vk12_query.descriptor_binding_sampled_image_update_after_bind,
+            ),
+            (
+                "descriptor_binding_partially_bound",
+                vk12_query.descriptor_binding_partially_bound,
+            ),
+        ];
+        if let Some((name, _)) = required_di.iter().find(|(_, v)| *v == 0) {
+            return Err(VulkanError::Init(format!(
+                "物理设备 descriptor indexing 特性不足：{name} 不支持（bindless 路线无传统回退，该设备出局）"
+            )));
+        }
+        // D1 惯例：20 个分位的支持值全量落日志——"不启用≠不查"，后续段要用
+        // 哪位（SSBO 表/variable count…）的证据都在这行里，不重新侦察
+        let di_all: [(&str, u32); 20] = [
+            ("inAttArrDynIdx", vk12_query.shader_input_attachment_array_dynamic_indexing),
+            ("uniTexelArrDynIdx", vk12_query.shader_uniform_texel_buffer_array_dynamic_indexing),
+            ("stoTexelArrDynIdx", vk12_query.shader_storage_texel_buffer_array_dynamic_indexing),
+            ("uniBufArrNonUni", vk12_query.shader_uniform_buffer_array_non_uniform_indexing),
+            ("smpImgArrNonUni", vk12_query.shader_sampled_image_array_non_uniform_indexing),
+            ("stoBufArrNonUni", vk12_query.shader_storage_buffer_array_non_uniform_indexing),
+            ("stoImgArrNonUni", vk12_query.shader_storage_image_array_non_uniform_indexing),
+            ("inAttArrNonUni", vk12_query.shader_input_attachment_array_non_uniform_indexing),
+            ("uniTexelArrNonUni", vk12_query.shader_uniform_texel_buffer_array_non_uniform_indexing),
+            ("stoTexelArrNonUni", vk12_query.shader_storage_texel_buffer_array_non_uniform_indexing),
+            ("uniBufUAB", vk12_query.descriptor_binding_uniform_buffer_update_after_bind),
+            ("smpImgUAB", vk12_query.descriptor_binding_sampled_image_update_after_bind),
+            ("stoImgUAB", vk12_query.descriptor_binding_storage_image_update_after_bind),
+            ("stoBufUAB", vk12_query.descriptor_binding_storage_buffer_update_after_bind),
+            ("uniTexelUAB", vk12_query.descriptor_binding_uniform_texel_buffer_update_after_bind),
+            ("stoTexelUAB", vk12_query.descriptor_binding_storage_texel_buffer_update_after_bind),
+            ("updUnusedPending", vk12_query.descriptor_binding_update_unused_while_pending),
+            ("partiallyBound", vk12_query.descriptor_binding_partially_bound),
+            ("varDescCount", vk12_query.descriptor_binding_variable_descriptor_count),
+            ("runtimeDescArray", vk12_query.runtime_descriptor_array),
+        ];
+        info!(
+            "descriptor indexing 分位支持(20/20): {}",
+            di_all.iter().map(|(n, v)| format!("{n}={}", *v != 0)).collect::<Vec<_>>().join(" ")
+        );
         // 显式启用本工程用到的每个 feature 位，不依赖"查询为 true"的惯性
-        let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
+        let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default()
+            .timeline_semaphore(true)
+            .descriptor_indexing(true)
+            .runtime_descriptor_array(true)
+            .shader_sampled_image_array_non_uniform_indexing(true)
+            .descriptor_binding_sampled_image_update_after_bind(true)
+            .descriptor_binding_partially_bound(true);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
         let queue_priority = [1.0f32];
         let mut queue_infos = vec![vk::DeviceQueueCreateInfo::default()
@@ -324,13 +385,14 @@ impl Context {
         let memory_contract =
             unsafe { crate::vulkan::MemoryContract::new(&instance, physical_device) };
         info!(
-            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  features[支持→已启用]: timelineSemaphore {}→on  dynamicRendering {}→on  验证层 {}",
+            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  features[支持→已启用]: timelineSemaphore {}→on  dynamicRendering {}→on  descriptorIndexing+4 位 {}→on  验证层 {}",
             vk::api_version_major(dev_props.api_version),
             vk::api_version_minor(dev_props.api_version),
             vk::api_version_patch(dev_props.api_version),
             dev_props.device_type,
             vk12_query.timeline_semaphore != 0,
             vk13_query.dynamic_rendering != 0,
+            vk12_query.descriptor_indexing != 0,
             if validation { "on" } else { "未找到" },
         );
 

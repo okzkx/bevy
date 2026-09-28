@@ -53,6 +53,8 @@ use crate::error::VulkanError;
 /// | `DevicePool` | VERTEX_BUFFER+INDEX_BUFFER+TRANSFER_DST | DEVICE_LOCAL | — |
 /// | `Staging` | TRANSFER_SRC | HOST_VISIBLE | HOST_COHERENT |
 /// | `Readback` | TRANSFER_DST | HOST_VISIBLE | HOST_CACHED+HOST_COHERENT |
+/// | `FrameUniform` | UNIFORM_BUFFER | HOST_VISIBLE | HOST_CACHED+HOST_COHERENT |
+/// | `Storage` | STORAGE_BUFFER | HOST_VISIBLE | HOST_CACHED+HOST_COHERENT |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufferRole {
     /// 顶点/索引大池本体:图形阶段读,3.2.4 的 transfer 提交写(TRANSFER_DST)。
@@ -62,6 +64,12 @@ pub enum BufferRole {
     Staging,
     /// 回读验证:transfer 写 + 宿主读(HOST_CACHED 优先,加速宿主读侧)。
     Readback,
+    /// 每帧 UBO(3.3.3 set1 的载体):着色器读,宿主按帧写(在飞安全由帧槽
+    /// 轮转保证——每帧一个 buffer,复用前等对应帧完成,3.5 接线时生效)。
+    FrameUniform,
+    /// 宿主可见 storage(3.3.3 探针 I/O;未来 GPU 可索引参数表的宿主侧形态):
+    /// 设备读写 + 宿主写(staging 直写)/读(回读)。
+    Storage,
 }
 
 impl BufferRole {
@@ -79,6 +87,12 @@ impl BufferRole {
             }
             Self::Staging => vk::BufferUsageFlags::TRANSFER_SRC,
             Self::Readback => vk::BufferUsageFlags::TRANSFER_DST,
+            Self::FrameUniform => vk::BufferUsageFlags::UNIFORM_BUFFER,
+            Self::Storage => {
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::TRANSFER_SRC
+            }
         }
     }
 
@@ -87,7 +101,10 @@ impl BufferRole {
     pub fn required_memory(self) -> vk::MemoryPropertyFlags {
         match self {
             Self::DevicePool => vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            Self::Staging | Self::Readback => vk::MemoryPropertyFlags::HOST_VISIBLE,
+            Self::Staging
+            | Self::Readback
+            | Self::FrameUniform
+            | Self::Storage => vk::MemoryPropertyFlags::HOST_VISIBLE,
         }
     }
 
@@ -97,7 +114,7 @@ impl BufferRole {
         match self {
             Self::DevicePool => vk::MemoryPropertyFlags::empty(),
             Self::Staging => vk::MemoryPropertyFlags::HOST_COHERENT,
-            Self::Readback => {
+            Self::Readback | Self::FrameUniform | Self::Storage => {
                 vk::MemoryPropertyFlags::HOST_CACHED | vk::MemoryPropertyFlags::HOST_COHERENT
             }
         }

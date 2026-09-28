@@ -240,6 +240,12 @@ impl Uploader {
         self.next_ticket - 1
     }
 
+    /// 提交目标队列族(发布方判断"图像 release 是否需要让渡"的证据口)。
+    #[must_use]
+    pub fn queue_family(&self) -> u32 {
+        self.queue_family
+    }
+
     /// timeline 当前计数 = GPU 已完成的最高票据(证据查询口)。
     ///
     /// # Errors
