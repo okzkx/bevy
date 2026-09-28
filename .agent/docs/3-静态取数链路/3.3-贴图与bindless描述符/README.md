@@ -4,14 +4,14 @@
 
 **目的**：用已经验证的 shader 接口连接 VkImage、采样器和常驻描述符表，证明资源发布与访问安全。
 
-**状态：⬜ 未开工。**不因 feature 名称或布局草案已写入文档就视为工具链已通过。
+**状态：⬜ 未开工（前置闸门四项已于 2026-09-28 关闭，证据见[前置闸门施工记录](前置闸门施工记录：naga小样例与set-binding表冻结.md)）。**不因 feature 名称或布局草案已写入文档就视为工具链已通过。
 
 ## 前置闸门
 
-- [ ] 3.2 的上传票据、跨族依赖和 staging 复用已验收，验证层与同步验证实际启用。
-- [ ] 先用两张纹理加一个索引验证 naga 30.0.1 的 WGSL → SPIR-V：features 为 `wgsl-in` / `spv-out`；原生 binding_array 和 NonUniform、入口、capability 经过验证，不写 GLSL `nonuniformEXT`。
-- [ ] 冻结纹理数组、sampler 数组和每帧 UBO 的 set/binding 表。WGSL texture/sampler 分离，不能照抄 GLSL combined sampler 表。
-- [ ] 最小 SPIR-V 经 `spirv-val` 和临时 Vulkan 管线试验通过后再定正式 layout；此试验不等于正式 3.4 场景绘制完成。
+- [x] 3.2 的上传票据、跨族依赖和 staging 复用已验收，验证层与同步验证实际启用。（3.2 收官记录 + context.rs VkValidationFeaturesEXT 落点；本闸门探针同款常开，全程 VUID 收账）
+- [x] 先用两张纹理加一个索引验证 naga 30.0.1 的 WGSL → SPIR-V：features 为 `wgsl-in` / `spv-out`；原生 binding_array 和 NonUniform、入口、capability 经过验证，不写 GLSL `nonuniformEXT`。（组 A/B 实测：NonUniform 自动装饰、GLCompute main、capability 集合全中；**遗留决定**：runtime 数组输出缺 `RuntimeDescriptorArray` capability（VUID-04680），须 capability 补丁或改定长数组——路线待拍板，见施工记录 §4）
+- [x] 冻结纹理数组、sampler 数组和每帧 UBO 的 set/binding 表。WGSL texture/sampler 分离，不能照抄 GLSL combined sampler 表。（表已冻结：set0 b0 纹理数组 / b1 采样器数组（UAB+PARTIALLY_BOUND 三层配套）、set1 b0 每帧 UBO、push 96B 偏移 0/64/68/80 双侧钉死；数组容量与 sampler 去重仍归 3.3.2/3.3.4 待决）
+- [x] 最小 SPIR-V 经 `spirv-val` 和临时 Vulkan 管线试验通过后再定正式 layout；此试验不等于正式 3.4 场景绘制完成。（补丁后 runtime 与原生 fixed 双双过 val + 设备 compute 试验，采样读回全对、零告警）
 
 ## 任务清单
 
@@ -43,7 +43,10 @@
 
 前置机制篇（2026-09-24）：[显存机制：Buffer与Image之别、swizzle不透明与访问路径特化](显存机制：Buffer与Image之别、swizzle不透明与访问路径特化.md)——§0 判定线给出 3.3 三条实现约束：上传/读回必须走拷贝命令、image 分配独立于 MeshPool、layout 转换不能套 buffer barrier 模板。
 
+前置闸门施工记录（2026-09-28）：[前置闸门施工记录：naga小样例与set-binding表冻结](前置闸门施工记录：naga小样例与set-binding表冻结.md)——四验收点全过；实证 naga 30.0.1 runtime 数组输出缺 capability（VUID-04680）、补丁器与定长双路线可跑；set/binding 表与 push 偏移冻结；路线决策待拍板。
+
 ## 待决问题
 
-- naga 原生 WGSL 扩展输出到 raw Vulkan 的完整合法性：前置小样例决定，不凭依赖存在推断。
-- 固定数组容量与 sampler 去重策略：由所选设备实际限额和资产需求决定，不预先假定 1024 必然可用。
+- ~~naga 原生 WGSL 扩展输出到 raw Vulkan 的完整合法性：前置小样例决定，不凭依赖存在推断。~~（2026-09-28 已决：接口能表达能编译，但 runtime 数组输出缺 `RuntimeDescriptorArray` capability 被 VUID-04680 拒——capability 补丁后合法；定长数组原生合法。新待决如下）
+- **runtime+补丁 vs 定长数组路线**（3.3.1 开工前拍板）：探针证据与取舍见施工记录 §4，推荐 runtime+补丁。
+- 固定数组容量与 sampler 去重策略：由所选设备实际限额和资产需求决定，不预先假定 1024 必然可用。（实测素材：本机 maxPerStageDescriptorSampledImages = 1048576、maxPushConstantsSize = 256B）
