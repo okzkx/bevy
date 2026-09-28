@@ -16,3 +16,9 @@ ash = "0.38.0"
 raw-window-handle = "0.6"
 # 类型化错误：帧循环要对 ERROR_OUT_OF_DATE_KHR 做"重建重试"分支，String 无法 match
 thiserror = "2"
+
+# WGSL → SPIR-V 编译（3.3 前置闸门）：精确锁版锁行为（选型记录 2026-09-24），
+# lock 内已有 30.0.1（wgpu 传递依赖），features 恰为 wgsl-in/spv-out 两个方向。
+# 探针（examples）专用；正式 3.3 施工若走 build.rs 再挪 build-dependencies。
+[dev-dependencies]
+naga = { version = "=30.0.1", features = ["wgsl-in", "spv-out"] }
