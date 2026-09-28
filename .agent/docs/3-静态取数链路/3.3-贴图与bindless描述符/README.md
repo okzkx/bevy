@@ -47,8 +47,11 @@
 
 3.3.1 施工记录（2026-09-28）：[3.3.1-贴图链路：bevy Image到VkImage的批次化上传、布局链与跨族所有权](3.3.1-贴图链路：bevy Image到VkImage的批次化上传、布局链与跨族所有权.md)——`vulkan/images.rs`（image_spec/GpuImage/ImageCache）+ 上传票据图像段；探针四组（映射/上传闭环/跨族所有权/负例执法）+ 宿主实跑一帧合批零 VUID；新钉号 VUID-01397（读回不收 SHADER_READ_ONLY）、所有权屏障按对生效、wgpu-types 直接依赖。
 
+机制篇（2026-09-28）：[纹理格式与Gamma：从png字节到采样值的色彩编码链](纹理格式与Gamma：从png字节到采样值的色彩编码链.md)——解码不改颜色值、用途决定格式（bevy_gltf 线性名单）、SRGB=同布局不同解释由 TMU 采样时解码；显存机制篇管"字节怎么排"，本篇管"字节怎么读"。
+
 ## 待决问题
 
 - ~~naga 原生 WGSL 扩展输出到 raw Vulkan 的完整合法性：前置小样例决定，不凭依赖存在推断。~~（2026-09-28 已决：接口能表达能编译，但 runtime 数组输出缺 `RuntimeDescriptorArray` capability 被 VUID-04680 拒——capability 补丁后合法；定长数组原生合法。新待决如下）
 - ~~**runtime+补丁 vs 定长数组路线**（3.3.1 开工前拍板）~~（2026-09-28 用户拍板：**runtime + capability 补丁器**——build.rs 内嵌补丁 + 补丁后重跑 spirv-val 兜底，定长保留为降级出口；build.rs 接线随首个正式 shader 落地）
 - 固定数组容量与 sampler 去重策略：由所选设备实际限额和资产需求决定，不预先假定 1024 必然可用。（实测素材：本机 maxPerStageDescriptorSampledImages = 1048576、maxPushConstantsSize = 256B）
+- 输出端色彩编码（3.4 定）：swapchain 现为 B8G8R8A8_UNORM 线性直出；官方 bevy_render 优先 SRGB surface / 非 SRGB 也套 sRGB view。画出受光几何后缺编码会显形（中间调偏暗），届时在 swapchain SRGB 格式与着色器端编码之间拍板。见[纹理格式与Gamma篇 §6](纹理格式与Gamma：从png字节到采样值的色彩编码链.md)。
