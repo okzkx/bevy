@@ -1,0 +1,37 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // Windows MSVC 工具链首选：用 VS 原生调试器（PDB 支持最顺）。
+      // 依赖扩展 ms-vscode.cpptools（C/C++）。
+      "name": "Debug ash_renderer (MSVC)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/ash_renderer.exe",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "RUST_BACKTRACE": "1"
+      },
+      "preLaunchTask": "cargo build ash_renderer (debug)",
+      "symbolOptions": {
+        "searchMicrosoftSymbolServer": false
+      }
+    },
+    {
+      // 备选：CodeLLDB（扩展 vadimcn.vscode-lldb）。用 cargo 自动构建并定位 exe，
+      // 不依赖 tasks.json；MSVC PDB 读取走 LLDB，个别场景符号略逊 cppvsdbg。
+      "name": "Debug ash_renderer (CodeLLDB)",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["build", "--package=ash_renderer", "--bin=ash_renderer"]
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_BACKTRACE": "1"
+      }
+    }
+  ]
+}
