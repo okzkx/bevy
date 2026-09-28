@@ -40,7 +40,9 @@
 - **VUID-StandaloneSpirv-OpTypeRuntimeArray-04680**：`OpVariable` 以 `OpTypeRuntimeArray` 实例化 UniformConstant 变量，须声明 `RuntimeDescriptorArray` capability。这就是 naga 30.0.1 输出缺口的规范锚点，spirv-val 与验证层（内嵌同款校验）双重执法。
 - **VUID-VkShaderModuleCreateInfo-pCode-08740**：模块声明 capability 而对应特性未启用。capability 与 Vulkan12Features 特性位的绑定关系由它执法——"支持 ≠ 启用"在 shader 侧的对应条款。
 
-## 4. 路线决策（待用户拍板，3.3.1 开工前定）
+## 4. 路线决策（2026-09-28 用户拍板：runtime + 补丁器）
+
+**定案：路线 A——runtime 数组 + capability 补丁器。**要点：build.rs 内嵌与组 B 同款的确定性补丁（插 RuntimeDescriptorArray/SampledImageArrayNonUniformIndexing 两枚 capability + SPV_EXT_descriptor_indexing 扩展，capability 必须插在 extension 区段之前），补丁后强制重跑 spirv-val 兜底；定长数组保留为补丁器失效时的降级出口。build.rs 接线随 3.3 首个正式 shader 落地（3.3.3 描述符对象/3.4 管线绘制消费 SPIR-V 时），探针内的补丁函数为已实证蓝本。
 
 runtime 与定长两条路线都已被本探针证明设备可跑、采样正确；差别只在工具链处理：
 
