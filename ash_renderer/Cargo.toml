@@ -16,6 +16,9 @@ ash = "0.38.0"
 raw-window-handle = "0.6"
 # 类型化错误：帧循环要对 ERROR_OUT_OF_DATE_KHR 做"重建重试"分支，String 无法 match
 thiserror = "2"
+# bevy_image 的 TextureFormat/TextureDimension/Extent3d 真身（bevy_image 私有 use
+# 不再出口；3.3.1 图像映射按格式名核对 sRGB/线性角色），版本对齐 lock
+wgpu-types = { version = "30.0.1", default-features = false }
 
 # WGSL → SPIR-V 编译（3.3 前置闸门）：精确锁版锁行为（选型记录 2026-09-24），
 # lock 内已有 30.0.1（wgpu 传递依赖），features 恰为 wgsl-in/spv-out 两个方向。
