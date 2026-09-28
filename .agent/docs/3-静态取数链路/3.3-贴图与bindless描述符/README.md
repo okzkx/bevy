@@ -4,7 +4,7 @@
 
 **目的**：用已经验证的 shader 接口连接 VkImage、采样器和常驻描述符表，证明资源发布与访问安全。
 
-**状态：⬜ 未开工（前置闸门四项已于 2026-09-28 关闭，证据见[前置闸门施工记录](前置闸门施工记录：naga小样例与set-binding表冻结.md)）。**不因 feature 名称或布局草案已写入文档就视为工具链已通过。
+**状态：🟨 施工中（前置闸门四项已于 2026-09-28 关闭，证据见[前置闸门施工记录](前置闸门施工记录：naga小样例与set-binding表冻结.md)；3.3.1 贴图链路已完成（2026-09-28），零描述符——3.3.2 特性与限额为下一段）。**不因 feature 名称或布局草案已写入文档就视为工具链已通过。
 
 ## 前置闸门
 
@@ -15,9 +15,9 @@
 
 ## 任务清单
 
-- [ ] **3.3.1 贴图链路**：`Assets<Image>` → VkImage/view/sampler，核对格式与使用角色，base color 走 sRGB 解码、数据贴图走线性；读取 sampler 设置，静态 mip0 模式限制可采样 LOD。
-  - 上传沿用 3.2 票据，但补图像子资源范围、布局转换、跨族 release/acquire 与 shader-read 依赖。
-  - `VERTEX_INPUT` 是 buffer 首个消费阶段的约定，不可作为所有图片屏障的固定模板；依赖按真实访问建立。
+- [x] **3.3.1 贴图链路**：`Assets<Image>` → VkImage/view/sampler，核对格式与使用角色，base color 走 sRGB 解码、数据贴图走线性；读取 sampler 设置，静态 mip0 模式限制可采样 LOD。（2026-09-28 完成：`vulkan/images.rs` + 探针 `image_probe` 四组全绿 + 宿主实跑一帧合批"mesh 6 + 贴图 15 张（14.7MB，sRGB 5/线性 10）"零 VUID、WM_CLOSE exit 0；格式角色以 `texture_descriptor.format` 的 Srgb 后缀为准，`ImageSampler::Default` 按官方 ImagePlugin 默认 linear() 解析）
+  - 上传沿用 3.2 票据，但补图像子资源范围、布局转换、跨族 release/acquire 与 shader-read 依赖。（release 随 transfer 提交（与迁出布局合成一条屏障），acquire 挂消费方——全链由组 C 实证并钉出配对语义：acquire 需以 release 的 oldLayout 为旧态重新声明同一转换）
+  - `VERTEX_INPUT` 是 buffer 首个消费阶段的约定，不可作为所有图片屏障的固定模板；依赖按真实访问建立。（图像段独立录制：UNDEFINED→TRANSFER_DST→（拷贝）→SHADER_READ_ONLY，读回经 TRANSFER_SRC——VUID-01397 首跑实抓）
 - [ ] **3.3.2 特性与限额**：查询并显式启用 runtime array、实际需要的 nonuniform、sampled-image update-after-bind、partially-bound 等；`descriptorIndexing` 不代替具体特性。
   - 初始容量以 1024 为候选，核对 UpdateAfterBind 的每阶段、set/layout、总池、sampler 限额后决定。
   - 固定容量默认不需要 VARIABLE_DESCRIPTOR_COUNT；若启用，则配套 feature 与分配结构，且只能放最高 binding，不得让 texture/sampler 两个数组同时使用该旗标。
@@ -44,6 +44,8 @@
 前置机制篇（2026-09-24）：[显存机制：Buffer与Image之别、swizzle不透明与访问路径特化](显存机制：Buffer与Image之别、swizzle不透明与访问路径特化.md)——§0 判定线给出 3.3 三条实现约束：上传/读回必须走拷贝命令、image 分配独立于 MeshPool、layout 转换不能套 buffer barrier 模板。
 
 前置闸门施工记录（2026-09-28）：[前置闸门施工记录：naga小样例与set-binding表冻结](前置闸门施工记录：naga小样例与set-binding表冻结.md)——四验收点全过；实证 naga 30.0.1 runtime 数组输出缺 capability（VUID-04680）、补丁器与定长双路线可跑；set/binding 表与 push 偏移冻结；**路线已定 runtime+补丁器（2026-09-28 用户拍板）**。
+
+3.3.1 施工记录（2026-09-28）：[3.3.1-贴图链路：bevy Image到VkImage的批次化上传、布局链与跨族所有权](3.3.1-贴图链路：bevy Image到VkImage的批次化上传、布局链与跨族所有权.md)——`vulkan/images.rs`（image_spec/GpuImage/ImageCache）+ 上传票据图像段；探针四组（映射/上传闭环/跨族所有权/负例执法）+ 宿主实跑一帧合批零 VUID；新钉号 VUID-01397（读回不收 SHADER_READ_ONLY）、所有权屏障按对生效、wgpu-types 直接依赖。
 
 ## 待决问题
 
