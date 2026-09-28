@@ -39,4 +39,4 @@ WGSL 本身不是必要条件：Vulkan 只消费 SPIR-V，源语言是纯选型�
 
 ## 边界
 
-本记录只冻结源语言选型。前置闸门中小样例验证**已于 2026-09-28 执行**（见[前置闸门施工记录](前置闸门施工记录：naga小样例与set-binding表冻结.md)）：WGSL 接口全链能表达能编译，但 naga 原生 runtime 数组输出缺 `RuntimeDescriptorArray` capability（VUID-04680），capability 补丁后过 spirv-val——**DXC 切换条件未命中**（naga 未卡住，补丁器即"可行替代写法"）；本记录的源语言冻结继续有效，runtime/定长路线决策另行落账。
+本记录只冻结源语言选型。前置闸门中小样例验证**已于 2026-09-28 执行**（见[前置闸门施工记录](前置闸门施工记录：naga小样例与set-binding表冻结.md)）：WGSL 接口全链能表达能编译，但 naga 原生 runtime 数组输出缺 `RuntimeDescriptorArray` capability（VUID-04680），capability 补丁后过 spirv-val——**DXC 切换条件未命中**（naga 未卡住，补丁器即"可行替代写法"）；本记录的源语言冻结继续有效。**路线已定 runtime+补丁器（2026-09-28 用户拍板，见施工记录 §4）**。
