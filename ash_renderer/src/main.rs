@@ -11,9 +11,8 @@
 //! 失败策略（两 Tier，非必要不 panic）见 host 模块文档与《错误处理体系：两Tier思想与优雅退出》篇。
 
 use ash_renderer::{
-    host::AshHostPlugin,
+    driver::{AshHostPlugin, AshUploadPlugin},
     scene::{AshCollectPlugin, AshMaterialHookPlugin, SceneEntryPlugin},
-    upload::AshUploadPlugin,
 };
 use bevy::{
     anti_alias::AntiAliasPlugin,

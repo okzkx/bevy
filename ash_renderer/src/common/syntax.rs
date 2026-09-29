@@ -20,7 +20,7 @@
 //! `_panic` = 家族的 panic 位（**工程原则"非必要不 panic"——现无现役调用点**，
 //! 仅供真正必要的断言场景：不可恢复的内部不变量且需要 backtrace 取证；经
 //! `UnwrapPanic` trait 同时吃 Option 与 Result）。
-//! 用法：`use ash_renderer::syntax::宏名;`——宏内部用 `$crate::` 全限定调 trait 方法，
+//! 用法：`use ash_renderer::common::syntax::宏名;`——宏内部用 `$crate::` 全限定调 trait 方法，
 //! 调用方无需导 trait。多数宏为 step3+ 预备，本模块关闭 `unused_macros`。
 
 #![allow(unused_macros)]
@@ -94,14 +94,14 @@ impl<T> UnwrapPanic<T> for Option<T> {
 #[macro_export]
 macro_rules! warn_unwrap_or_return {
     ($res_value:expr, $return_result:expr) => {{
-        let Ok(t) = $crate::syntax::LogDebug::warn($res_value) else {
+        let Ok(t) = $crate::common::syntax::LogDebug::warn($res_value) else {
             return $return_result;
         };
         t
     }};
 
     ($res_value:expr) => {{
-        let Ok(t) = $crate::syntax::LogDebug::warn($res_value) else {
+        let Ok(t) = $crate::common::syntax::LogDebug::warn($res_value) else {
             return Default::default();
         };
         t
@@ -112,7 +112,7 @@ macro_rules! warn_unwrap_or_return {
 #[macro_export]
 macro_rules! warn_unwrap_or {
     ($res_value:expr, $return_result:expr) => {{
-        let Ok(t) = $crate::syntax::LogDebug::warn($res_value) else {
+        let Ok(t) = $crate::common::syntax::LogDebug::warn($res_value) else {
             $return_result;
         };
         t
@@ -155,14 +155,14 @@ macro_rules! unwrap_or {
 #[macro_export]
 macro_rules! unwrap_or_panic {
     ($res_value:expr, $panic_message:expr) => {
-        match $crate::syntax::UnwrapPanic::into_result($res_value) {
+        match $crate::common::syntax::UnwrapPanic::into_result($res_value) {
             Ok(t) => t,
             Err(msg) => panic!("{}: {msg}", $panic_message),
         }
     };
 
     ($res_value:expr) => {
-        match $crate::syntax::UnwrapPanic::into_result($res_value) {
+        match $crate::common::syntax::UnwrapPanic::into_result($res_value) {
             Ok(t) => t,
             Err(msg) => panic!("{msg}"),
         }

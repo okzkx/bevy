@@ -34,7 +34,7 @@ use wgpu_types::{TextureDimension, TextureFormat};
 
 use super::resources::MemoryContract;
 use super::uploader::Ticket;
-use crate::error::VulkanError;
+use crate::common::error::VulkanError;
 
 /// bevy `Image` → 渲染器规格的映射拒绝。Tier①：不影响帧循环，warn 一次跳过该资产
 ///（与 [`super::mesh_convert::MeshConvertError`] 同责）。

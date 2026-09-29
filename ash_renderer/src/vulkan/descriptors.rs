@@ -32,7 +32,7 @@ use ash::{vk, Device, Instance};
 use bevy::image::ImageSamplerDescriptor;
 use bevy::log::info;
 
-use crate::error::VulkanError;
+use crate::common::error::VulkanError;
 
 use super::images::{sampler_key, GpuImage, ImageSpec};
 use super::resources::{BufferRole, GpuBuffer, MemoryContract};
@@ -51,7 +51,7 @@ pub const TABLE_CAPACITY: u32 = 1024;
 pub const FRAME_UBO_SIZE: u64 = 128;
 
 /// 帧数据打包模式（UBO `mode` 字段，与 `debug_draw.wgsl` 的 case 值逐字同源；
-/// 非零值的语义见 host 侧 [`crate::host`] 的材质三模式说明）。
+/// 非零值的语义见 host 侧 [`crate::driver::host`] 的材质三模式说明）。
 pub const FRAME_MODE_LAMBERT: u32 = 0;
 pub const FRAME_MODE_UNLIT: u32 = 1;
 pub const FRAME_MODE_NORMAL: u32 = 2;

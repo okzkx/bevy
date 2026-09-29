@@ -36,7 +36,7 @@ use std::slice;
 use ash::{vk, Device};
 use bevy::log::info;
 
-use crate::error::VulkanError;
+use crate::common::error::VulkanError;
 
 use super::resources::{BufferRole, GpuBuffer, MemoryContract};
 

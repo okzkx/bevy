@@ -26,7 +26,7 @@ use ash::{
 use bevy::log::{error, info};
 use raw_window_handle::RawWindowHandle;
 
-use crate::error::VulkanError;
+use crate::common::error::VulkanError;
 
 const VALIDATION_LAYER: &std::ffi::CStr = c"VK_LAYER_KHRONOS_validation";
 

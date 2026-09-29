@@ -44,7 +44,7 @@ use std::slice;
 use ash::{vk, Device, Instance};
 use bevy::log::info;
 
-use crate::error::VulkanError;
+use crate::common::error::VulkanError;
 
 /// buffer 用途角色:usage 与 memory 属性要求在此定案,创建入口逐一引用。
 ///

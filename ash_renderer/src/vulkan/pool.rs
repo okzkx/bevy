@@ -34,7 +34,7 @@ use bevy::asset::AssetId;
 use bevy::log::info;
 use bevy::mesh::Mesh;
 
-use crate::error::VulkanError;
+use crate::common::error::VulkanError;
 
 use super::resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
 use super::uploader::{CopyRegion, UploadBatch, Uploader};

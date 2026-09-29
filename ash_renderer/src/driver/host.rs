@@ -35,7 +35,7 @@ use bevy::{
 };
 
 use crate::{
-    error::VulkanError,
+    common::error::VulkanError,
     vulkan::{
         pack_frame_uniforms, AcquireOutcome, BindlessTables, Context, DrawCall, FrameDraw,
         FramePool, FrameUniformsData, GraphicsPipeline, ImageCache, MeshPool, PushData, Swapchain,
