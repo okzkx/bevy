@@ -350,9 +350,9 @@ fn group_b_upload_closure(
     let spec_unorm = image_spec(&bevy_image(TextureFormat::Rgba8Unorm, expect_unorm.clone()))
         .expect("线性映射");
     let gpu_srgb =
-        GpuImage::create(device, instance, pd, contract, &spec_srgb).expect("sRGB 建图");
+        GpuImage::create(device, instance, pd, contract, &spec_srgb, &[]).expect("sRGB 建图");
     let gpu_unorm =
-        GpuImage::create(device, instance, pd, contract, &spec_unorm).expect("线性建图");
+        GpuImage::create(device, instance, pd, contract, &spec_unorm, &[]).expect("线性建图");
 
     // 一批两图:staging 连续排布(64B + 64B),uploader 图像段完成迁移与拷贝
     let mut staging = expect_srgb.clone();
@@ -506,7 +506,7 @@ fn group_c_cross_family(
     let expect = srgb_bytes();
     let spec =
         image_spec(&bevy_image(TextureFormat::Rgba8UnormSrgb, expect.clone())).expect("C 映射");
-    let gpu = GpuImage::create(device, instance, pd, contract, &spec).expect("C 建图");
+    let gpu = GpuImage::create(device, instance, pd, contract, &spec, &[]).expect("C 建图");
 
     // 上传批带 release:所有权 transfer → graphics,与迁出布局合成一条屏障
     let ticket = uploader
@@ -686,7 +686,7 @@ fn group_d_negative(ctx: &ProbeCtx, transfer_family: u32, transfer_queue: vk::Qu
     staging.write(0, &bytes).expect("D staging 写");
     let spec = image_spec(&bevy_image(TextureFormat::Rgba8Unorm, bytes)).expect("D 映射");
     // 建图即用后即弃:负例图的 layout 恒 UNDEFINED,拷贝后不修复、不留用
-    let gpu = GpuImage::create(device, instance, pd, contract, &spec).expect("D 建图");
+    let gpu = GpuImage::create(device, instance, pd, contract, &spec, &[]).expect("D 建图");
     let (pool, cb) = alloc_commands(device, transfer_family);
     unsafe {
         device

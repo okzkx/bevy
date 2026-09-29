@@ -332,15 +332,27 @@ impl BindlessTables {
         // # Safety:set 与 info 均合法,Vulkan 写入契约由参数构造保证
         unsafe { device.update_descriptor_sets(&writes, &[]) };
         // ---- 6) fallback:白 1×1(UNORM 线性白 = 任意色彩域的安全缺省)走普通
-        // 上传链进 GPU,占 0 号双槽;真实贴图从 1 号起分槽 ----
+        // 上传链进 GPU,占 0 号双槽;真实贴图从 1 号起分槽。跨族设备 CONCURRENT
+        // 双族(3.4 定案,与生产贴图同款) ----
+        let fallback_sharing: Vec<u32> = if uploader.queue_family() != graphics_family {
+            vec![uploader.queue_family(), graphics_family]
+        } else {
+            Vec::new()
+        };
         let fallback_spec = ImageSpec {
             width: 1,
             height: 1,
             format: vk::Format::R8G8B8A8_UNORM,
             sampler: ImageSamplerDescriptor::linear(),
         };
-        let fallback =
-            GpuImage::create(device, instance, physical_device, contract, &fallback_spec)?;
+        let fallback = GpuImage::create(
+            device,
+            instance,
+            physical_device,
+            contract,
+            &fallback_spec,
+            &fallback_sharing,
+        )?;
         let fallback_ticket = match uploader.submit_batch(UploadBatch {
             staging: vec![255, 255, 255, 255],
             image_uploads: vec![StagingImageCopy {
@@ -349,16 +361,7 @@ impl BindlessTables {
                 width: 1,
                 height: 1,
             }],
-            // 异族设备上随批次末尾让渡给图形族(与 3.3.1 flush_uploads 同形状);
-            // 同族回退为空
-            image_releases: if uploader.queue_family() != graphics_family {
-                vec![super::uploader::ImageRelease {
-                    image: fallback.image(),
-                    to_family: graphics_family,
-                }]
-            } else {
-                Vec::new()
-            },
+            // 3.4 定案:图像 CONCURRENT 双族共享,不再随批次 release
             ..Default::default()
         }) {
             Ok(Some(ticket)) => ticket,

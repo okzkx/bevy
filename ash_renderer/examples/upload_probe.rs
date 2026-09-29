@@ -484,7 +484,7 @@ fn group_b_upload_closure(
     transfer_family: u32,
     transfer_queue: vk::Queue,
 ) {
-    let mut pool = MeshPool::new(device, contract);
+    let mut pool = MeshPool::new(device, contract, &[]);
     let mut uploader = Uploader::new(
         device,
         contract,
@@ -577,7 +577,7 @@ fn group_c_maintenance(
     transfer_queue: vk::Queue,
 ) {
     println!("\n== 组 C(维护扩容观察:容量不足 → 显式维护迁移)==");
-    let mut pool = MeshPool::new(device, contract);
+    let mut pool = MeshPool::new(device, contract, &[]);
     let mut uploader = Uploader::new(
         device,
         contract,
@@ -676,7 +676,7 @@ fn group_d_cross_family(
     transfer_queue: vk::Queue,
 ) {
     println!("\n== 组 D(跨族依赖观察:release → graphics 等票据 + acquire + 真实读)==");
-    let mut pool = MeshPool::new(device, contract);
+    let mut pool = MeshPool::new(device, contract, &[]);
     let mut uploader = Uploader::new(
         device,
         contract,

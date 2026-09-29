@@ -146,7 +146,7 @@ fn main() {
             format: vk::Format::R8G8B8A8_UNORM,
             sampler: ImageSamplerDescriptor::linear(),
         };
-        let img = GpuImage::create(&device, &instance, pd, &contract, &spec).expect("测试贴图");
+        let img = GpuImage::create(&device, &instance, pd, &contract, &spec, &[]).expect("测试贴图");
         textures.insert(name, (img, rgba));
     }
 
@@ -185,7 +185,7 @@ fn main() {
         format: vk::Format::R8G8B8A8_UNORM,
         sampler: ImageSamplerDescriptor::linear(),
     };
-    let white = GpuImage::create(&device, &instance, pd, &contract, &white_spec).expect("白色贴图");
+    let white = GpuImage::create(&device, &instance, pd, &contract, &white_spec, &[]).expect("白色贴图");
     match small_tables.publish(white.view(), white.sampler(), &lin) {
         Ok(_) => panic!("容量 4 的小表第 4 次发布竟然成功——容量纪律失效"),
         Err(e) => {
