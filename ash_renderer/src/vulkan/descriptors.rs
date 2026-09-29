@@ -44,8 +44,79 @@ use super::MAX_FRAMES_IN_FLIGHT;
 /// 布局事实上排除了各自异容的必要；异容需求出现时拆两个常量再改）。
 pub const TABLE_CAPACITY: u32 = 1024;
 
-/// 每帧 UBO 字节数（set1 b0，前置闸门冻结：FrameUniforms = 64B mat4 view_proj）。
-pub const FRAME_UBO_SIZE: u64 = 64;
+/// 每帧 UBO 字节数（set1 b0）。前置闸门冻结的 64B（mat4 view_proj）在 3.5.1 扩为
+/// 128B 灯光版——扩容已随 3.5 定案登记进冻结记录；binding 形状（b0
+/// UNIFORM_BUFFER）与 pipeline layout 不变，range 在写入时的
+/// `DescriptorBufferInfo`，扩容不动 ABI。
+pub const FRAME_UBO_SIZE: u64 = 128;
+
+/// 帧数据打包模式（UBO `mode` 字段，与 `debug_draw.wgsl` 的 case 值逐字同源；
+/// 非零值的语义见 host 侧 [`crate::host`] 的材质三模式说明）。
+pub const FRAME_MODE_LAMBERT: u32 = 0;
+pub const FRAME_MODE_UNLIT: u32 = 1;
+pub const FRAME_MODE_NORMAL: u32 = 2;
+
+/// 每帧 UBO 的宿主侧取数产物（`draw_frame` 组装，[`pack_frame_uniforms`] 排布）。
+pub struct FrameUniformsData {
+    /// view × projection（列主序展平约定同 push 的 model）。
+    pub view_proj: bevy::math::Mat4,
+    /// 表面到光方向（xyz 单位向量，w=0 占位）。**bevy GPU 同款语义**：
+    /// `prepare_lights` 写 `dir_to_light = transform.back()`（forward 取负，
+    /// "N·L 就绪"），Lambert 直接 `dot(n, dir_to_light)`，符号混淆在此斩断。
+    pub dir_to_light: [f32; 4],
+    /// 环境光（rgb = LinearRgba × brightness，bevy 同款；w 未用）。
+    pub ambient_color: [f32; 4],
+    /// 方向光（rgb = LinearRgba × illuminance，bevy 同款；w 未用）。
+    pub light_color: [f32; 4],
+    /// 材质模式（`FRAME_MODE_*`）。
+    pub mode: u32,
+}
+
+/// [`FrameUniformsData`] 的 WGSL 布局镜像（uniform address space）：本类型不参与
+/// 运行时（字节由 [`pack_frame_uniforms`] 按偏移手工排布），存在的意义与
+/// `pipeline.rs::PushLayout` 同款——`offset_of!` 静态断言把 WGSL/描述符 range/CPU
+/// 三方钉在一起。uniform 对齐 16：mode 后垫到 128。
+#[repr(C)]
+#[allow(dead_code)]
+struct FrameUniformsLayout {
+    view_proj: [f32; 16],
+    dir_to_light: [f32; 4],
+    ambient_color: [f32; 4],
+    light_color: [f32; 4],
+    mode: u32,
+    _pad: [u32; 3],
+}
+
+const _: () = {
+    assert!(std::mem::offset_of!(FrameUniformsLayout, view_proj) == 0);
+    assert!(std::mem::offset_of!(FrameUniformsLayout, dir_to_light) == 64);
+    assert!(std::mem::offset_of!(FrameUniformsLayout, ambient_color) == 80);
+    assert!(std::mem::offset_of!(FrameUniformsLayout, light_color) == 96);
+    assert!(std::mem::offset_of!(FrameUniformsLayout, mode) == 112);
+    assert!(std::mem::size_of::<FrameUniformsLayout>() == 128);
+    assert!(FRAME_UBO_SIZE == 128);
+};
+
+/// [`FrameUniformsData`] → 128B uniform 字节（偏移按 [`FrameUniformsLayout`] 的
+/// 静态断言表手工排布，与 `pipeline.rs::pack_push` 同一纪律）。
+#[must_use]
+pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usize] {
+    let mut out = [0u8; FRAME_UBO_SIZE as usize];
+    let mut put = |offset: usize, bytes: &[u8]| {
+        out[offset..offset + bytes.len()].copy_from_slice(bytes);
+    };
+    for (i, v) in d.view_proj.to_cols_array().iter().enumerate() {
+        put(i * 4, &v.to_le_bytes());
+    }
+    for (base, field) in [(64usize, &d.dir_to_light), (80, &d.ambient_color), (96, &d.light_color)] {
+        for (i, v) in field.iter().enumerate() {
+            put(base + i * 4, &v.to_le_bytes());
+        }
+    }
+    put(112, &d.mode.to_le_bytes());
+    // 116..128 对齐垫保持 0
+    out
+}
 
 /// 一张贴图的描述符槽位绑定（3.4 per-draw 参数 `tex_index/sampler_index` 的取值）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -302,11 +373,12 @@ impl BindlessTables {
         };
         let mut frame_sets = sets;
         let resident_set = frame_sets.remove(0);
-        // ---- 5) 每帧 UBO(帧槽一一对应)+ set1 描述符写入(初值 = identity view_proj)----
+        // ---- 5) 每帧 UBO(帧槽一一对应)+ set1 描述符写入(初值 = identity view_proj
+        // + 灯光归零 + Lambert 模式;3.5.1 起运行期每帧重写)----
         let mut frame_ubos = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let mut ubo = GpuBuffer::create(device, contract, FRAME_UBO_SIZE, BufferRole::FrameUniform)?;
-            ubo.write(0, &identity_mat4_bytes())?;
+            ubo.write(0, &pack_frame_uniforms(&identity_frame_uniforms()))?;
             frame_ubos.push(ubo);
         }
         let ubo_infos: Vec<vk::DescriptorBufferInfo> = frame_ubos
@@ -558,12 +630,15 @@ impl Drop for BindlessTables {
     }
 }
 
-/// identity 4×4 矩阵的 64B uniform 字节(列主序对角 1.0,与 WGSL FrameUniforms
-/// 的 mat4x4f 布局一致——M2 无相机数据,3.5 接入前采样坐标恒等)。
-fn identity_mat4_bytes() -> [u8; 64] {
-    let mut b = [0u8; 64];
-    for (offset, v) in [(0usize, 1.0f32), (20, 1.0), (40, 1.0), (60, 1.0)] {
-        b[offset..offset + 4].copy_from_slice(&v.to_le_bytes());
+/// identity 初值的帧数据（view_proj = identity、灯光归零、Lambert 模式）：
+/// 表建好到首帧写入之间若被采样（理论不发生，帧循环首帧即重写），画面同
+/// 3.4 之前的 identity 形状而非悬空值。
+fn identity_frame_uniforms() -> FrameUniformsData {
+    FrameUniformsData {
+        view_proj: bevy::math::Mat4::IDENTITY,
+        dir_to_light: [0.5, 1.0, 0.3, 0.0],
+        ambient_color: [0.0; 4],
+        light_color: [0.0; 4],
+        mode: FRAME_MODE_LAMBERT,
     }
-    b
 }
