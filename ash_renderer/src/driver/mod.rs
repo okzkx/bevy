@@ -3,13 +3,13 @@
 //!
 //! 命名澄清：这里的"驱动"指驱动帧循环与上传链的编排代码，**不是 GPU 驱动**。
 //!
-//! | 子模块 | 调度位置 | 职责 |
+//! | 子模块 | 职责 | 调度位置 |
 //! |---|---|---|
-//! | [`host`] | Startup / Last / OnAppExitSystems | 宿主桥：init / draw_frame / teardown 三系统 + 禁渲染补位 |
-//! | [`upload`] | Last（before draw_frame） | `flush_uploads`：快照去重 → 转换 → 容量保证 → 合批提交 |
+//! | [`host`] | 宿主桥:插件 + 禁渲染补位 + 系统进调度(系统本体在其子模块 `init`/`frame`) | 插件装配 |
+//! | [`upload`] | 上传编排（flush_uploads）：快照去重 → 转换 → 容量保证 → 合批提交 | Last（before draw_frame） |
 //!
 //! 层内依赖：upload 的排序引用 [`host::draw_frame`]（"先上传后画"），host 不引用
-//! upload——依赖单向；两模块都只消费 [`crate::vulkan`] 重出口的类型。
+//! upload——依赖单向；全部模块只消费 [`crate::vulkan`] 重出口的类型。
 
 pub mod host;
 pub mod upload;

@@ -350,7 +350,8 @@ impl FramePool {
     /// `render_finished` 按 acquire 的 image index 从 Swapchain 取（D3），不按帧槽轮转。
     ///
     /// # Errors
-    /// 命令缓冲重置/录制/提交任一失败（调用方按 Tier② 退出，见 host::draw_frame）。
+    /// 命令缓冲重置/录制/提交任一失败（调用方按 Tier② 退出，见
+    /// `crate::driver::host::draw_frame`）。
     pub fn record_frame(
         &self,
         ctx: &Context,

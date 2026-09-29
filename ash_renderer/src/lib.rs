@@ -27,8 +27,9 @@
 //! - [`scene`]:ECS 侧取数（step3 施工 3.1）——材质缝接线 / 场景进场 / 相机 / 灯光
 //!   按场景元素各自成组 + 采集（PostUpdate 帧末直读产 CollectedScene 快照），零 Vulkan 代码；
 //! - [`driver`]:渲染驱动(3.6.1 自 src 根收拢)——bevy 调度侧编排,横跨 scene 与 vulkan:
-//!   `host`(宿主桥:init/draw_frame/teardown 三系统 + 禁渲染补位)、`upload`(上传编排:
-//!   flush_uploads,Last 里 before draw_frame);
+//!   `host`(宿主桥插件:禁渲染补位 + 系统进调度)、`init`(Vulkan 初始化链与反序拆除)、
+//!   `frame`(帧循环 draw_frame)、`upload`(上传编排:flush_uploads,Last 里 before
+//!   draw_frame);
 //! - main.rs:纯组装(装配级配置 + 插件清单;冻结边界只许增删 add_plugins)。
 
 pub mod common;

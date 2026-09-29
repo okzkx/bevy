@@ -5,7 +5,7 @@
 //!
 //! 时序(施工计划 §2 终态表):PostUpdate 采集 → **Last:准备+上传提交** →
 //! 同帧图形提交(图形等票据是 3.4 接 draw 时的事)。本系统住 `Last`,由
-//! [`crate::driver::host`] 与 `draw_frame` 链成序(先上传后画),失败两 Tier:
+//! [`crate::driver::frame`] 的 `draw_frame` 链成序(先上传后画),失败两 Tier:
 //! 资产未到货/转换拒绝 = Tier①(跳过重试或 warn 一次),Vulkan/账本失败 =
 //! Tier②(error + `AppExit::error()` 优雅退出;提交失败不发布票据,池内
 //! bump 游标随下次容量保证自然前移,不留指向未上传数据的账本行)。
@@ -49,9 +49,9 @@ const TEXTURE_SLOTS: fn(&StandardMaterial) -> [&Option<Handle<Image>>; 5] = |m| 
     ]
 };
 
-/// 上传编排插件:资源插入在 [`crate::driver::host`] 的初始化链完成(需要 Device),
+/// 上传编排插件:资源插入在 [`crate::driver::init`] 的初始化链完成(需要 Device),
 /// 本插件只把 [`flush_uploads`] 系统挂进 `Last`(与 draw_frame 的链序由
-/// host 定义,保证"先上传后画")。
+/// host 插件与排序声明共同保证"先上传后画")。
 pub struct AshUploadPlugin;
 
 impl Plugin for AshUploadPlugin {
