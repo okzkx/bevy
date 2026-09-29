@@ -2,7 +2,7 @@
 
 > 2026-09-14 建档。本文是 `F:\okzkx\bevy\.agent\docs` 知识库的第一篇/入口篇，写给未来的自己与未来的 agent 会话。
 > 仓库现状：Bevy 上游浅克隆，tag **v0.19.1**（建档时）。**版本不钉死，跟随官方 release tag 升级**（2026-09-14 改策）：渲染插件按当前理解写，遇重大破坏性变更无法跟进时再钉死当时版本。选型论证在上游知识库（见文末"相关文档"），本文做三件事：**记录项目目标** + **讲清楚 Bevy 在本项目里怎么用** + **定文档分类归档规则**。
-> **2026-09-23 当前基线：Bevy 0.20.0-dev / ash 0.38 / Vulkan 1.3。**上行 v0.19.1 是建档历史，不作当前 API 依据。执行顺序与状态见[路线图](学习目标实现步骤.md)；既有同步问题见[已实现缺陷与修复验收](3-静态取数链路/材料/已实现缺陷与修复验收.md)。本轮只修文档，未修代码。
+> **2026-09-23 当前基线：Bevy 0.20.0-dev / ash 0.38 / Vulkan 1.3。**上行 v0.19.1 是建档历史，不作当前 API 依据。执行顺序与状态见[路线图](学习目标实现步骤.md)；既有同步问题见[已实现缺陷与修复验收](3-静态取数链路/3.2-buffer侧上传/已实现缺陷与修复验收.md)（2026-09-29 注：文档已随施工迁至 3.2 文件夹，旧"材料/"路径失效）。本轮只修文档，未修代码。
 > 文档按 §九 落位：施工记录带任务号，步骤主产出带步骤号，讲解篇不强加任务号；新文登记入口与所在目录索引。
 
 ## 一、项目目标（记录在案）
@@ -122,7 +122,7 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 
 ## 八、已知坑与注意
 
-- 禁渲染宿主已实测；当前尚未关闭的实现问题集中在[缺陷文档](3-静态取数链路/材料/已实现缺陷与修复验收.md)，旧“收官”不覆盖新增复核。
+- 禁渲染宿主已实测；实现缺陷的登记与关闭状态见[缺陷文档](3-静态取数链路/3.2-buffer侧上传/已实现缺陷与修复验收.md)（D1~D7 已全部关闭，2026-09-29）。
 - 资产未就绪时容忍空帧；不要将 CPU 有 Handle、GPU 上传完成、descriptor 可引用合成一个状态。
 - `Changed` 是脏标记来源，不是 O(变化数) 的事件队列；只读路径避免不必要的可变解引用，资产内容另看 AssetEvent。
 - 帧序为 Update 变更、PostUpdate 传播与采集、Last 提交；源码旧注释与执行冲突时以系统注册为准。
@@ -219,7 +219,7 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 - 实现规则：渲染器跨段施工的实现要求（**规则篇（宪法层）**（2026-09-29，承 3.4 施工记录定案提炼）——**正本住用户级 ZCode rules 目录 `~/.zcode/rules/bevy-renderer-implementation-rules.md`，不入项目仓库**，适用范围限本项目；内容：接口三方互证（offset_of! 编译期断言）与字节手工排布、法线 cofactor 与颜色空间恰一次、reverse-Z 三件套与 viewport 正高度直出定案、帧槽深度与同槽重用隔 fence、跨族一律 CONCURRENT 且屏障族号 IGNORED、可见性由票据信号量收口、探针形状须覆盖生产消费形态、验证层报错修结构不修验证、施工记录四问体例（要求/原理/过程含落点/反思）；规则是活的——改规则在正本修订并写明缘由，不在施工记录里绕过）
 - `笔记/Bevy GUI 实现研究：布局、渲染、交互三层链路.md`（**侦察篇**（2026-09-29，由 gradients 示例带出）：Bevy GUI=retained mode 实体树非即时模式，一套 UI 三层分家（0.20 拆 crate）——`bevy_ui`（Node 样式组件+taffy 0.14 布局+UiStack 排序，不依赖 bevy_render）/`bevy_ui_render`（独立 ui_pass 借主相机颜色附件、SDF 圆角边框走顶点参数、CPU Sutherland–Hodgman 裁剪、渐变参数走顶点属性）/`bevy_ui_widgets`（14 个无样式受控控件，全局 observer+Activate/ValueChange）；文字栈已换血 cosmic-text→parley 0.11+swash 位图图集（非 SDF）；交互=bevy_picking 统一管线一个后端（UiStack 逆序命中）→trigger 指针事件→观察者，旧 Interaction 已弃用；钉子=命中判定有一帧布局滞后（PreUpdate 读上一帧 ComputedNode）、裁剪在 CPU 圆角在 shader、文本 measure 回调是布局反推唯一通道；含调试 UI 问答（§8：Bevy 核心零 egui/imgui 依赖、dev_tools 全狗粮自绘、bevy_egui 接入三段式=Update build/输入桥/RenderApp 顶点化）与 Unity UI Toolkit 对照表；**本项目定案（2026-09-29 用户拍板）=调试 UI 走 egui 裸接 ash**（§11.2：禁 bevy_render 故 bevy_egui 挂不上，自己消费 epaint 顶点写 ash 管线，3.4 后验收题；BRP web console 另线互补；订正旧文"egui-wgpu"错误）
 - `笔记/Bevy World与场景生命周期：闯关全清、场景图与引用计数.md`（**知识篇**（2026-09-29，由"渲染器为什么住 World/静态变量之问"与"闯关全清怎么个做法"两轮问答沉淀）：World=引擎全量数据库非业务层（Time/Window/Assets/输入都住这，Resource 是引擎服务槽位）；静态变量输在别名控制/拆除序/失败语义/实例性四处，且 Resource 只是 marker trait 不绑 World（探针证明类型可在无 ECS 处完整使用）；渲染状态住 World 是"渲染器作为系统"的必然，完整解耦形态是 RenderApp SubApp，本项目 CollectedScene 快照已是 Extract 形态；**闯关全清五层配方**=States 状态机（帧边界切换）+`DespawnOnExit`/根实体 despawn（`bevy_state/src/state_scoped.rs:145`）+StateScoped 消息防漏关+强柄掉零+Local 复位；**场景结构是森林/图非单根树**——同根是编排约定、0.16 起 ChildOf 可多父且 despawn 连带按唯一父判定；**引用计数=强柄确定性掉零**（无 GC，Drop 即释放，glTF 资产家族传递退场，同路径 load 命中缓存去重），但只管 Assets 容器——GPU 驻留是第三层账，需 retire 按票据清（契约已立在 BindlessTables::retire_*，调用归步骤 4）；Unity 对照=DOTS 能删 World 是因渲染状态不在 World 里）
-- [3-静态取数链路/](3-静态取数链路/README.md)（M2：3.1～3.4 已收官（2026-09-29 管线与绘制落地，FlightHelmet 首画零 VUID），3.5 光照对照待开工；五段节奏不变）
+- [3-静态取数链路/](3-静态取数链路/README.md)（M2：**3.1～3.5 全段收官（2026-09-29）**——3.5 光照与同屏对照落地：每帧 UBO 128B 灯光/相机、材质三模式、官方 bevy_render 独立进程并排对照分项通过，全程零 VUID；步骤 4 解禁）
 - [已实现缺陷与修复验收](3-静态取数链路/材料/已实现缺陷与修复验收.md)（2026-09-23 代码复核：生产同步缺陷、timeline 探针有效性、证据等级与修复验收；仅文档，不宣称代码已修）
 
 上游知识库（`C:\Users\zengkaixiang\.agents\docs\游戏制作\游戏引擎\渲染\渲染管线\`，绝对路径引用）：
