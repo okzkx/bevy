@@ -127,6 +127,11 @@ pub struct GpuImage {
 impl GpuImage {
     /// 按契约创建:image(usage 按读回条款三用途)→ requirements → 选型(必需
     /// DEVICE_LOCAL)→ 恰量分配 → offset 0 绑定 → view → 采样器。
+    /// `sharing_families`:≥2 个不同族时按 CONCURRENT 创建(3.4 定案,与
+    /// `GpuBuffer::create_with_families` 同一取舍——EXCLUSIVE 的 release/acquire
+    /// 成对语义下,验证层对"已写入但未被 draw 访问的 UAB 数组元素"的布局账本
+    /// 不随 release 更新,Draw-09600 保守断言污染目标路径(3.4 三轮 bisect 实证,
+    /// 见施工记录);内存可见性由票据信号量收口,与池同款)。
     /// 任何失败回收已建对象(全有或全无)。
     ///
     /// # Errors
@@ -137,6 +142,7 @@ impl GpuImage {
         physical_device: vk::PhysicalDevice,
         contract: &MemoryContract,
         spec: &ImageSpec,
+        sharing_families: &[u32],
     ) -> Result<Self, VulkanError> {
         // 使用角色三用途:上传拷贝写(TRANSFER_DST)、读回校验拷贝读(TRANSFER_SRC,
         // 显存机制篇读回条款)、着色器采样(SAMPLED)。RGBA8 两档对这三用途都是
@@ -174,9 +180,14 @@ impl GpuImage {
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
                     .usage(usage)
-                    // EXCLUSIVE + 首用屏障落 transfer 族(Uploader 图像段);跨族让渡
-                    // 走 release/acquire,与 3.2 buffer 同一机制,不用 CONCURRENT
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    // 跨族设备:CONCURRENT 双族(transfer 写 + graphics 读,3.4 定案
+                    // 见上);同族设备 EXCLUSIVE 无所有权语义
+                    .sharing_mode(if sharing_families.len() >= 2 {
+                        vk::SharingMode::CONCURRENT
+                    } else {
+                        vk::SharingMode::EXCLUSIVE
+                    })
+                    .queue_family_indices(sharing_families)
                     .initial_layout(vk::ImageLayout::UNDEFINED),
                 None,
             )
