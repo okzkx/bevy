@@ -118,6 +118,8 @@ update-after-bind 还需要 **binding 的 `UPDATE_AFTER_BIND`、layout 的 `UPDA
 
 **目的**：第一次在正式帧循环画出完整调试模型。
 
+**状态：已完成（2026-09-29）。**正式 vertex/fragment WGSL（push 96B 三方互证）、dynamic rendering 管线（reverse-Z 成套：清 0 + GREATER）、帧槽深度附件随尺寸重建、`record_frame` + DrawList 同帧消费、六 primitive 不透明调试覆盖全部落地；朝向定案正高度 viewport 直出（E5 光栅级实验 + 官方对照实证）；跨族定案 CONCURRENT 双族共享（Draw-09600 三轮 bisect 排障实录见施工记录）。全程零 VUID/WARN，resize/最小化/退出回归通过。
+
 1. 正式 vertex/fragment WGSL、CPU/shader 布局、矩阵/法线与颜色空间约定。
 2. dynamic rendering 图形管线、vertex input、viewport/scissor、reverse-Z；先禁背面剔除，验证绕向与双面材质后再选择开启。
 3. 深度附件随尺寸重建；区分同一附件的生命周期与多个在飞提交的读写同步，不能只凭“归 Swapchain”判安全。

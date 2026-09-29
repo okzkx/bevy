@@ -61,4 +61,4 @@
 - ~~**runtime+补丁 vs 定长数组路线**（3.3.1 开工前拍板）~~（2026-09-28 用户拍板：**runtime + capability 补丁器**——build.rs 内嵌补丁 + 补丁后重跑 spirv-val 兜底，定长保留为降级出口；build.rs 接线随首个正式 shader 落地）
 - ~~固定数组容量与 sampler 去重策略：由所选设备实际限额和资产需求决定，不预先假定 1024 必然可用。（实测素材：本机 maxPerStageDescriptorSampledImages = 1048576、maxPushConstantsSize = 256B）~~（2026-09-28 已决：**容量 1024 定案**——UAB 轨五项限额实测全满足（见施工记录 §1）；**sampler 去重定案**——按 `SamplerKey` 功能参数键（滤波/mip/寻址/比较/边框色）分槽，色彩角色与被钉死的 lod/aniso 不进键，15 贴图 → 2 槽实测收敛）
 - RenderDoc 描述符可见性验证：验证条款 3（贴图/描述符工具可见、sRGB/线性与 sampler 差异最小例）因本机无 RenderDoc 未执行——环境就绪后补做，不以零日志冒充证据。
-- 输出端色彩编码（3.4 定）：swapchain 现为 B8G8R8A8_UNORM 线性直出；官方 bevy_render 优先 SRGB surface / 非 SRGB 也套 sRGB view。画出受光几何后缺编码会显形（中间调偏暗），届时在 swapchain SRGB 格式与着色器端编码之间拍板。见[纹理格式与Gamma篇 §6](纹理格式与Gamma：从png字节到采样值的色彩编码链.md)。
+- ~~输出端色彩编码（3.4 定）：swapchain 现为 B8G8R8A8_UNORM 线性直出；官方 bevy_render 优先 SRGB surface / 非 SRGB 也套 sRGB view。画出受光几何后缺编码会显形（中间调偏暗），届时在 swapchain SRGB 格式与着色器端编码之间拍板。见[纹理格式与Gamma篇 §6](纹理格式与Gamma：从png字节到采样值的色彩编码链.md)。~~（2026-09-29 3.4 已决：**UNORM 底板 + SRGB view 别名**——swapchain_mutable_format + 双格式清单 + MUTABLE_FORMAT 旗标三件套，blend 线性域；见[3.4 施工记录 §3.2](../3.4-管线与绘制/3.4.1-3.4.5-管线与绘制施工记录：正式着色器、图形管线与DrawList同帧消费.md)）
