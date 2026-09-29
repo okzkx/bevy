@@ -36,6 +36,7 @@
 
 ## 材料清单
 
+- 机制篇（2026-09-29）：[图形管线机制：打包清单、双集ABI与bindless下的角色](图形管线机制：打包清单、双集ABI与bindless下的角色.md)——pipeline 三问（进包什么/包外什么/多久编一次）、"每帧绑一次"与 Unity SRP Batcher 对照、UAB 在飞更新与管线无感、无长度 runtime array vs layout 容量账本、layout 公共 ABI 与 3.5 变体分岔；§0 判定线含诚实边界（M2 管线数=1）。
 - 施工记录（2026-09-29）：[3.4.1-3.4.5-管线与绘制施工记录：正式着色器、图形管线与DrawList同帧消费](3.4.1-3.4.5-管线与绘制施工记录：正式着色器、图形管线与DrawList同帧消费.md)——判定线收账、三方布局冻结、朝向证据链、帧槽深度定案、CONCURRENT 取舍与 **Draw-09600 三轮 bisect 排障实录**。
 - 配图（2026-09-29 入 [步骤 _assets](../_assets/)）：[helmet-debug-first-render](../_assets/helmet-debug-first-render.png)（首跑完整画面）、[helmet-nonuniform-scale-rotated](../_assets/helmet-nonuniform-scale-rotated.png)（非均匀缩放+旋转）、[helmet-resize-900x620](../_assets/helmet-resize-900x620.png)（resize 重建）、[viewport-negative-inverted](../_assets/viewport-negative-inverted.png)（负高度反例）、[e5-known-clip-probe](../_assets/e5-known-clip-probe.png)（E5 光栅级实验）。
 
