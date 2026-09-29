@@ -275,6 +275,11 @@ impl GraphicsPipeline {
                 .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
                 .map_err(|(_, e)| e)?
                 .remove(0);
+            // module 用毕即拆：管线创建完成即编译收口，规范允许此刻销毁 shader
+            // module（vkDestroyShaderModule 与管线无生命周期耦合）。3.4 首版漏了
+            // 这一步（句柄是纯整数，没人存没人拆），每次启动泄漏 1 个 VkShaderModule
+            //——3.5 回归由验证层 VUID-vkDestroyDevice-device-05137 抓获（D7）。
+            device.destroy_shader_module(module, None);
             info!(
                 "图形管线就绪: dynamic rendering（color {color_format:?} / depth {depth_format:?}），\
                  顶点输入 32B 交错（pos/normal/uv @ 0/12/24），reverse-Z（clear 0 + GREATER），\
