@@ -132,6 +132,8 @@ update-after-bind 还需要 **binding 的 `UPDATE_AFTER_BIND`、layout 的 `UPDA
 
 **目的**：分项过 §0 判定线，整理可复跑证据。
 
+**状态：✅ 已收官（2026-09-29）。**每帧 UBO 128B（view_proj + dir_to_light/ambient/light_color + mode，bevy prepare_lights 数值链同源）、材质三模式（lambert/unlit/normal）、独立官方对照进程（`examples/official_reference.rs`）并排分项验收（几何/base color/UV/光照方向）、窗口回归全程零 VUID；回归轮实抓并修复 3.4 遗留 D7（VkShaderModule 泄漏）。证据见[施工记录](3.5-光照与同屏对照/3.5.1-3.5.4-光照与同屏对照施工记录：相机灯光UBO、材质三模式与官方对照收官.md)。
+
 1. 相机、方向光、`GlobalAmbientLight` 及可选相机 `AmbientLight` 覆盖写入每帧 UBO，复用前等对应帧使用完成。
 2. 固定几何、不透明、base-color/unlit、方向光四类对照条件；相同相机和材质简化，记录官方 PBR/后处理未对齐项。
 3. 采用独立官方对照进程或并排截图，不为验收把 wgpu 初始化引入自研进程。
