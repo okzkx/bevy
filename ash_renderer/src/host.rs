@@ -28,6 +28,7 @@ use bevy::{
     ecs::system::NonSendMarker,
     ecs::system::SystemParam,
     image::{CompressedImageFormatSupport, CompressedImageFormats},
+    light::{AmbientLight, DirectionalLight, GlobalAmbientLight},
     math::Mat4,
     prelude::*,
     window::{PrimaryWindow, RawHandleWrapper, WindowResized},
@@ -36,8 +37,10 @@ use bevy::{
 use crate::{
     error::VulkanError,
     vulkan::{
-        AcquireOutcome, BindlessTables, Context, DrawCall, FrameDraw, FramePool, GraphicsPipeline,
-        ImageCache, MeshPool, PushData, Swapchain, Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
+        pack_frame_uniforms, AcquireOutcome, BindlessTables, Context, DrawCall, FrameDraw,
+        FramePool, FrameUniformsData, GraphicsPipeline, ImageCache, MeshPool, PushData, Swapchain,
+        Uploader, FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_UNLIT, MAX_FRAMES_IN_FLIGHT,
+        TABLE_CAPACITY,
     },
 };
 
@@ -240,7 +243,58 @@ pub(crate) struct FrameInput<'w, 's> {
     image_cache: Res<'w, ImageCache>,
     pipeline: Res<'w, GraphicsPipeline>,
     uploader: Res<'w, Uploader>,
-    cameras: Query<'w, 's, (&'static Projection, &'static GlobalTransform), With<Camera>>,
+    /// 相机 + 可选的每相机 `AmbientLight` 覆盖（3.5.1：挂了则压过全局资源）。
+    cameras: Query<
+        'w,
+        's,
+        (
+            &'static Projection,
+            &'static GlobalTransform,
+            Option<&'static AmbientLight>,
+        ),
+        With<Camera>,
+    >,
+    /// 方向光（3.5.1：取第一盏，方向 = 实体 `back()`，bevy GPU 同款）。
+    lights: Query<'w, 's, (&'static GlobalTransform, &'static DirectionalLight)>,
+    ambient: Option<Res<'w, GlobalAmbientLight>>,
+}
+
+/// ash 帧循环的材质模式（3.5 定案：三态进 UBO `mode`，env `ASH_RENDER_MODE` 选）。
+/// 与 `debug_draw.wgsl` 的 `MODE_*` 常量同值（`FRAME_MODE_*`）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RenderMode {
+    /// 数据驱动 Lambert（默认）：UBO 方向光 + 环境，bevy 物理链同构。
+    Lambert,
+    /// albedo 直出：base color/UV/颜色空间对照（官方侧同款置 unlit）。
+    Unlit,
+    /// 世界法线可视化：法线方向验收仪器（非均匀缩放案例的判定仪器）。
+    Normal,
+}
+
+impl RenderMode {
+    fn from_env() -> Self {
+        match std::env::var("ASH_RENDER_MODE").ok().as_deref() {
+            None | Some("") | Some("lambert") => Self::Lambert,
+            Some("unlit") => Self::Unlit,
+            Some("normal") => Self::Normal,
+            Some(other) => {
+                // Tier①：拼写错误是配置问题不是运行故障——warn 后按默认继续，
+                // 不为对照仪器的错拼中断帧循环
+                bevy::log::warn!(
+                    "ASH_RENDER_MODE={other:?} 无法识别（可选 lambert/unlit/normal），按 lambert 继续"
+                );
+                Self::Lambert
+            }
+        }
+    }
+
+    fn as_u32(self) -> u32 {
+        match self {
+            Self::Lambert => FRAME_MODE_LAMBERT,
+            Self::Unlit => FRAME_MODE_UNLIT,
+            Self::Normal => FRAME_MODE_NORMAL,
+        }
+    }
 }
 
 /// DrawList 消费状态（跨帧 `Local`）：缺资源/相机告警去重 + 材质覆盖一次性收账。
@@ -250,8 +304,16 @@ pub(crate) struct DrawListState {
     warned_pending: bool,
     /// 相机缺席告警只报一次。
     warned_no_camera: bool,
+    /// 环境光缺席告警只报一次。
+    warned_no_ambient: bool,
     /// 不透明调试覆盖策略报一次（首个完整 DrawList 时）。
     override_logged: bool,
+    /// 3.5 灯光数据收账报一次（首个取到灯光的帧；值随帧可变，只报"链路已通"）。
+    lights_logged: bool,
+    /// 多方向光/无方向光的状态告警去重。
+    warned_light_count: bool,
+    /// 材质模式（env 每进程解析一次，`ASH_RENDER_MODE`）。
+    mode: Option<RenderMode>,
 }
 
 /// ash 帧循环。一次 update = 一帧：
@@ -289,6 +351,8 @@ pub(crate) fn draw_frame(
         ref pipeline,
         ref uploader,
         ref cameras,
+        ref lights,
+        ref ambient,
     } = input;
     // —— 闸门①：读 resize 消息。一次 update 可能积压多条（拖拽 125Hz 输入 vs 60fps
     // 帧），逐条刷状态，最新一条定生死：非零尺寸 = 正常/恢复，(0,0) = 最小化。
@@ -417,31 +481,92 @@ pub(crate) fn draw_frame(
     {
         draw_state.override_logged = true;
         info!(
-            "材质调试覆盖（M2）：{} 个 primitive 全部按不透明绘制——blend 关闭（alpha<1 的 {} 行照常画出，glTF BLEND 镜片在此列）；unlit 标志忽略，统一调试 Lambert（固定方向光+环境，3.5 分项对照）；贴图只采 base color 槽，其余四槽不进调试着色",
+            "材质调试覆盖（M2）：{} 个 primitive 全部按不透明绘制——blend 关闭（alpha<1 的 {} 行照常画出，glTF BLEND 镜片在此列）；贴图只采 base color 槽，其余四槽不进调试着色；着色模式按 ASH_RENDER_MODE（3.5 三态，见灯光收账日志）",
             scene.primitives.len(),
             alpha_override,
         );
     }
 
-    // 4) 相机 → view_proj → 本帧槽 UBO（3.5 扩灯光；复用安全 = wait_for_slot 的
-    // fence：写发生在上一轮使用完成之后）。相机缺席是场景装配问题，报一次后
-    // identity 兜底（画面不可读但不崩帧循环）。矩阵乘序/列主序与 WGSL 端同一约定。
-    let view_proj = match cameras.single() {
-        Ok((projection, global)) => {
-            projection.get_clip_from_view() * global.affine().inverse()
+    // 4) 相机/灯光 → 本帧槽 UBO（3.5.1）。复用安全 = wait_for_slot 的 fence：写
+    // 发生在上一轮使用完成之后（帧槽轮转只是定位，安全证据是 fence）。
+    // 相机缺席是场景装配问题，报一次后 identity 兜底（画面不可读但不崩帧循环）。
+    // 矩阵乘序/列主序与 WGSL 端同一约定。材质模式每进程解析一次 env。
+    let render_mode = *draw_state.mode.get_or_insert_with(RenderMode::from_env);
+    let mut view_proj = Mat4::IDENTITY;
+    let mut per_camera_ambient: Option<&AmbientLight> = None;
+    match cameras.single() {
+        Ok((projection, global, ambient_override)) => {
+            view_proj = projection.get_clip_from_view() * global.affine().inverse();
+            per_camera_ambient = ambient_override;
         }
         Err(_) => {
             if !draw_state.warned_no_camera {
                 draw_state.warned_no_camera = true;
                 warn!("相机缺席：view_proj 用 identity 兜底（画面不可读属预期，查 3.1.3 相机组）");
             }
-            Mat4::IDENTITY
         }
+    }
+    // —— 方向光：M2 取第一盏（多灯告警一次；排序/多灯聚光是正式光照的事）。
+    // 数值约定与 bevy prepare_lights 同款：dir_to_light = 实体 back()（forward 取
+    // 负，"N·L 就绪"），light_color = linear × illuminance。
+    let light_count = lights.iter().count();
+    let (dir_to_light, light_color) = match lights.iter().next() {
+        Some((light_tf, light)) => {
+            let back = light_tf.back();
+            let [r, g, b, a] = LinearRgba::from(light.color).to_f32_array();
+            (
+                [back.x, back.y, back.z, 0.0],
+                [r * light.illuminance, g * light.illuminance, b * light.illuminance, a],
+            )
+        }
+        None => ([0.5, 1.0, 0.3, 0.0], [0.0; 4]), // 无灯：直射项归零，方向留合法占位
     };
-    if let Err(e) = tables
-        .frame_ubo(frames.current_index())
-        .write(0, &view_proj_bytes(&view_proj))
-    {
+    if light_count != 1 && !draw_state.warned_light_count && !scene.primitives.is_empty() {
+        draw_state.warned_light_count = true;
+        warn!("方向光 {light_count} 盏（M2 取第一盏/无灯直射项归零），多灯支持不在 M2");
+    }
+    // —— 环境光：相机组件 AmbientLight（若挂）压过全局 GlobalAmbientLight 资源；
+    // 数值 = linear × brightness（bevy prepare_lights 同款）。
+    let ambient_color = match per_camera_ambient {
+        Some(a) => LinearRgba::from(a.color).to_f32_array().map(|c| c * a.brightness),
+        None => match ambient.as_deref() {
+            Some(global) => {
+                LinearRgba::from(global.color).to_f32_array().map(|c| c * global.brightness)
+            }
+            None => {
+                if !draw_state.warned_no_ambient {
+                    draw_state.warned_no_ambient = true;
+                    warn!("环境光缺席：GlobalAmbientLight 资源与相机 AmbientLight 均无，环境项归零");
+                }
+                [0.0; 4]
+            }
+        },
+    };
+    if !draw_state.lights_logged && light_count > 0 {
+        draw_state.lights_logged = true;
+        info!(
+            "3.5 灯光 UBO 收账：方向光 {light_count} 盏（dir_to_light = back()，light = {}）；\
+             环境 = {}（来源 {}）；材质模式 = {}（ASH_RENDER_MODE）",
+            fmt_vec4(light_color),
+            fmt_vec4(ambient_color),
+            if per_camera_ambient.is_some() { "相机 AmbientLight" } else { "GlobalAmbientLight" },
+            match render_mode {
+                RenderMode::Lambert => "lambert",
+                RenderMode::Unlit => "unlit",
+                RenderMode::Normal => "normal",
+            },
+        );
+    }
+    if let Err(e) = tables.frame_ubo(frames.current_index()).write(
+        0,
+        &pack_frame_uniforms(&FrameUniformsData {
+            view_proj,
+            dir_to_light,
+            ambient_color,
+            light_color,
+            mode: render_mode.as_u32(),
+        }),
+    ) {
         error!("帧 UBO 写失败，渲染链无法继续，优雅退出: {e}");
         exit.write(AppExit::error());
         return;
@@ -501,15 +626,9 @@ fn clear_color(t: f64) -> [f32; 4] {
     [0.02 + 0.03 * s, 0.06 + 0.13 * s, 0.14 + 0.22 * s, 1.0]
 }
 
-/// view_proj → 64B uniform 字节（set1 b0，FrameUniforms.view_proj）。列主序展平
-///（`to_cols_array`），与 WGSL `mat4x4f` 的列主序存储一致；排布手工按偏移写，
-/// 与 push 字节的 pack_push 同一纪律（不依赖 repr 对齐的巧合）。
-fn view_proj_bytes(m: &Mat4) -> [u8; 64] {
-    let mut out = [0u8; 64];
-    for (i, v) in m.to_cols_array().iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
-    }
-    out
+/// [f32; 4] 的收账日志格式（灯光 UBO 的 rgb 分量可读性）。
+fn fmt_vec4(v: [f32; 4]) -> String {
+    format!("({:.1}, {:.1}, {:.1}, {:.1})", v[0], v[1], v[2], v[3])
 }
 
 /// 退出拆除：先排空队列，再按创建的相反顺序移除资源触发 Drop——FramePool（帧级）→
