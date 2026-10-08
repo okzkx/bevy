@@ -47,3 +47,6 @@ compressed_texture_cache
 assets/textures/GroundSand005/**
 .zcode
 ash_renderer/.smoke375
+
+# 临时文件统一目录（规则见 .agents/rules/临时文件与工具脚本存放.md）
+.temp/
