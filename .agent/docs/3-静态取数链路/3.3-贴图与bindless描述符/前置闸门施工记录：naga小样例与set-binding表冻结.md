@@ -59,8 +59,10 @@ runtime 与定长两条路线都已被本探针证明设备可跑、采样正确
 |---|---|---|---|---|
 | 0 | 0 | `binding_array<texture_2d<f32>>` ↔ SAMPLED_IMAGE 数组 | **待决**（1024 候选，按 3.3.2 限额与资产需求定；试验用 4 槽写 2） | UPDATE_AFTER_BIND + PARTIALLY_BOUND；layout 旗标 UPDATE_AFTER_BIND_POOL；pool 旗标 UPDATE_AFTER_BIND |
 | 0 | 1 | `binding_array<sampler>` ↔ SAMPLER 数组 | **待决**（去重后容量） | 同上 |
-| 1 | 0 | `var<uniform> FrameUniforms{ view_proj: mat4x4f }` | 64B/帧 × 在飞组数 | 普通 UNIFORM_BUFFER |
+| 1 | 0 | `var<uniform> FrameUniforms{ view_proj, dir_to_light, ambient_color, light_color, mode }` | **128B**/帧 × 在飞组数 | 普通 UNIFORM_BUFFER |
 | push | — | `var<immediate> PushParams{ model: mat4x4f, tex_index: u32, sampler_index: u32, base_color: vec4f }` | 96B（offset 0/64/68/80，SPIR-V 与 Rust 双侧钉死） | COMPUTE 阶段；96B ≤ 128B 规范最低线 ≤ 本机 256B |
+
+- **2026-09-29 修订（3.5.1）**：set1 b0 由 64B（mat4 view_proj）扩为 **128B**——`view_proj @0 + dir_to_light @64 + ambient_color @80 + light_color @96 + mode(u32) @112`，Rust 镜像 `descriptors.rs::FrameUniformsLayout`（`offset_of!` ×5）与 WGSL/描述符 range 三方互证。binding 形状（UNIFORM_BUFFER ×1）与 pipeline layout 不变，range 在写入时的 `DescriptorBufferInfo`——扩容不动 ABI；2/3.4 首画用的 64B 形状保留为历史证据（当时探针与表逐字段一致），不回改。
 
 - 偏移证据：SPIR-V `OpMemberDecorate Offset` 实测 [0, 64, 68, 80]；Rust 镜像用 16B 对齐的 `Mat4`/`Vec4` 钉住——裸 `[f32; 4]` 对齐 4 会把 base_color 落到 72，与 shader 侧不一致，"repr(C) 或低于 128B 不能独立证明对齐"（施工计划 §2）由此有了具体反例。
 - 小样例的 set2（storage 索引/输出，(2,0)(2,1)）是试验 I/O 专用载体，**不进冻结表**；3.4 的 per-draw 采样索引进 push constant（表中已含）。

@@ -1,18 +1,27 @@
 // 3.4 正式绘制着色器（vertex + fragment 双入口）：FlightHelmet 调试几何的首条管线。
+// 3.5.1/3.5.2 扩：FrameUniforms 64B→128B 灯光版，fragment 从 push 固定光换 UBO
+// 数据驱动光照，并按 mode 三分支（材质策略 3.5 定案）。
 //
 // 接口 = 3.3 前置闸门冻结的 set/binding 表（与 descriptor_probe.wgsl 逐字段同源）：
 // - set0 b0/b1：纹理数组 + sampler 数组，runtime array（build.rs 补丁器补 capability）。
-// - set1 b0：每帧 UBO（FrameUniforms = 64B mat4 view_proj；3.5 扩灯光字段）。
+// - set1 b0：每帧 UBO（FrameUniforms = 128B，偏移 0/64/80/96/112——与 Rust 镜像
+//   `vulkan/descriptors.rs::FrameUniformsLayout`（offset_of! 静态互证）和描述符
+//   range（FRAME_UBO_SIZE）三方一致）。
 // - push constant：每 draw 参数，96B，偏移 0/64/68/80——与 Rust 镜像
 //   `vulkan/pipeline.rs::PushLayout`（offset_of! 静态互证）和 pipeline layout 的
 //   push constant range 三方一致。
 //
-// 着色内容 = M2 不透明调试策略（3.4 面板口径）：
+// fragment 着色 = 材质三模式（UBO mode，与 Rust `FRAME_MODE_*` 同值）：
+// - 0 Lambert（默认）：albedo × (direct + ambient) × exposure。物理链与 bevy GPU
+//   侧同构：UBO 里的 light_color = linear × illuminance、ambient = linear ×
+//   brightness（prepare_lights 同款），此处只补 Lambert 的 1/π 与曝光常量——
+//   曝光 = exp2(-EV100)/1.2，EV100=9.7 为 bevy Exposure::BLENDER 默认。Burley
+//   漫反射/镜面/IBL/tonemap 不属于 M2 判定（3.5 收官记录列明差异）。
+// - 1 Unlit：albedo 直出（base color/UV/颜色空间对照；bevy 侧同款置 unlit）。
+// - 2 Normal：世界法线可视化（rgb = n×0.5+0.5，法线方向验收仪器）。
 // - vertex 做坐标变换（view_proj × model）；法线用 cofactor 矩阵——它与逆转置
 //   只差行列式倒数这一个标量，normalize 后消失，免 WGSL 无 inverse() 内建的限制，
 //   非均匀缩放正确（见 normal_cofactor 注释）。
-// - fragment 按 push 索引采样 base color 贴图 × 材质基色（线性域），调试方向光
-//   Lambert + 环境（光照对照归 3.5，此处只为让法线/深度可判读）。
 // - sRGB 解码在采样端（贴图格式是 SRGB），编码在输出端（swapchain 的 SRGB view，
 //   ROP 写出自动做）——着色器全程线性，编码恰好一次（纹理格式与Gamma篇 §0）。
 //
@@ -23,6 +32,12 @@ enable wgpu_binding_array;
 
 struct FrameUniforms {
     view_proj: mat4x4f,
+    // 表面到光方向（bevy GPU 同款：dir_to_light = light transform.back()）。
+    // w 未用。模式 0 专用；归一化在 shader 端防御性再做一次。
+    dir_to_light: vec4f,
+    ambient_color: vec4f,
+    light_color: vec4f,
+    mode: u32,
 }
 
 struct PushParams {
@@ -31,6 +46,17 @@ struct PushParams {
     sampler_index: u32,
     base_color: vec4f,
 }
+
+// 与 Rust 侧 FRAME_MODE_* 同值（descriptors.rs）
+const MODE_LAMBERT: u32 = 0u;
+const MODE_UNLIT: u32 = 1u;
+const MODE_NORMAL: u32 = 2u;
+
+// Lambert 漫反射的 1/π（能量归一；bevy Fd_Burley 的 Lambert 部分同款）
+const INV_PI: f32 = 0.3183099;
+// bevy 默认曝光（Exposure::BLENDER）：EV100=9.7，exposure = exp2(-9.7)/1.2 = 0.0010019。
+// 20000 lx + 80 cd/m² 的物理量收敛到可见亮度，与官方视亮度同源。
+const EXPOSURE: f32 = 0.0010019;
 
 @group(0) @binding(0) var textures: binding_array<texture_2d<f32>>;
 @group(0) @binding(1) var samplers: binding_array<sampler>;
@@ -78,9 +104,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     let albedo =
         textureSampleLevel(textures[push.tex_index], samplers[push.sampler_index], in.uv, 0.0)
             * push.base_color;
-    // 调试光照：固定世界空间方向光 + 环境（3.5 换成 UBO 数据并分项对照）
     let n = normalize(in.world_normal);
-    let l = normalize(vec3f(0.5, 1.0, 0.3));
+    // 材质三模式（3.5 定案）：unlit / normal / Lambert（默认，数据驱动）。
+    if frame.mode == MODE_UNLIT {
+        return vec4f(albedo.rgb, albedo.a);
+    }
+    if frame.mode == MODE_NORMAL {
+        return vec4f(n * 0.5 + vec3f(0.5), 1.0);
+    }
+    // Lambert（mode == MODE_LAMBERT 及一切未知值的兜底）：UBO 方向光 + 环境。
+    // dir_to_light 防御性归一化：零向量 normalize 会出 NaN 且 NaN×0≠0，先择回退向。
+    let l_raw = frame.dir_to_light.xyz;
+    let l = select(vec3f(0.0, 1.0, 0.0), normalize(l_raw), dot(l_raw, l_raw) > 1e-8);
     let lambert = max(dot(n, l), 0.0);
-    return vec4f(albedo.rgb * (0.25 + 0.75 * lambert), albedo.a);
+    let direct = frame.light_color.rgb * lambert * INV_PI;
+    let ambient = frame.ambient_color.rgb;
+    return vec4f(albedo.rgb * (direct + ambient) * EXPOSURE, albedo.a);
 }
