@@ -9,6 +9,8 @@
 
 use bevy::{camera::Projection, prelude::*, window::PrimaryWindow};
 
+use ash_macros::system;
+
 /// 宽高比补位插件：Update 里幂等对比-修正，接线收在本插件内，main 只
 /// `add_plugins`。
 pub struct AshCameraAspectPlugin;
@@ -22,6 +24,7 @@ impl Plugin for AshCameraAspectPlugin {
 /// 宽高比补位（Update，幂等对比-修正）：camera_system 缺席后没人随窗口 resize
 /// 更新 `PerspectiveProjection.aspect_ratio`（初值 1.0），不补位则画面横向
 /// 拉伸。宽度/高度为 0（最小化）跳过，等恢复。
+#[system]
 pub(super) fn sync_projection_aspect(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut cameras: Query<&mut Projection, With<Camera>>,

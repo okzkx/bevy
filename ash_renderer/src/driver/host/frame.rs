@@ -25,6 +25,8 @@ use bevy::{
 
 use ash::vk;
 
+use ash_macros::system;
+
 use crate::{
     common::error::VulkanError,
     overlay::{paint_overlay, OverlayLogState, RenderMode, UiDrawData},
@@ -114,6 +116,7 @@ pub(crate) struct DrawListState {
     clippy::too_many_arguments,
     reason = "bevy 系统的参数表即依赖注入清单，逐项声明是框架惯例，非函数签名设计味道"
 )]
+#[system]
 pub(crate) fn draw_frame(
     mut input: FrameInput,
     mut swapchain: ResMut<Swapchain>,

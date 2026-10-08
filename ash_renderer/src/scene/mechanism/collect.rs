@@ -20,6 +20,8 @@ use bevy::{
     transform::TransformSystems,
 };
 
+use ash_macros::system;
+
 /// 采集插件：每帧重建 [`CollectedScene`]。接线收在本插件内，main 只
 /// `add_plugins`，不引用内部系统。
 pub struct AshCollectPlugin;
@@ -54,6 +56,7 @@ pub struct CollectedPrimitive {
 /// 采集系统（每帧）：重建 [`CollectedScene`]。`pub(crate)` 是给业务侧核验
 /// （[`crate::scene::content::collect_report::report_scene_collected`]）当排序锚点用，
 /// 语义 = "快照已重建完毕"。
+#[system]
 pub(crate) fn collect_scene(
     mut scene: ResMut<CollectedScene>,
     primitives: Query<(

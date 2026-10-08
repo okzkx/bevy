@@ -12,6 +12,8 @@ use bevy::{
     world_serialization::WorldAssetRoot,
 };
 
+use ash_macros::system;
+
 /// FlightHelmet 在 assets/ 下的相对路径（1 gltf + 1 bin + 15 png；
 /// 6 材质 = Hose/RubberWood/GlassPlastic/MetalParts/LeatherParts/Lenses）。
 const FLIGHT_HELMET: &str = "models/FlightHelmet/FlightHelmet.gltf";
@@ -19,6 +21,7 @@ const FLIGHT_HELMET: &str = "models/FlightHelmet/FlightHelmet.gltf";
 /// 场景进场请求（Startup）：`load` 立即返回占位 Handle、数据异步到货；
 /// [`WorldAssetRoot`] 的组件 Add hook（bevy_world_serialization/src/lib.rs:96）
 /// 在依赖就绪后把整棵实体树展开进主 World——这里只发"进场请求"，不等数据。
+#[system]
 pub(super) fn load_flight_helmet(mut commands: Commands, server: Res<AssetServer>) {
     let scene = server.load(GltfAssetLabel::Scene(0).from_asset(FLIGHT_HELMET));
     commands.spawn(WorldAssetRoot(scene));
@@ -34,6 +37,7 @@ pub(super) struct ArrivalState {
     waited_secs: f32,
 }
 
+#[system]
 pub(super) fn report_scene_arrival(
     mut state: Local<ArrivalState>,
     time: Res<Time>,

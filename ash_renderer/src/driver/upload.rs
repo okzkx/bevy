@@ -32,6 +32,8 @@ use bevy::{
     prelude::*,
 };
 
+use ash_macros::system;
+
 use crate::{
     scene::CollectedScene,
     vulkan::{
@@ -94,6 +96,7 @@ pub(crate) struct UploadData<'w> {
 
 /// flush_uploads 本体:快照 → 去重(mesh 直读 + 贴图经材质五槽)→ 转换/建图 →
 /// 容量保证(可能触发维护)→ 合批提交 → 驻留登记。空批次(无新资产)不提交。
+#[system]
 pub(crate) fn flush_uploads(
     data: UploadData,
     mut pool: ResMut<MeshPool>,

@@ -6,6 +6,8 @@ use std::collections::HashSet;
 
 use bevy::{ecs::system::SystemParam, mesh::Indices, pbr::StandardMaterial, prelude::*};
 
+use ash_macros::system;
+
 use crate::scene::{util::fmt_vec3, CollectedScene};
 
 /// 核验要读的成组数据：快照 + 层级查询 + 两个资产容器。SystemParam 打包让系统
@@ -42,6 +44,7 @@ pub(super) struct CollectState {
 /// 两 Tier：资产未到货（[`Assets::get`] 为 `None`）是异步加载的正常态，空帧容忍、
 /// 下一帧再查，不是失败；primitive 已在场但 10s 仍凑不齐或契约不过才 warn 一次——
 /// 根因在资产加载或材质缝接线，本系统不修，帧循环照常。
+#[system]
 pub(super) fn report_scene_collected(
     mut state: Local<CollectState>,
     time: Res<Time>,

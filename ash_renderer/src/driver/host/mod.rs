@@ -24,6 +24,7 @@ use bevy::{
     prelude::*,
 };
 
+use ash_macros::system;
 use crate::vulkan::Context;
 
 mod frame;
@@ -77,6 +78,7 @@ impl Plugin for AshHostPlugin {
     }
 }
 
+#[system]
 fn announce() {
     info!("宿主壳启动：渲染族 8 插件已禁用，无 RenderApp / 无 wgpu 初始化");
 }
