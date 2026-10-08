@@ -1,7 +1,7 @@
-//! 相机组（施工 3.1.3，业务半边）：裸 Camera 三件套的 spawn 与就位核验，
-//! 取景参数写死官方示例，零 Vulkan 代码。
+//! 相机组（业务半边）：裸 Camera 三件套的 spawn 与就位核验，取景参数与官方
+//! 对照进程同源，零 Vulkan 代码。
 //!
-//! 宽高比补位是通用机制，已拆往 [`crate::scene::mechanism::camera_aspect`]；
+//! 宽高比补位是通用机制，住 [`crate::scene::mechanism::camera_aspect`]；
 //! "为什么裸 `Camera` 不用 `Camera3d`"的机制见
 //! `.agents/docs/3-静态取数链路/3.1-ECS侧取数/3.1.3-相机与灯光：引擎层自建与宽高比第四补位.md`。
 
@@ -13,17 +13,17 @@ use bevy::{
 
 use crate::scene::util::fmt_vec3;
 
-/// 相机取景参数（抄官方 FlightHelmet 示例 examples/3d/anti_aliasing.rs `setup`）：
-/// 3.5 同屏对照时 bevy wgpu 侧用同一组参数，几何与光照方向判定才同源可比。
+/// 相机取景参数：与官方对照进程（examples/official_reference.rs）用同一组
+/// 参数——并排对照时几何与光照方向判定才同源可比。
 const CAMERA_POS: Vec3 = Vec3::new(0.7, 0.7, 1.0);
 const CAMERA_TARGET: Vec3 = Vec3::new(0.0, 0.3, 0.0);
 
-/// 相机进场（Startup）：裸 [`Camera`] + [`Projection`] + [`Transform`]，官方示例取景。
+/// 相机进场（Startup）：裸 [`Camera`] + [`Projection`] + [`Transform`]。
 ///
 /// 相机用裸 [`Camera`] 而非 `Camera3d`：后者携带渲染图、管纹理用法等渲染族死重，
 /// 我们只消费 Camera+Projection+Transform 三样数据。"无渲染图的 Camera 运行时
 /// 会报错"（bevy_camera/src/camera.rs:368-371）——报错者是渲染侧系统，禁渲染后
-/// 无人报，正合"数据先行、渲染后置"节奏。
+/// 无人报。
 pub(super) fn spawn_camera(
     mut commands: Commands,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -31,7 +31,7 @@ pub(super) fn spawn_camera(
     // 宽高比初值：官方由 camera_system（bevy_render/src/camera.rs:354，渲染族已禁）
     // 随窗口建/改维护，禁后归我们——Startup 先按主窗口写一次，后续 resize 由
     // 机制侧宽高比补位（crate::scene::mechanism::camera_aspect）接管。宽高比错了，
-    // 3.4 建 VP 矩阵时横向视野就错。
+    // 建 VP 矩阵时横向视野就错。
     let mut projection = Projection::default();
     let mut aspect_note = "默认 1.0，交 Update 修正";
     if let Ok(window) = windows.single()
@@ -58,7 +58,7 @@ pub(super) fn spawn_camera(
 /// 相机就位核验（Update，报一次即歇）：相机 1 台且 GlobalTransform 前向
 /// 精确指向 [`CAMERA_TARGET`]——相机是根实体、无父链，Transform require 的
 /// GlobalTransform 种子值即终值，looking_at 语义逐字成立。带父链的传播验证
-/// 与逐帧采集已随 3.1.4 兑现（`super::collect`）。
+/// 与逐帧采集归机制侧采集（crate::scene::mechanism::collect）。
 #[derive(Default)]
 pub(super) struct CameraSetupState {
     done: bool,

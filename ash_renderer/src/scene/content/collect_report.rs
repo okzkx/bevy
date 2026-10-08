@@ -1,7 +1,6 @@
-//! 采集核验（业务半边，3.6.2 自 mechanism/collect.rs 拆出）：一次性核验系统，
-//! 报一次即歇，读 [`crate::scene::mechanism::CollectedScene`] 快照与资产容器做
-//! 3.1.4 施工判定线——期望值（"期望 6"等）写死 FlightHelmet，属业务侧脚手架，
-//! 采集机制本体不背这些数。
+//! 采集核验（业务侧）：一次性核验系统，报一次即歇，读
+//! [`crate::scene::mechanism::CollectedScene`] 快照与资产容器做采集判定线——
+//! 期望值（"期望 6"等）随当前场景写死，采集机制本体不背这些数。
 
 use std::collections::HashSet;
 
@@ -42,7 +41,7 @@ pub(super) struct CollectState {
 ///
 /// 两 Tier：资产未到货（[`Assets::get`] 为 `None`）是异步加载的正常态，空帧容忍、
 /// 下一帧再查，不是失败；primitive 已在场但 10s 仍凑不齐或契约不过才 warn 一次——
-/// 根因在资产侧或缝接线（3.1.1/3.1.2），本系统不修，帧循环照常。
+/// 根因在资产加载或材质缝接线，本系统不修，帧循环照常。
 pub(super) fn report_scene_collected(
     mut state: Local<CollectState>,
     time: Res<Time>,
@@ -52,10 +51,10 @@ pub(super) fn report_scene_collected(
         return;
     }
     if data.scene.primitives.is_empty() {
-        // 场景未展开：等。到货问题由 3.1.2 report_scene_arrival 告警，这里不重复。
+        // 场景未展开：等。到货问题由进场到货报告（super::world_asset）告警，这里不重复。
         state.waited_secs += time.delta_secs();
         if state.waited_secs > 10.0 {
-            warn!("场景采集 10s 未见 primitive 实体——进场链路问题，看 3.1.2 到货报告与加载错误日志");
+            warn!("场景采集 10s 未见 primitive 实体——进场链路问题，看到货报告与加载错误日志");
             state.done = true;
         }
         return;
@@ -73,7 +72,7 @@ pub(super) fn report_scene_collected(
     for row in &data.scene.primitives {
         // 传播契约：子 GlobalTransform == 父 GlobalTransform × 本地 Transform（无父链
         // 则 == 本地）。FlightHelmet 六节点全恒等——种子值与传播值重合，本核验守的
-        // 是"读在传播之后 + 数据合法"；非恒等父链的逐帧正确性由 3.4 画面判定。
+        // 是"读在传播之后 + 数据合法"；非恒等父链的逐帧正确性由画面判定。
         let Ok((local, global, child_of)) = data.hierarchy.get(row.entity) else {
             resolved = false;
             continue;
@@ -159,7 +158,7 @@ pub(super) fn report_scene_collected(
         state.waited_secs += time.delta_secs();
         if state.waited_secs > 10.0 {
             warn!(
-                "场景采集 10s 未凑齐：primitive {total}，三样俱全 {joined}/{total}，传播契约（位移 {max_dt:.4}/前向夹角 {max_dev:.4}°）——根因在资产加载或缝接线（3.1.1/3.1.2），本系统不修"
+                "场景采集 10s 未凑齐：primitive {total}，三样俱全 {joined}/{total}，传播契约（位移 {max_dt:.4}/前向夹角 {max_dev:.4}°）——根因在资产加载或材质缝接线，本系统不修"
             );
             state.done = true;
         }
