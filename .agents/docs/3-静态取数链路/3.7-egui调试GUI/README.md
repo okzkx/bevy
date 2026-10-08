@@ -4,7 +4,9 @@
 
 **状态：✅ 已收官（2026-10-08），收官后一笔点击偏移订正（3.7.5）。**四任务全过（3.7.1 状态与输入桥 → 3.7.2 图集与顶点资源 → 3.7.3 overlay 管线与同实例接画 → 3.7.4 回归收官：判定线五条全过 + deepseek-flash 视觉验证）；~~本段修复一个真 bug = push 双域失配~~（**已被 3.7.5 再订正**：tessellate 顶点是 points 域，3.7.3 的"物理域定案"才是引入点击偏移的错刀，详见[3.7.4](3.7.4-回归收官：判定线全量、ppp双域订正与输入排查链.md) §7）。
 
-讲解篇[《egui裸接ash讲解：输入桥、pass与GPU后端（兼frenderer Dear ImGui对照）》](egui裸接ash讲解：输入桥、pass与GPU后端（兼frenderer-Dear-ImGui对照）.md)（2026-10-08）：三件活分工、输入桥按类近似排序、pass 与交互闭环、Context 记忆与图集缓存两问深入；frenderer Dear ImGui 全链对照含 **GUI 顶点通道新侦察发现**（每帧新建 buffer + `RenderBuffer::drop` 全设备等死——此前对照只覆盖上传链）。
+讲解篇[《egui裸接ash讲解：输入桥、pass与GPU后端（兼frenderer-Dear-ImGui对照）》](egui裸接ash讲解：输入桥、pass与GPU后端（兼frenderer-Dear-ImGui对照）.md)（2026-10-08）：三件活分工、输入桥按类近似排序、pass 与交互闭环、Context 记忆与图集缓存两问深入；frenderer Dear ImGui 全链对照含 **GUI 顶点通道新侦察发现**（每帧新建 buffer + `RenderBuffer::drop` 全设备等死——此前对照只覆盖上传链）。
+
+订正讲解篇[《UI点击偏移订正讲解：tessellate顶点域、push尺寸域与DPI测量假阳性》](UI点击偏移订正讲解：tessellate顶点域、push尺寸域与DPI测量假阳性.md)（2026-10-08，随 3.7.5）：点击偏移 bug 的完整因果链——tessellate 顶点=points 域的源码判据、三种 push 域对照表（两种错法方向相反）、DPI 不感知测量两把尺子互相抵消的假阳性机制、探针色块/点击三域对账方法论。
 
 **目的**：把研究篇 §11.2 定案的"窗口内调试 UI"立起来——帧统计与渲染参数在窗口里可见可调，为步骤 4 的实例槽/上传票据/驻留账本提供实时观察面；同时是"3.4 后管线验收题"的兑现（管线、顶点缓冲、描述符、blend、纹理图集全用上）。
 
