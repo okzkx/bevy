@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use bevy::{
+    ecs::system::SystemParam,
     input::{
         keyboard::{KeyCode, KeyboardInput},
         mouse::{MouseButtonInput, MouseWheel},
@@ -25,7 +26,9 @@ use bevy::{
     window::{CursorLeft, CursorMoved, PrimaryWindow, Window, WindowFocused},
 };
 
-use crate::vulkan::{FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_UNLIT};
+use crate::vulkan::{
+    BindlessTables, Uploader, FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
+};
 
 use super::input::{egui_raw_input, EguiInput};
 use super::paint::{AtlasGpu, AtlasMirror};
@@ -142,16 +145,26 @@ fn load_fonts() -> egui::FontDefinitions {
     fonts
 }
 
+/// vulkan 侧统计三项的只读束（调试窗口取数）。打成 SystemParam 是因为函数系统的
+/// 参数上限 16 个（FrameInput/UiDrawData 同款式样）。
+#[derive(SystemParam)]
+struct RendererStats<'w> {
+    tables: Res<'w, BindlessTables>,
+    uploader: Res<'w, Uploader>,
+    gpu: Res<'w, AtlasGpu>,
+}
+
 /// Update：组 RawInput → begin_pass → 调试窗口 → end_pass → 存 [`EguiFrame`]。
 #[expect(
     clippy::too_many_arguments,
-    reason = "bevy 系统的参数表即依赖注入清单：六个事件读取器 + 窗口/时间/按键 + egui 状态帧与图集镜像资源，逐项声明是框架惯例"
+    reason = "bevy 系统的参数表即依赖注入清单：六个事件读取器 + 窗口/时间/按键 + egui 状态帧与图集镜像资源 + vulkan 侧统计束，逐项声明是框架惯例"
 )]
 fn run_egui_pass(
     state: ResMut<EguiState>,
     mut frame: ResMut<EguiFrame>,
     mut input: ResMut<EguiInput>,
     mut mirror: ResMut<AtlasMirror>,
+    stats: RendererStats,
     window: Query<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -176,7 +189,20 @@ fn run_egui_pass(
         );
     state.ctx.set_pixels_per_point(ppp);
     state.ctx.begin_pass(raw);
-    debug_window(&state.ctx, &time, window, ppp, &mut mode);
+    debug_window(
+        &state.ctx,
+        &time,
+        window,
+        ppp,
+        &mut mode,
+        &UiStats {
+            texture_slots: (stats.tables.used_texture_slots(), stats.tables.capacity()),
+            sampler_slots: stats.tables.used_sampler_slots(),
+            atlas_generation: stats.gpu.generation(),
+            graveyard: stats.gpu.graveyard_len(),
+            ticket: stats.uploader.last_issued_ticket(),
+        },
+    );
     let mut output = state.ctx.end_pass();
     // 纹理增量（字体图集 dirty-rect）在 pass 出口就地消费：折进图集 CPU 镜像
     //（Update 侧——最小化帧 Update 照跑而 draw_frame 让路，折入不丢数据），折完
@@ -204,13 +230,28 @@ fn run_egui_pass(
     }
 }
 
-/// 调试窗口本体。渲染器内部统计（驻留/槽位/票据）接在 3.7.3（资源就绪后）。
+/// 调试窗口的渲染器内部统计（vulkan 侧资源的只读取数快照，绘制常量）。
+struct UiStats {
+    /// (已占纹理槽, 表容量)。
+    texture_slots: (u32, u32),
+    /// 已占采样器槽（功能参数去重后的收敛数）。
+    sampler_slots: u32,
+    /// 图集已整传代数。
+    atlas_generation: u64,
+    /// 图集 graveyard 累计张数。
+    graveyard: usize,
+    /// 最近发出的上传票据号。
+    ticket: u64,
+}
+
+/// 调试窗口本体：fps/窗口信息 + 着色模式单选 + 渲染器内部统计。
 fn debug_window(
     ctx: &egui::Context,
     time: &Time,
     window: &Window,
     ppp: f32,
     mode: &mut RenderMode,
+    stats: &UiStats,
 ) {
     egui::Window::new("ash 调试")
         .default_pos(egui::pos2(12.0, 12.0))
@@ -231,5 +272,15 @@ fn debug_window(
                 ui.selectable_value(mode, RenderMode::Unlit, "unlit");
                 ui.selectable_value(mode, RenderMode::Normal, "normal");
             });
+            ui.separator();
+            ui.monospace(format!(
+                "常驻表 纹理 {}/{} · 采样器 {}",
+                stats.texture_slots.0, stats.texture_slots.1, stats.sampler_slots,
+            ));
+            ui.monospace(format!(
+                "图集 第 {} 代 · graveyard {} 张",
+                stats.atlas_generation, stats.graveyard,
+            ));
+            ui.monospace(format!("票据 #{}", stats.ticket));
         });
 }

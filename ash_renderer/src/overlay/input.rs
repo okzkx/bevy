@@ -7,7 +7,9 @@
 //! 快照，修饰键状态变化时补发一条 `ModifiersChanged`。
 //!
 //! 事件次序只能按类近似（bevy 的各类事件独立缓冲，跨类无全局序）：键盘 →
-//! 按键 → 滚轮 → 指针移动/离开。调试 UI 场景够用；完美序要 fork bevy_winit。
+//! 指针移动/离开 → 按键 → 滚轮。指针先于按键，是让同帧"移动+点击"的按下
+//! 事件带上本帧新位置（`MouseButtonInput` 不带坐标，从移动事件补）。
+//! 调试 UI 场景够用；完美序要 fork bevy_winit。
 //!
 //! bevy 0.20 事实：`ReceivedCharacter` 已删，文本随 `KeyboardInput.text` 携带
 //!（crates/bevy_input/src/keyboard.rs:134）。文本事件按 egui-winit 同款过滤：
@@ -75,6 +77,18 @@ pub(crate) fn egui_raw_input(
             });
         }
     }
+    // 指针移动/离开先于按键处理：bevy 各类事件独立缓冲，同帧可能同时进"移动+按下"，
+    // 先更新 pointer_pos 再读按钮，按下事件才带得上本帧的新位置（否则用上一帧的
+    // 旧位置、首帧更是 None 整条丢弃）——与 egui-winit 按事件到达序处理同构。
+    for ev in cursor.read() {
+        let pos = egui::pos2(ev.position.x, ev.position.y);
+        input.pointer_pos = Some(pos);
+        events.push(egui::Event::PointerMoved(pos));
+    }
+    for _ in cursor_left.read() {
+        input.pointer_pos = None;
+        events.push(egui::Event::PointerGone);
+    }
     for ev in mouse_button.read() {
         if let Some(pos) = input.pointer_pos {
             events.push(egui::Event::PointerButton {
@@ -100,15 +114,6 @@ pub(crate) fn egui_raw_input(
             phase: egui::TouchPhase::Move,
             modifiers,
         });
-    }
-    for ev in cursor.read() {
-        let pos = egui::pos2(ev.position.x, ev.position.y);
-        input.pointer_pos = Some(pos);
-        events.push(egui::Event::PointerMoved(pos));
-    }
-    for _ in cursor_left.read() {
-        input.pointer_pos = None;
-        events.push(egui::Event::PointerGone);
     }
     for ev in window_focused.read() {
         events.push(egui::Event::WindowFocused(ev.focused));

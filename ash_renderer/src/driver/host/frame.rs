@@ -23,14 +23,16 @@ use bevy::{
     window::WindowResized,
 };
 
+use ash::vk;
+
 use crate::{
     common::error::VulkanError,
     overlay::{paint_overlay, OverlayLogState, RenderMode, UiDrawData},
     scene::CollectedScene,
     vulkan::{
         pack_frame_uniforms, AcquireOutcome, BindlessTables, Context, DrawCall, FrameDraw,
-        FramePool, FrameUniformsData, GraphicsPipeline, ImageCache, MeshPool, PushData, Swapchain,
-        Uploader,
+        FramePool, FrameUniformsData, GraphicsPipeline, ImageCache, MeshPool, OverlayPipeline,
+        PushData, Swapchain, Uploader,
     },
 };
 
@@ -64,6 +66,8 @@ pub(crate) struct FrameInput<'w, 's> {
     pool: Res<'w, MeshPool>,
     image_cache: Res<'w, ImageCache>,
     pipeline: Res<'w, GraphicsPipeline>,
+    /// overlay 管线：UI 半边绑定用（init 链与场景管线同批创建）。
+    overlay_pipeline: Res<'w, OverlayPipeline>,
     /// 上传器：普通帧只读票号，overlay 在场时图集整传要走它提交批次（独占写点）。
     uploader: ResMut<'w, Uploader>,
     /// 相机 + 可选的每相机 `AmbientLight` 覆盖（挂了则压过全局资源）。
@@ -130,6 +134,7 @@ pub(crate) fn draw_frame(
         ref pool,
         ref image_cache,
         ref pipeline,
+        ref overlay_pipeline,
         ref cameras,
         ref lights,
         ref ambient,
@@ -365,32 +370,34 @@ pub(crate) fn draw_frame(
         return;
     }
 
-    // 4.5) overlay 绘制半边（3.7.2）：图集整传（可能多出一张 transfer 票据——本帧
+    // 4.5) overlay 绘制半边（3.7）：图集整传（可能多出一张 transfer 票据——本帧
     // 图形提交的 wait_ticket 在此后快照，flush_uploads 批与图集批都被等待）→
-    // 镶嵌 → 顶点环写入。资源束缺席 = overlay 未装，整段跳过。3.7.3 起 UiPaint
-    // 进 FrameDraw 接画；本任务只产不画（收账日志在 paint_overlay 内）。
-    #[allow(unused_variables)]
-    let ui_paint = match overlay {
-        Some(mut ui) => match paint_overlay(
-            ctx,
-            &ui.egui,
-            &mut ui.frame,
-            &ui.mirror,
-            &mut ui.gpu,
-            &mut ui.ring,
-            &mut tables,
-            &mut *uploader,
-            frames.current_index(),
-            swapchain.extent,
-            &mut paint_log,
-        ) {
-            Ok(paint) => paint,
-            Err(e) => {
-                error!("overlay 绘制半边失败，渲染链无法继续，优雅退出: {e}");
-                exit.write(AppExit::error());
-                return;
+    // 镶嵌 → 顶点环写入 → UiPaint + 本帧槽 buffer 句柄（record_frame 的 UI 段
+    // 接画）。资源束缺席 = overlay 未装，整段跳过（收账日志在 paint_overlay 内）。
+    let ui = match overlay {
+        Some(mut ui_data) => {
+            let ui_buffers = ui_data.ring.buffers(frames.current_index());
+            match paint_overlay(
+                ctx,
+                &ui_data.egui,
+                &mut ui_data.frame,
+                &ui_data.mirror,
+                &mut ui_data.gpu,
+                &mut ui_data.ring,
+                &mut tables,
+                &mut *uploader,
+                frames.current_index(),
+                swapchain.extent,
+                &mut paint_log,
+            ) {
+                Ok(paint) => paint.map(|p| (p, ui_buffers)),
+                Err(e) => {
+                    error!("overlay 绘制半边失败，渲染链无法继续，优雅退出: {e}");
+                    exit.write(AppExit::error());
+                    return;
+                }
             }
-        },
+        }
         None => None,
     };
 
@@ -409,6 +416,14 @@ pub(crate) fn draw_frame(
         index_buffer: pool.index_buffer(),
         depth_view: frames.current().depth.view,
         draws: &draws,
+        overlay_pipeline: overlay_pipeline.pipeline(),
+        overlay_layout: overlay_pipeline.layout(),
+        ui: ui.as_ref().map(|(paint, _)| paint),
+        // ui 为 None 时这两个句柄不被读（record_frame 的 UI 段整段跳过）
+        ui_buffers: ui
+            .as_ref()
+            .map(|(_, buffers)| *buffers)
+            .unwrap_or((vk::Buffer::null(), vk::Buffer::null())),
         wait_ticket: uploader.last_issued_ticket(),
         ticket_semaphore: uploader.ticket_semaphore(),
         clear: clear_color(time.elapsed_secs_f64()),

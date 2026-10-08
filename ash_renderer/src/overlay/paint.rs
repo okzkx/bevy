@@ -23,7 +23,8 @@ use crate::{
     common::error::VulkanError,
     vulkan::{
         sampler_key, BindlessTables, BufferRole, Context, GpuBuffer, GpuImage, ImageSpec,
-        SlotBinding, StagingImageCopy, UploadBatch, Uploader, MAX_FRAMES_IN_FLIGHT,
+        SlotBinding, StagingImageCopy, UiDrawCall, UiPaint, UploadBatch, Uploader,
+        MAX_FRAMES_IN_FLIGHT, UI_VERTEX_STRIDE,
     },
 };
 
@@ -47,7 +48,7 @@ pub(crate) struct UiVertex {
     color: [u8; 4],
 }
 
-const _: () = assert!(std::mem::size_of::<UiVertex>() == 20);
+const _: () = assert!(std::mem::size_of::<UiVertex>() == UI_VERTEX_STRIDE as usize);
 
 /// 字体图集的 CPU 镜像（Update 侧由 [`super::ui`] 折入，绘制半边按代数差整传）。
 #[derive(Resource, Default)]
@@ -150,6 +151,18 @@ struct AtlasSlot {
     slots: SlotBinding,
 }
 
+impl AtlasGpu {
+    /// 已整传的镜像代数（调试窗口统计行）。
+    pub(crate) fn generation(&self) -> u64 {
+        self.uploaded_generation
+    }
+
+    /// graveyard 累计张数（调试窗口统计行）。
+    pub(crate) fn graveyard_len(&self) -> usize {
+        self.graveyard.len()
+    }
+}
+
 /// UI 顶点环：每帧槽一对固定容量顶点/索引 buffer（`MAX_FRAMES_IN_FLIGHT` 组），
 /// 宿主按帧直写。写入安全契约 = 调用方（draw_frame）先过 `wait_for_slot`。
 #[derive(Resource)]
@@ -189,10 +202,6 @@ impl UiVertexRing {
     }
 
     /// 本帧槽顶点/索引 buffer 句柄（录制段绑定用）。
-    #[expect(
-        dead_code,
-        reason = "3.7.2 只产不画：3.7.3 record_frame 绑定 UI 环时起消费，届时移除本条"
-    )]
     pub(crate) fn buffers(&self, slot: usize) -> (vk::Buffer, vk::Buffer) {
         let s = &self.slots[slot];
         (s.vertex.buffer(), s.index.buffer())
@@ -240,36 +249,6 @@ pub(crate) struct UiDrawData<'w> {
     pub(crate) mirror: Res<'w, AtlasMirror>,
     pub(crate) gpu: ResMut<'w, AtlasGpu>,
     pub(crate) ring: ResMut<'w, UiVertexRing>,
-}
-
-/// 一次 UI 绘制的全部产物：图集槽位 + 屏幕 points + 逐 clip draw 列表
-/// （录制段 3.7.3 消费；顶点/索引已在本帧槽 buffer 里，draw 用池内引脚定位）。
-#[expect(
-    dead_code,
-    reason = "3.7.2 只产不画：3.7.3 record_frame UI 段起消费，届时移除本条"
-)]
-pub(crate) struct UiPaint {
-    /// 图集纹理槽（push 的 tex_index）。
-    pub atlas_texture: u32,
-    /// 图集采样器槽（push 的 sampler_index；键与 fallback 同键去重）。
-    pub atlas_sampler: u32,
-    /// 屏幕 points 尺寸（push 的 screen_size，顶点 pos 同域）。
-    pub screen_points: [f32; 2],
-    /// 逐 clip draw（mesh 边界即 clip 边界，scissor 各自持有）。
-    pub draws: Vec<UiDrawCall>,
-}
-
-/// 一个 clip 的 draw 参数：环内引脚 + scissor（物理像素）。
-#[expect(
-    dead_code,
-    reason = "3.7.2 只产不画：3.7.3 record_frame UI 段起消费，届时移除本条"
-)]
-pub(crate) struct UiDrawCall {
-    pub index_count: u32,
-    pub first_index: u32,
-    pub vertex_base: u32,
-    /// (x, y, w, h) 物理像素，左上原点。
-    pub scissor: [u32; 4],
 }
 
 /// paint_overlay 的一次性收账/告警去重（draw_frame 的 Local）。
@@ -460,7 +439,7 @@ pub(crate) fn paint_overlay(
         log.painted_logged = true;
         info!(
             "paint_overlay 收账：draws {}（顶点 {} / 索引 {}），图集槽 {}/{}，\
-             screen {:.0}×{:.0}pt（record_frame 接画归 3.7.3）",
+             screen {:.0}×{:.0}pt",
             draws.len(),
             vertices.len(),
             indices.len(),
@@ -473,7 +452,9 @@ pub(crate) fn paint_overlay(
     Ok(Some(UiPaint {
         atlas_texture: atlas.slots.texture,
         atlas_sampler: atlas.slots.sampler,
-        screen_points: [frame.screen_points.x, frame.screen_points.y],
+        // push 的 screen_size 与顶点 pos 同域 = 物理像素（tessellate 按 ppp 换算
+        // 后的顶点域）；给逻辑 points 会让 NDC 再乘一次 scale，UI 整体 ×ppp 放大
+        screen_px: [screen_px.width as f32, screen_px.height as f32],
         draws,
     }))
 }

@@ -32,7 +32,8 @@
 //!   egui-wgpu):`input`(bevy 事件→egui RawInput 输入桥)、`ui`(Update 的 egui
 //!   pass 与调试窗口,产 EguiFrame)、`paint`(draw_frame 内的绘制半边:图集 CPU
 //!   镜像/整传新槽/顶点环,paint_overlay→UiPaint)、RenderMode 单选资源;
-//!   overlay 管线住 `vulkan`(3.7.3 落位);
+//!   overlay 管线与 UI 录制契约住 `vulkan::overlay_pipeline`(`OverlayPipeline`
+//!   共享 set0、`UiPaint`/`UiDrawCall` 供 `frames` 接画);
 //! - [`driver`]:渲染驱动(3.6.1 自 src 根收拢)——bevy 调度侧编排,横跨 scene 与 vulkan:
 //!   `host`(宿主桥插件:禁渲染补位 + 系统进调度)、`init`(Vulkan 初始化链与反序拆除)、
 //!   `frame`(帧循环 draw_frame)、`upload`(上传编排:flush_uploads,Last 里 before
