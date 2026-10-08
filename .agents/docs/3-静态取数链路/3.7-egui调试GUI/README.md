@@ -4,6 +4,8 @@
 
 **状态：✅ 已收官（2026-10-08）。**四任务全过（3.7.1 状态与输入桥 → 3.7.2 图集与顶点资源 → 3.7.3 overlay 管线与同实例接画 → 3.7.4 回归收官：判定线五条全过 + deepseek-flash 视觉验证）；本段修复一个真 bug = push 双域失配（screen_size 给逻辑点致 UI ×ppp²，`UiPaint::screen_px` 定案，详见[3.7.4](3.7.4-回归收官：判定线全量、ppp双域订正与输入排查链.md) §1）。
 
+讲解篇[《egui裸接ash讲解：输入桥、pass与GPU后端（兼frenderer Dear ImGui对照）》](egui裸接ash讲解：输入桥、pass与GPU后端（兼frenderer-Dear-ImGui对照）.md)（2026-10-08）：三件活分工、输入桥按类近似排序、pass 与交互闭环、Context 记忆与图集缓存两问深入；frenderer Dear ImGui 全链对照含 **GUI 顶点通道新侦察发现**（每帧新建 buffer + `RenderBuffer::drop` 全设备等死——此前对照只覆盖上传链）。
+
 **目的**：把研究篇 §11.2 定案的"窗口内调试 UI"立起来——帧统计与渲染参数在窗口里可见可调，为步骤 4 的实例槽/上传票据/驻留账本提供实时观察面；同时是"3.4 后管线验收题"的兑现（管线、顶点缓冲、描述符、blend、纹理图集全用上）。
 
 **路线**：egui 裸接 ash——禁渲染宿主上 `bevy_egui` 挂不上，自己消费 epaint `ClippedPrimitive` 写 ash 管线；字体图集复用既有 Uploader/GpuImage/bindless 链；输入桥走 bevy 输入事件；绘制接在场景之后（同一 dynamic rendering 实例内 LOAD 形态接画）。
