@@ -74,6 +74,31 @@ pub struct Release {
     pub to_family: u32,
 }
 
+/// 一段 staging → image 的拷贝:src 恒为本批 staging,dst 是 2D mip0 单层(3.3.1
+/// 静态 mip0 形状)。字节排布按紧 packing(`bufferRowLength/bufferImageHeight = 0`,
+/// 行距由驱动按格式推导),与 bevy `Image.data` 的 mip0 布局一致。
+#[derive(Clone, Copy, Debug)]
+pub struct StagingImageCopy {
+    /// 目标 VkImage(须含 TRANSFER_DST usage;首用即从 UNDEFINED 迁入传输布局)。
+    pub image: vk::Image,
+    /// 本批 staging 内的源偏移(4 的倍数——RGBA8 texel block 对齐,
+    /// VUID-vkCmdCopyBufferToImage-pRegions-06223)。
+    pub src_offset: u64,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 异族 release(图像):所有权从 transfer 族让渡。图像侧与 buffer 侧不同——
+/// release 屏障**同时携带布局转换**(TRANSFER_DST → SHADER_READ_ONLY),
+/// 一次屏障同时完成"迁出到可采样布局"与"让渡所有权"(sync.adoc 标准形状,
+/// 比拆成两个屏障少一次全管线等待)。
+#[derive(Clone, Copy, Debug)]
+pub struct ImageRelease {
+    pub image: vk::Image,
+    /// 接收所有权的队列族(3.3.3 起 = graphics 族)。
+    pub to_family: u32,
+}
+
 /// 一次 transfer 提交的全部内容。
 #[derive(Default)]
 pub struct UploadBatch {
@@ -81,10 +106,16 @@ pub struct UploadBatch {
     pub staging: Vec<u8>,
     /// staging → 池的拷贝段(src 一律是本批 staging)。
     pub uploads: Vec<StagingCopy>,
+    /// staging → 贴图的拷贝段(2D mip0 单层;每图配"迁入传输布局"前置屏障与
+    /// "迁出为可采样"后置屏障,见录制段)。
+    pub image_uploads: Vec<StagingImageCopy>,
     /// 池 → 池的设备侧拷贝(迁移;同提交内与 uploads 间以屏障收口)。
     pub device_copies: Vec<CopyRegion>,
     /// 批末尾的异族 release(同族回退时保持空)。
     pub releases: Vec<Release>,
+    /// 图像侧异族 release:在场的图按"迁出布局+让渡"合成屏障;缺席的图按
+    /// 纯布局转换收尾(同族回退/暂无消费者形状)。
+    pub image_releases: Vec<ImageRelease>,
 }
 
 /// 一个复用槽位:staging 与命令缓冲成对,同槽同票据。
@@ -209,6 +240,12 @@ impl Uploader {
         self.next_ticket - 1
     }
 
+    /// 提交目标队列族(发布方判断"图像 release 是否需要让渡"的证据口)。
+    #[must_use]
+    pub fn queue_family(&self) -> u32 {
+        self.queue_family
+    }
+
     /// timeline 当前计数 = GPU 已完成的最高票据(证据查询口)。
     ///
     /// # Errors
@@ -261,7 +298,11 @@ impl Uploader {
     /// staging 扩容/写入、命令重置/录制/提交任一失败。
     pub fn submit_batch(&mut self, batch: UploadBatch) -> Result<Option<Ticket>, VulkanError> {
         let staging_len = batch.staging.len() as u64;
-        if staging_len == 0 && batch.uploads.is_empty() && batch.device_copies.is_empty() {
+        if staging_len == 0
+            && batch.uploads.is_empty()
+            && batch.device_copies.is_empty()
+            && batch.image_uploads.is_empty()
+        {
             return Ok(None); // 空批次不提交,不留无人 signal 的票据
         }
         // 先算槽位与"要不要等"——票据等待发生在槽位可变借用之前(借用分离)
@@ -324,6 +365,101 @@ impl Uploader {
                         size: region.size,
                     }],
                 );
+            }
+            if !batch.image_uploads.is_empty() {
+                // 图像段(3.3.1):布局迁移与 buffer 读写次序是两类问题(显存机制篇
+                // 判定线 3),独立录制,不套 buffer barrier 模板。
+                //
+                // 前置:UNDEFINED → TRANSFER_DST。首用自持——src/dst 族号显式落
+                // transfer 族(不假手 IGNORED,把"这图从此归谁"写成代码)。UNDEFINED
+                // 起点无先前访问要罩,src 作用域为空(TOP_OF_PIPE 只满足非零前提);
+                // 对比 D6 的进场屏障:那里 UNDEFINED 迁移前有 acquire 读要罩,srcStage
+                // 必须提到 COLOR_ATTACHMENT_OUTPUT——两处形状不同是语义不同,不是模板。
+                for image in distinct_images(&batch.image_uploads) {
+                    let into_transfer = vk::ImageMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .src_queue_family_index(queue_family)
+                        .dst_queue_family_index(queue_family)
+                        .image(image)
+                        .subresource_range(color_mip0());
+                    device.cmd_pipeline_barrier(
+                        slot.command_buffer,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[into_transfer],
+                    );
+                }
+                // 拷贝:staging → image,2D mip0 单层,紧 packing(行距驱动按格式推)。
+                // bufferOffset 须为 texel block(4B)倍数——staging 分段偏移的调用方
+                // 纪律(mesh 字节 32B 步长倍数、贴图字节 w*h*4,均过 4)。
+                for region in &batch.image_uploads {
+                    device.cmd_copy_buffer_to_image(
+                        slot.command_buffer,
+                        staging_buffer.buffer(),
+                        region.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[vk::BufferImageCopy {
+                            buffer_offset: region.src_offset,
+                            buffer_row_length: 0,
+                            buffer_image_height: 0,
+                            image_subresource: vk::ImageSubresourceLayers::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .mip_level(0)
+                                .base_array_layer(0)
+                                .layer_count(1),
+                            image_offset: vk::Offset3D::default(),
+                            image_extent: vk::Extent3D {
+                                width: region.width,
+                                height: region.height,
+                                depth: 1,
+                            },
+                        }],
+                    );
+                }
+                // 后置:TRANSFER_DST → SHADER_READ_ONLY。src 作用域罩住本提交内的
+                // 拷贝写(TRANSFER_WRITE);本提交内没有消费者,dst 作用域为空——真正的
+                // 读依赖由消费方"等票据 + 自己的屏障"建立(票据信号量完成 memory
+                // 释放/获取语义)。带 release 的图把所有权让渡合成进同一条屏障,
+                // dst 阶段/访问掩码被规范声明忽略(与 buffer release 同款);不带
+                // release 的图按同族纯布局转换收尾(IGNORED = 无所有权语义)。
+                for image in distinct_images(&batch.image_uploads) {
+                    let release_to = batch
+                        .image_releases
+                        .iter()
+                        .find(|r| r.image == image)
+                        .map(|r| r.to_family);
+                    let out_of_transfer = match release_to {
+                        Some(to_family) => vk::ImageMemoryBarrier::default()
+                            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                            .src_queue_family_index(queue_family)
+                            .dst_queue_family_index(to_family),
+                        None => vk::ImageMemoryBarrier::default()
+                            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED),
+                    }
+                    .image(image)
+                    .subresource_range(color_mip0());
+                    device.cmd_pipeline_barrier(
+                        slot.command_buffer,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[out_of_transfer],
+                    );
+                }
             }
             if !batch.device_copies.is_empty() {
                 // 同提交内的写后读(回读/迁移读池):TRANSFER_WRITE → TRANSFER_READ
@@ -413,6 +549,25 @@ fn distinct_srcs(regions: &[CopyRegion]) -> Vec<vk::Buffer> {
         }
     }
     seen
+}
+
+/// image_uploads 里出现过的不同目标 image(前/后置屏障逐图挂)。
+fn distinct_images(regions: &[StagingImageCopy]) -> Vec<vk::Image> {
+    let mut seen = Vec::new();
+    for region in regions {
+        if !seen.contains(&region.image) {
+            seen.push(region.image);
+        }
+    }
+    seen
+}
+
+/// 2D mip0 单层的 COLOR 子资源范围(图像屏障的统一口径,与 view 创建一致)。
+fn color_mip0() -> vk::ImageSubresourceRange {
+    vk::ImageSubresourceRange::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .level_count(1)
+        .layer_count(1)
 }
 
 impl Drop for Uploader {
