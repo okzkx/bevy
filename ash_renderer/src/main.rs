@@ -12,6 +12,7 @@
 
 use ash_renderer::{
     driver::{AshHostPlugin, AshUploadPlugin},
+    overlay::OverlayPlugin,
     scene::{
         AshCameraAspectPlugin, AshCollectPlugin, AshMaterialHookPlugin, SceneEntryPlugin,
     },
@@ -65,6 +66,9 @@ fn main() -> AppExit {
         .add_plugins(SceneEntryPlugin)
         // 场景采集（step3 任务 3.1.4，机制半边）：PostUpdate 帧末直读 primitive 三样，产 CollectedScene 快照
         .add_plugins(AshCollectPlugin)
+        // egui 调试 UI 的 ECS 半边（3.7，裸接 ash）：Update 里输入桥 + pass + 调试窗口，
+        // 产 EguiFrame/RenderMode 给帧循环
+        .add_plugins(OverlayPlugin)
         // buffer 侧上传（3.2.4）：Last 里快照去重 → 合批进 GPU 池,先于帧循环
         .add_plugins(AshUploadPlugin)
         // 宿主桥：禁渲染补位 + init/draw_frame/teardown 三系统进调度

@@ -25,11 +25,12 @@ use bevy::{
 
 use crate::{
     common::error::VulkanError,
+    overlay::RenderMode,
     scene::CollectedScene,
     vulkan::{
         pack_frame_uniforms, AcquireOutcome, BindlessTables, Context, DrawCall, FrameDraw,
         FramePool, FrameUniformsData, GraphicsPipeline, ImageCache, MeshPool, PushData, Swapchain,
-        Uploader, FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
+        Uploader,
     },
 };
 
@@ -78,43 +79,8 @@ pub(crate) struct FrameInput<'w, 's> {
     /// 方向光（取第一盏，方向 = 实体 `back()`，bevy GPU 同款）。
     lights: Query<'w, 's, (&'static GlobalTransform, &'static DirectionalLight)>,
     ambient: Option<Res<'w, GlobalAmbientLight>>,
-}
-
-/// 材质模式：三态进 UBO `mode`，env `ASH_RENDER_MODE` 选择。
-/// 与 `debug_draw.wgsl` 的 `MODE_*` 常量同值（`FRAME_MODE_*`）。
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RenderMode {
-    /// 数据驱动 Lambert（默认）：UBO 方向光 + 环境，bevy 物理链同构。
-    Lambert,
-    /// albedo 直出：base color/UV/颜色空间对照（官方侧同款置 unlit）。
-    Unlit,
-    /// 世界法线可视化：法线方向验收仪器（非均匀缩放案例的判定仪器）。
-    Normal,
-}
-
-impl RenderMode {
-    fn from_env() -> Self {
-        match std::env::var("ASH_RENDER_MODE").ok().as_deref() {
-            None | Some("") | Some("lambert") => Self::Lambert,
-            Some("unlit") => Self::Unlit,
-            Some("normal") => Self::Normal,
-            Some(other) => {
-                // 拼写错误是配置问题不是运行故障：warn 后按默认继续，不中断帧循环
-                bevy::log::warn!(
-                    "ASH_RENDER_MODE={other:?} 无法识别（可选 lambert/unlit/normal），按 lambert 继续"
-                );
-                Self::Lambert
-            }
-        }
-    }
-
-    fn as_u32(self) -> u32 {
-        match self {
-            Self::Lambert => FRAME_MODE_LAMBERT,
-            Self::Unlit => FRAME_MODE_UNLIT,
-            Self::Normal => FRAME_MODE_NORMAL,
-        }
-    }
+    /// 着色模式（overlay 单选钮写；None = overlay 未装，按 lambert 兜底并告警一次）。
+    render_mode: Option<Res<'w, RenderMode>>,
 }
 
 /// DrawList 消费状态（跨帧 `Local`）：缺资源/相机告警去重 + 材质覆盖一次性收账。
@@ -132,8 +98,8 @@ pub(crate) struct DrawListState {
     lights_logged: bool,
     /// 多方向光/无方向光的状态告警去重。
     warned_light_count: bool,
-    /// 材质模式（env 每进程解析一次，`ASH_RENDER_MODE`）。
-    mode: Option<RenderMode>,
+    /// RenderMode 资源缺席告警只报一次。
+    warned_no_mode: bool,
 }
 
 /// ash 帧循环本体（编排见模块注释；注册与排序在 [`super::host`]）。
@@ -164,6 +130,7 @@ pub(crate) fn draw_frame(
         ref cameras,
         ref lights,
         ref ambient,
+        ref render_mode,
     } = input;
     // —— 闸门①：读 resize 消息。一次 update 可能积压多条（拖拽 125Hz 输入 vs 60fps
     // 帧），逐条刷状态，最新一条定生死：非零尺寸 = 正常/恢复，(0,0) = 最小化。
@@ -301,8 +268,18 @@ pub(crate) fn draw_frame(
     // 4) 相机/灯光 → 本帧槽 UBO。复用安全 = wait_for_slot 的 fence：写
     // 发生在上一轮使用完成之后（帧槽轮转只是定位，安全证据是 fence）。
     // 相机缺席是场景装配问题，报一次后 identity 兜底（画面不可读但不崩帧循环）。
-    // 矩阵乘序/列主序与 WGSL 端同一约定。材质模式每进程解析一次 env。
-    let render_mode = *draw_state.mode.get_or_insert_with(RenderMode::from_env);
+    // 矩阵乘序/列主序与 WGSL 端同一约定。材质模式来自 overlay 的单选钮资源
+    //（初值 = env ASH_RENDER_MODE）。
+    let render_mode = match render_mode.as_deref() {
+        Some(mode) => *mode,
+        None => {
+            if !draw_state.warned_no_mode && !scene.primitives.is_empty() {
+                draw_state.warned_no_mode = true;
+                warn!("RenderMode 资源缺席（overlay 未装）：材质模式按 lambert 兜底");
+            }
+            RenderMode::Lambert
+        }
+    };
     let mut view_proj = Mat4::IDENTITY;
     let mut per_camera_ambient: Option<&AmbientLight> = None;
     match cameras.single() {
