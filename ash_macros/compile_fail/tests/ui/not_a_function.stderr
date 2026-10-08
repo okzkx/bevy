@@ -1,0 +1,8 @@
+error: #[system] 只能标注函数
+ --> tests/ui/not_a_function.rs:4:1
+  |
+4 | struct NotAFunction;
+  | ^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error
+
