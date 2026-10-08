@@ -1,13 +1,13 @@
-//! 材质缝接线（施工 3.1.1）：补 `Assets<StandardMaterial>` 容器 + 自写三钩子。
+//! 材质缝接线：补 `Assets<StandardMaterial>` 容器 + 自写三钩子。
 //!
-//! step2 连带禁用 PbrPlugin 后，官方材质缝两头失守：`Assets<StandardMaterial>`
+//! 连带禁用 PbrPlugin 后，官方材质缝两头失守：`Assets<StandardMaterial>`
 //! 容器无人注册；官方 `GltfExtensionHandlerPbr` 是 `pub(crate)`，其注册点
 //! `add_gltf`（bevy_pbr/src/gltf.rs:13）又在 PbrPlugin::build 里——禁用后
 //! `GltfExtensionHandlers` 永远是空的，glTF loader 只会 spawn 出没有材质的
 //! 裸 `Mesh3d` 实体。本模块手动接线：`init_asset` 补容器，自写 [`AshMaterialHook`]
 //! 复刻官方三钩子，标签格式与 loader 的 `material_label` 约定逐字对齐。
 //!
-//! 机制与证据：`.agent/docs/3-静态取数链路/3.1-ECS侧取数/3.1.1-材质缝接线：自写AshMaterialHook三钩子.md`
+//! 机制与证据：`.agents/docs/3-静态取数链路/3.1-ECS侧取数/3.1.1-材质缝接线：自写AshMaterialHook三钩子.md`
 
 use bevy::{
     asset::{AssetApp, LoadContext},
@@ -39,8 +39,8 @@ impl Plugin for AshMaterialHookPlugin {
             .init_asset::<StandardMaterial>()
             // 官方在 PbrPlugin（register_asset_reflect）与 MaterialPlugin::<StandardMaterial>
             // （register_type，bevy_pbr/src/material.rs:448）里做——两者都被连带禁用。
-            // 不补这个注册，WorldAssetRoot 展开实体树时反射写入 MeshMaterial3d 直接 panic
-            //（world_asset_spawner.rs:635，2026-09-22 实测）。
+            // 不补这个注册，WorldAssetRoot 展开实体树时反射写入 MeshMaterial3d
+            // 直接 panic（world_asset_spawner.rs:635）。
             .register_asset_reflect::<StandardMaterial>()
             .register_type::<MeshMaterial3d<StandardMaterial>>()
             .add_systems(Startup, report_material_seam);
@@ -100,7 +100,7 @@ impl GltfExtensionHandler for AshMaterialHook {
     }
 
     /// primitive 实体收口：按 on_material 写入的同一标签取回 handle，
-    /// 给裸 `Mesh3d` 实体补上 `MeshMaterial3d`——采集系统（3.1.4）以后就从这里读到材质。
+    /// 给裸 `Mesh3d` 实体补上 `MeshMaterial3d`——采集系统从这里读到材质。
     fn on_spawn_mesh_and_material(
         &mut self,
         load_context: &mut LoadContext<'_>,

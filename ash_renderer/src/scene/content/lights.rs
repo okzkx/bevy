@@ -1,11 +1,10 @@
-//! 灯光组（施工 3.1.3）：方向光实体 spawn + 全局环境光资源核验，零 Vulkan 代码。
+//! 灯光组（业务半边）：方向光实体 spawn + 全局环境光资源核验，零 Vulkan 代码。
 //!
 //! 环境光是资源不是实体：全局环境光真身 = [`GlobalAmbientLight`] 资源（LightPlugin
 //! 预插，默认白光亮度 80），相机组件 AmbientLight 可按相机覆盖——本项目不挂（与
-//! 官方默认配置一致），3.5 读 GlobalAmbientLight 进 UBO。方向光沿实体 forward 照射
-//!（bevy_light/src/directional_light.rs:25），所以灯只写朝向不写位置。机制与计划
-//! §6.4 的订正记录见
-//! `.agent/docs/3-静态取数链路/3.1-ECS侧取数/3.1.3-相机与灯光：引擎层自建与宽高比第四补位.md`。
+//! 官方默认配置一致），灯光 UBO 组装读 GlobalAmbientLight。方向光沿实体 forward
+//! 照射（bevy_light/src/directional_light.rs:25），所以灯只写朝向不写位置。机制
+//! 见 `.agents/docs/3-静态取数链路/3.1-ECS侧取数/3.1.3-相机与灯光：引擎层自建与宽高比第四补位.md`。
 
 use std::f32::consts::PI;
 
@@ -15,9 +14,9 @@ use bevy::{
     prelude::*,
 };
 
-use super::util::fmt_vec3;
+use crate::scene::util::fmt_vec3;
 
-/// 灯光进场（Startup）：方向光一个实体（朝向抄官方 FlightHelmet 示例）；
+/// 灯光进场（Startup）：方向光一个实体（朝向与官方对照进程同源）；
 /// 环境光不 spawn——LightPlugin 已预插全局资源，这里只核验。
 pub(super) fn spawn_lights(mut commands: Commands) {
     commands.spawn((
@@ -33,8 +32,8 @@ pub(super) fn spawn_lights(mut commands: Commands) {
 }
 
 /// 灯光就位核验（Update，报一次即歇）：方向光 1 盏沿实体前向；GlobalAmbientLight
-/// 资源在位（3.5 读它进 UBO）。require 链自动插入的 CascadeShadowConfig 等照常
-/// 在场，但阴影是渲染语义，本步不取值。
+/// 资源在位（灯光 UBO 组装读它）。require 链自动插入的 CascadeShadowConfig 等照常
+/// 在场，但阴影是渲染语义，不取值。
 #[derive(Default)]
 pub(super) struct LightSetupState {
     done: bool,

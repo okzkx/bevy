@@ -18,8 +18,10 @@
 //!    源不再被 GPU 读)→ 分配新池 → 已驻留内容整段迁移(old→new 设备拷贝)
 //!    → 等迁移票据 → 才销毁旧池。迁移与销毁的等待全部记账,与正常上传分账
 //!    (施工计划 §0 判定线 6:维护等待单列,不冒充"正常上传零 idle")。
-//!    图形侧最后使用:当前 M2 帧循环只清屏,图形队列尚未消费池数据——该等待
-//!    面在 3.4 接入 draw 时补齐(边界冻结见责任边界文档)。
+//!    图形侧最后使用:draw 每帧读池区间(依赖方向=帧提交挂票据等待,frames 侧)。
+//!    旧池销毁按契约须"上传票据∧图形最后使用"双条件,本模块迁移只等前者,
+//!    图形半边未接线——M2 靠两条事实兜底:素材规模不触发迁移、退出排空
+//!    device_wait_idle 先于 Drop;迁移常态化前须补帧侧等待(责任边界文档②)。
 //!
 //! 销毁纪律:本类型 Drop 不等 GPU——"最后一次使用完成"由两个上游负责:在飞
 //! 上传票据由容量维护在迁移前等待,进程级退出排空由 `host::teardown_vulkan` 的
@@ -34,7 +36,7 @@ use bevy::asset::AssetId;
 use bevy::log::info;
 use bevy::mesh::Mesh;
 
-use crate::error::VulkanError;
+use crate::common::error::VulkanError;
 
 use super::resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
 use super::uploader::{CopyRegion, UploadBatch, Uploader};
@@ -208,7 +210,8 @@ impl MeshPool {
         )?;
         if migrating {
             // 已驻留内容整段迁移:bump 布局保证 [0, used) 就是全部有效数据。
-            // 迁移批自己的票据在销毁旧池前等完(旧池最后使用 = 这次拷贝)
+            // 迁移批自己的票据在销毁旧池前等完——只覆盖上传侧;在飞 draw 对
+            // 旧池的读取不在此等待,归属见模块头"图形侧最后使用"
             let ticket = uploader
                 .submit_batch(UploadBatch {
                     device_copies: vec![
@@ -327,8 +330,9 @@ impl MeshPool {
 impl Drop for MeshPool {
     fn drop(&mut self) {
         // 契约边界(与 GpuBuffer::Drop 同款):不等 GPU。在飞上传票据由容量
-        // 维护在迁移前等待;图形侧最后使用与退出排空分别归 3.4 接线与
-        // teardown_vulkan 的 device_wait_idle(D4)。
+        // 维护在迁移前等待;退出排空由 teardown_vulkan 的 device_wait_idle
+        // 先于一切 Drop 完成(D4)。draw 在飞读取的等待面见模块头
+        // "图形侧最后使用"。
         self.vertex = None;
         self.index = None;
     }

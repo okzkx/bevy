@@ -1,4 +1,4 @@
-//! Swapchain（施工④从 vulkan.rs 拆出）：resize 级生命周期。
+//! Swapchain：resize 级生命周期。
 //!
 //! 生命周期四层里的"resize 级"（VulkanContext字段释义：从Entry到Swapchain.md §12）：窗口尺寸一变整体重建，
 //! images/views/format/extent 全换。帧槽对象（fence / image_available / 命令缓冲）跨重建
@@ -16,7 +16,7 @@
 use ash::{khr::swapchain, vk, Device};
 use bevy::log::info;
 
-use crate::error::VulkanError;
+use crate::common::error::VulkanError;
 use crate::vulkan::Context;
 
 /// acquire 的三种结局。SUBOPTIMAL 拿得到图但下次要重建——照常渲染完这帧再重建。
@@ -331,7 +331,7 @@ impl Swapchain {
 impl Drop for Swapchain {
     fn drop(&mut self) {
         // view 先于 swapchain。Device/Instance 的存活由拆除顺序保证：
-        // 正常退出走 main.rs teardown（FramePool → 本结构 → Context）；
+        // 正常退出走 driver::host 的 teardown_vulkan（FramePool → 本结构 → Context）；
         // panic 时 Resource drop 顺序不定，进程本就注定终止。
         self.destroy();
     }

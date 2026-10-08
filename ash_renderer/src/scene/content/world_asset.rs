@@ -1,8 +1,8 @@
-//! 场景进场（施工 3.1.2）：WorldAsset 的 load 请求与到货统计，零 Vulkan 代码。
+//! 场景进场：WorldAsset 的 load 请求与到货统计，零 Vulkan 代码。
 //!
-//! 进场本身只有三行（load + spawn + 轮询到货）；配额的三个"禁渲染补位"
+//! 进场本身只有三行（load + spawn + 轮询到货）；三个"禁渲染补位"
 //! （ImageLoader 注册、反射注册、资产根路径）机制见
-//! `.agent/docs/3-静态取数链路/3.1-ECS侧取数/3.1.2-场景进场：一个load请求与三个禁渲染补位.md`。
+//! `.agents/docs/3-静态取数链路/3.1-ECS侧取数/3.1.2-场景进场：一个load请求与三个禁渲染补位.md`。
 
 use bevy::{
     gltf::GltfAssetLabel,
@@ -13,8 +13,7 @@ use bevy::{
 };
 
 /// FlightHelmet 在 assets/ 下的相对路径（1 gltf + 1 bin + 15 png；
-/// 6 材质 = Hose/RubberWood/GlassPlastic/MetalParts/LeatherParts/Lenses，
-/// 施工计划 §6.8 早版写的"4 材质"与本文件不符，已订正）。
+/// 6 材质 = Hose/RubberWood/GlassPlastic/MetalParts/LeatherParts/Lenses）。
 const FLIGHT_HELMET: &str = "models/FlightHelmet/FlightHelmet.gltf";
 
 /// 场景进场请求（Startup）：`load` 立即返回占位 Handle、数据异步到货；

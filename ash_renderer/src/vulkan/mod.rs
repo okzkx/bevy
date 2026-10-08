@@ -1,4 +1,4 @@
-//! Vulkan 资源层：按生命周期分三个子模块（VulkanContext字段释义：从Entry到Swapchain.md §12）。
+//! Vulkan 资源层：按生命周期分层（VulkanContext字段释义：从Entry到Swapchain.md §12）。
 //!
 //! | 子模块 | 生命周期 | 职责 |
 //! |---|---|---|
@@ -14,7 +14,7 @@
 //! | `descriptors` | 资产级 | 常驻描述符表(set0 双表/set1 每帧 UBO)+ 槽位发布(3.3.2~3.3.4) |
 //!
 //! 拆分点：同步对象不挂任何一张 swapchain image 上——重建 swapchain 时原地不动；
-//! 编排方 [`crate::host`] 只消费本层重出口的类型，不进子模块内部。
+//! 编排方 [`crate::driver::host`] 只消费本层重出口的类型，不进子模块内部。
 
 mod context;
 mod descriptors;

@@ -14,8 +14,9 @@
 //!    功能参数去重、fallback 槽 0（白 1×1 + 线性采样器）、发布接上传票据。
 //!
 //! set/binding 表（前置闸门冻结，本模块是 CPU 侧真身）：set0 b0 = `texture_2d`
-//! 数组（runtime，无长度）、b1 = sampler 数组；set1 b0 = 每帧 UBO 64B。push 96B
-//! 偏移 0/64/68/80 与 pipeline layout 不在本模块——归 3.4 管线施工。
+//! 数组（runtime，无长度）、b1 = sampler 数组；set1 b0 = 每帧 UBO 128B（灯光版
+//! 扩容，见 [`FRAME_UBO_SIZE`] 冻结表）。push 96B 偏移 0/64/68/80 与 pipeline
+//! layout 在 [`super::pipeline`]。
 //!
 //! stage flags 取 `COMPUTE|VERTEX|FRAGMENT` 超集：3.3 探针走 compute、3.4 走
 //! graphics，超集声明只影响驱动的描述符优化面，不改变合法性。
@@ -32,7 +33,7 @@ use ash::{vk, Device, Instance};
 use bevy::image::ImageSamplerDescriptor;
 use bevy::log::info;
 
-use crate::error::VulkanError;
+use crate::common::error::VulkanError;
 
 use super::images::{sampler_key, GpuImage, ImageSpec};
 use super::resources::{BufferRole, GpuBuffer, MemoryContract};
@@ -51,7 +52,7 @@ pub const TABLE_CAPACITY: u32 = 1024;
 pub const FRAME_UBO_SIZE: u64 = 128;
 
 /// 帧数据打包模式（UBO `mode` 字段，与 `debug_draw.wgsl` 的 case 值逐字同源；
-/// 非零值的语义见 host 侧 [`crate::host`] 的材质三模式说明）。
+/// 非零值的语义见 host 侧 [`crate::driver::host`] 的材质三模式说明）。
 pub const FRAME_MODE_LAMBERT: u32 = 0;
 pub const FRAME_MODE_UNLIT: u32 = 1;
 pub const FRAME_MODE_NORMAL: u32 = 2;
@@ -469,7 +470,7 @@ impl BindlessTables {
         debug_assert_eq!(slots.sampler, 0, "fallback 必占采样器槽 0");
         info!(
             "常驻描述符表就绪:set0 双表(容量 {capacity}×2,UAB+PARTIALLY_BOUND 三层配套)\
-             + set1 每帧 UBO×{MAX_FRAMES_IN_FLIGHT}(64B,identity 初值);\
+             + set1 每帧 UBO×{MAX_FRAMES_IN_FLIGHT}({FRAME_UBO_SIZE}B,identity 初值);\
              fallback 白图占槽 0(texture+ sampler),fallback 票据 #{ticket}",
             ticket = tables.fallback_ticket,
         );

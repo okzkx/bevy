@@ -6,8 +6,8 @@
 //! 搬入清单与取舍：
 //! - ✅ 控制流宏 9 件（8 件 frenderer 原件 + `unwrap_or_panic!` 为 ash_renderer 新增，
 //!   补初始化路径的家族位）+ `LogDebug`/`WarnOrDefault`——bevy 系统返回 `()`，`?` 不可用，
-//!   "warn + 早退"正是 `()` 系统里的传播形式；step3 起逐实体收集（Query → 绘制列表）
-//!   就是 `unwrap_or!(x, continue)` 的主场（frenderer render_params.rs:35 同形状）；
+//!   "warn + 早退"正是 `()` 系统里的传播形式；逐实体遍历类系统（Query → 绘制列表）
+//!   是其预期主场（frenderer render_params.rs:35 同形状）；
 //! - ❌ `singleton` 系列：bevy `Resource` 就是全局状态的正解，搬进来反而诱导反模式；
 //! - ❌ `lock_mutex!`：bevy 调度器管并发，系统内不持手动锁；首个后台线程出现时再议；
 //! - ❌ `Option::some()`：anyhow `?` 链专用，这里 Option 早退已由 `unwrap_or_*` 覆盖。
@@ -20,8 +20,9 @@
 //! `_panic` = 家族的 panic 位（**工程原则"非必要不 panic"——现无现役调用点**，
 //! 仅供真正必要的断言场景：不可恢复的内部不变量且需要 backtrace 取证；经
 //! `UnwrapPanic` trait 同时吃 Option 与 Result）。
-//! 用法：`use ash_renderer::syntax::宏名;`——宏内部用 `$crate::` 全限定调 trait 方法，
-//! 调用方无需导 trait。多数宏为 step3+ 预备，本模块关闭 `unused_macros`。
+//! 用法：`use ash_renderer::common::syntax::宏名;`——宏内部用 `$crate::` 全限定调 trait 方法，
+//! 调用方无需导 trait。宏家族当前无现役调用点，作为两 Tier 错误处理的控制流
+//! 标准件备用，故本模块关闭 `unused_macros`。
 
 #![allow(unused_macros)]
 
@@ -94,14 +95,14 @@ impl<T> UnwrapPanic<T> for Option<T> {
 #[macro_export]
 macro_rules! warn_unwrap_or_return {
     ($res_value:expr, $return_result:expr) => {{
-        let Ok(t) = $crate::syntax::LogDebug::warn($res_value) else {
+        let Ok(t) = $crate::common::syntax::LogDebug::warn($res_value) else {
             return $return_result;
         };
         t
     }};
 
     ($res_value:expr) => {{
-        let Ok(t) = $crate::syntax::LogDebug::warn($res_value) else {
+        let Ok(t) = $crate::common::syntax::LogDebug::warn($res_value) else {
             return Default::default();
         };
         t
@@ -112,7 +113,7 @@ macro_rules! warn_unwrap_or_return {
 #[macro_export]
 macro_rules! warn_unwrap_or {
     ($res_value:expr, $return_result:expr) => {{
-        let Ok(t) = $crate::syntax::LogDebug::warn($res_value) else {
+        let Ok(t) = $crate::common::syntax::LogDebug::warn($res_value) else {
             $return_result;
         };
         t
@@ -148,21 +149,21 @@ macro_rules! unwrap_or {
     }};
 }
 
-/// 失败 → panic（初始化路径专用，ash_renderer 新增件；frenderel 无此宏）。
+/// 失败 → panic（初始化路径专用，ash_renderer 新增件；frenderer 无此宏）。
 /// 同时吃 Result（错误走 Display）与 Option（报 "None"）——一次性装配代码
 /// 没有"安全降级"可言，fail fast：根因必须钉在启动现场，而不是延后失真。
 /// 双参版 `panic!("{上下文}: {错误}")`，单参版直接 panic 错误。
 #[macro_export]
 macro_rules! unwrap_or_panic {
     ($res_value:expr, $panic_message:expr) => {
-        match $crate::syntax::UnwrapPanic::into_result($res_value) {
+        match $crate::common::syntax::UnwrapPanic::into_result($res_value) {
             Ok(t) => t,
             Err(msg) => panic!("{}: {msg}", $panic_message),
         }
     };
 
     ($res_value:expr) => {
-        match $crate::syntax::UnwrapPanic::into_result($res_value) {
+        match $crate::common::syntax::UnwrapPanic::into_result($res_value) {
             Ok(t) => t,
             Err(msg) => panic!("{msg}"),
         }

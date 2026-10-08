@@ -6,14 +6,15 @@
 //! 装配与编排一次分家）；ECS 侧材质缝在 [`ash_renderer::scene`]。
 //!
 //! 禁用名单 = step1《DefaultPlugins分类.md》§1 的渲染族 8 件
-//! （0.20.0-dev 下路径逐一复核未变，见 .agent/docs/2-宿主壳/2-宿主壳搭建记录.md §2）。
+//! （0.20.0-dev 下路径逐一复核未变，见 .agents/docs/2-宿主壳/2-宿主壳搭建记录.md §2）。
 //! 帧循环住在 bevy runner 里（侦察篇 §4）：winit `about_to_wait` 驱动 `app.update()`。
 //! 失败策略（两 Tier，非必要不 panic）见 host 模块文档与《错误处理体系：两Tier思想与优雅退出》篇。
 
 use ash_renderer::{
-    host::AshHostPlugin,
-    scene::{AshCollectPlugin, AshMaterialHookPlugin, SceneEntryPlugin},
-    upload::AshUploadPlugin,
+    driver::{AshHostPlugin, AshUploadPlugin},
+    scene::{
+        AshCameraAspectPlugin, AshCollectPlugin, AshMaterialHookPlugin, SceneEntryPlugin,
+    },
 };
 use bevy::{
     anti_alias::AntiAliasPlugin,
@@ -56,11 +57,13 @@ fn main() -> AppExit {
                 // 与 glTF 材质接入缝已由 AshMaterialHookPlugin 手动接线（scene 模块）。
                 .disable::<PbrPlugin>(),
         )
-        // 材质缝接线（step3 任务 3.1.1）：init_asset + AshMaterialHook 三钩子进 GltfExtensionHandlers
+        // 材质缝接线（step3 任务 3.1.1，机制半边）：init_asset + AshMaterialHook 三钩子进 GltfExtensionHandlers
         .add_plugins(AshMaterialHookPlugin)
-        // 场景进场（step3 任务 3.1.2）：load FlightHelmet + spawn WorldAssetRoot + 到货统计
+        // 宽高比补位（3.1.3 第四补位，机制半边）：随窗口 resize 修正相机 aspect_ratio
+        .add_plugins(AshCameraAspectPlugin)
+        // 场景进场（step3 任务 3.1.2，业务半边）：load FlightHelmet + spawn WorldAssetRoot + 到货统计
         .add_plugins(SceneEntryPlugin)
-        // 场景采集（step3 任务 3.1.4）：PostUpdate 帧末直读 primitive 三样，产 CollectedScene 快照
+        // 场景采集（step3 任务 3.1.4，机制半边）：PostUpdate 帧末直读 primitive 三样，产 CollectedScene 快照
         .add_plugins(AshCollectPlugin)
         // buffer 侧上传（3.2.4）：Last 里快照去重 → 合批进 GPU 池,先于帧循环
         .add_plugins(AshUploadPlugin)

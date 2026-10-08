@@ -44,7 +44,7 @@ use std::slice;
 use ash::{vk, Device, Instance};
 use bevy::log::info;
 
-use crate::error::VulkanError;
+use crate::common::error::VulkanError;
 
 /// buffer 用途角色:usage 与 memory 属性要求在此定案,创建入口逐一引用。
 ///
@@ -65,7 +65,7 @@ pub enum BufferRole {
     /// 回读验证:transfer 写 + 宿主读(HOST_CACHED 优先,加速宿主读侧)。
     Readback,
     /// 每帧 UBO(3.3.3 set1 的载体):着色器读,宿主按帧写(在飞安全由帧槽
-    /// 轮转保证——每帧一个 buffer,复用前等对应帧完成,3.5 接线时生效)。
+    /// 轮转保证——每帧一个 buffer,复用前等对应帧完成,wait_for_slot 已生效)。
     FrameUniform,
     /// 宿主可见 storage(3.3.3 探针 I/O;未来 GPU 可索引参数表的宿主侧形态):
     /// 设备读写 + 宿主写(staging 直写)/读(回读)。

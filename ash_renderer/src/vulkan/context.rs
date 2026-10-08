@@ -1,8 +1,8 @@
-//! ash Vulkan 进程级上下文（step2 施工③④拆分）：Entry → Instance(+验证层) →
+//! ash Vulkan 进程级上下文：Entry → Instance(+验证层) →
 //! Win32 Surface → PhysicalDevice → Device(+dynamicRendering+timelineSemaphore) →
 //! Queue（图形 + transfer，同族则合一）。
 //!
-//! 生命周期四层（详见 .agent/docs/2-宿主壳/材料/VulkanContext字段释义：从Entry到Swapchain.md §12）：
+//! 生命周期四层（详见 .agents/docs/2-宿主壳/材料/VulkanContext字段释义：从Entry到Swapchain.md §12）：
 //! - 本结构 = 进程级（随进程活）+ Surface（窗口级，单窗宿主壳中并入）；
 //! - resize 级的 Swapchain 与帧级的命令缓冲/fence/信号量在同层 `swapchain` / `frames` 子模块。
 //!
@@ -13,7 +13,7 @@
 //!   `impl Drop`）——销毁全部手动、按 Messenger ← Surface ← Device ← Instance 反序；
 //! - `Entry` 内持 libloading 句柄，提前丢它会卸载 vulkan-1.dll，必须与 Instance 同寿命；
 //! - bevy 退出时 runner `exiting` 回调会清场（清场序对 Resource 是任意的），正常退出
-//!   走 main.rs 的 `teardown_vulkan`（OnAppExitSystems）反序拆除，本 Drop 只是兜底。
+//!   走 `driver::host` 的 `teardown_vulkan`（OnAppExitSystems）反序拆除，本 Drop 只是兜底。
 
 use std::ffi::{c_char, c_void};
 use std::num::NonZeroIsize;
@@ -26,7 +26,7 @@ use ash::{
 use bevy::log::{error, info};
 use raw_window_handle::RawWindowHandle;
 
-use crate::error::VulkanError;
+use crate::common::error::VulkanError;
 
 const VALIDATION_LAYER: &std::ffi::CStr = c"VK_LAYER_KHRONOS_validation";
 
