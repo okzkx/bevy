@@ -596,7 +596,7 @@ impl FramePool {
                     vk::IndexType::UINT32,
                 );
                 // push 对全帧 UI 恒定（screen_size + 图集双槽位），循环外打包一次
-                let ui_push = pack_ui_push(ui.screen_px, ui.atlas_texture, ui.atlas_sampler);
+                let ui_push = pack_ui_push(ui.screen_pt, ui.atlas_texture, ui.atlas_sampler);
                 for call in &ui.draws {
                     // scissor 逐 clip 设（egui 镶嵌的 clip 即裁剪边界；零尺寸 = 全裁）
                     device.cmd_set_scissor(

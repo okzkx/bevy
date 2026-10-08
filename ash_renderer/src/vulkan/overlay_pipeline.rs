@@ -4,8 +4,9 @@
 //! - **set0 共享**：layout 只声明常驻表 set0（UI 无 UBO，不声明 set1），表在飞
 //!   更新对两管线同时生效——"布局=未来管线公共 ABI"的兑现位。切换管线后 set0
 //!   需按本布局对象重绑（同句柄、不同 layout 对象）。
-//! - **push 16B**：screen_size（物理像素，顶点 pos 同域——tessellate 已按 ppp
-//!   把 points 换算到像素）@0 + tex_index @8 +
+//! - **push 16B**：screen_size（points，顶点 pos 同域——tessellate 不按 ppp 缩
+//!   放顶点，ppp 只进字形栅格化/像素取整；egui-wgpu 0.36.2 uniform 同名
+//!   screen_size_in_points）@0 + tex_index @8 +
 //!   sampler_index @12，整帧 UI 一次；与 `overlay_draw.wgsl` 的 PushParams 和
 //!   下方 [`UiPushLayout`] 镜像 `offset_of!` 静态互证（三方同源纪律）。
 //! - **深度格式声明对齐、读写全关**：渲染实例带 D32 深度附件，本管线声明同格式
@@ -56,7 +57,8 @@ pub const UI_PUSH_CONSTANTS_SIZE: u32 = 16;
 /// 写入侧的 `size_of` 断言与本常量互证）。
 pub const UI_VERTEX_STRIDE: u32 = 20;
 
-/// overlay push 参数 → 16B 字节（偏移按 [`UiPushLayout`] 静态断言表手工排布）。
+/// overlay push 参数 → 16B 字节（偏移按 [`UiPushLayout`] 静态断言表手工排布；
+/// screen_size 是 points 域，与镶嵌顶点同域——见 [`UiPaint::screen_pt`]）。
 #[must_use]
 pub fn pack_ui_push(
     screen_size: [f32; 2],
@@ -84,15 +86,16 @@ pub struct UiDrawCall {
 }
 
 /// 一次 UI 绘制的全部产物（`overlay::paint` 组装，[`super::frames`] 消费）：
-/// 图集槽位 + 屏幕物理像素 + 逐 clip draw 列表；顶点/索引已由生产方写入 UI 环
+/// 图集槽位 + 屏幕 points 尺寸 + 逐 clip draw 列表；顶点/索引已由生产方写入 UI 环
 /// 本帧槽 buffer，draw 用环内引脚定位。
 pub struct UiPaint {
     /// 图集纹理槽（push 的 tex_index）。
     pub atlas_texture: u32,
     /// 图集采样器槽（push 的 sampler_index；键与 fallback 同键去重）。
     pub atlas_sampler: u32,
-    /// 屏幕物理像素尺寸（push 的 screen_size；tessellate 顶点 pos 同域）。
-    pub screen_px: [f32; 2],
+    /// 屏幕 points 尺寸（push 的 screen_size；tessellate 顶点 pos 同域，ppp 只
+    /// 进字形栅格化/像素取整——渲染目标尺寸按 ppp 换算是消费端职责，本字段已除）。
+    pub screen_pt: [f32; 2],
     /// 逐 clip draw（mesh 边界即 clip 边界，scissor 各自持有）。
     pub draws: Vec<UiDrawCall>,
 }

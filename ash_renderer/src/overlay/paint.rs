@@ -452,9 +452,14 @@ pub(crate) fn paint_overlay(
     Ok(Some(UiPaint {
         atlas_texture: atlas.slots.texture,
         atlas_sampler: atlas.slots.sampler,
-        // push 的 screen_size 与顶点 pos 同域 = 物理像素（tessellate 按 ppp 换算
-        // 后的顶点域）；给逻辑 points 会让 NDC 再乘一次 scale，UI 整体 ×ppp 放大
-        screen_px: [screen_px.width as f32, screen_px.height as f32],
+        // push 的 screen_size 与顶点 pos 同域 = points：tessellate 不按 ppp 缩放
+        // 顶点（ppp 只进字形栅格化/像素取整/圆半径），换算成像素是渲染目标的
+        // 职责——egui-wgpu 0.36.2 同款：uniform 字段即 screen_size_in_points
+        //（= size_in_pixels / ppp）。给物理像素会让 NDC 除偏大、UI 整体 ×ppp 缩小
+        screen_pt: [
+            screen_px.width as f32 / frame.pixels_per_point,
+            screen_px.height as f32 / frame.pixels_per_point,
+        ],
         draws,
     }))
 }

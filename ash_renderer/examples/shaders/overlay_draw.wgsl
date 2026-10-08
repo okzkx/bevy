@@ -19,9 +19,11 @@
 //   显式边界）。
 // - mip 钉 level 0（图集静态 mip0，与采样器 max_lod=0 双保险，debug_draw 同款）。
 //
-// NDC：pos 是物理像素（左上原点、y 向下；tessellate 已按 ppp 把 points 换算
-// 成像素），照 egui-wgpu 的 webgpu 约定（Y-up）写 pos→clip，screen_size 同为
-// 物理像素；naga ADJUST_COORDINATE_SPACE 注入的 gl_Position.y 翻转照旧
+// NDC：pos 是 points（左上原点、y 向下；tessellate 不按 ppp 缩放顶点——ppp 只
+// 进字形栅格化/像素取整/圆半径，points 换算成像素是渲染目标的职责），照
+// egui-wgpu 的 webgpu 约定（Y-up）写 pos→clip，screen_size 同为 points 域
+//（官方 0.36.2 uniform 字段即 screen_size_in_points = size_in_pixels / ppp）；
+// naga ADJUST_COORDINATE_SPACE 注入的 gl_Position.y 翻转照旧
 // 生效（与 debug_draw 同一编译路径，翻转恰好一次）。
 enable wgpu_binding_array;
 
