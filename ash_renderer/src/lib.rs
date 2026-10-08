@@ -24,8 +24,9 @@
 //!   票据,3.2.4)、`mesh_convert`(纯函数:32B 交错转换,3.2.3)、`images`(资产级:贴图
 //!   链路,3.3.1)、`descriptors`(资产级:常驻描述符表 + 槽位发布,3.3.2~3.3.4)、
 //!   `pipeline`(接口件:图形管线,3.4.2);
-//! - [`scene`]:ECS 侧取数（step3 施工 3.1）——材质缝接线 / 场景进场 / 相机 / 灯光
-//!   按场景元素各自成组 + 采集（PostUpdate 帧末直读产 CollectedScene 快照），零 Vulkan 代码；
+//! - [`scene`]:ECS 侧取数（step3 施工 3.1，3.6.2 分机制/业务两半）——机制半边
+//!   `mechanism`(材质缝接线/采集快照/宽高比补位,换场景内容不变)+ 业务半边
+//!   `content`(FlightHelmet 进场/取景/灯光参数/施工核验),零 Vulkan 代码;
 //! - [`driver`]:渲染驱动(3.6.1 自 src 根收拢)——bevy 调度侧编排,横跨 scene 与 vulkan:
 //!   `host`(宿主桥插件:禁渲染补位 + 系统进调度)、`init`(Vulkan 初始化链与反序拆除)、
 //!   `frame`(帧循环 draw_frame)、`upload`(上传编排:flush_uploads,Last 里 before

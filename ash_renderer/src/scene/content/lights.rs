@@ -1,4 +1,5 @@
-//! 灯光组（施工 3.1.3）：方向光实体 spawn + 全局环境光资源核验，零 Vulkan 代码。
+//! 灯光组（施工 3.1.3，业务半边）：方向光实体 spawn + 全局环境光资源核验，
+//! 零 Vulkan 代码。
 //!
 //! 环境光是资源不是实体：全局环境光真身 = [`GlobalAmbientLight`] 资源（LightPlugin
 //! 预插，默认白光亮度 80），相机组件 AmbientLight 可按相机覆盖——本项目不挂（与
@@ -15,7 +16,7 @@ use bevy::{
     prelude::*,
 };
 
-use super::util::fmt_vec3;
+use crate::scene::util::fmt_vec3;
 
 /// 灯光进场（Startup）：方向光一个实体（朝向抄官方 FlightHelmet 示例）；
 /// 环境光不 spawn——LightPlugin 已预插全局资源，这里只核验。

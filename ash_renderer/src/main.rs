@@ -12,7 +12,9 @@
 
 use ash_renderer::{
     driver::{AshHostPlugin, AshUploadPlugin},
-    scene::{AshCollectPlugin, AshMaterialHookPlugin, SceneEntryPlugin},
+    scene::{
+        AshCameraAspectPlugin, AshCollectPlugin, AshMaterialHookPlugin, SceneEntryPlugin,
+    },
 };
 use bevy::{
     anti_alias::AntiAliasPlugin,
@@ -55,11 +57,13 @@ fn main() -> AppExit {
                 // 与 glTF 材质接入缝已由 AshMaterialHookPlugin 手动接线（scene 模块）。
                 .disable::<PbrPlugin>(),
         )
-        // 材质缝接线（step3 任务 3.1.1）：init_asset + AshMaterialHook 三钩子进 GltfExtensionHandlers
+        // 材质缝接线（step3 任务 3.1.1，机制半边）：init_asset + AshMaterialHook 三钩子进 GltfExtensionHandlers
         .add_plugins(AshMaterialHookPlugin)
-        // 场景进场（step3 任务 3.1.2）：load FlightHelmet + spawn WorldAssetRoot + 到货统计
+        // 宽高比补位（3.1.3 第四补位，机制半边）：随窗口 resize 修正相机 aspect_ratio
+        .add_plugins(AshCameraAspectPlugin)
+        // 场景进场（step3 任务 3.1.2，业务半边）：load FlightHelmet + spawn WorldAssetRoot + 到货统计
         .add_plugins(SceneEntryPlugin)
-        // 场景采集（step3 任务 3.1.4）：PostUpdate 帧末直读 primitive 三样，产 CollectedScene 快照
+        // 场景采集（step3 任务 3.1.4，机制半边）：PostUpdate 帧末直读 primitive 三样，产 CollectedScene 快照
         .add_plugins(AshCollectPlugin)
         // buffer 侧上传（3.2.4）：Last 里快照去重 → 合批进 GPU 池,先于帧循环
         .add_plugins(AshUploadPlugin)

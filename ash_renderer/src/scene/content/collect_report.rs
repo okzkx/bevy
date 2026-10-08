@@ -1,90 +1,18 @@
-//! 场景采集（施工 3.1.4）：PostUpdate 帧末直读 primitive 三样，产出 [`CollectedScene`]
-//! 快照，零 Vulkan 代码。
-//!
-//! 渲染族禁用后，官方 Extract（bevy_render 的 extract_component 家族）不存在——
-//! 第 N+1 帧绘制半边要用什么数，必须第 N 帧末自己从 World 里拿（入口篇既定架构
-//! "帧末直读"）。时机钉在 PostUpdate 且排在 [`TransformSystems::Propagate`] 之后：
-//! 那里是传播链的收口（mark_dirty_trees → propagate_parent_transforms →
-//! sync_simple_transforms，bevy_transform/src/plugins.rs:37-47），读到的
-//! [`GlobalTransform`] 才是含父链的本帧终值。快照只带拓扑（实体 + 两柄 + 终值矩阵），
-//! 顶点/贴图等内容留在资产容器——禁渲染后主世界 Assets 数据常驻（施工计划 §6.9），
-//! 3.2 上传与 3.4 DrawList 从快照出发去容器取数。
-//!
-//! 机制与证据：`.agents/docs/3-静态取数链路/3.1-ECS侧取数/3.1.4-采集系统：PostUpdate帧末直读与CollectedScene快照.md`
+//! 采集核验（业务半边，3.6.2 自 mechanism/collect.rs 拆出）：一次性核验系统，
+//! 报一次即歇，读 [`crate::scene::mechanism::CollectedScene`] 快照与资产容器做
+//! 3.1.4 施工判定线——期望值（"期望 6"等）写死 FlightHelmet，属业务侧脚手架，
+//! 采集机制本体不背这些数。
 
 use std::collections::HashSet;
 
-use bevy::{
-    ecs::system::SystemParam,
-    mesh::Indices,
-    pbr::{MeshMaterial3d, StandardMaterial},
-    prelude::*,
-    transform::TransformSystems,
-};
+use bevy::{ecs::system::SystemParam, mesh::Indices, pbr::StandardMaterial, prelude::*};
 
-use super::util::fmt_vec3;
-
-/// 采集插件：把 [`collect_scene`]（每帧重建快照）与 [`report_scene_collected`]
-///（一次性核验）按"先采后验"链进 PostUpdate（传播链之后）。接线收在本插件内，
-/// main 只 `add_plugins`，不引用内部系统。
-pub struct AshCollectPlugin;
-
-impl Plugin for AshCollectPlugin {
-    fn build(&self, app: &mut App) {
-        app.init_resource::<CollectedScene>().add_systems(
-            PostUpdate,
-            (collect_scene, report_scene_collected)
-                .chain()
-                .after(TransformSystems::Propagate),
-        );
-    }
-}
-
-/// 第 N 帧的采集快照（PostUpdate 末"会被渲染的场景内容"）：第 N+1 帧的 GPU 半边
-/// 从这里读——施工计划 §2 图中跨帧折线的 ECS 侧起点（消费者 3.2 上传 pending、
-/// 3.4 DrawList）。每帧重建，行窄（两柄 + 一矩阵），重建成本可忽略。
-#[derive(Resource, Default)]
-pub struct CollectedScene {
-    /// 本帧在场且三样俱全（`Mesh3d` + `GlobalTransform` + `MeshMaterial3d`）的 primitive。
-    pub primitives: Vec<CollectedPrimitive>,
-}
-
-/// 快照的一行：柄去容器取内容，`model` 直进 push constant（3.4）。
-#[derive(Clone)]
-pub struct CollectedPrimitive {
-    pub entity: Entity,
-    pub mesh: Handle<Mesh>,
-    pub material: Handle<StandardMaterial>,
-    /// [`GlobalTransform`] 终值矩阵（PostUpdate 传播后直读，含父链）。
-    pub model: Mat4,
-}
-
-/// 采集系统（每帧）：重建 [`CollectedScene`]。不随核验完成停摆——GPU 半边永远读
-/// 最新一帧；核验是另一支系统（[`report_scene_collected`]），与本系统仅以链序耦合。
-fn collect_scene(
-    mut scene: ResMut<CollectedScene>,
-    primitives: Query<(
-        Entity,
-        &Mesh3d,
-        &GlobalTransform,
-        &MeshMaterial3d<StandardMaterial>,
-    )>,
-) {
-    scene.primitives.clear();
-    for (entity, mesh3d, global, material3d) in &primitives {
-        scene.primitives.push(CollectedPrimitive {
-            entity,
-            mesh: mesh3d.0.clone(),
-            material: material3d.0.clone(),
-            model: global.to_matrix(),
-        });
-    }
-}
+use crate::scene::{util::fmt_vec3, CollectedScene};
 
 /// 核验要读的成组数据：快照 + 层级查询 + 两个资产容器。SystemParam 打包让系统
 /// 签名保持三参——官方渲染侧的 Extract 系统同样用参数束装下成排的 Query/Res。
 #[derive(SystemParam)]
-struct CollectData<'w, 's> {
+pub(super) struct CollectData<'w, 's> {
     scene: Res<'w, CollectedScene>,
     /// primitive 全集（含尚未缝上材质的）——三样俱全与否由此比对得出。
     hierarchy: Query<
@@ -105,7 +33,7 @@ struct CollectData<'w, 's> {
 
 /// 一次性核验的进度（报一次即歇；10s 凑不齐按 Tier① warn 一次后不再打扰）。
 #[derive(Default)]
-struct CollectState {
+pub(super) struct CollectState {
     done: bool,
     waited_secs: f32,
 }
@@ -115,7 +43,11 @@ struct CollectState {
 /// 两 Tier：资产未到货（[`Assets::get`] 为 `None`）是异步加载的正常态，空帧容忍、
 /// 下一帧再查，不是失败；primitive 已在场但 10s 仍凑不齐或契约不过才 warn 一次——
 /// 根因在资产侧或缝接线（3.1.1/3.1.2），本系统不修，帧循环照常。
-fn report_scene_collected(mut state: Local<CollectState>, time: Res<Time>, data: CollectData) {
+pub(super) fn report_scene_collected(
+    mut state: Local<CollectState>,
+    time: Res<Time>,
+    data: CollectData,
+) {
     if state.done {
         return;
     }

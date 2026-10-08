@@ -1,6 +1,8 @@
-//! 相机组（施工 3.1.3）：裸 Camera 三件套的 spawn、宽高比补位与就位核验，零 Vulkan 代码。
+//! 相机组（施工 3.1.3，业务半边）：裸 Camera 三件套的 spawn 与就位核验，
+//! 取景参数写死官方示例，零 Vulkan 代码。
 //!
-//! 为什么裸 `Camera` 不用 `Camera3d`、宽高比为什么归我们补位——机制见
+//! 宽高比补位是通用机制，已拆往 [`crate::scene::mechanism::camera_aspect`]；
+//! "为什么裸 `Camera` 不用 `Camera3d`"的机制见
 //! `.agents/docs/3-静态取数链路/3.1-ECS侧取数/3.1.3-相机与灯光：引擎层自建与宽高比第四补位.md`。
 
 use bevy::{
@@ -9,7 +11,7 @@ use bevy::{
     window::PrimaryWindow,
 };
 
-use super::util::fmt_vec3;
+use crate::scene::util::fmt_vec3;
 
 /// 相机取景参数（抄官方 FlightHelmet 示例 examples/3d/anti_aliasing.rs `setup`）：
 /// 3.5 同屏对照时 bevy wgpu 侧用同一组参数，几何与光照方向判定才同源可比。
@@ -28,7 +30,8 @@ pub(super) fn spawn_camera(
 ) {
     // 宽高比初值：官方由 camera_system（bevy_render/src/camera.rs:354，渲染族已禁）
     // 随窗口建/改维护，禁后归我们——Startup 先按主窗口写一次，后续 resize 由
-    // [`sync_projection_aspect`] 接管。宽高比错了，3.4 建 VP 矩阵时横向视野就错。
+    // 机制侧宽高比补位（crate::scene::mechanism::camera_aspect）接管。宽高比错了，
+    // 3.4 建 VP 矩阵时横向视野就错。
     let mut projection = Projection::default();
     let mut aspect_note = "默认 1.0，交 Update 修正";
     if let Ok(window) = windows.single()
@@ -50,32 +53,6 @@ pub(super) fn spawn_camera(
         fmt_vec3(CAMERA_POS),
         fmt_vec3(CAMERA_TARGET),
     );
-}
-
-/// 宽高比补位（Update，幂等对比-修正）：camera_system 缺席后没人随窗口 resize
-/// 更新 `PerspectiveProjection.aspect_ratio`（初值 1.0），不补位则 3.4 的画面
-/// 横向拉伸。宽度/高度为 0（最小化）跳过，等恢复。
-pub(super) fn sync_projection_aspect(
-    windows: Query<&Window, With<PrimaryWindow>>,
-    mut cameras: Query<&mut Projection, With<Camera>>,
-) {
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let (w, h) = (window.resolution.width(), window.resolution.height());
-    if w <= 0.0 || h <= 0.0 {
-        return;
-    }
-    let aspect = w / h;
-    for mut projection in &mut cameras {
-        if let Projection::Perspective(ref mut persp) = *projection
-            && (persp.aspect_ratio - aspect).abs() > f32::EPSILON
-        {
-            let old = persp.aspect_ratio;
-            persp.aspect_ratio = aspect;
-            debug!("相机宽高比随窗口修正：{old:.4} → {aspect:.4}");
-        }
-    }
 }
 
 /// 相机就位核验（Update，报一次即歇）：相机 1 台且 GlobalTransform 前向
