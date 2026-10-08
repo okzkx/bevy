@@ -40,7 +40,7 @@ pub trait LogDebug<T> {
 impl<T, D: std::fmt::Debug> LogDebug<T> for std::result::Result<T, D> {
     fn info(self) -> Self {
         self.map_err(|d| {
-            format!("{d:?}").lines().next().map(|l| info!("{l}"));
+            format!("{d:?}").lines().next().inspect(|l| info!("{l}"));
             d
         })
     }
