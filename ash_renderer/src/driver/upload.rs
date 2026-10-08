@@ -4,8 +4,9 @@
 //! 资源操作全部走 [`crate::vulkan`] 的 pool/uploader/images 出口。
 //!
 //! 时序(施工计划 §2 终态表):PostUpdate 采集 → **Last:准备+上传提交** →
-//! 同帧图形提交(图形等票据是 3.4 接 draw 时的事)。本系统住 `Last`,由
-//! [`crate::driver::frame`] 的 `draw_frame` 链成序(先上传后画),失败两 Tier:
+//! 同帧图形提交(图形侧等票据=draw 挂 ticket 信号量等待,见 frames.rs)。
+//! 本系统住 `Last`,由 [`crate::driver::host`] 的 `draw_frame` 链成序(先上传
+//! 后画),失败两 Tier:
 //! 资产未到货/转换拒绝 = Tier①(跳过重试或 warn 一次),Vulkan/账本失败 =
 //! Tier②(error + `AppExit::error()` 优雅退出;提交失败不发布票据,池内
 //! bump 游标随下次容量保证自然前移,不留指向未上传数据的账本行)。
@@ -305,7 +306,7 @@ pub(crate) fn flush_uploads(
             }
             // —— 3.3.4 槽位发布:提交成功 → 分槽(采样器按功能键去重) → 驻留登记
             // 带槽位。只写 free list 的新槽,覆盖竞态在结构上不存在;采样 draw 的
-            // "上传完成才可使用"由票据承担(3.4 接 draw 时挂 ticket 信号量等待)。
+            // "上传完成才可使用"由票据承担(图形提交挂 draw 的 ticket 信号量等待)。
             // 发布失败 = 槽容量耗尽,按 Tier② 冒泡(施工计划:不静默截断)
             let mut sampler_slots_hit = HashSet::new();
             for ((id, _, spec), (gid, gpu)) in image_specs.iter().zip(gpu_images) {
