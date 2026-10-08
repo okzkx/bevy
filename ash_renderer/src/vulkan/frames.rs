@@ -1,5 +1,4 @@
-//! 帧级资源（施工④从 vulkan.rs 拆出；3.4 生长出深度附件与绘制录制）：命令池/命令缓冲
-//! + 每帧"image_available + fence + 深度附件"。
+//! 帧级资源：命令池/命令缓冲 + 每帧"image_available + fence + 深度附件"。
 //!
 //! 生命周期四层里的"帧级"（VulkanContext字段释义：从Entry到Swapchain.md §12）：MAX_FRAMES_IN_FLIGHT 组
 //! 轮转复用，CPU 最多领先 GPU 这么多帧。与 swapchain 解耦的是帧槽对象，修复后各归其位：

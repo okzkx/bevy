@@ -226,14 +226,14 @@ impl GraphicsPipeline {
                 .vertex_attribute_descriptions(&vertex_attributes);
             let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
                 .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-            // viewport/scissor 动态：尺寸随 swapchain 逐帧给（负高度翻转见模块注释）
+            // viewport/scissor 动态：尺寸随 swapchain 逐帧给（正高度直出，朝向定案见模块注释）
             let viewport_state = vk::PipelineViewportStateCreateInfo::default()
                 .viewport_count(1)
                 .scissor_count(1);
             let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
                 .polygon_mode(vk::PolygonMode::FILL)
-                // M2 关剔除：负 viewport 镜像绕向待核验 + HoseMat 双面 + 镜片按
-                // 不透明覆盖——三者齐备后才选正面方向与剔除变体（面板定案）
+                // M2 关剔除：HoseMat 双面 + 镜片按不透明覆盖；正高度直出未镜像
+                // 绕向，开剔除前的绕向核验另立判定（面板定案）
                 .cull_mode(vk::CullModeFlags::NONE)
                 .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
                 .line_width(1.0);
@@ -283,7 +283,7 @@ impl GraphicsPipeline {
             info!(
                 "图形管线就绪: dynamic rendering（color {color_format:?} / depth {depth_format:?}），\
                  顶点输入 32B 交错（pos/normal/uv @ 0/12/24），reverse-Z（clear 0 + GREATER），\
-                 viewport 负高度翻转，剔除关，push 96B（0/64/68/80），set0/set1 来自常驻表"
+                 viewport 正高度直出，剔除关，push 96B（0/64/68/80），set0/set1 来自常驻表"
             );
             Ok(Self {
                 device: device.clone(),

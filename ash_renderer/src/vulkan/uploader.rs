@@ -25,11 +25,11 @@
 //! 访问掩码被忽略,填 BOTTOM_OF_PIPE/空只满足旧式屏障非零前提,依据
 //! sync.adoc §Queue Family Ownership Transfer)。配对的 **acquire** 记在图形族
 //! 的提交里(acquire 的 srcAccessMask 同样被忽略,src 阶段按规范用
-//! ALL_COMMANDS 等待 release 完成)——M2 帧循环只清屏,图形尚不消费池数据,
-//! 故正常路径 `releases` 为空、acquire 机制由探针跨族组全链实证,3.4 接 draw
-//! 时按同一形状接线。同族回退(无专用 transfer 族的设备)无所有权转移,但
-//! "等票据 + TRANSFER→消费屏障"的内存依赖仍在,同族形状已由 memory_probe
-//! 闭环(零 VUID)覆盖。
+//! ALL_COMMANDS 等待 release 完成)。**生产路径不走让渡**:图像与池按 CONCURRENT
+//! 双族共享创建(与 [`super::images`]/[`super::pool`] 同款定案),故 `releases`/
+//! `image_releases` 恒空;release/acquire 录制代码保留,由探针跨族组全链实证。
+//! 同族回退(无专用 transfer 族的设备)无所有权转移,但"等票据 + TRANSFER→
+//! 消费屏障"的内存依赖仍在,同族形状已由 memory_probe 闭环(零 VUID)覆盖。
 
 use std::slice;
 
@@ -499,8 +499,8 @@ impl Uploader {
             }
             for release in &batch.releases {
                 // release:dst 阶段/访问掩码被规范声明为"忽略"(ownership transfer),
-                // 填 BOTTOM_OF_PIPE/空只满足旧式屏障掩码非零前提;配对 acquire 在
-                // 图形族提交侧(全链形状见探针跨族组,3.4 按此接线)
+                // 填 BOTTOM_OF_PIPE/空只满足旧式屏障掩码非零前提;配对 acquire
+                // 由探针跨族组全链实证(生产路径 CONCURRENT 共享,不走让渡)
                 let owned = vk::BufferMemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                     .src_queue_family_index(queue_family)

@@ -1,4 +1,4 @@
-//! Vulkan 资源层：按生命周期分三个子模块（VulkanContext字段释义：从Entry到Swapchain.md §12）。
+//! Vulkan 资源层：按生命周期分层（VulkanContext字段释义：从Entry到Swapchain.md §12）。
 //!
 //! | 子模块 | 生命周期 | 职责 |
 //! |---|---|---|

@@ -1,4 +1,4 @@
-//! ash Vulkan 进程级上下文（step2 施工③④拆分）：Entry → Instance(+验证层) →
+//! ash Vulkan 进程级上下文：Entry → Instance(+验证层) →
 //! Win32 Surface → PhysicalDevice → Device(+dynamicRendering+timelineSemaphore) →
 //! Queue（图形 + transfer，同族则合一）。
 //!
@@ -13,7 +13,7 @@
 //!   `impl Drop`）——销毁全部手动、按 Messenger ← Surface ← Device ← Instance 反序；
 //! - `Entry` 内持 libloading 句柄，提前丢它会卸载 vulkan-1.dll，必须与 Instance 同寿命；
 //! - bevy 退出时 runner `exiting` 回调会清场（清场序对 Resource 是任意的），正常退出
-//!   走 main.rs 的 `teardown_vulkan`（OnAppExitSystems）反序拆除，本 Drop 只是兜底。
+//!   走 `driver::host` 的 `teardown_vulkan`（OnAppExitSystems）反序拆除，本 Drop 只是兜底。
 
 use std::ffi::{c_char, c_void};
 use std::num::NonZeroIsize;
