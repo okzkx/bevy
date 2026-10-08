@@ -1,6 +1,6 @@
 //! 图像资源层（施工 3.3.1）：bevy `Image` → VkImage/view/sampler，资产身份驻留缓存。
 //!
-//! 三条机制约束来自显存机制篇判定线（.agent/docs/3-静态取数链路/3.3-贴图与bindless描述符/
+//! 三条机制约束来自显存机制篇判定线（.agents/docs/3-静态取数链路/3.3-贴图与bindless描述符/
 //! 显存机制：Buffer与Image之别、swizzle不透明与访问路径特化.md §0）：
 //! 1. OPTIMAL tiling image 的内容不能按字节读写——上传走 `vkCmdCopyBufferToImage`
 //!    （uploader.rs 的图像拷贝段），读回走 `vkCmdCopyImageToBuffer`；swizzle 重排由

@@ -2,7 +2,7 @@
 //! Win32 Surface → PhysicalDevice → Device(+dynamicRendering+timelineSemaphore) →
 //! Queue（图形 + transfer，同族则合一）。
 //!
-//! 生命周期四层（详见 .agent/docs/2-宿主壳/材料/VulkanContext字段释义：从Entry到Swapchain.md §12）：
+//! 生命周期四层（详见 .agents/docs/2-宿主壳/材料/VulkanContext字段释义：从Entry到Swapchain.md §12）：
 //! - 本结构 = 进程级（随进程活）+ Surface（窗口级，单窗宿主壳中并入）；
 //! - resize 级的 Swapchain 与帧级的命令缓冲/fence/信号量在同层 `swapchain` / `frames` 子模块。
 //!

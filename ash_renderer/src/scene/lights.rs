@@ -5,7 +5,7 @@
 //! 官方默认配置一致），3.5 读 GlobalAmbientLight 进 UBO。方向光沿实体 forward 照射
 //!（bevy_light/src/directional_light.rs:25），所以灯只写朝向不写位置。机制与计划
 //! §6.4 的订正记录见
-//! `.agent/docs/3-静态取数链路/3.1-ECS侧取数/3.1.3-相机与灯光：引擎层自建与宽高比第四补位.md`。
+//! `.agents/docs/3-静态取数链路/3.1-ECS侧取数/3.1.3-相机与灯光：引擎层自建与宽高比第四补位.md`。
 
 use std::f32::consts::PI;
 

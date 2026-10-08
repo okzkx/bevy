@@ -10,7 +10,7 @@
 //! 顶点/贴图等内容留在资产容器——禁渲染后主世界 Assets 数据常驻（施工计划 §6.9），
 //! 3.2 上传与 3.4 DrawList 从快照出发去容器取数。
 //!
-//! 机制与证据：`.agent/docs/3-静态取数链路/3.1-ECS侧取数/3.1.4-采集系统：PostUpdate帧末直读与CollectedScene快照.md`
+//! 机制与证据：`.agents/docs/3-静态取数链路/3.1-ECS侧取数/3.1.4-采集系统：PostUpdate帧末直读与CollectedScene快照.md`
 
 use std::collections::HashSet;
 

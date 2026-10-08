@@ -12,7 +12,7 @@
 //! | [`collect`] | 场景采集：PostUpdate 帧末直读 primitive 三样，产 CollectedScene 快照 | 3.1.4 |
 //! | `util` | 子模块公共小工具 | — |
 //!
-//! 机制与证据：`.agent/docs/3-静态取数链路/3.1-ECS侧取数/`
+//! 机制与证据：`.agents/docs/3-静态取数链路/3.1-ECS侧取数/`
 
 mod camera;
 mod collect;

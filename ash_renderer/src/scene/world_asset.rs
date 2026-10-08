@@ -2,7 +2,7 @@
 //!
 //! 进场本身只有三行（load + spawn + 轮询到货）；配额的三个"禁渲染补位"
 //! （ImageLoader 注册、反射注册、资产根路径）机制见
-//! `.agent/docs/3-静态取数链路/3.1-ECS侧取数/3.1.2-场景进场：一个load请求与三个禁渲染补位.md`。
+//! `.agents/docs/3-静态取数链路/3.1-ECS侧取数/3.1.2-场景进场：一个load请求与三个禁渲染补位.md`。
 
 use bevy::{
     gltf::GltfAssetLabel,

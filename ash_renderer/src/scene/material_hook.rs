@@ -7,7 +7,7 @@
 //! 裸 `Mesh3d` 实体。本模块手动接线：`init_asset` 补容器，自写 [`AshMaterialHook`]
 //! 复刻官方三钩子，标签格式与 loader 的 `material_label` 约定逐字对齐。
 //!
-//! 机制与证据：`.agent/docs/3-静态取数链路/3.1-ECS侧取数/3.1.1-材质缝接线：自写AshMaterialHook三钩子.md`
+//! 机制与证据：`.agents/docs/3-静态取数链路/3.1-ECS侧取数/3.1.1-材质缝接线：自写AshMaterialHook三钩子.md`
 
 use bevy::{
     asset::{AssetApp, LoadContext},
