@@ -34,8 +34,7 @@ use bevy::{
 use crate::{
     scene::CollectedScene,
     vulkan::{
-        sampler_key, GpuImage, ImageCache, ImageRelease, MeshPool, StagingImageCopy, UploadBatch,
-        Uploader,
+        sampler_key, GpuImage, ImageCache, MeshPool, StagingImageCopy, UploadBatch, Uploader,
     },
 };
 
@@ -194,7 +193,12 @@ pub(crate) fn flush_uploads(
     };
     // —— 4a) 建图(Tier②):每张贴图 VkImage+dedicated memory+view+sampler——
     // 创建先于排批(拷贝目标必须已存在);提交失败走 Tier② 退出,局部变量随
-    // 返回 Drop,不留半建对象
+    // 返回 Drop,不留半建对象。跨族设备:CONCURRENT 双族(3.4 定案,与池同款)
+    let image_sharing: Vec<u32> = if ctx.transfer_queue_family_index != ctx.queue_family_index {
+        vec![ctx.transfer_queue_family_index, ctx.queue_family_index]
+    } else {
+        Vec::new()
+    };
     let mut gpu_images: Vec<(AssetId<Image>, GpuImage)> = Vec::with_capacity(image_specs.len());
     for (id, _, spec) in &image_specs {
         match GpuImage::create(
@@ -203,6 +207,7 @@ pub(crate) fn flush_uploads(
             ctx.physical_device,
             ctx.memory_contract(),
             spec,
+            &image_sharing,
         ) {
             Ok(g) => gpu_images.push((*id, g)),
             Err(e) => {
@@ -274,28 +279,15 @@ pub(crate) fn flush_uploads(
             height: spec.height,
         });
     }
-    // 跨族让渡:本机有专用 transfer 族时,贴图所有权随批次末尾让渡给图形族
-    // (release 与"迁出为可采样布局"合成一条屏障,见 uploader 图像段)。
-    // 图形侧 acquire 随首个消费者落地(3.3.3 描述符表接线时),与 3.2 buffer 的
-    // "release 挂产方提交、acquire 挂消费方提交"同一形状。
-    let image_releases: Vec<ImageRelease> =
-        if ctx.transfer_queue_family_index != ctx.queue_family_index {
-            gpu_images
-                .iter()
-                .map(|(_, gpu)| ImageRelease {
-                    image: gpu.image(),
-                    to_family: ctx.queue_family_index,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+    // 跨族让渡已随 3.4 定案退役:图像与池一样走 CONCURRENT 双族共享,不再
+    // 记录 release/待办 acquire——上传批次的图像收尾是纯布局转换(IGNORED 族),
+    // 跨队列内存可见性由图形提交等票据信号量收口(见 frames.rs 提交段注释)。
+    // EXCLUSIVE 的 release/acquire 成对语义保留在 image_probe 组 C 作机制实证。
     // —— 5) 一次合批 = 一个 staging 范围 + 一次 transfer 提交(3.2.4/3.3.1)——
     let batch = UploadBatch {
         staging,
         uploads,
         image_uploads,
-        image_releases,
         ..Default::default()
     };
     match uploader.submit_batch(batch) {

@@ -370,8 +370,10 @@ impl Uploader {
                 // 图像段(3.3.1):布局迁移与 buffer 读写次序是两类问题(显存机制篇
                 // 判定线 3),独立录制,不套 buffer barrier 模板。
                 //
-                // 前置:UNDEFINED → TRANSFER_DST。首用自持——src/dst 族号显式落
-                // transfer 族(不假手 IGNORED,把"这图从此归谁"写成代码)。UNDEFINED
+                // 前置:UNDEFINED → TRANSFER_DST。首用自持——src/dst 族号用 IGNORED:
+                // 3.4 定案后生产图像是 CONCURRENT 双族(显式族号会被 VUID 拒,必须
+                // IGNORED),探针的 EXCLUSIVE 图像无让渡场景时 IGNORED 同样合法;
+                // "把归谁写成代码"的显式族号只保留在 release 屏障(下方)。UNDEFINED
                 // 起点无先前访问要罩,src 作用域为空(TOP_OF_PIPE 只满足非零前提);
                 // 对比 D6 的进场屏障:那里 UNDEFINED 迁移前有 acquire 读要罩,srcStage
                 // 必须提到 COLOR_ATTACHMENT_OUTPUT——两处形状不同是语义不同,不是模板。
@@ -381,8 +383,8 @@ impl Uploader {
                         .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                         .old_layout(vk::ImageLayout::UNDEFINED)
                         .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .src_queue_family_index(queue_family)
-                        .dst_queue_family_index(queue_family)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                         .image(image)
                         .subresource_range(color_mip0());
                     device.cmd_pipeline_barrier(

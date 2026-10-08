@@ -117,6 +117,8 @@ wait_dst_stage_mask: [COLOR_ATTACHMENT_OUTPUT]     // frames.rs:208
 
 同步骨架(两帧在飞 + 双信号量 + fence)不动,生长在掩码与队列上:上传顶点/纹理会引入**搬运阶段 → 图形阶段**的屏障(srcStage=TRANSFER → dstStage=VERTEX_INPUT / 片段采样);transfer 队列分家时跨队列交接走信号量、图像所有权转移靠屏障的 queue family 索引(EXCLUSIVE 模式暂用不上);多队列排班可换**timeline semaphore**(带数值、CPU 可查,等于信号量与栅栏合体)。判定线不变:闸门双方在哪,决定用哪种闸门。
 
+> **生长已兑现（2026-09-29,3.4）**：《[GPU同步策略：以record_frame为例——进场屏障、提交等待与流水线阶段](../../3-静态取数链路/3.4-管线与绘制/GPU同步策略：以record_frame为例——进场屏障、提交等待与流水线阶段.md)》按定稿版 `record_frame` 走完全帧七道闸门（深度附件与上传票据在场）。注意本篇 §2.1 的进场屏障 `src=TOP_OF_PIPE` 与代码锚点 `frames.rs:120-220` 均为当时形状——D6 修复后 src 落点改挂 COLOR_ATTACHMENT_OUTPUT（落进 acquire 等待作用域），现行理由见 3.4 篇 §3.3/§4.1。
+
 ## 8. 自测三问(能答出才算过)
 
 1. 屏障的四个掩码,哪两个管时间、哪两个管内存?只配时间会出什么事故?

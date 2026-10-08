@@ -242,17 +242,50 @@ impl GpuBuffer {
         size: u64,
         role: BufferRole,
     ) -> Result<Self, VulkanError> {
+        Self::create_with_families(device, contract, size, role, &[])
+    }
+
+    /// 共享模式变体:`families` 含两个及以上队列族时按 CONCURRENT 创建(两族都
+    /// 声明为可访问集合),否则 EXCLUSIVE。3.4 定案:顶点/索引大池在"有专用
+    /// transfer 族"的设备上走 CONCURRENT——池被 transfer 反复写、graphics 长期读,
+    /// EXCLUSIVE 的所有权乒乓需要跨队列排序链(下一批 transfer 的 acquire 必须排在
+    /// 上一帧 graphics 的 acquire 之后,只能用信号量串起来,上传延迟 +1 帧加状态机);
+    /// CONCURRENT 用显式族集合换掉所有权跟踪,与 wgpu-hal 同构。内存可见性不因此
+    /// 放松:transfer 写 → graphics 读仍由票据信号量的内存依赖收口(帧录制在
+    /// ALL_COMMANDS 等票据)。图像侧不走本变体——图像一次性发布,EXCLUSIVE 的
+    /// release/acquire 成对语义已由探针组 C 实证,维持原形状。
+    ///
+    /// # Errors
+    /// 同 [`Self::create`]。
+    pub fn create_with_families(
+        device: &Device,
+        contract: &MemoryContract,
+        size: u64,
+        role: BufferRole,
+        families: &[u32],
+    ) -> Result<Self, VulkanError> {
         if size == 0 {
             return Err(VulkanError::Init(
                 "内存契约:size 必须大于 0(VkBufferCreateInfo::size 为 0 非法)".into(),
             ));
         }
+        debug_assert!(
+            families.len() < 2 || families[0] != families[1],
+            "CONCURRENT 族集合须是两个不同族(同族设备走 EXCLUSIVE,调用方负责分流)"
+        );
+        let concurrent = families.len() >= 2;
         // # Safety:create_buffer 参数全为合法默认 + 契约 usage,无裸指针
         let buffer = unsafe {
             device.create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(size)
-                    .usage(role.usage()),
+                    .usage(role.usage())
+                    .sharing_mode(if concurrent {
+                        vk::SharingMode::CONCURRENT
+                    } else {
+                        vk::SharingMode::EXCLUSIVE
+                    })
+                    .queue_family_indices(families),
                 None,
             )
         }?;

@@ -6,7 +6,7 @@
 //! |---|---|---|
 //! | `Startup` | `init_vulkan` | `try_init_vulkan` 用 `?` 串链创建三资源（**全有或全无**）；失败 → `error!` + `AppExit::error()` 优雅退出 |
 //! | `Last` | `flush_uploads`（upload 模块的 `AshUploadPlugin` 注册，before 本表下一行） | 3.2.4 上传链：快照去重 → 合批 transfer 提交，先于帧循环 |
-//! | `Last` | `draw_frame.run_if(resource_exists::<Context>)` | 帧循环（排在采集之后、`OnAppExitSystems` 之前）：resize 闸门（最小化整帧让路；尺寸变化帧首按需重建）→ 等 fence → acquire → 录制清屏并提交 → present |
+//! | `Last` | `draw_frame.run_if(resource_exists::<Context>)` | 帧循环（排在采集之后、`OnAppExitSystems` 之前）：resize 闸门（最小化整帧让路；尺寸变化帧首按需重建 swapchain+深度附件）→ 等 fence → acquire → 组装 DrawList → 录制（清屏+绘制）并提交 → present |
 //! | `Last` | `teardown_vulkan.in_set(OnAppExitSystems)` | AppExit 写入后、despawn_windows 杀 hwnd 前反序拆除 |
 //!
 //! 本模块不持有 Vulkan 状态，只编排三个生命周期模块暴露的类型：
@@ -24,8 +24,11 @@
 
 use bevy::{
     app::OnAppExitSystems,
+    camera::{Camera, Projection},
     ecs::system::NonSendMarker,
+    ecs::system::SystemParam,
     image::{CompressedImageFormatSupport, CompressedImageFormats},
+    math::Mat4,
     prelude::*,
     window::{PrimaryWindow, RawHandleWrapper, WindowResized},
 };
@@ -33,8 +36,8 @@ use bevy::{
 use crate::{
     error::VulkanError,
     vulkan::{
-        AcquireOutcome, BindlessTables, Context, FramePool, ImageCache, MeshPool, Swapchain,
-        Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
+        AcquireOutcome, BindlessTables, Context, DrawCall, FrameDraw, FramePool, GraphicsPipeline,
+        ImageCache, MeshPool, PushData, Swapchain, Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
 
@@ -105,17 +108,18 @@ fn init_vulkan(
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let (ctx, swapchain, frames, pool, uploader, image_cache, tables) = match try_init_vulkan(&wrapper)
-    {
-        Ok(ok) => ok,
-        Err(e) => {
-            error!("Vulkan 初始化失败，宿主壳优雅退出: {e}");
-            exit.write(AppExit::error());
-            return; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过
-        }
-    };
+    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, pipeline) =
+        match try_init_vulkan(&wrapper)
+        {
+            Ok(ok) => ok,
+            Err(e) => {
+                error!("Vulkan 初始化失败，宿主壳优雅退出: {e}");
+                exit.write(AppExit::error());
+                return; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过
+            }
+        };
     info!(
-        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞 + MeshPool/Uploader（3.2 上传链）+ ImageCache（3.3.1 贴图）+ BindlessTables（3.3.3 常驻表，容量 {TABLE_CAPACITY}）；清屏循环自下一帧（Last）起"
+        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader（3.2 上传链）+ ImageCache（3.3.1 贴图）+ BindlessTables（3.3.3 常驻表，容量 {TABLE_CAPACITY}）+ GraphicsPipeline（3.4.2）；清屏+绘制自下一帧（Last）起"
     );
     // 插入顺序 = 创建顺序；World 清场顺序不定，退出时的反序拆除见 teardown_vulkan
     commands.insert_resource(ctx);
@@ -125,6 +129,7 @@ fn init_vulkan(
     commands.insert_resource(uploader);
     commands.insert_resource(image_cache);
     commands.insert_resource(tables);
+    commands.insert_resource(pipeline);
 }
 
 /// 初始化链路本体：`?` 串起创建链，任一层失败即短路返回 `VulkanError`——
@@ -140,6 +145,7 @@ type InitChain = (
     Uploader,
     ImageCache,
     BindlessTables,
+    GraphicsPipeline,
 );
 
 fn try_init_vulkan(wrapper: &Query<&RawHandleWrapper, With<PrimaryWindow>>) -> Result<InitChain, VulkanError> {
@@ -150,9 +156,11 @@ fn try_init_vulkan(wrapper: &Query<&RawHandleWrapper, With<PrimaryWindow>>) -> R
     })?;
     let ctx = Context::new(wrapper)?;
     let swapchain = Swapchain::new(&ctx)?;
-    let frames = FramePool::new(&ctx)?;
-    // 3.2 上传链:池懒建(首帧按需分配),staging 环 2 槽 × 1MiB 起步(按需扩)
-    let pool = MeshPool::new(&ctx.device, ctx.memory_contract());
+    // 3.4.3 深度附件按帧槽建(尺寸取 swapchain 首建 extent,重建走 rebuild_depth)
+    let frames = FramePool::new(&ctx, swapchain.extent)?;
+    // 3.2 上传链:池懒建(首帧按需分配);有专用 transfer 族时两族 CONCURRENT 共享
+    //(3.4 定案:所有权乒乓不值得,见 GpuBuffer::create_with_families 定案注释)
+    let pool = MeshPool::new(&ctx.device, ctx.memory_contract(), &pool_sharing_families(&ctx));
     let mut uploader = Uploader::new(
         &ctx.device,
         ctx.memory_contract(),
@@ -174,7 +182,28 @@ fn try_init_vulkan(wrapper: &Query<&RawHandleWrapper, With<PrimaryWindow>>) -> R
         ctx.queue_family_index,
         TABLE_CAPACITY,
     )?;
-    Ok((ctx, swapchain, frames, pool, uploader, image_cache, tables))
+    // 3.4 跨族接线已随 CONCURRENT 定案收窄:fallback 无需登记待办 acquire
+    // 3.4.2:图形管线(吃 swapchain 的渲染 view 格式与帧槽深度格式,布局与常驻表同源)
+    let pipeline = GraphicsPipeline::new(
+        &ctx,
+        swapchain.view_format,
+        crate::vulkan::DEPTH_FORMAT,
+        tables.set0_layout(),
+        tables.set1_layout(),
+    )?;
+    Ok((
+        ctx, swapchain, frames, pool, uploader, image_cache, tables, pipeline,
+    ))
+}
+
+/// 池 buffer 的共享族集合:有专用 transfer 族(≠graphics)时返回两族(池按
+/// CONCURRENT 创建,transfer 写 + graphics 读),同族设备返回空(EXCLUSIVE)。
+fn pool_sharing_families(ctx: &Context) -> Vec<u32> {
+    if ctx.transfer_queue_family_index != ctx.queue_family_index {
+        vec![ctx.transfer_queue_family_index, ctx.queue_family_index]
+    } else {
+        Vec::new()
+    }
 }
 
 /// 帧循环的 resize 闸门状态（`draw_frame` 私有，`Local` 跨帧保持）。
@@ -200,31 +229,67 @@ pub(crate) struct ResizeGate {
     logged_minimized: bool,
 }
 
+/// draw_frame 的只读参数束（SystemParam，与 3.1.4 CollectData / 3.2 upload 的
+/// UploadData 同款：参数束装下成排的只读依赖，系统签名保持精简）。
+#[derive(SystemParam)]
+pub(crate) struct FrameInput<'w, 's> {
+    ctx: Res<'w, Context>,
+    scene: Res<'w, crate::scene::CollectedScene>,
+    std_materials: Res<'w, Assets<StandardMaterial>>,
+    pool: Res<'w, MeshPool>,
+    image_cache: Res<'w, ImageCache>,
+    pipeline: Res<'w, GraphicsPipeline>,
+    uploader: Res<'w, Uploader>,
+    cameras: Query<'w, 's, (&'static Projection, &'static GlobalTransform), With<Camera>>,
+}
+
+/// DrawList 消费状态（跨帧 `Local`）：缺资源/相机告警去重 + 材质覆盖一次性收账。
+#[derive(Default)]
+pub(crate) struct DrawListState {
+    /// "快照未全部可画（缺驻留/缺材质）"已 warn 过（下帧自愈，不逐帧刷屏）。
+    warned_pending: bool,
+    /// 相机缺席告警只报一次。
+    warned_no_camera: bool,
+    /// 不透明调试覆盖策略报一次（首个完整 DrawList 时）。
+    override_logged: bool,
+}
+
 /// ash 帧循环。一次 update = 一帧：
-/// resize 闸门 → 等帧槽位空出 → acquire → 录制清屏并提交 → present。
+/// resize 闸门 → 等帧槽位空出 → acquire → 组装 DrawList → 录制（清屏+绘制）并提交 → present。
 /// 资源内聚在各模块：本系统只做编排和错误分流（OUT_OF_DATE 是"重试"不是"失败"）。
 ///
 /// 住址：`Last`（2026-09-22 自 Update 挪正）。帧内 relay 同帧闭环——Update 变更 →
 /// PostUpdate 传播+采集（`scene::collect` 产快照）→ Last 提交，与官方 bevy 未开
-/// 流水线的"帧末收集、同帧提交"同形；原 Update 钉位是步骤 2 清屏时代的产物，
-/// "N 帧末采、N+1 帧初画"的跨帧滞后在单线程宿主里买不到任何并行（伪流水线纯支出），
-/// 故归位。显式 `.before(OnAppExitSystems)` 钉退出帧次序：本帧照常画完，teardown
-/// 才反序拆除。resize 消息不受影响——缓冲在 `First` 换（bevy_app/src/sub_app.rs），
-/// winit 回调写入的消息本帧 Update/Last 都可读。
+/// 流水线的"帧末收集、同帧提交"同形；显式 `.before(OnAppExitSystems)` 钉退出帧次序。
+/// 3.4.5 起 Last 消费快照：查驻留账本（MeshPool/ImageCache）+ 材质容器组装
+/// DrawList（拓扑快照不跨 CPU 帧，GPU 执行异步——上传完成由票据信号量在 GPU 侧
+/// 等待，CPU 不阻塞）；材质按 M2 不透明调试策略覆盖（详见 record 后的收账日志）。
 #[expect(
     clippy::too_many_arguments,
     reason = "bevy 系统的参数表即依赖注入清单，逐项声明是框架惯例，非函数签名设计味道"
 )]
 pub(crate) fn draw_frame(
-    ctx: Res<Context>,
+    input: FrameInput,
     mut swapchain: ResMut<Swapchain>,
     mut frames: ResMut<FramePool>,
+    mut tables: ResMut<BindlessTables>,
     mut resized: MessageReader<WindowResized>,
     time: Res<Time>,
     mut gate: Local<ResizeGate>,
+    mut draw_state: Local<DrawListState>,
     mut exit: MessageWriter<AppExit>,
     _main_thread: NonSendMarker,
 ) {
+    let FrameInput {
+        ref ctx,
+        ref scene,
+        ref std_materials,
+        ref pool,
+        ref image_cache,
+        ref pipeline,
+        ref uploader,
+        ref cameras,
+    } = input;
     // —— 闸门①：读 resize 消息。一次 update 可能积压多条（拖拽 125Hz 输入 vs 60fps
     // 帧），逐条刷状态，最新一条定生死：非零尺寸 = 正常/恢复，(0,0) = 最小化。
     for msg in resized.read() {
@@ -251,14 +316,18 @@ pub(crate) fn draw_frame(
     }
     // —— 闸门③：尺寸变化 → 帧首按需重建（frenderer 的 dirty_swapchain 同款时机，
     // 移到 acquire 之前）。rebuild 幂等（尺寸没变就空手而归），拖拽中每步一建、
-    // 帧循环不断流——acquire 永远落在新 swapchain 上（对失配 swapchain 的 acquire
-    // 会阻塞，见结构注释②）。重建日志由 swapchain 的"swapchain 就绪"承担（只在
-    // 真重建时打）。acquire 报的 OUT_OF_DATE 走不到这里（下方立即重建）。
+    // 帧循环不断流——acquire 永远落在新 swapchain 上。深度附件随其后按新 extent
+    // 重建（同样幂等；重建自带 device_wait_idle，在飞旧深度不可能被引用）。
     if gate.pending {
         gate.pending = false;
-        if let Err(e) = swapchain.rebuild(&ctx) {
+        if let Err(e) = swapchain.rebuild(ctx) {
             bevy::log::warn!("resize 后重建失败，下帧重试: {e}");
             gate.pending = true;
+            return;
+        }
+        if let Err(e) = frames.rebuild_depth(ctx, swapchain.extent) {
+            error!("深度附件重建失败，渲染链无法继续，优雅退出: {e}");
+            exit.write(AppExit::error());
             return;
         }
     }
@@ -282,7 +351,7 @@ pub(crate) fn draw_frame(
             index
         }
         Err(VulkanError::SwapchainOutOfDate) => {
-            if let Err(e) = swapchain.rebuild(&ctx) {
+            if let Err(e) = swapchain.rebuild(ctx) {
                 bevy::log::warn!("acquire 过时后重建失败: {e}");
             }
             return;
@@ -294,26 +363,123 @@ pub(crate) fn draw_frame(
         }
     };
 
-    // 3) 录制 + 提交（清屏颜色随时间缓慢呼吸，肉眼可证"帧在动"）。此刻 image_available
-    // 已被 present engine 置位、image 已到手——从这里起任何失败都让同步状态无法
-    // 原样恢复（signal 无人等 / fence 已 reset 无人 signal），按 Tier② 冒泡退出
-    //（D2：不得 warn 后继续，那是"等无人 signal 的 fence"死锁面）
+    // 3) 组装 DrawList（3.4.5）：同帧快照 → 驻留账本/资产容器 → push + 池引脚。
+    // mesh/材质未驻留/未到货 = 该 primitive 暂缓（Tier①，下帧快照再来）；缺
+    // base color 贴图 = fallback 白图照画（面板：缺资源用有效 fallback 或暂缓
+    // draw，贴图缺不拦几何）。
+    let mut draws: Vec<DrawCall> = Vec::with_capacity(scene.primitives.len());
+    let mut pending_rows = 0usize;
+    let mut alpha_override = 0usize;
+    for row in &scene.primitives {
+        let Some(slot) = pool.resident(row.mesh.id()) else {
+            pending_rows += 1;
+            continue;
+        };
+        let Some(material) = std_materials.get(&row.material) else {
+            pending_rows += 1;
+            continue;
+        };
+        let color = material.base_color.to_linear();
+        if color.alpha < 1.0 {
+            alpha_override += 1;
+        }
+        let slots = material
+            .base_color_texture
+            .as_ref()
+            .and_then(|handle| image_cache.slots(handle.id()))
+            .unwrap_or_else(BindlessTables::fallback_slots);
+        draws.push(DrawCall {
+            push: PushData {
+                model: row.model.to_cols_array(),
+                tex_index: slots.texture,
+                sampler_index: slots.sampler,
+                base_color: [color.red, color.green, color.blue, color.alpha],
+            },
+            vertex_base: slot.vertex_base(),
+            first_index: slot.first_index(),
+            index_count: slot.index_count,
+        });
+    }
+    if pending_rows > 0 {
+        if !draw_state.warned_pending {
+            draw_state.warned_pending = true;
+            info!(
+                "DrawList 暂缓 {pending_rows}/{} 行（mesh/材质未驻留或未到货，上传链自愈后消失）",
+                scene.primitives.len(),
+            );
+        }
+    } else {
+        draw_state.warned_pending = false;
+    }
+    if !draw_state.override_logged
+        && !scene.primitives.is_empty()
+        && pending_rows == 0
+    {
+        draw_state.override_logged = true;
+        info!(
+            "材质调试覆盖（M2）：{} 个 primitive 全部按不透明绘制——blend 关闭（alpha<1 的 {} 行照常画出，glTF BLEND 镜片在此列）；unlit 标志忽略，统一调试 Lambert（固定方向光+环境，3.5 分项对照）；贴图只采 base color 槽，其余四槽不进调试着色",
+            scene.primitives.len(),
+            alpha_override,
+        );
+    }
+
+    // 4) 相机 → view_proj → 本帧槽 UBO（3.5 扩灯光；复用安全 = wait_for_slot 的
+    // fence：写发生在上一轮使用完成之后）。相机缺席是场景装配问题，报一次后
+    // identity 兜底（画面不可读但不崩帧循环）。矩阵乘序/列主序与 WGSL 端同一约定。
+    let view_proj = match cameras.single() {
+        Ok((projection, global)) => {
+            projection.get_clip_from_view() * global.affine().inverse()
+        }
+        Err(_) => {
+            if !draw_state.warned_no_camera {
+                draw_state.warned_no_camera = true;
+                warn!("相机缺席：view_proj 用 identity 兜底（画面不可读属预期，查 3.1.3 相机组）");
+            }
+            Mat4::IDENTITY
+        }
+    };
+    if let Err(e) = tables
+        .frame_ubo(frames.current_index())
+        .write(0, &view_proj_bytes(&view_proj))
+    {
+        error!("帧 UBO 写失败，渲染链无法继续，优雅退出: {e}");
+        exit.write(AppExit::error());
+        return;
+    }
+
+    // 5) 录制 + 提交。此刻 image_available 已被 present engine 置位、image 已到手
+    //——从这里起任何失败都让同步状态无法原样恢复（signal 无人等 / fence 已 reset
+    // 无人 signal），按 Tier② 冒泡退出（D2：不得 warn 后继续，那是"等无人 signal
+    // 的 fence"死锁面）。上传票据在 GPU 侧等待（ALL_COMMANDS），CPU 不阻塞。
     let image = swapchain.images[index as usize];
     let view = swapchain.views[index as usize];
-    if let Err(e) = frames.record_clear_and_submit(
-        &ctx,
+    let frame_draw = FrameDraw {
+        pipeline: pipeline.pipeline(),
+        layout: pipeline.layout(),
+        set0: tables.resident_set(),
+        set1: tables.frame_set(frames.current_index()),
+        vertex_buffer: pool.vertex_buffer(),
+        index_buffer: pool.index_buffer(),
+        depth_view: frames.current().depth.view,
+        draws: &draws,
+        wait_ticket: uploader.last_issued_ticket(),
+        ticket_semaphore: uploader.ticket_semaphore(),
+        clear: clear_color(time.elapsed_secs_f64()),
+    };
+    if let Err(e) = frames.record_frame(
+        ctx,
         swapchain.render_finished[index as usize],
         image,
         view,
         swapchain.extent,
-        clear_color(time.elapsed_secs_f64()),
+        &frame_draw,
     ) {
         error!("录制/提交失败，渲染链无法继续，优雅退出: {e}");
         exit.write(AppExit::error());
         return;
     }
 
-    // 4) present：把画好的 image 交给 present engine，等它的信号量按 acquire 的
+    // 6) present：把画好的 image 交给 present engine，等它的信号量按 acquire 的
     // image index 取（D3），不按帧槽轮转。SUBOPTIMAL/OUT_OF_DATE 都只是标记 pending
     //（同 acquire 的次优），重建交给下个帧首的闸门③；其余真失败 Tier② 冒泡
     if let Err(e) = swapchain.present(ctx.queue, swapchain.render_finished[index as usize], index) {
@@ -333,6 +499,17 @@ pub(crate) fn draw_frame(
 fn clear_color(t: f64) -> [f32; 4] {
     let s = (t * 0.6).sin().abs() as f32;
     [0.02 + 0.03 * s, 0.06 + 0.13 * s, 0.14 + 0.22 * s, 1.0]
+}
+
+/// view_proj → 64B uniform 字节（set1 b0，FrameUniforms.view_proj）。列主序展平
+///（`to_cols_array`），与 WGSL `mat4x4f` 的列主序存储一致；排布手工按偏移写，
+/// 与 push 字节的 pack_push 同一纪律（不依赖 repr 对齐的巧合）。
+fn view_proj_bytes(m: &Mat4) -> [u8; 64] {
+    let mut out = [0u8; 64];
+    for (i, v) in m.to_cols_array().iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    out
 }
 
 /// 退出拆除：先排空队列，再按创建的相反顺序移除资源触发 Drop——FramePool（帧级）→
@@ -355,8 +532,11 @@ fn teardown_vulkan(world: &mut World) {
     world.remove_resource::<FramePool>();
     world.remove_resource::<Swapchain>();
     // 3.2/3.3 上传链与资产件随帧级之后拆除(对象依赖只到 Device,顺序相对自由;
-    // Context 必须最后——Device 归它销毁)。BindlessTables 先于 ImageCache:其
-    // 描述符集里的 view/sampler 句柄是贴图缓存资源的借用,先拆账本再拆本体
+    // Context 必须最后——Device 归它销毁)。GraphicsPipeline 在 BindlessTables 之前:
+    // 它的 layout 借用了常驻表的 set layouts,先拆管线再拆表;BindlessTables 先于
+    // ImageCache:其描述符集里的 view/sampler 句柄是贴图缓存资源的借用,先拆账本
+    // 再拆本体
+    world.remove_resource::<GraphicsPipeline>();
     world.remove_resource::<Uploader>();
     world.remove_resource::<MeshPool>();
     world.remove_resource::<BindlessTables>();
@@ -364,6 +544,6 @@ fn teardown_vulkan(world: &mut World) {
     world.remove_resource::<Context>();
     // 初始化失败路径资源从未插入，此处静默即可——error! 已在 init_vulkan 记过根因
     if had_vulkan {
-        info!("退出拆除完成：排空 → 帧级 → resize 级 → 资产级(池/上传/描述符表/贴图缓存) → 进程级");
+        info!("退出拆除完成：排空 → 帧级 → resize 级 → 管线 → 资产级(池/上传/描述符表/贴图缓存) → 进程级");
     }
 }

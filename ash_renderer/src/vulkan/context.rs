@@ -352,13 +352,33 @@ impl Context {
                     .queue_priorities(&queue_priority),
             );
         }
-        let device_exts = [ash::khr::swapchain::NAME.as_ptr()];
+        // 输出编码定案（3.4，纹理格式与Gamma篇 §6 待决翻面）：swapchain 保持
+        // B8G8R8A8_UNORM 底板（DWM 母语），渲染附件用同图 B8G8R8A8_SRGB view 别名
+        // （wgpu/bevy_render 同构：非 SRGB surface 套 sRGB view）。view 换格式需要
+        // image 带 MUTABLE_FORMAT——swapchain image 上它由本扩展 + 格式清单兑现
+        //（swapchain.rs 传 VkImageFormatListCreateInfo）。blend 仍在编码前的线性域
+        //（SRGB 的 ROP 编码在 blend 之后）。不支持 = 出局：本机验证支持与启用分开。
+        let device_ext_props = unsafe { instance.enumerate_device_extension_properties(physical_device) }
+            .map_err(|e| VulkanError::Init(format!("枚举设备扩展失败: {e}")))?;
+        let has_mutable_format = device_ext_props.iter().any(|p| unsafe {
+            std::ffi::CStr::from_ptr(p.extension_name.as_ptr()) == ash::khr::swapchain_mutable_format::NAME
+        });
+        if !has_mutable_format {
+            return Err(VulkanError::Init(
+                "设备不支持 VK_KHR_swapchain_mutable_format——输出编码定案（UNORM 底板 + SRGB view 别名）无法落地，出局".into(),
+            ));
+        }
+
+        let dev_exts = [
+            ash::khr::swapchain::NAME.as_ptr(),
+            ash::khr::swapchain_mutable_format::NAME.as_ptr(),
+        ];
         let device = unsafe {
             instance.create_device(
                 physical_device,
                 &vk::DeviceCreateInfo::default()
                     .queue_create_infos(&queue_infos)
-                    .enabled_extension_names(&device_exts)
+                    .enabled_extension_names(&dev_exts)
                     .push_next(&mut vulkan12)
                     .push_next(&mut vulkan13),
                 None,
@@ -385,7 +405,7 @@ impl Context {
         let memory_contract =
             unsafe { crate::vulkan::MemoryContract::new(&instance, physical_device) };
         info!(
-            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  features[支持→已启用]: timelineSemaphore {}→on  dynamicRendering {}→on  descriptorIndexing+4 位 {}→on  验证层 {}",
+            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  features[支持→已启用]: timelineSemaphore {}→on  dynamicRendering {}→on  descriptorIndexing+4 位 {}→on  swapchain_mutable_format on  验证层 {}",
             vk::api_version_major(dev_props.api_version),
             vk::api_version_minor(dev_props.api_version),
             vk::api_version_patch(dev_props.api_version),

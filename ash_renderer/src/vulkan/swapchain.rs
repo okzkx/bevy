@@ -8,6 +8,10 @@
 //!
 //! `pre_transform`/`composite_alpha`/`present_mode` 等选型与创建链（施工③）一致：
 //! MAILBOX 优先（FIFO 兜底）、BGRA8_UNORM 优先、EXCLUSIVE 共享、clipped。
+//!
+//! 3.4 输出编码定案：image 保持 UNORM 底板，view 套 SRGB 别名当渲染附件（needs
+//! `VK_KHR_swapchain_mutable_format` + VkImageFormatListCreateInfo，见 `new` 内定案
+//! 注释）——本结构新增 `view_format` 字段承载"底板 vs 渲染 view"两个格式。
 
 use ash::{khr::swapchain, vk, Device};
 use bevy::log::info;
@@ -42,7 +46,11 @@ pub struct Swapchain {
     /// host.rs 按 acquire 返回的 index 取用，**不是**按帧槽轮转；生命周期与
     /// swapchain 绑定，重建时随旧 image 集合一起销毁。
     pub render_finished: Vec<vk::Semaphore>,
+    /// swapchain 底板格式（present engine 的母语；D3 定案的 present 路径不碰 view）。
     pub format: vk::Format,
+    /// 渲染附件 view 的格式：底板 UNORM 时的 SRGB 别名（输出编码定案，3.4）——
+    /// 写入时 ROP 自动编码；别名不可用时 == `format`（缺位形态，重建日志有 warn）。
+    pub view_format: vk::Format,
     pub extent: vk::Extent2D,
 }
 
@@ -67,6 +75,43 @@ impl Swapchain {
             .find(|f| f.format == vk::Format::B8G8R8A8_UNORM)
             .copied()
             .unwrap_or(formats[0]);
+        // 输出编码定案（3.4，与 context.rs 的 swapchain_mutable_format 扩展配套）：
+        // swapchain image 保持 UNORM 底板，view 用 SRGB 别名当渲染附件——写入时由
+        // ROP 自动做线性→sRGB 编码（blend 在编码前，仍是线性域），present 直接读
+        // image 本体不经 view，编码结果原样上屏。别名合法性三件套：
+        // ① 设备扩展（context.rs 已查+启用）；② 创建时挂 VkImageFormatListCreateInfo
+        // 声明双格式（swapchain image 由此按 MUTABLE_FORMAT 形态创建）；③ SRGB 变体
+        // 的 color attachment 支持查过才用（支持与启用分开），不满足回退 UNORM 直出
+        // 并响亮记日志——输出编码缺位会在受光中间调上显形（偏暗），不能静默。
+        let srgb_alias = match surface_format.format {
+            vk::Format::B8G8R8A8_UNORM => {
+                let features = unsafe {
+                    ctx.instance
+                        .get_physical_device_format_properties(ctx.physical_device, vk::Format::B8G8R8A8_SRGB)
+                }
+                .optimal_tiling_features;
+                if features.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT) {
+                    Some(vk::Format::B8G8R8A8_SRGB)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let view_format = srgb_alias.unwrap_or(surface_format.format);
+        if srgb_alias.is_some() {
+            info!("输出编码：UNORM 底板 + SRGB view 别名（ROP 写出自动编码，着色器全程线性）");
+        } else {
+            bevy::log::warn!("输出编码缺位：swapchain {:?} 无 SRGB view 别名（扩展/格式支持不足），受光几何中间调将偏暗——3.4 输出编码定案未生效", surface_format.format);
+        }
+        // 格式清单必须含 swapchain 自身格式（VUID-VkSwapchainCreateInfoKHR-pNext-07781
+        // 族的声明要求：viewFormats 覆盖创建格式）；pNext 结构须活到 create 返回
+        let format_list: Vec<vk::Format> = match srgb_alias {
+            Some(srgb) => vec![surface_format.format, srgb],
+            None => vec![surface_format.format],
+        };
+        let mut format_list_info =
+            vk::ImageFormatListCreateInfo::default().view_formats(&format_list);
         if caps.current_extent.width == u32::MAX {
             return Err(VulkanError::Init("current_extent 未定义（窗口尚未定型），本步不做显式尺寸回退".into()));
         }
@@ -107,7 +152,16 @@ impl Swapchain {
                     .pre_transform(caps.current_transform)
                     .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
                     .present_mode(present_mode)
-                    .clipped(true),
+                    .clipped(true)
+                    // 双格式清单必须配本旗标：swapchain image 由此按 MUTABLE_FORMAT
+                    // 形态创建，SRGB view 别名才合法（VUID-VkSwapchainCreateInfoKHR-
+                    // flags-01977；首跑验证层实抓）
+                    .flags(if srgb_alias.is_some() {
+                        vk::SwapchainCreateFlagsKHR::MUTABLE_FORMAT
+                    } else {
+                        vk::SwapchainCreateFlagsKHR::empty()
+                    })
+                    .push_next(&mut format_list_info),
                 None,
             )
         }?;
@@ -121,7 +175,8 @@ impl Swapchain {
             }
         };
 
-        // view：后续所有渲染（含清屏）吃 view 不吃裸 image；生命周期与 swapchain 绑定
+        // view：渲染（含清屏）吃 view 不吃裸 image；格式用 SRGB 别名（输出编码，
+        // 见上方定案注释）——生命周期与 swapchain 绑定
         let views = images
             .iter()
             .map(|&image| {
@@ -130,7 +185,7 @@ impl Swapchain {
                         &vk::ImageViewCreateInfo::default()
                             .image(image)
                             .view_type(vk::ImageViewType::TYPE_2D)
-                            .format(surface_format.format)
+                            .format(view_format)
                             .subresource_range(
                                 vk::ImageSubresourceRange::default()
                                     .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -156,11 +211,12 @@ impl Swapchain {
             .collect::<Result<Vec<_>, _>>()?;
 
         info!(
-            "swapchain 就绪: {}x{}，{} images，{:?}，present={:?}，render_finished 按 image 配 {} 个",
+            "swapchain 就绪: {}x{}，{} images，底板 {:?} / 渲染 view {:?}，present={:?}，render_finished 按 image 配 {} 个",
             caps.current_extent.width,
             caps.current_extent.height,
             images.len(),
             surface_format.format,
+            view_format,
             present_mode,
             render_finished.len(),
         );
@@ -173,6 +229,7 @@ impl Swapchain {
             views,
             render_finished,
             format: surface_format.format,
+            view_format,
             extent: caps.current_extent,
         })
     }

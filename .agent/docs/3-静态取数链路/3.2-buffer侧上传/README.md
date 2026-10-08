@@ -44,6 +44,8 @@
 - [验证层：CPU侧的规范执法者——它查什么、怎么查、保证到哪.md](验证层：CPU侧的规范执法者——它查什么、怎么查、保证到哪.md)：机制篇（2026-09-23）——驱动按契约假设你合法、layer 链与三个开关、四类执法面 + GPU-AV、保证的四条边界、"合同模拟执行者 vs GPU 监工"的复述校准。
 - [3.2.2.1-内存契约：memory type、usage、绑定与对齐.md](3.2.2.1-内存契约：memory type、usage、绑定与对齐.md)：施工记录（2026-09-24）——角色定案表、绑定四条款、coherent 分支与 atom 舍入三细则、探针证据与未实测边界；`vulkan/resources.rs` 与 memory_probe 的设计依据。
 - [GpuBuffer：契约、用法与frenderer三分法对照.md](GpuBuffer：契约、用法与frenderer三分法对照.md)：设计对照篇（2026-09-24）——GpuBuffer 定位与用法速查、与 frenderer RO/RW/MRW 的轴对照（角色表达用法 + 运行时同步语义 + 类型层留白）、Bindless 对 buffer 的"稳定与寿命"要求、宿主可见内存的两码头角色与 3.5 每帧 UBO 展望。
+- [Buffer与Staging上传：三跳路径与内存堆拓扑.md](Buffer与Staging上传：三跳路径与内存堆拓扑.md)：机制讲解篇（2026-09-29）——staging 是 VkBuffer 非"Rust 内存"、三跳路径与执行者换人、HOST_VISIBLE×DEVICE_LOCAL 两旗标正交而**堆决定物理位置**（本机 vulkaninfo 实测三堆表：staging 住系统内存、池/贴图住显存、BAR 窗口 214MiB 不当主力）、环形复用与时钟解耦；配图 `../_assets/staging-three-hop-path.png`。
+- [Uploader：搬运收口、完成票据与frenderers对照.md](Uploader：搬运收口、完成票据与frenderers对照.md)：机制讲解篇（2026-09-29）——三方分工（组货/搬运/记账）、submit_batch 七步每步守一条契约、能力边界闭集（mip0 冻结、无 blit/回读）、**卖点五张牌对着 frenderer 底牌打**（单队列+one-shot 等死消掉的复杂度 vs 票据可传递/等待只关税/失败结构化）；frenderers 源码锚点 command_manager.rs/rt_util.rs；配图 `../_assets/submit-batch-flow.png`。
 - 内存契约探针：`ash_renderer/examples/memory_probe.rs`，从仓库根可用 `cargo run -p ash_renderer --example memory_probe` 运行。组 A（合同正路）在验证层 + 同步验证下零 VUID，含 staging→池→回读的最小 copyBuffer 闭环；组 B（绑定负例）被 VUID-10739（即 v1.3.289 的 memoryOffset-01036）收账。
 - [3.2.2.2-池与缓存：DEVICE_LOCAL大池、bump分配与资产身份去重.md](3.2.2.2-池与缓存：DEVICE_LOCAL大池、bump分配与资产身份去重.md)：施工记录（2026-09-24）——双池 bump、身份去重、账本行引脚与容量策略；`vulkan/pool.rs` 设计依据。
 - [3.2.2.3-容量与销毁：显式维护迁移与停顿分账.md](3.2.2.3-容量与销毁：显式维护迁移与停顿分账.md)：施工记录（2026-09-24）——维护五步时序、停顿分账、图形侧等待面冻结；组 C 证据。
@@ -56,5 +58,5 @@
 ## 待决问题
 
 - ~~staging 用整批暂存还是可复用环形区域~~：已定案（2026-09-24）——2 槽环形轮转复用，槽位票据闸门证明复用安全（3.2.4.3）；『整批一个 staging 范围』与『不逐批新建对象』由两槽按需扩容统一满足。
-- ~~静态容量增长可采用显式等待后的维护路径~~：已定案（2026-09-24）——维护路径落地（3.2.2.3 五步时序 + 停顿分账）；频繁增量增长和流送预算仍留步骤 4～6，不纳入『正常上传零 idle』的承诺。
+- ~~静态容量增长可采用显式等待后的维护路径~~：已定案（2026-09-24）——维护路径落地（3.2.2.3 五步时序 + 停顿分账）；频繁增量增长和流送预算仍留步骤 4～6，不纳入『正常上传零 idle』的承诺（预定形状见[开放世界流送设计](../材料/开放世界流送设计：滑动窗口驻留、淘汰与预算环.md)）。
 - 专用 transfer 队列是所选学习路径，其性能收益需实测，不因查到独立族就宣称复制必与图形硬件并行。

@@ -30,6 +30,10 @@ const EXT_DESCRIPTOR_INDEXING: &str = "SPV_EXT_descriptor_indexing";
 fn main() {
     let shaders_dir = Path::new("examples/shaders");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo 提供 OUT_DIR"));
+    // 目录级 rerun-if-changed：逐文件声明只盯已知文件，新落一个 .wgsl 不会触发
+    // 重编译（cargo 对"新增文件"无感知）——3.4 首个正式 shader 落地时实撞此坑。
+    // 目录声明覆盖增删，逐文件声明保留（内容变更仍逐文件精确触发）。
+    println!("cargo:rerun-if-changed={}", shaders_dir.display());
     let mut wgsl_paths: Vec<PathBuf> = std::fs::read_dir(shaders_dir)
         .unwrap_or_else(|e| panic!("读 {shaders_dir:?} 失败: {e}"))
         .filter_map(|e| e.ok())
@@ -62,7 +66,10 @@ fn compile(path: &Path, stem: &str) -> Vec<u32> {
         .unwrap_or_else(|e| panic!("读 {:?} 失败: {e}", path));
     let module = match naga::front::wgsl::parse_str(&source) {
         Ok(m) => m,
-        Err(e) => panic!("[{stem}] WGSL 解析失败: {e}"),
+        Err(e) => {
+            // 带源码定位的文本诊断（文件:行:列 + 上下文摘录），比裸 message 可用
+            panic!("[{stem}] WGSL 解析失败:\n{}", e.emit_to_string(&source));
+        }
     };
     // 能力面与闸门探针同款显式声明：binding 数组、非一致索引、var<immediate>。
     let caps = Capabilities::IMMEDIATES

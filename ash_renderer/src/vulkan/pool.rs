@@ -89,6 +89,10 @@ pub struct MaintenanceLedger {
 pub struct MeshPool {
     device: Device,
     contract: MemoryContract,
+    /// 池 buffer 的共享族集合(3.4 定案:有专用 transfer 族时 = [transfer, graphics]
+    /// 两族 CONCURRENT,所有权乒乓不值得;同族设备 = 空 = EXCLUSIVE。取数见
+    /// `GpuBuffer::create_with_families` 的定案注释)。
+    sharing_families: Vec<u32>,
     vertex: Option<GpuBuffer>,
     index: Option<GpuBuffer>,
     capacity_vertex: u64,
@@ -101,11 +105,13 @@ pub struct MeshPool {
 
 impl MeshPool {
     /// 空池:分配推迟到第一次 [`Self::ensure_capacity`](懒建,容量按当时的
-    /// 需求算,不预付猜测的容量)。
-    pub fn new(device: &Device, contract: &MemoryContract) -> Self {
+    /// 需求算,不预付猜测的容量)。`sharing_families`:≥2 个不同族时池按
+    /// CONCURRENT 创建(transfer 写 + graphics 读的异族设备),同族设备传空。
+    pub fn new(device: &Device, contract: &MemoryContract, sharing_families: &[u32]) -> Self {
         Self {
             device: device.clone(),
             contract: contract.clone(),
+            sharing_families: sharing_families.to_vec(),
             vertex: None,
             index: None,
             capacity_vertex: 0,
@@ -186,17 +192,19 @@ impl MeshPool {
         if migrating {
             uploader.wait_all_uploads()?;
         }
-        let new_vertex = GpuBuffer::create(
+        let new_vertex = GpuBuffer::create_with_families(
             &self.device,
             &self.contract,
             new_vertex_cap,
             BufferRole::DevicePool,
+            &self.sharing_families,
         )?;
-        let new_index = GpuBuffer::create(
+        let new_index = GpuBuffer::create_with_families(
             &self.device,
             &self.contract,
             new_index_cap,
             BufferRole::DevicePool,
+            &self.sharing_families,
         )?;
         if migrating {
             // 已驻留内容整段迁移:bump 布局保证 [0, used) 就是全部有效数据。
