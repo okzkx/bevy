@@ -55,6 +55,7 @@ use crate::common::error::VulkanError;
 /// | `Readback` | TRANSFER_DST | HOST_VISIBLE | HOST_CACHED+HOST_COHERENT |
 /// | `FrameUniform` | UNIFORM_BUFFER | HOST_VISIBLE | HOST_CACHED+HOST_COHERENT |
 /// | `Storage` | STORAGE_BUFFER | HOST_VISIBLE | HOST_CACHED+HOST_COHERENT |
+/// | `DynamicDraw` | VERTEX_BUFFER+INDEX_BUFFER | HOST_VISIBLE | HOST_CACHED+HOST_COHERENT |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufferRole {
     /// 顶点/索引大池本体:图形阶段读,3.2.4 的 transfer 提交写(TRANSFER_DST)。
@@ -70,6 +71,11 @@ pub enum BufferRole {
     /// 宿主可见 storage(3.3.3 探针 I/O;未来 GPU 可索引参数表的宿主侧形态):
     /// 设备读写 + 宿主写(staging 直写)/读(回读)。
     Storage,
+    /// UI 顶点/索引(3.7.2):每帧整换、宿主直写、着色器读本帧内容——不经
+    /// staging/transfer(写频率是帧级,直写少一跳)。容量固定,超容 = 帧槽不变
+    /// 之下当场判断丢弃(调用方 Tier① 分流);复用安全与 FrameUniform 同一条
+    /// fence 纪律(wait_for_slot 先行,写发生在本槽上一轮提交完成之后)。
+    DynamicDraw,
 }
 
 impl BufferRole {
@@ -88,6 +94,9 @@ impl BufferRole {
             Self::Staging => vk::BufferUsageFlags::TRANSFER_SRC,
             Self::Readback => vk::BufferUsageFlags::TRANSFER_DST,
             Self::FrameUniform => vk::BufferUsageFlags::UNIFORM_BUFFER,
+            Self::DynamicDraw => {
+                vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER
+            }
             Self::Storage => {
                 vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::TRANSFER_DST
@@ -104,6 +113,9 @@ impl BufferRole {
             Self::Staging
             | Self::Readback
             | Self::FrameUniform
+            | Self::DynamicDraw
+            // Storage 带 TRANSFER_DST|SRC,与 staging 直写/回读共用同一条
+            // host-visible 硬契约
             | Self::Storage => vk::MemoryPropertyFlags::HOST_VISIBLE,
         }
     }
@@ -114,7 +126,7 @@ impl BufferRole {
         match self {
             Self::DevicePool => vk::MemoryPropertyFlags::empty(),
             Self::Staging => vk::MemoryPropertyFlags::HOST_COHERENT,
-            Self::Readback | Self::FrameUniform | Self::Storage => {
+            Self::Readback | Self::FrameUniform | Self::DynamicDraw | Self::Storage => {
                 vk::MemoryPropertyFlags::HOST_CACHED | vk::MemoryPropertyFlags::HOST_COHERENT
             }
         }

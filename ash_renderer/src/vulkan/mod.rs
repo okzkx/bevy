@@ -6,6 +6,7 @@
 //! | `swapchain` | resize 级 | swapchain + images/views,随窗口尺寸整体重建 |
 //! | `frames` | 帧级 | 命令缓冲 + 双信号量 + fence + 深度附件,`MAX_FRAMES_IN_FLIGHT` 组轮转复用 |
 //! | `pipeline` | 进程级 | 3.4 图形管线(dynamic rendering)+ pipeline layout(双 set + push) |
+//! | `overlay_pipeline` | 进程级 | 3.7 overlay 管线(set0 共享 + 16B push + 深度声明对齐读写关 + blend)+ UI 录制契约 |
 //! | `resources` | 资产级 | 内存契约(3.2.2.1):类型选择/绑定/对齐/coherent 分支 |
 //! | `pool` | 资产级 | 顶点/索引大池:bump 分配 + 资产身份驻留缓存(3.2.2.2/3.2.2.3) |
 //! | `uploader` | 批次级 | staging 环 + timeline 票据 + transfer 合批提交(3.2.4) |
@@ -21,6 +22,7 @@ mod descriptors;
 mod frames;
 mod images;
 mod mesh_convert;
+mod overlay_pipeline;
 mod pipeline;
 mod pool;
 mod resources;
@@ -35,6 +37,9 @@ pub use descriptors::{
 pub use frames::{DepthTarget, DrawCall, FrameDraw, Frame, FramePool, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT};
 pub use images::{image_spec, sampler_key, GpuImage, ImageCache, ImageConvertError, ImageSpec, SamplerKey};
 pub use mesh_convert::{convert_mesh, ConvertedMesh, MeshConvertError, VERTEX_STRIDE};
+pub use overlay_pipeline::{
+    pack_ui_push, OverlayPipeline, UiDrawCall, UiPaint, UI_PUSH_CONSTANTS_SIZE, UI_VERTEX_STRIDE,
+};
 pub use pipeline::{pack_push, GraphicsPipeline, PushData, PUSH_CONSTANTS_SIZE};
 pub use pool::{MeshPool, MeshSlot, PoolRange};
 pub use resources::{align_up, BufferRole, GpuBuffer, MemoryContract};

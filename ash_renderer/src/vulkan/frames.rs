@@ -32,6 +32,7 @@ use ash::{vk, Device};
 use bevy::log::info;
 
 use crate::common::error::VulkanError;
+use crate::vulkan::overlay_pipeline::{pack_ui_push, UiPaint};
 use crate::vulkan::pipeline::{pack_push, PushData};
 use crate::vulkan::Context;
 
@@ -69,6 +70,15 @@ pub struct FrameDraw<'a> {
     /// 本帧槽的深度附件 view。
     pub depth_view: vk::ImageView,
     pub draws: &'a [DrawCall],
+    /// overlay 管线（UI 半边的绘制入口；深度格式与实例对齐声明，读/写全关）。
+    pub overlay_pipeline: vk::Pipeline,
+    /// overlay 自有 pipeline layout（只借 set0，无 set1）——换管线后描述符绑定
+    /// 不延续，set0 须按这个 layout 对象重绑。
+    pub overlay_layout: vk::PipelineLayout,
+    /// 本帧 UI 绘制产物（无 UI 帧为 None：首 pass 前空帧/超容丢弃/图集缺席）。
+    pub ui: Option<&'a UiPaint>,
+    /// 本帧槽 UI 顶点/索引 buffer（`ui` 为 Some 时必有当帧写入）。
+    pub ui_buffers: (vk::Buffer, vk::Buffer),
     /// 上传票据等待值：图形提交在 GPU 侧等 timeline ≥ 此值——"上传完成才可使用"
     /// 的执法点（0 = 无上传过，跳过等待）。该等待同时收口 transfer 写的跨队列
     /// 内存可见性（池/贴图 CONCURRENT 双族共享，无所有权屏障，3.4 定案）。
@@ -343,9 +353,9 @@ impl FramePool {
     }
 
     /// 录制并提交一帧：进场屏障（颜色+深度）→ 待办 acquire（异族让渡）→
-    /// dynamic rendering（清屏 + DrawList 逐 draw）→ 出场屏障（颜色）→
-    /// queue_submit。提交等 acquire 的 image_available + 上传票据（GPU 侧），
-    /// 完成时发 render_finished + fence。
+    /// dynamic rendering（清屏 + DrawList 逐 draw + overlay UI 接画，同实例）→
+    /// 出场屏障（颜色）→ queue_submit。提交等 acquire 的 image_available + 上传
+    /// 票据（GPU 侧），完成时发 render_finished + fence。
     /// `render_finished` 按 acquire 的 image index 从 Swapchain 取（D3），不按帧槽轮转。
     ///
     /// # Errors
@@ -540,6 +550,81 @@ impl FramePool {
                         call.first_index,
                         // vertexOffset 的 SPIR-V 类型是带符号的（可负偏移做实例复用
                         // 等技巧）；池引脚恒为正字节偏移÷32，值域安全
+                        call.vertex_base as i32,
+                        0,
+                    );
+                }
+            }
+
+            // —— UI 半边（3.7）：同一 dynamic rendering 实例内接画——raster order
+            // 保证 UI 盖在场景之上，混合走 ROP（SRGB view 写出时编码，blend 在
+            // 线性域进行）。overlay 管线只声明 set0（UI 无 UBO），管线切换后 set0
+            // 须按 overlay 自己的 layout 对象重绑——描述符绑定随 layout，不随句柄。
+            if let Some(ui) = draw.ui {
+                device.cmd_bind_pipeline(
+                    frame.command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    draw.overlay_pipeline,
+                );
+                let ui_sets = [draw.set0];
+                device.cmd_bind_descriptor_sets(
+                    frame.command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    draw.overlay_layout,
+                    0,
+                    &ui_sets,
+                    &[],
+                );
+                // 全屏 viewport：场景分支不必然跑过，UI 段自带 viewport/scissor 状态
+                device.cmd_set_viewport(
+                    frame.command_buffer,
+                    0,
+                    &[vk::Viewport {
+                        x: 0.0,
+                        y: 0.0,
+                        width: extent.width as f32,
+                        height: extent.height as f32,
+                        min_depth: 0.0,
+                        max_depth: 1.0,
+                    }],
+                );
+                device.cmd_bind_vertex_buffers(frame.command_buffer, 0, &[draw.ui_buffers.0], &[0]);
+                device.cmd_bind_index_buffer(
+                    frame.command_buffer,
+                    draw.ui_buffers.1,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                // push 对全帧 UI 恒定（screen_size + 图集双槽位），循环外打包一次
+                let ui_push = pack_ui_push(ui.screen_pt, ui.atlas_texture, ui.atlas_sampler);
+                for call in &ui.draws {
+                    // scissor 逐 clip 设（egui 镶嵌的 clip 即裁剪边界；零尺寸 = 全裁）
+                    device.cmd_set_scissor(
+                        frame.command_buffer,
+                        0,
+                        &[vk::Rect2D {
+                            offset: vk::Offset2D {
+                                x: call.scissor[0] as i32,
+                                y: call.scissor[1] as i32,
+                            },
+                            extent: vk::Extent2D {
+                                width: call.scissor[2],
+                                height: call.scissor[3],
+                            },
+                        }],
+                    );
+                    device.cmd_push_constants(
+                        frame.command_buffer,
+                        draw.overlay_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0,
+                        &ui_push,
+                    );
+                    device.cmd_draw_indexed(
+                        frame.command_buffer,
+                        call.index_count,
+                        1,
+                        call.first_index,
                         call.vertex_base as i32,
                         0,
                     );

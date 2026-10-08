@@ -9,6 +9,7 @@
 //!
 //! ```text
 //! main ──► driver（渲染驱动）──┬─► scene（ECS 取数，读 CollectedScene 快照）
+//!                              ├─► overlay（egui 调试 UI，ECS 侧）
 //!                              └─► vulkan（Vulkan 资源）──► common（工具层）
 //! ```
 //!
@@ -27,6 +28,12 @@
 //! - [`scene`]:ECS 侧取数（step3 施工 3.1，3.6.2 分机制/业务两半）——机制半边
 //!   `mechanism`(材质缝接线/采集快照/宽高比补位,换场景内容不变)+ 业务半边
 //!   `content`(FlightHelmet 进场/取景/灯光参数/施工核验),零 Vulkan 代码;
+//! - [`overlay`]:egui 调试 UI(3.7,裸接 ash——禁渲染宿主挂不上 bevy_egui/
+//!   egui-wgpu):`input`(bevy 事件→egui RawInput 输入桥)、`ui`(Update 的 egui
+//!   pass 与调试窗口,产 EguiFrame)、`paint`(draw_frame 内的绘制半边:图集 CPU
+//!   镜像/整传新槽/顶点环,paint_overlay→UiPaint)、RenderMode 单选资源;
+//!   overlay 管线与 UI 录制契约住 `vulkan::overlay_pipeline`(`OverlayPipeline`
+//!   共享 set0、`UiPaint`/`UiDrawCall` 供 `frames` 接画);
 //! - [`driver`]:渲染驱动(3.6.1 自 src 根收拢)——bevy 调度侧编排,横跨 scene 与 vulkan:
 //!   `host`(宿主桥插件:禁渲染补位 + 系统进调度)、`init`(Vulkan 初始化链与反序拆除)、
 //!   `frame`(帧循环 draw_frame)、`upload`(上传编排:flush_uploads,Last 里 before
@@ -35,5 +42,6 @@
 
 pub mod common;
 pub mod driver;
+pub mod overlay;
 pub mod scene;
 pub mod vulkan;

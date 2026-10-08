@@ -5,7 +5,7 @@
 ## 主要工作范围
 
 - 本地项目代码包括 Bevy 上游 crates / examples，以及位于 `ash_renderer/` 的自研渲染器学习项目；按目标范围遵循对应代码的现有约定。
-- 本项目的通用模块分组和 AI 代码生成要求见 [代码生成规范](.agents/rules/代码生成规范.md)。项目目标、Bevy 使用边界和学习路线分别见 `.agents/docs/项目目标与Bevy使用指南.md` 与 `.agents/docs/学习目标实现步骤.md`。
+- 本项目的通用模块分组和 AI 代码生成要求见 [代码生成规范](.agents/rules/代码生成规范.md)；实现大型画面功能后的截图与 deepseek-flash 视觉验证要求见 [画面功能视觉验证](.agents/rules/画面功能视觉验证.md)；临时文件与 Python 工具脚本的存放位置见 [临时文件与工具脚本存放](.agents/rules/临时文件与工具脚本存放.md)。项目目标、Bevy 使用边界和学习路线分别见 `.agents/docs/项目目标与Bevy使用指南.md` 与 `.agents/docs/学习目标实现步骤.md`。
 
 ## AI 工作要求
 

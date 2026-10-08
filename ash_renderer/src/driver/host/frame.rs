@@ -23,13 +23,16 @@ use bevy::{
     window::WindowResized,
 };
 
+use ash::vk;
+
 use crate::{
     common::error::VulkanError,
+    overlay::{paint_overlay, OverlayLogState, RenderMode, UiDrawData},
     scene::CollectedScene,
     vulkan::{
         pack_frame_uniforms, AcquireOutcome, BindlessTables, Context, DrawCall, FrameDraw,
-        FramePool, FrameUniformsData, GraphicsPipeline, ImageCache, MeshPool, PushData, Swapchain,
-        Uploader, FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
+        FramePool, FrameUniformsData, GraphicsPipeline, ImageCache, MeshPool, OverlayPipeline,
+        PushData, Swapchain, Uploader,
     },
 };
 
@@ -54,7 +57,7 @@ pub(crate) struct ResizeGate {
     logged_minimized: bool,
 }
 
-/// draw_frame 的只读参数束（SystemParam）：参数束装下成排的只读依赖，系统签名保持精简。
+/// draw_frame 的参数束（SystemParam）：参数束装下成排依赖，系统签名保持精简。
 #[derive(SystemParam)]
 pub(crate) struct FrameInput<'w, 's> {
     ctx: Res<'w, Context>,
@@ -63,7 +66,10 @@ pub(crate) struct FrameInput<'w, 's> {
     pool: Res<'w, MeshPool>,
     image_cache: Res<'w, ImageCache>,
     pipeline: Res<'w, GraphicsPipeline>,
-    uploader: Res<'w, Uploader>,
+    /// overlay 管线：UI 半边绑定用（init 链与场景管线同批创建）。
+    overlay_pipeline: Res<'w, OverlayPipeline>,
+    /// 上传器：普通帧只读票号，overlay 在场时图集整传要走它提交批次（独占写点）。
+    uploader: ResMut<'w, Uploader>,
     /// 相机 + 可选的每相机 `AmbientLight` 覆盖（挂了则压过全局资源）。
     cameras: Query<
         'w,
@@ -78,43 +84,10 @@ pub(crate) struct FrameInput<'w, 's> {
     /// 方向光（取第一盏，方向 = 实体 `back()`，bevy GPU 同款）。
     lights: Query<'w, 's, (&'static GlobalTransform, &'static DirectionalLight)>,
     ambient: Option<Res<'w, GlobalAmbientLight>>,
-}
-
-/// 材质模式：三态进 UBO `mode`，env `ASH_RENDER_MODE` 选择。
-/// 与 `debug_draw.wgsl` 的 `MODE_*` 常量同值（`FRAME_MODE_*`）。
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RenderMode {
-    /// 数据驱动 Lambert（默认）：UBO 方向光 + 环境，bevy 物理链同构。
-    Lambert,
-    /// albedo 直出：base color/UV/颜色空间对照（官方侧同款置 unlit）。
-    Unlit,
-    /// 世界法线可视化：法线方向验收仪器（非均匀缩放案例的判定仪器）。
-    Normal,
-}
-
-impl RenderMode {
-    fn from_env() -> Self {
-        match std::env::var("ASH_RENDER_MODE").ok().as_deref() {
-            None | Some("") | Some("lambert") => Self::Lambert,
-            Some("unlit") => Self::Unlit,
-            Some("normal") => Self::Normal,
-            Some(other) => {
-                // 拼写错误是配置问题不是运行故障：warn 后按默认继续，不中断帧循环
-                bevy::log::warn!(
-                    "ASH_RENDER_MODE={other:?} 无法识别（可选 lambert/unlit/normal），按 lambert 继续"
-                );
-                Self::Lambert
-            }
-        }
-    }
-
-    fn as_u32(self) -> u32 {
-        match self {
-            Self::Lambert => FRAME_MODE_LAMBERT,
-            Self::Unlit => FRAME_MODE_UNLIT,
-            Self::Normal => FRAME_MODE_NORMAL,
-        }
-    }
+    /// 着色模式（overlay 单选钮写；None = overlay 未装，按 lambert 兜底并告警一次）。
+    render_mode: Option<Res<'w, RenderMode>>,
+    /// overlay 绘制半边资源束（None = overlay 未装，UI 段整段跳过）。
+    overlay: Option<UiDrawData<'w>>,
 }
 
 /// DrawList 消费状态（跨帧 `Local`）：缺资源/相机告警去重 + 材质覆盖一次性收账。
@@ -132,8 +105,8 @@ pub(crate) struct DrawListState {
     lights_logged: bool,
     /// 多方向光/无方向光的状态告警去重。
     warned_light_count: bool,
-    /// 材质模式（env 每进程解析一次，`ASH_RENDER_MODE`）。
-    mode: Option<RenderMode>,
+    /// RenderMode 资源缺席告警只报一次。
+    warned_no_mode: bool,
 }
 
 /// ash 帧循环本体（编排见模块注释；注册与排序在 [`super::host`]）。
@@ -142,7 +115,7 @@ pub(crate) struct DrawListState {
     reason = "bevy 系统的参数表即依赖注入清单，逐项声明是框架惯例，非函数签名设计味道"
 )]
 pub(crate) fn draw_frame(
-    input: FrameInput,
+    mut input: FrameInput,
     mut swapchain: ResMut<Swapchain>,
     mut frames: ResMut<FramePool>,
     mut tables: ResMut<BindlessTables>,
@@ -150,6 +123,7 @@ pub(crate) fn draw_frame(
     time: Res<Time>,
     mut gate: Local<ResizeGate>,
     mut draw_state: Local<DrawListState>,
+    mut paint_log: Local<OverlayLogState>,
     mut exit: MessageWriter<AppExit>,
     _main_thread: NonSendMarker,
 ) {
@@ -160,10 +134,13 @@ pub(crate) fn draw_frame(
         ref pool,
         ref image_cache,
         ref pipeline,
-        ref uploader,
+        ref overlay_pipeline,
         ref cameras,
         ref lights,
         ref ambient,
+        ref render_mode,
+        ref mut uploader,
+        overlay,
     } = input;
     // —— 闸门①：读 resize 消息。一次 update 可能积压多条（拖拽 125Hz 输入 vs 60fps
     // 帧），逐条刷状态，最新一条定生死：非零尺寸 = 正常/恢复，(0,0) = 最小化。
@@ -301,8 +278,18 @@ pub(crate) fn draw_frame(
     // 4) 相机/灯光 → 本帧槽 UBO。复用安全 = wait_for_slot 的 fence：写
     // 发生在上一轮使用完成之后（帧槽轮转只是定位，安全证据是 fence）。
     // 相机缺席是场景装配问题，报一次后 identity 兜底（画面不可读但不崩帧循环）。
-    // 矩阵乘序/列主序与 WGSL 端同一约定。材质模式每进程解析一次 env。
-    let render_mode = *draw_state.mode.get_or_insert_with(RenderMode::from_env);
+    // 矩阵乘序/列主序与 WGSL 端同一约定。材质模式来自 overlay 的单选钮资源
+    //（初值 = env ASH_RENDER_MODE）。
+    let render_mode = match render_mode.as_deref() {
+        Some(mode) => *mode,
+        None => {
+            if !draw_state.warned_no_mode && !scene.primitives.is_empty() {
+                draw_state.warned_no_mode = true;
+                warn!("RenderMode 资源缺席（overlay 未装）：材质模式按 lambert 兜底");
+            }
+            RenderMode::Lambert
+        }
+    };
     let mut view_proj = Mat4::IDENTITY;
     let mut per_camera_ambient: Option<&AmbientLight> = None;
     match cameras.single() {
@@ -383,6 +370,37 @@ pub(crate) fn draw_frame(
         return;
     }
 
+    // 4.5) overlay 绘制半边（3.7）：图集整传（可能多出一张 transfer 票据——本帧
+    // 图形提交的 wait_ticket 在此后快照，flush_uploads 批与图集批都被等待）→
+    // 镶嵌 → 顶点环写入 → UiPaint + 本帧槽 buffer 句柄（record_frame 的 UI 段
+    // 接画）。资源束缺席 = overlay 未装，整段跳过（收账日志在 paint_overlay 内）。
+    let ui = match overlay {
+        Some(mut ui_data) => {
+            let ui_buffers = ui_data.ring.buffers(frames.current_index());
+            match paint_overlay(
+                ctx,
+                &ui_data.egui,
+                &mut ui_data.frame,
+                &ui_data.mirror,
+                &mut ui_data.gpu,
+                &mut ui_data.ring,
+                &mut tables,
+                &mut *uploader,
+                frames.current_index(),
+                swapchain.extent,
+                &mut paint_log,
+            ) {
+                Ok(paint) => paint.map(|p| (p, ui_buffers)),
+                Err(e) => {
+                    error!("overlay 绘制半边失败，渲染链无法继续，优雅退出: {e}");
+                    exit.write(AppExit::error());
+                    return;
+                }
+            }
+        }
+        None => None,
+    };
+
     // 5) 录制 + 提交。此刻 image_available 已被 present engine 置位、image 已到手
     //——从这里起任何失败都让同步状态无法原样恢复（signal 无人等 / fence 已 reset
     // 无人 signal），按 Tier② 冒泡退出（不得 warn 后继续——那是"等无人 signal
@@ -398,6 +416,14 @@ pub(crate) fn draw_frame(
         index_buffer: pool.index_buffer(),
         depth_view: frames.current().depth.view,
         draws: &draws,
+        overlay_pipeline: overlay_pipeline.pipeline(),
+        overlay_layout: overlay_pipeline.layout(),
+        ui: ui.as_ref().map(|(paint, _)| paint),
+        // ui 为 None 时这两个句柄不被读（record_frame 的 UI 段整段跳过）
+        ui_buffers: ui
+            .as_ref()
+            .map(|(_, buffers)| *buffers)
+            .unwrap_or((vk::Buffer::null(), vk::Buffer::null())),
         wait_ticket: uploader.last_issued_ticket(),
         ticket_semaphore: uploader.ticket_semaphore(),
         clear: clear_color(time.elapsed_secs_f64()),
