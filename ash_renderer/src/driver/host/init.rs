@@ -18,6 +18,7 @@ use bevy::{
 
 use crate::{
     common::error::VulkanError,
+    overlay::{AtlasGpu, UiVertexRing},
     vulkan::{
         BindlessTables, Context, FramePool, GraphicsPipeline, ImageCache, MeshPool, Swapchain,
         Uploader, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
@@ -35,9 +36,8 @@ pub(super) fn init_vulkan(
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, pipeline) =
-        match try_init_vulkan(&wrapper)
-        {
+    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, pipeline, ui_ring) =
+        match try_init_vulkan(&wrapper) {
             Ok(ok) => ok,
             Err(e) => {
                 error!("Vulkan 初始化失败，宿主壳优雅退出: {e}");
@@ -46,7 +46,7 @@ pub(super) fn init_vulkan(
             }
         };
     info!(
-        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader（3.2 上传链）+ ImageCache（3.3.1 贴图）+ BindlessTables（3.3.3 常驻表，容量 {TABLE_CAPACITY}）+ GraphicsPipeline（3.4.2）；清屏+绘制自下一帧（Last）起"
+        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader（3.2 上传链）+ ImageCache（3.3.1 贴图）+ BindlessTables（3.3.3 常驻表，容量 {TABLE_CAPACITY}）+ GraphicsPipeline（3.4.2）+ UiVertexRing（3.7.2 overlay 顶点环）；清屏+绘制自下一帧（Last）起"
     );
     // 插入顺序 = 创建顺序；World 清场顺序不定，退出时的反序拆除见 teardown_vulkan
     commands.insert_resource(ctx);
@@ -57,6 +57,7 @@ pub(super) fn init_vulkan(
     commands.insert_resource(image_cache);
     commands.insert_resource(tables);
     commands.insert_resource(pipeline);
+    commands.insert_resource(ui_ring);
 }
 
 /// 创建链本体：`?` 串起全部创建步骤，任一层失败即短路返回 `VulkanError`；
@@ -105,8 +106,11 @@ fn try_init_vulkan(
         tables.set0_layout(),
         tables.set1_layout(),
     )?;
+    // UI 顶点环（3.7.2）：每帧槽一对 HOST_VISIBLE 顶点/索引 buffer，纯 Context
+    // 依赖（初始化链尾端，拆除随帧级一批——无表/管线依赖）
+    let ui_ring = UiVertexRing::new(&ctx)?;
     Ok((
-        ctx, swapchain, frames, pool, uploader, image_cache, tables, pipeline,
+        ctx, swapchain, frames, pool, uploader, image_cache, tables, pipeline, ui_ring,
     ))
 }
 
@@ -137,6 +141,8 @@ pub(super) fn teardown_vulkan(world: &mut World) {
         }
     }
     world.remove_resource::<FramePool>();
+    // UI 顶点环随帧级一批拆（帧内使用，无表/管线依赖；overlay 未装时缺席即 no-op）
+    world.remove_resource::<UiVertexRing>();
     world.remove_resource::<Swapchain>();
     // 上传链与资产件随帧级之后拆除（对象依赖只到 Device，顺序相对自由；
     // Context 必须最后——Device 归它销毁）。GraphicsPipeline 在 BindlessTables 之前:
@@ -148,10 +154,13 @@ pub(super) fn teardown_vulkan(world: &mut World) {
     world.remove_resource::<MeshPool>();
     world.remove_resource::<BindlessTables>();
     world.remove_resource::<ImageCache>();
+    // overlay 图集 graveyard 在表之后拆：槽位持有的是 view/sampler 句柄借用，
+    // 与 bindless 表同寿同序（先拆借用账本，再拆本体；overlay 未装时 no-op）
+    world.remove_resource::<AtlasGpu>();
     world.remove_resource::<Context>();
     // 初始化失败路径资源从未插入，此处静默即可——error! 已在 init_vulkan 记过根因
     if had_vulkan {
-        info!("退出拆除完成：排空 → 帧级 → resize 级 → 管线 → 资产级(池/上传/描述符表/贴图缓存) → 进程级");
+        info!("退出拆除完成：排空 → 帧级(帧池/UI 顶点环) → resize 级 → 管线 → 资产级(池/上传/描述符表/贴图缓存/图集 graveyard) → 进程级");
     }
 }
 
@@ -165,4 +174,5 @@ type InitChain = (
     ImageCache,
     BindlessTables,
     GraphicsPipeline,
+    UiVertexRing,
 );

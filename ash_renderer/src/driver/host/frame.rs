@@ -25,7 +25,7 @@ use bevy::{
 
 use crate::{
     common::error::VulkanError,
-    overlay::RenderMode,
+    overlay::{paint_overlay, OverlayLogState, RenderMode, UiDrawData},
     scene::CollectedScene,
     vulkan::{
         pack_frame_uniforms, AcquireOutcome, BindlessTables, Context, DrawCall, FrameDraw,
@@ -55,7 +55,7 @@ pub(crate) struct ResizeGate {
     logged_minimized: bool,
 }
 
-/// draw_frame 的只读参数束（SystemParam）：参数束装下成排的只读依赖，系统签名保持精简。
+/// draw_frame 的参数束（SystemParam）：参数束装下成排依赖，系统签名保持精简。
 #[derive(SystemParam)]
 pub(crate) struct FrameInput<'w, 's> {
     ctx: Res<'w, Context>,
@@ -64,7 +64,8 @@ pub(crate) struct FrameInput<'w, 's> {
     pool: Res<'w, MeshPool>,
     image_cache: Res<'w, ImageCache>,
     pipeline: Res<'w, GraphicsPipeline>,
-    uploader: Res<'w, Uploader>,
+    /// 上传器：普通帧只读票号，overlay 在场时图集整传要走它提交批次（独占写点）。
+    uploader: ResMut<'w, Uploader>,
     /// 相机 + 可选的每相机 `AmbientLight` 覆盖（挂了则压过全局资源）。
     cameras: Query<
         'w,
@@ -81,6 +82,8 @@ pub(crate) struct FrameInput<'w, 's> {
     ambient: Option<Res<'w, GlobalAmbientLight>>,
     /// 着色模式（overlay 单选钮写；None = overlay 未装，按 lambert 兜底并告警一次）。
     render_mode: Option<Res<'w, RenderMode>>,
+    /// overlay 绘制半边资源束（None = overlay 未装，UI 段整段跳过）。
+    overlay: Option<UiDrawData<'w>>,
 }
 
 /// DrawList 消费状态（跨帧 `Local`）：缺资源/相机告警去重 + 材质覆盖一次性收账。
@@ -108,7 +111,7 @@ pub(crate) struct DrawListState {
     reason = "bevy 系统的参数表即依赖注入清单，逐项声明是框架惯例，非函数签名设计味道"
 )]
 pub(crate) fn draw_frame(
-    input: FrameInput,
+    mut input: FrameInput,
     mut swapchain: ResMut<Swapchain>,
     mut frames: ResMut<FramePool>,
     mut tables: ResMut<BindlessTables>,
@@ -116,6 +119,7 @@ pub(crate) fn draw_frame(
     time: Res<Time>,
     mut gate: Local<ResizeGate>,
     mut draw_state: Local<DrawListState>,
+    mut paint_log: Local<OverlayLogState>,
     mut exit: MessageWriter<AppExit>,
     _main_thread: NonSendMarker,
 ) {
@@ -126,11 +130,12 @@ pub(crate) fn draw_frame(
         ref pool,
         ref image_cache,
         ref pipeline,
-        ref uploader,
         ref cameras,
         ref lights,
         ref ambient,
         ref render_mode,
+        ref mut uploader,
+        overlay,
     } = input;
     // —— 闸门①：读 resize 消息。一次 update 可能积压多条（拖拽 125Hz 输入 vs 60fps
     // 帧），逐条刷状态，最新一条定生死：非零尺寸 = 正常/恢复，(0,0) = 最小化。
@@ -359,6 +364,35 @@ pub(crate) fn draw_frame(
         exit.write(AppExit::error());
         return;
     }
+
+    // 4.5) overlay 绘制半边（3.7.2）：图集整传（可能多出一张 transfer 票据——本帧
+    // 图形提交的 wait_ticket 在此后快照，flush_uploads 批与图集批都被等待）→
+    // 镶嵌 → 顶点环写入。资源束缺席 = overlay 未装，整段跳过。3.7.3 起 UiPaint
+    // 进 FrameDraw 接画；本任务只产不画（收账日志在 paint_overlay 内）。
+    #[allow(unused_variables)]
+    let ui_paint = match overlay {
+        Some(mut ui) => match paint_overlay(
+            ctx,
+            &ui.egui,
+            &mut ui.frame,
+            &ui.mirror,
+            &mut ui.gpu,
+            &mut ui.ring,
+            &mut tables,
+            &mut *uploader,
+            frames.current_index(),
+            swapchain.extent,
+            &mut paint_log,
+        ) {
+            Ok(paint) => paint,
+            Err(e) => {
+                error!("overlay 绘制半边失败，渲染链无法继续，优雅退出: {e}");
+                exit.write(AppExit::error());
+                return;
+            }
+        },
+        None => None,
+    };
 
     // 5) 录制 + 提交。此刻 image_available 已被 present engine 置位、image 已到手
     //——从这里起任何失败都让同步状态无法原样恢复（signal 无人等 / fence 已 reset

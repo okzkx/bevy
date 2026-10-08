@@ -28,6 +28,7 @@ use bevy::{
 use crate::vulkan::{FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_UNLIT};
 
 use super::input::{egui_raw_input, EguiInput};
+use super::paint::{AtlasGpu, AtlasMirror};
 
 /// 调试 UI 插件：Startup 建状态，Update 跑 egui pass。绘制半边（图集/顶点/管线）
 /// 在 `driver`/`vulkan` 侧，消费本插件产的 [`EguiFrame`]。
@@ -105,6 +106,10 @@ fn init_egui(mut commands: Commands) {
     commands.insert_resource(state);
     commands.insert_resource(EguiFrame::default());
     commands.insert_resource(RenderMode::from_env());
+    // 图集镜像（Update 折入）与 GPU 代（Last 整传；空建——首帧有整图增量才落图）。
+    // AtlasGpu 的拆除在 teardown_vulkan（graveyard 与表同寿的拆除序）
+    commands.insert_resource(AtlasMirror::default());
+    commands.insert_resource(AtlasGpu::default());
     info!("egui 状态就绪：Context + 字体（default_fonts + msyh 回退），pass 自下一帧（Update）");
 }
 
@@ -140,12 +145,13 @@ fn load_fonts() -> egui::FontDefinitions {
 /// Update：组 RawInput → begin_pass → 调试窗口 → end_pass → 存 [`EguiFrame`]。
 #[expect(
     clippy::too_many_arguments,
-    reason = "bevy 系统的参数表即依赖注入清单：六个事件读取器 + 窗口/时间/按键/两状态资源，逐项声明是框架惯例"
+    reason = "bevy 系统的参数表即依赖注入清单：六个事件读取器 + 窗口/时间/按键 + egui 状态帧与图集镜像资源，逐项声明是框架惯例"
 )]
 fn run_egui_pass(
     state: ResMut<EguiState>,
     mut frame: ResMut<EguiFrame>,
     mut input: ResMut<EguiInput>,
+    mut mirror: ResMut<AtlasMirror>,
     window: Query<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -172,15 +178,15 @@ fn run_egui_pass(
     state.ctx.begin_pass(raw);
     debug_window(&state.ctx, &time, window, ppp, &mut mode);
     let mut output = state.ctx.end_pass();
-    // 纹理增量（字体图集 dirty-rect）在 pass 出口就地消费：`TexturesDelta` 的
-    // Drop 审查要求增量被处理（否则 panic），epaint 文档的显式弃置出口是 `clear`。
-    // 3.7.2 起换成真实消费——折进图集 CPU 镜像（Update 侧，最小化帧也不丢数据）
-    // 后由绘制半边整传新槽；增量本身不跨系统存放。
+    // 纹理增量（字体图集 dirty-rect）在 pass 出口就地消费：折进图集 CPU 镜像
+    //（Update 侧——最小化帧 Update 照跑而 draw_frame 让路，折入不丢数据），折完
+    // clear 满足 TexturesDelta 的 Drop 审查。镜像整传/新槽发布由绘制半边按
+    // 代数差触发（paint_overlay）。
     let (set_count, free_count) = {
         let delta = &output.textures_delta;
         (delta.set.len(), delta.free.len())
     };
-    output.textures_delta.clear();
+    mirror.fold(&mut output.textures_delta);
     *frame = EguiFrame {
         shapes: output.shapes,
         pixels_per_point: ppp,
