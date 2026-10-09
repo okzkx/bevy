@@ -1,5 +1,7 @@
 //! 调试窗口（业务面板）：overlay 的业务半边——"画什么"住这里，"怎么跑"住
-//! [`super::ui`]。加新面板/新统计行只动本文件。
+//! [`super::ui`]。本文件只管帧统计窗口内容；加新调试窗口 = 独立 rs 文件 struct
+//!（照 [`super::entity_tree_window`] 样式）+ [`super::debug_hub_window`] 加开关
+//! 字段 + pass 里加显示门。
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 
@@ -59,6 +61,8 @@ pub(super) struct RendererStats<'w> {
 /// 调试窗口的一次构建输入：框架 pass 每帧组好、字段名逐项交给面板。
 pub(super) struct DebugWindow<'a> {
     pub(super) ctx: &'a egui::Context,
+    /// 显隐开关：总控 checkbox 与窗口 [×] 写同一字段（egui `Window::open` 借用）。
+    pub(super) open: &'a mut bool,
     pub(super) time: &'a Time,
     pub(super) window: &'a Window,
     /// 本帧 pixels_per_point（窗口信息行展示）。
@@ -71,8 +75,9 @@ pub(super) struct DebugWindow<'a> {
 impl DebugWindow<'_> {
     /// 面板本体：fps/窗口信息 + 着色模式单选 + 渲染器内部统计（vulkan 侧资源只读）。
     pub(super) fn show(self) {
-        let Self { ctx, time, window, ppp, mode, stats } = self;
+        let Self { ctx, open, time, window, ppp, mode, stats } = self;
         egui::Window::new("ash 调试")
+            .open(open)
             .default_pos(egui::pos2(12.0, 12.0))
             .show(ctx, |ui| {
                 let fps = 1.0 / time.delta_secs().max(1e-6);

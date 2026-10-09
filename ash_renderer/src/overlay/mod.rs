@@ -9,13 +9,18 @@
 //! | 子模块 | 职责 |
 //! |---|---|
 //! | [`ui`] | 框架半边：egui 状态（Context/字体含 CJK）+ Update 的 egui pass，产 [`EguiFrame`] |
-//! | [`debug_window`] | 业务半边：调试窗口内容（fps/着色模式单选/渲染器统计）+ [`RenderMode`] 资源 |
+//! | [`debug_window`] | 业务半边：帧统计窗口（fps/着色模式单选/渲染器统计）+ [`RenderMode`] 资源 |
+//! | [`debug_hub_window`] | 业务半边：调试窗口总控——各窗口显隐开关 [`DebugWindowsOpen`] |
+//! | [`entity_tree_window`] | 业务半边：实体层级树 + 点选 [`SelectedEntity`]（3.10，3.11 编辑目标来源） |
 //! | [`input`] | 输入桥：bevy 输入事件 → egui `RawInput`（含 KeyCode→egui Key 映射） |
 //! | [`paint`] | 绘制半边：图集 CPU 镜像/整传新槽/graveyard + 顶点环 + `paint_overlay` 产 `UiPaint` |
 //!
-//! 机制与证据：`.agents/docs/3-静态取数链路/3.7-egui调试GUI/`。
+//! 机制与证据：`.agents/docs/3-静态取数链路/3.7-egui调试GUI/`、
+//! `.agents/docs/3-静态取数链路/3.10-egui实体层级树/`。
 
+mod debug_hub_window;
 mod debug_window;
+mod entity_tree_window;
 mod input;
 mod paint;
 mod ui;
