@@ -97,6 +97,10 @@ impl EntityTreeWindow<'_> {
 /// 相关性过滤：至少带一个被关注组件（名字/层级/相机/灯/mesh/材质/变换）才进树。
 /// DefaultPlugins 注册的数百个 observer 等内部裸实体会淹没场景树，不显示；
 /// 计数行"相关 X / 全部 Y"如实报出被滤掉的量。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "过滤谓词逐项对应 EntityRow 查询元组的字段，收拢成结构体只是换个地方数数"
+)]
 fn is_relevant(
     name: Option<&Name>,
     children: Option<&Children>,

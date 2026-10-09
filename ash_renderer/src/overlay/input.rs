@@ -29,12 +29,28 @@ use bevy::{
     window::{CursorLeft, CursorMoved, Window, WindowFocused},
 };
 
+/// egui 的五个指针按键（桥按位记账用）。
+const ALL_BUTTONS: [egui::PointerButton; egui::NUM_POINTER_BUTTONS] = [
+    egui::PointerButton::Primary,
+    egui::PointerButton::Secondary,
+    egui::PointerButton::Middle,
+    egui::PointerButton::Extra1,
+    egui::PointerButton::Extra2,
+];
+
 /// 输入桥跨帧状态。
 #[derive(Resource, Default)]
 pub(crate) struct EguiInput {
     /// 最新指针位置（points）。bevy 的 `MouseButtonInput` 不带位置——发
     /// `PointerButton` 时从这里补 pos；`CursorLeft` 后清空。
     pointer_pos: Option<egui::Pos2>,
+    /// 最近一次已知指针位置：`CursorLeft` 不清空，是离窗释放/失焦兜底
+    /// 补发 Release 时的落点。
+    last_pointer_pos: Option<egui::Pos2>,
+    /// 已向 egui 报告"按下"的按键。egui 的按键状态只由 `PointerButton`
+    /// 事件翻转（0.36.2 input_state/mod.rs:1201，`PointerGone` 与失焦都不清），
+    /// 所以桥欠下的每条 Release 都必须补报，否则 egui 永久卡"按住"。
+    buttons_down: [bool; egui::NUM_POINTER_BUTTONS],
     /// 上一帧的修饰键快照：变化时补发 `ModifiersChanged`。
     last_modifiers: egui::Modifiers,
 }
@@ -90,13 +106,31 @@ pub(crate) fn egui_raw_input(
         events.push(egui::Event::PointerGone);
     }
     for ev in mouse_button.read() {
-        if let Some(pos) = input.pointer_pos {
-            events.push(egui::Event::PointerButton {
-                pos,
-                button: map_button(ev.button),
-                pressed: ev.state == ButtonState::Pressed,
-                modifiers,
-            });
+        let button = map_button(ev.button);
+        let pressed = ev.state == ButtonState::Pressed;
+        if pressed {
+            // 按下仍要求指针在场：egui 无指针位置时按压无落点，不报。
+            if let Some(pos) = input.pointer_pos {
+                input.buttons_down[button as usize] = true;
+                events.push(egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed: true,
+                    modifiers,
+                });
+            }
+        } else if input.pointer_pos.is_some() || input.buttons_down[button as usize] {
+            // 释放不能因指针离窗而丢：丢一条 = egui 永久"按住"，拖选/拖动跟随
+            // 鼠标。指针已离窗（pointer_pos 为 None）时用最近已知位置补报。
+            if let Some(pos) = input.pointer_pos.or(input.last_pointer_pos) {
+                input.buttons_down[button as usize] = false;
+                events.push(egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed: false,
+                    modifiers,
+                });
+            }
         }
     }
     let ppp = window.scale_factor();
@@ -116,6 +150,22 @@ pub(crate) fn egui_raw_input(
         });
     }
     for ev in window_focused.read() {
+        if !ev.focused {
+            // egui 失焦只清键盘不清鼠标（0.36.2 input_state/mod.rs:440）。
+            // 按住拖动中失焦（如拖到另一窗口上松开）收不到 bevy 的释放，
+            // 全部欠账在此补报，落点用最近已知位置。
+            for (idx, down) in input.buttons_down.iter_mut().enumerate() {
+                if *down && let Some(pos) = input.last_pointer_pos {
+                    events.push(egui::Event::PointerButton {
+                        pos,
+                        button: ALL_BUTTONS[idx],
+                        pressed: false,
+                        modifiers,
+                    });
+                }
+                *down = false;
+            }
+        }
         events.push(egui::Event::WindowFocused(ev.focused));
     }
     if modifiers != input.last_modifiers {
