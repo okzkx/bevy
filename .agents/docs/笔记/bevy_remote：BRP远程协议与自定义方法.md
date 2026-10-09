@@ -91,3 +91,36 @@ handler 能力上限：**可独占 `&mut World`**——内置的 `process_remote
 | `examples/remote/` | `server.rs`（91 行最小服务端）· `client.rs`（158 行 Rust 客户端示例）· `integration_test.rs` |
 
 **启用就两行**：`app.add_plugins((RemotePlugin::default(), RemoteHttpPlugin::default()));`
+
+## 8. 树内官方检视栈：bevy_inspector 三层结构（2026-10-09 3.10 收官后补查）
+
+3.10 自研实体树收官后用户问"bevy 源码里有没有现成的"——**有，且是 0.20-dev 树内新 crate**，与本项目 3.10/3.11/3.12 三段两两相关。三层 + 一个数据模型层：
+
+| 层 | 位置 | 内容 |
+|------|------|------|
+| UI | `crates/bevy_inspector/` | **实体层级树面板 + 选中详情面板**，建在 `bevy_ui` + `bevy_feathers`（0.20 新 UI 框架）+ `bevy_picking` 上；`entity_tree.rs` 的 `sync_entity_tree` 每帧 World→UI 树同步，**根 = 无 `ChildOf` 实体**（:255，与 3.10 定根逻辑同构）；row↔source 双向映射（`row()`/`source()`）、expanded/selected 各落资源、`set_dirty` 手动失效；**`remote` feature：同套面板经 BRP 检视另一个运行中的 app** |
+| 数据 | `bevy_dev_tools::inspection/` | UI 与数据分家：entity/component/resource 检视、`world_summary`（archetype 摘要）、label_resolution、fuzzy_name_matching——数据半边零渲染依赖 |
+| 协议 | `bevy_remote/src/inspection_methods.rs` | BRP 读方法族（点风格，与 §3 同代）：`world.inspect` / `world.inspect_component` / `world.inspect_component_type` / `world.inspect_resource` / `world.inspect_all_resources` / `world.summarize`（archetype 全景）/ `registry.component_metadata` |
+| ECS | `bevy_ecs/src/relationship/relationship_query.rs` | 现成遍历器：`iter_descendants` / `iter_descendants_depth_first` / `iter_ancestors`（:101/:118/:135，QueryData/Filter 参数化）——手写递归遍历有现成替代 |
+
+**官方示例与测试命令**（`examples/inspector/`）：
+
+```bash
+# 本机检视自己的 World：左实体树 + 右详情面板（reflect 可编辑 widget 全家桶，Showcase 组件演示每种）
+cargo run --example local_inspector --features="bevy_inspector,debug"   # debug=未注册类型出可读名
+
+# 进程外检视（3.12 同款形状）：T1 起 BRP 服务端，T2 面板客户端
+cargo run --example server --features="bevy_remote"
+cargo run --example remote_inspector --features="bevy_inspector,bevy_remote_client"
+# 默认连 127.0.0.1:15702，BRP_HOST/BRP_PORT 可覆盖；关键接线 = InspectorSource::Remote(RemoteSource::new(..))
+```
+
+对 3.10~3.12 的判定：
+
+- **3.10 不白做**：`bevy_inspector` 走 `bevy_ui` → `bevy_ui_render` 渲染管线，**禁渲染宿主挂不上**（与 bevy_egui 同根）；egui 裸接仍是我们宿主形状下的唯一路线。且它是 retained 组件树同步，我们是每帧直查 World，形状本就不同。
+- **3.12 重大利好**：BRP 读侧方法族现成（inspect/summarize/query），自定义只需 set_transform/spawn/despawn 三个写方法（复用 3.11 封装的操作函数）；官方 `remote_inspector` 可直接当"现成 GUI 客户端"连我们宿主开出的 BRP 端口，候选验收方式之一。
+- **3.11 参照**：官方详情面板的编辑走 `bevy_reflect`（组件须注册 Reflect，Showcase 演示全部 widget 类型）；我们 3.11 直改 `Transform` 组件不走反射，两条路线互为对照。
+- `InspectorSelection` 资源 = 官方点选落账形状，与我们 `SelectedEntity` 同构。
+- 示例场景用 0.20 新 `bsn!`/`bsn_list!` 场景 DSL（声明式实体树），另见本目录场景篇。
+
+**定案（2026-10-09 用户实测）**：`local_inspector` 的前端 UI 表现**不学**——实测又闪又卡（机制定性假设：bevy_ui retained 组件树每帧重建 + taffy 全量重排，规模一大就抖；未做源码级核实，勿当结论引用）。**可学的是后端数据收集与组织**：`bevy_dev_tools::inspection` 的数据模型（component 分组、label 解析、world_summary）、BRP inspection 读方法族、选中态语义（row↔source 映射）——3.11 开工深读 `entity_tree.rs` 时只取数据/语义层，不取 UI 表现层。
