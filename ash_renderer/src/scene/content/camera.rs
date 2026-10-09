@@ -13,6 +13,7 @@ use bevy::{
 
 use ash_macros::system;
 
+use crate::scene::mechanism::CameraOrbit;
 use crate::scene::util::fmt_vec3;
 
 /// 相机取景参数：与官方对照进程（examples/official_reference.rs）用同一组
@@ -50,6 +51,9 @@ pub(super) fn spawn_camera(
         projection,
         Transform::from_xyz(CAMERA_POS.x, CAMERA_POS.y, CAMERA_POS.z)
             .looking_at(CAMERA_TARGET, Vec3::Y),
+        // 轨道控制状态随相机进场（3.9）：环绕目标 = 取景注视点，机位零跳变
+        // 反解为球坐标（机制半边 AshCameraControlPlugin 逐帧驱动）。
+        CameraOrbit::from_pose(CAMERA_POS, CAMERA_TARGET),
     ));
     info!(
         "相机进场：Camera+Projection+Transform @ {} 看向 {}（官方示例取景，宽高比{aspect_note}）",
