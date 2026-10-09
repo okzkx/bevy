@@ -14,7 +14,8 @@ use ash_renderer::{
     driver::{AshHostPlugin, AshUploadPlugin},
     overlay::OverlayPlugin,
     scene::{
-        AshCameraAspectPlugin, AshCollectPlugin, AshMaterialHookPlugin, SceneEntryPlugin,
+        AshCameraAspectPlugin, AshCameraControlPlugin, AshCollectPlugin, AshMaterialHookPlugin,
+        SceneEntryPlugin,
     },
 };
 use bevy::{
@@ -62,6 +63,8 @@ fn main() -> AppExit {
         .add_plugins(AshMaterialHookPlugin)
         // 宽高比补位（3.1.3 第四补位，机制半边）：随窗口 resize 修正相机 aspect_ratio
         .add_plugins(AshCameraAspectPlugin)
+        // 相机轨道控制（3.9，机制半边）：左键拖拽环绕 + 滚轮推拉，驱动带 CameraOrbit 的相机
+        .add_plugins(AshCameraControlPlugin)
         // 场景进场（step3 任务 3.1.2，业务半边）：load FlightHelmet + spawn WorldAssetRoot + 到货统计
         .add_plugins(SceneEntryPlugin)
         // 场景采集（step3 任务 3.1.4，机制半边）：PostUpdate 帧末直读 primitive 三样，产 CollectedScene 快照

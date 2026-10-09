@@ -13,6 +13,6 @@ mod util;
 
 pub use content::SceneEntryPlugin;
 pub use mechanism::{
-    AshCameraAspectPlugin, AshCollectPlugin, AshMaterialHookPlugin, CollectedPrimitive,
-    CollectedScene,
+    AshCameraAspectPlugin, AshCameraControlPlugin, AshCollectPlugin, AshMaterialHookPlugin,
+    CollectedPrimitive, CollectedScene,
 };

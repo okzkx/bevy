@@ -6,15 +6,18 @@
 //! | [`material_hook`] | 材质缝补位：补 `Assets<StandardMaterial>` 容器 + 自写三钩子 |
 //! | [`collect`] | 采集机制：PostUpdate 帧末直读 primitive 三样，产 CollectedScene 快照 |
 //! | [`camera_aspect`] | 宽高比补位：随窗口 resize 修正任意相机的 aspect_ratio |
+//! | [`camera_control`] | 相机轨道控制：左键拖拽环绕 + 滚轮推拉，目标点由组件携带 |
 //!
 //! 判定线：driver（上传、帧循环）只依赖本层，业务半边（[`crate::scene::content`]）
 //! 没有任何引擎侧消费者。
 
 mod camera_aspect;
+mod camera_control;
 mod collect;
 mod material_hook;
 
 pub use camera_aspect::AshCameraAspectPlugin;
+pub use camera_control::{AshCameraControlPlugin, CameraOrbit};
 pub use collect::{AshCollectPlugin, CollectedPrimitive, CollectedScene};
 pub use material_hook::AshMaterialHookPlugin;
 
