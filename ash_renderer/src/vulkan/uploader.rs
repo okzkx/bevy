@@ -36,7 +36,7 @@ use std::slice;
 use ash::{vk, Device};
 use bevy::log::info;
 
-use crate::common::error::VulkanError;
+use crate::common::error::{Result, VulkanError};
 
 use super::resources::{BufferRole, GpuBuffer, MemoryContract};
 
@@ -157,7 +157,7 @@ impl Uploader {
         queue: vk::Queue,
         staging_capacity: u64,
         slots: usize,
-    ) -> Result<Self, VulkanError> {
+    ) -> Result<Self> {
         let command_pool = unsafe {
             device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
@@ -205,7 +205,7 @@ impl Uploader {
         staging_capacity: u64,
         command_pool: vk::CommandPool,
         command_buffers: &[vk::CommandBuffer],
-    ) -> Result<Self, VulkanError> {
+    ) -> Result<Self> {
         // timeline:支持(1.3 核心 mandatory)≠ 启用——timelineSemaphore 已在
         // 设备创建时显式开启(context.rs);此处只用不另设
         let mut timeline = vk::SemaphoreTypeCreateInfo::default()
@@ -250,7 +250,7 @@ impl Uploader {
     ///
     /// # Errors
     /// `vkGetSemaphoreCounterValue` 失败(设备丢失等)。
-    pub fn completed_ticket(&self) -> Result<Ticket, VulkanError> {
+    pub fn completed_ticket(&self) -> Result<Ticket> {
         unsafe {
             self.device
                 .get_semaphore_counter_value(self.ticket_semaphore)
@@ -270,7 +270,7 @@ impl Uploader {
     ///
     /// # Errors
     /// 等待超时(5s,合法合批远快于此;超时按设备异常冒泡)或调用失败。
-    pub fn wait_until(&self, ticket: Ticket) -> Result<(), VulkanError> {
+    pub fn wait_until(&self, ticket: Ticket) -> Result<()> {
         if self.completed_ticket()? >= ticket {
             return Ok(());
         }
@@ -286,7 +286,7 @@ impl Uploader {
     ///
     /// # Errors
     /// 同 [`Self::wait_until`]。
-    pub fn wait_all_uploads(&self) -> Result<(), VulkanError> {
+    pub fn wait_all_uploads(&self) -> Result<()> {
         self.wait_until(self.last_issued_ticket())
     }
 
@@ -296,7 +296,7 @@ impl Uploader {
     ///
     /// # Errors
     /// staging 扩容/写入、命令重置/录制/提交任一失败。
-    pub fn submit_batch(&mut self, batch: UploadBatch) -> Result<Option<Ticket>, VulkanError> {
+    pub fn submit_batch(&mut self, batch: UploadBatch) -> Result<Option<Ticket>> {
         let staging_len = batch.staging.len() as u64;
         if staging_len == 0
             && batch.uploads.is_empty()

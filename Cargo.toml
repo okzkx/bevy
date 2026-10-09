@@ -37,6 +37,9 @@ members = [
   "examples/large_scenes/zero_day",
   # 学习项目：宿主壳 + 自研 ash Vulkan 渲染器（.agents/docs/2-宿主壳）
   "ash_renderer",
+  # 学习项目：#[system] 透明标注宏（compile_fail 子 crate 一并入组）
+  "ash_macros",
+  "ash_macros/compile_fail",
   # Mipmap generator for testing large bevy scenes with mips and texture compression.
   "examples/large_scenes/mipmap_generator",
   # Benchmarks

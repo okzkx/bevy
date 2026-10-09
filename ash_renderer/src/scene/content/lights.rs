@@ -16,8 +16,11 @@ use bevy::{
 
 use crate::scene::util::fmt_vec3;
 
+use ash_macros::system;
+
 /// 灯光进场（Startup）：方向光一个实体（朝向与官方对照进程同源）；
 /// 环境光不 spawn——LightPlugin 已预插全局资源，这里只核验。
+#[system]
 pub(super) fn spawn_lights(mut commands: Commands) {
     commands.spawn((
         DirectionalLight {
@@ -39,6 +42,7 @@ pub(super) struct LightSetupState {
     done: bool,
 }
 
+#[system]
 pub(super) fn report_lights_setup(
     mut state: Local<LightSetupState>,
     lights: Query<&GlobalTransform, With<DirectionalLight>>,

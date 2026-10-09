@@ -16,7 +16,7 @@
 use ash::{khr::swapchain, vk, Device};
 use bevy::log::info;
 
-use crate::common::error::VulkanError;
+use crate::common::error::{Result, VulkanError};
 use crate::vulkan::Context;
 
 /// acquire 的三种结局。SUBOPTIMAL 拿得到图但下次要重建——照常渲染完这帧再重建。
@@ -55,7 +55,7 @@ pub struct Swapchain {
 }
 
 impl Swapchain {
-    pub fn new(ctx: &Context) -> Result<Self, VulkanError> {
+    pub fn new(ctx: &Context) -> Result<Self> {
         let fns = swapchain::Device::new(&ctx.instance, &ctx.device);
 
         // 每次重建都重查 caps：current_extent 是驱动认定的窗口尺寸，唯一的权威来源
@@ -240,7 +240,7 @@ impl Swapchain {
     ///
     /// 单次真重建 ≈ 60ms（wait_idle+destroy+create，2026-09-22 实测）——调用方必须
     /// 去抖（host::draw_frame 的 `ResizeGate`），不要在拖拽的每个尺寸步进上调用。
-    pub fn rebuild(&mut self, ctx: &Context) -> Result<(), VulkanError> {
+    pub fn rebuild(&mut self, ctx: &Context) -> Result<()> {
         let caps = unsafe {
             ctx.surface_fns
                 .get_physical_device_surface_capabilities(ctx.physical_device, ctx.surface)
@@ -283,7 +283,7 @@ impl Swapchain {
 
     /// 取下一张可绘 image（信号量在 present engine 拿到图时置位）。
     /// `ERROR_OUT_OF_DATE_KHR` 折叠成 [`VulkanError::SwapchainOutOfDate`]。
-    pub fn acquire(&self, semaphore: vk::Semaphore) -> Result<AcquireOutcome, VulkanError> {
+    pub fn acquire(&self, semaphore: vk::Semaphore) -> Result<AcquireOutcome> {
         match unsafe {
             self.fns
                 .acquire_next_image(self.swapchain, u64::MAX, semaphore, vk::Fence::null())
@@ -304,7 +304,7 @@ impl Swapchain {
         queue: vk::Queue,
         wait_semaphore: vk::Semaphore,
         index: u32,
-    ) -> Result<PresentOutcome, VulkanError> {
+    ) -> Result<PresentOutcome> {
         let wait = [wait_semaphore];
         let swapchains = [self.swapchain];
         let indices = [index];

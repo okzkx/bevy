@@ -25,7 +25,7 @@
 use ash::{vk, Device};
 use bevy::log::info;
 
-use crate::common::error::VulkanError;
+use crate::common::error::Result;
 
 use super::Context;
 
@@ -111,7 +111,7 @@ impl GraphicsPipeline {
         depth_format: vk::Format,
         set0_layout: vk::DescriptorSetLayout,
         set1_layout: vk::DescriptorSetLayout,
-    ) -> Result<Self, VulkanError> {
+    ) -> Result<Self> {
         let device = &ctx.device;
         // 词流（小端）→ ash 的 &[u32]；build.rs 只写整词，as_chunks 即全部字节
         let words: Vec<u32> = DEBUG_DRAW_SPV
@@ -153,7 +153,7 @@ impl GraphicsPipeline {
         set0_layout: vk::DescriptorSetLayout,
         set1_layout: vk::DescriptorSetLayout,
         module: vk::ShaderModule,
-    ) -> Result<Self, VulkanError> {
+    ) -> Result<Self> {
         unsafe {
             // push range 覆盖全 96B、双 stage：model 在 vertex 用，其余在 fragment 用
             let push_range = vk::PushConstantRange::default()
@@ -185,7 +185,7 @@ impl GraphicsPipeline {
         depth_format: vk::Format,
         layout: vk::PipelineLayout,
         module: vk::ShaderModule,
-    ) -> Result<Self, VulkanError> {
+    ) -> Result<Self> {
         unsafe {
             let vs_main = c"vs_main";
             let fs_main = c"fs_main";

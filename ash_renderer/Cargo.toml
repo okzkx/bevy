@@ -20,6 +20,8 @@ thiserror = "2"
 # 不再出口；3.3.1 图像映射按格式名核对 sRGB/线性角色），版本对齐 lock
 wgpu-types = { version = "30.0.1", default-features = false }
 egui = { version = "0.36.2", default-features = false, features = ["default_fonts"] }
+# #[system] 透明标注：具名系统函数的阅读路标 + 编译期校验（不能带 self），零运行时成本
+ash_macros = { path = "../ash_macros" }
 
 # WGSL → SPIR-V 编译（3.3 前置闸门）：精确锁版锁行为（选型记录 2026-09-24），
 # lock 内已有 30.0.1（wgpu 传递依赖），features 恰为 wgsl-in/spv-out 两个方向。

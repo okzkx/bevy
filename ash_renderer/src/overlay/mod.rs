@@ -8,17 +8,20 @@
 //!
 //! | 子模块 | 职责 |
 //! |---|---|
-//! | [`ui`] | egui 状态（Context/字体含 CJK）+ Update 的 egui pass + 调试窗口 + [`RenderMode`] 资源 |
+//! | [`ui`] | 框架半边：egui 状态（Context/字体含 CJK）+ Update 的 egui pass，产 [`EguiFrame`] |
+//! | [`debug_window`] | 业务半边：调试窗口内容（fps/着色模式单选/渲染器统计）+ [`RenderMode`] 资源 |
 //! | [`input`] | 输入桥：bevy 输入事件 → egui `RawInput`（含 KeyCode→egui Key 映射） |
 //! | [`paint`] | 绘制半边：图集 CPU 镜像/整传新槽/graveyard + 顶点环 + `paint_overlay` 产 `UiPaint` |
 //!
 //! 机制与证据：`.agents/docs/3-静态取数链路/3.7-egui调试GUI/`。
 
+mod debug_window;
 mod input;
 mod paint;
 mod ui;
 
+pub use debug_window::RenderMode;
 pub use paint::{AtlasGpu, AtlasMirror, UiVertexRing};
-pub use ui::{EguiFrame, EguiState, OverlayPlugin, RenderMode};
+pub use ui::{EguiFrame, EguiState, OverlayPlugin};
 
 pub(crate) use paint::{paint_overlay, OverlayLogState, UiDrawData};

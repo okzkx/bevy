@@ -23,6 +23,8 @@ use bevy::{
     prelude::*,
 };
 
+use ash_macros::system;
+
 /// 材质缝接线插件：注册 `Assets<StandardMaterial>` 容器，挂 [`AshMaterialHook`]，
 /// 并注册 Startup 自检（[`report_material_seam`]）——缝的全部接线收在本插件内，
 /// main 只 `add_plugins`，不引用本模块内部件。
@@ -119,6 +121,7 @@ impl GltfExtensionHandler for AshMaterialHook {
 /// 材质缝自检（Startup）：缝的两侧各报一句——容器在不在、hook 挂了几个。
 /// 运行时 `GltfExtensionHandlers` 应恰好含 1 个 handler（本 hook；KHR 扩展
 /// 不走 handler 注册，是 loader 在 load_material 里内联解析的）。
+#[system]
 fn report_material_seam(
     handlers: Option<Res<GltfExtensionHandlers>>,
     materials: Option<Res<Assets<StandardMaterial>>>,

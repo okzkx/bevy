@@ -36,7 +36,7 @@ use bevy::asset::AssetId;
 use bevy::log::info;
 use bevy::mesh::Mesh;
 
-use crate::common::error::VulkanError;
+use crate::common::error::{Result, VulkanError};
 
 use super::resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
 use super::uploader::{CopyRegion, UploadBatch, Uploader};
@@ -175,7 +175,7 @@ impl MeshPool {
         uploader: &mut Uploader,
         extra_vertex: u64,
         extra_index: u64,
-    ) -> Result<(), VulkanError> {
+    ) -> Result<()> {
         let need_vertex = self.used_vertex + extra_vertex;
         let need_index = self.used_index + extra_index;
         if self.vertex.is_some()
@@ -310,7 +310,7 @@ impl MeshPool {
         vertex_count: u32,
         index_count: u32,
         ticket: u64,
-    ) -> Result<(), VulkanError> {
+    ) -> Result<()> {
         let slot = MeshSlot {
             vertex,
             index,

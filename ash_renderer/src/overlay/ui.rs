@@ -1,4 +1,9 @@
-//! egui 状态与 pass：Update 里跑一遍 egui（纯 CPU），产 [`EguiFrame`] 交绘制半边。
+//! egui 框架半边：Startup 建状态，Update 里跑一遍 egui pass（纯 CPU），产
+//! [`EguiFrame`] 交绘制半边。
+//!
+//! overlay 按内容分两半：本文件是框架半边——"怎么跑"（Context/字体、pass、
+//! 纹理增量折叠、帧产出）；窗口内容"画什么"是业务，住 [`super::debug_window`]
+//! （本文件的 pass 只负责在 begin/end 之间调它）。
 //!
 //! pass 三件（egui 0.36，源码钉死见施工计划 §2.1）：`begin_pass(RawInput)` →
 //! 建窗口 UI → `end_pass() -> FullOutput`。`FullOutput.shapes` 是**未镶嵌**的
@@ -9,14 +14,10 @@
 //! （`C:\Windows\Fonts\msyh.ttc`，face index 0）插进 Proportional 回退位——拉丁
 //! 仍走自带 Ubuntu，CJK 落到雅黑。读不到 warn 后继续（Tier①：调试 UI 缺 CJK
 //! 显示为豆腐块，不影响帧循环）。
-//!
-//! `RenderMode` 是场景着色模式（原 driver 帧 Local 的 env 解析，3.7 资源化）：
-//! 本模块的单选钮写，`draw_frame` 读——依赖方向 driver→overlay 正向。
 
 use std::sync::Arc;
 
 use bevy::{
-    ecs::system::SystemParam,
     input::{
         keyboard::{KeyCode, KeyboardInput},
         mouse::{MouseButtonInput, MouseWheel},
@@ -26,12 +27,11 @@ use bevy::{
     window::{CursorLeft, CursorMoved, PrimaryWindow, Window, WindowFocused},
 };
 
-use crate::vulkan::{
-    BindlessTables, Uploader, FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
-};
-
+use super::debug_window::{DebugWindow, RenderMode, RendererStats};
 use super::input::{egui_raw_input, EguiInput};
 use super::paint::{AtlasGpu, AtlasMirror};
+
+use ash_macros::system;
 
 /// 调试 UI 插件：Startup 建状态，Update 跑 egui pass。绘制半边（图集/顶点/管线）
 /// 在 `driver`/`vulkan` 侧，消费本插件产的 [`EguiFrame`]。
@@ -62,45 +62,8 @@ pub struct EguiFrame {
     pub screen_points: Vec2,
 }
 
-/// 场景着色模式（UBO `mode` 的宿主侧形态）。UI 单选钮写、`draw_frame` 读；
-/// 初值来自 env `ASH_RENDER_MODE`（拼写错误 warn 后按 lambert 继续）。
-#[derive(Clone, Copy, PartialEq, Eq, Resource)]
-pub enum RenderMode {
-    /// 数据驱动 Lambert（默认）：UBO 方向光 + 环境，bevy 物理链同构。
-    Lambert,
-    /// albedo 直出：base color/UV/颜色空间对照（官方侧同款置 unlit）。
-    Unlit,
-    /// 世界法线可视化：法线方向验收仪器（非均匀缩放案例的判定仪器）。
-    Normal,
-}
-
-impl RenderMode {
-    fn from_env() -> Self {
-        match std::env::var("ASH_RENDER_MODE").ok().as_deref() {
-            None | Some("") | Some("lambert") => Self::Lambert,
-            Some("unlit") => Self::Unlit,
-            Some("normal") => Self::Normal,
-            Some(other) => {
-                // 拼写错误是配置问题不是运行故障：warn 后按默认继续，不中断帧循环
-                bevy::log::warn!(
-                    "ASH_RENDER_MODE={other:?} 无法识别（可选 lambert/unlit/normal），按 lambert 继续"
-                );
-                Self::Lambert
-            }
-        }
-    }
-
-    /// UBO `mode` 值（与 `debug_draw.wgsl` 的 `MODE_*` 同值，`FRAME_MODE_*`）。
-    pub(crate) fn as_u32(self) -> u32 {
-        match self {
-            Self::Lambert => FRAME_MODE_LAMBERT,
-            Self::Unlit => FRAME_MODE_UNLIT,
-            Self::Normal => FRAME_MODE_NORMAL,
-        }
-    }
-}
-
 /// Startup：建 egui Context + 装字体 + 插状态资源。
+#[system]
 fn init_egui(mut commands: Commands) {
     let state = EguiState {
         ctx: egui::Context::default(),
@@ -145,20 +108,13 @@ fn load_fonts() -> egui::FontDefinitions {
     fonts
 }
 
-/// vulkan 侧统计三项的只读束（调试窗口取数）。打成 SystemParam 是因为函数系统的
-/// 参数上限 16 个（FrameInput/UiDrawData 同款式样）。
-#[derive(SystemParam)]
-struct RendererStats<'w> {
-    tables: Res<'w, BindlessTables>,
-    uploader: Res<'w, Uploader>,
-    gpu: Res<'w, AtlasGpu>,
-}
-
-/// Update：组 RawInput → begin_pass → 调试窗口 → end_pass → 存 [`EguiFrame`]。
+/// Update：组 RawInput → begin_pass → 调试窗口（[`super::debug_window`]）→
+/// end_pass → 存 [`EguiFrame`]。
 #[expect(
     clippy::too_many_arguments,
     reason = "bevy 系统的参数表即依赖注入清单：六个事件读取器 + 窗口/时间/按键 + egui 状态帧与图集镜像资源 + vulkan 侧统计束，逐项声明是框架惯例"
 )]
+#[system]
 fn run_egui_pass(
     state: ResMut<EguiState>,
     mut frame: ResMut<EguiFrame>,
@@ -189,20 +145,15 @@ fn run_egui_pass(
         );
     state.ctx.set_pixels_per_point(ppp);
     state.ctx.begin_pass(raw);
-    debug_window(
-        &state.ctx,
-        &time,
+    DebugWindow {
+        ctx: &state.ctx,
+        time: &time,
         window,
         ppp,
-        &mut mode,
-        &UiStats {
-            texture_slots: (stats.tables.used_texture_slots(), stats.tables.capacity()),
-            sampler_slots: stats.tables.used_sampler_slots(),
-            atlas_generation: stats.gpu.generation(),
-            graveyard: stats.gpu.graveyard_len(),
-            ticket: stats.uploader.last_issued_ticket(),
-        },
-    );
+        mode: &mut mode,
+        stats: &stats,
+    }
+    .show();
     let mut output = state.ctx.end_pass();
     // 纹理增量（字体图集 dirty-rect）在 pass 出口就地消费：折进图集 CPU 镜像
     //（Update 侧——最小化帧 Update 照跑而 draw_frame 让路，折入不丢数据），折完
@@ -228,59 +179,4 @@ fn run_egui_pass(
             frame.screen_points.y,
         );
     }
-}
-
-/// 调试窗口的渲染器内部统计（vulkan 侧资源的只读取数快照，绘制常量）。
-struct UiStats {
-    /// (已占纹理槽, 表容量)。
-    texture_slots: (u32, u32),
-    /// 已占采样器槽（功能参数去重后的收敛数）。
-    sampler_slots: u32,
-    /// 图集已整传代数。
-    atlas_generation: u64,
-    /// 图集 graveyard 累计张数。
-    graveyard: usize,
-    /// 最近发出的上传票据号。
-    ticket: u64,
-}
-
-/// 调试窗口本体：fps/窗口信息 + 着色模式单选 + 渲染器内部统计。
-fn debug_window(
-    ctx: &egui::Context,
-    time: &Time,
-    window: &Window,
-    ppp: f32,
-    mode: &mut RenderMode,
-    stats: &UiStats,
-) {
-    egui::Window::new("ash 调试")
-        .default_pos(egui::pos2(12.0, 12.0))
-        .show(ctx, |ui| {
-            let fps = 1.0 / time.delta_secs().max(1e-6);
-            ui.monospace(format!("fps {:.0}  ({:.1} ms)", fps, time.delta_secs() * 1000.0));
-            ui.monospace(format!(
-                "窗口 {:.0}×{:.0}pt（物理 {:.0}×{:.0}）ppp {ppp:.2}",
-                window.width(),
-                window.height(),
-                window.physical_width(),
-                window.physical_height(),
-            ));
-            ui.separator();
-            ui.label("着色模式");
-            ui.horizontal(|ui| {
-                ui.selectable_value(mode, RenderMode::Lambert, "lambert");
-                ui.selectable_value(mode, RenderMode::Unlit, "unlit");
-                ui.selectable_value(mode, RenderMode::Normal, "normal");
-            });
-            ui.separator();
-            ui.monospace(format!(
-                "常驻表 纹理 {}/{} · 采样器 {}",
-                stats.texture_slots.0, stats.texture_slots.1, stats.sampler_slots,
-            ));
-            ui.monospace(format!(
-                "图集 第 {} 代 · graveyard {} 张",
-                stats.atlas_generation, stats.graveyard,
-            ));
-            ui.monospace(format!("票据 #{}", stats.ticket));
-        });
 }

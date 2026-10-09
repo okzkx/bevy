@@ -16,8 +16,10 @@ use bevy::{
     window::{PrimaryWindow, RawHandleWrapper},
 };
 
+use ash_macros::system;
+
 use crate::{
-    common::error::VulkanError,
+    common::error::{Result, VulkanError},
     overlay::{AtlasGpu, UiVertexRing},
     vulkan::{
         BindlessTables, Context, FramePool, GraphicsPipeline, ImageCache, MeshPool,
@@ -30,6 +32,7 @@ use crate::{
 ///
 /// 失败统一走 Tier② 冒泡：`try_init_vulkan` 把一切失败（含时序假设被打破）折叠成
 /// `VulkanError`，此处单点 match：记日志 + `AppExit::error()` 优雅退出。
+#[system]
 pub(super) fn init_vulkan(
     wrapper: Query<&RawHandleWrapper, With<PrimaryWindow>>,
     _main_thread: NonSendMarker,
@@ -65,7 +68,7 @@ pub(super) fn init_vulkan(
 /// 失败处理集中在调用方（init_vulkan 的单点 match）。
 fn try_init_vulkan(
     wrapper: &Query<&RawHandleWrapper, With<PrimaryWindow>>,
-) -> Result<InitChain, VulkanError> {
+) -> Result<InitChain> {
     let wrapper = wrapper.single().map_err(|_| {
         VulkanError::Init(
             "PrimaryWindow 上没有 RawHandleWrapper：窗口未在 Startup 前建好，时序假设被打破".into(),
@@ -139,6 +142,7 @@ fn pool_sharing_families(ctx: &Context) -> Vec<u32> {
 /// Swapchain（resize 级）→ Context（进程级，销毁 Surface/Instance/Device）。
 /// 不能等 runner `exiting` 回调的 `world.clear_all()`：那里清场顺序对 Resource 是任意的，
 /// 且 winit 窗口（hwnd）已先行销毁，surface 等不到合法的宿主。
+#[system]
 pub(super) fn teardown_vulkan(world: &mut World) {
     let had_vulkan = world.get_resource::<Context>().is_some();
     // 第一项 GPU 资源销毁前先排空。反序拆除解决对象依赖（帧资源引用 Device），

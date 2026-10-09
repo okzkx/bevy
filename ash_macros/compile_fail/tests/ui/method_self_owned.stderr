@@ -1,0 +1,8 @@
+error: #[system] 不能标注带 self 的方法：Bevy 的 System 无业务 self，状态走 Local/Resource
+ --> tests/ui/method_self_owned.rs:7:5
+  |
+7 |     fn tick(self) {}
+  |     ^^^^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error
+

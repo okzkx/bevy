@@ -11,6 +11,8 @@ use bevy::{
     window::PrimaryWindow,
 };
 
+use ash_macros::system;
+
 use crate::scene::util::fmt_vec3;
 
 /// 相机取景参数：与官方对照进程（examples/official_reference.rs）用同一组
@@ -24,6 +26,7 @@ const CAMERA_TARGET: Vec3 = Vec3::new(0.0, 0.3, 0.0);
 /// 我们只消费 Camera+Projection+Transform 三样数据。"无渲染图的 Camera 运行时
 /// 会报错"（bevy_camera/src/camera.rs:368-371）——报错者是渲染侧系统，禁渲染后
 /// 无人报。
+#[system]
 pub(super) fn spawn_camera(
     mut commands: Commands,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -64,6 +67,7 @@ pub(super) struct CameraSetupState {
     done: bool,
 }
 
+#[system]
 pub(super) fn report_camera_setup(
     mut state: Local<CameraSetupState>,
     cameras: Query<(&GlobalTransform, &Projection), With<Camera>>,

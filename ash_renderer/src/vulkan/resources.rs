@@ -44,7 +44,7 @@ use std::slice;
 use ash::{vk, Device, Instance};
 use bevy::log::info;
 
-use crate::common::error::VulkanError;
+use crate::common::error::{Result, VulkanError};
 
 /// buffer 用途角色:usage 与 memory 属性要求在此定案,创建入口逐一引用。
 ///
@@ -185,7 +185,7 @@ impl MemoryContract {
         type_bits: u32,
         required: vk::MemoryPropertyFlags,
         preferred: vk::MemoryPropertyFlags,
-    ) -> Result<u32, VulkanError> {
+    ) -> Result<u32> {
         let mut best: Option<(u32, u32)> = None; // (优先位命中数, 类型索引)
         for ty in 0..self.properties.memory_type_count {
             if type_bits & (1 << ty) == 0 {
@@ -253,7 +253,7 @@ impl GpuBuffer {
         contract: &MemoryContract,
         size: u64,
         role: BufferRole,
-    ) -> Result<Self, VulkanError> {
+    ) -> Result<Self> {
         Self::create_with_families(device, contract, size, role, &[])
     }
 
@@ -275,7 +275,7 @@ impl GpuBuffer {
         size: u64,
         role: BufferRole,
         families: &[u32],
-    ) -> Result<Self, VulkanError> {
+    ) -> Result<Self> {
         if size == 0 {
             return Err(VulkanError::Init(
                 "内存契约:size 必须大于 0(VkBufferCreateInfo::size 为 0 非法)".into(),
@@ -319,7 +319,7 @@ impl GpuBuffer {
         size: u64,
         role: BufferRole,
         buffer: vk::Buffer,
-    ) -> Result<Self, VulkanError> {
+    ) -> Result<Self> {
         unsafe {
             // 绑定四条款的证据来源:requirements 三元组,一次查询全用上
             let reqs = device.get_buffer_memory_requirements(buffer);
@@ -421,7 +421,7 @@ impl GpuBuffer {
     ///
     /// # Errors
     /// buffer 非 host-visible,或写入范围越出分配整体。
-    pub fn write(&mut self, offset: u64, bytes: &[u8]) -> Result<(), VulkanError> {
+    pub fn write(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
         if !self.host_visible() {
             return Err(VulkanError::Init(format!(
                 "host 写要求 HOST_VISIBLE,本 buffer 类型属性 {:?}",
@@ -454,7 +454,7 @@ impl GpuBuffer {
     ///
     /// # Errors
     /// buffer 非 host-visible,或读取范围越出分配整体。
-    pub fn read(&mut self, offset: u64, out: &mut [u8]) -> Result<(), VulkanError> {
+    pub fn read(&mut self, offset: u64, out: &mut [u8]) -> Result<()> {
         if !self.host_visible() {
             return Err(VulkanError::Init(format!(
                 "host 读要求 HOST_VISIBLE,本 buffer 类型属性 {:?}",
@@ -482,7 +482,7 @@ impl GpuBuffer {
 
     /// 范围前置检查:`[offset, offset+len)` 须整体落在分配内(checked_add 同时
     /// 防 u64 溢出),不满足即报错——契约的"不越界"在指针运算之前执行。
-    fn check_range(&self, offset: u64, len: u64, what: &str) -> Result<(), VulkanError> {
+    fn check_range(&self, offset: u64, len: u64, what: &str) -> Result<()> {
         if offset
             .checked_add(len)
             .is_none_or(|end| end > self.allocation_size)
@@ -498,7 +498,7 @@ impl GpuBuffer {
 
     /// 写侧 flush:`[offset, offset+len)` 向两端舍入到 atom 边界后 flush。
     /// 舍入只扩到含写入字节的两个边界 atom,未写 atom 永不进范围。
-    fn coherent_flush(&mut self, offset: u64, len: u64) -> Result<(), VulkanError> {
+    fn coherent_flush(&mut self, offset: u64, len: u64) -> Result<()> {
         let Some((start, size)) = self.atom_range(offset, len) else {
             return Ok(());
         };
@@ -516,7 +516,7 @@ impl GpuBuffer {
     }
 
     /// 读侧 invalidate:与 flush 同一套舍入与跳过规则。
-    fn coherent_invalidate(&mut self, offset: u64, len: u64) -> Result<(), VulkanError> {
+    fn coherent_invalidate(&mut self, offset: u64, len: u64) -> Result<()> {
         let Some((start, size)) = self.atom_range(offset, len) else {
             return Ok(());
         };

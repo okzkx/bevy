@@ -1,0 +1,15 @@
+[package]
+name = "ash_macros"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+# 锁到 workspace lock 里已有的版本，不引入新依赖面
+syn = { version = "2.0.119", features = ["full"] }
+quote = "1.0.47"
+proc-macro2 = "1.0.107"

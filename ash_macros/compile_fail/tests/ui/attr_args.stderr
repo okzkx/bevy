@@ -1,0 +1,8 @@
+error: #[system] 暂不支持参数
+ --> tests/ui/attr_args.rs:4:10
+  |
+4 | #[system(set = "Input")]
+  |          ^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error
+
