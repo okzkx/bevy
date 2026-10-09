@@ -30,7 +30,7 @@ use bevy::{
 };
 
 use super::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
-use super::debug_window::{DebugWindow, RenderMode, RendererStats};
+use super::debug_window::{DebugWindow, FpsMeter, RenderMode, RendererStats};
 use super::entity_tree_window::{EntityTreeData, EntityTreeWindow, SelectedEntity};
 use super::input::{egui_raw_input, EguiInput};
 use super::paint::{AtlasGpu, AtlasMirror};
@@ -80,6 +80,8 @@ fn init_egui(mut commands: Commands) {
     commands.insert_resource(DebugWindowsOpen::default());
     // 层级树点选（3.10）：3.11 编辑面板的目标来源
     commands.insert_resource(SelectedEntity::default());
+    // 帧率显示平滑（3.10 收官后追记）：0.5s 出一次平均快照
+    commands.insert_resource(FpsMeter::default());
     // 图集镜像（Update 折入）与 GPU 代（Last 整传；空建——首帧有整图增量才落图）。
     // AtlasGpu 的拆除在 teardown_vulkan（graveyard 与表同寿的拆除序）
     commands.insert_resource(AtlasMirror::default());
@@ -125,6 +127,7 @@ struct DebugUiParams<'w, 's> {
     mode: ResMut<'w, RenderMode>,
     windows_open: ResMut<'w, DebugWindowsOpen>,
     selected: ResMut<'w, SelectedEntity>,
+    fps: ResMut<'w, FpsMeter>,
     tree: EntityTreeData<'w, 's>,
 }
 
@@ -164,13 +167,15 @@ fn run_egui_pass(
         );
     state.ctx.set_pixels_per_point(ppp);
     state.ctx.begin_pass(raw);
+    // 帧率快照先喂再显示：0.5s 一刷，间隔内读数稳定
+    ui.fps.tick(time.delta_secs());
     // 总控先行（自身不可关），其余窗口按开关显隐；[×] 与 checkbox 写同一字段
     DebugHubWindow { ctx: &state.ctx, open: &mut ui.windows_open }.show();
     if ui.windows_open.stats {
         DebugWindow {
             ctx: &state.ctx,
             open: &mut ui.windows_open.stats,
-            time: &time,
+            fps: ui.fps.snapshot,
             window,
             ppp,
             mode: &mut ui.mode,
