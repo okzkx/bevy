@@ -25,7 +25,7 @@
 use ash::{vk, Device};
 use bevy::log::info;
 
-use crate::common::error::VulkanError;
+use crate::common::error::Result;
 
 use super::Context;
 
@@ -120,7 +120,7 @@ impl OverlayPipeline {
         color_format: vk::Format,
         depth_format: vk::Format,
         set0_layout: vk::DescriptorSetLayout,
-    ) -> Result<Self, VulkanError> {
+    ) -> Result<Self> {
         let device = &ctx.device;
         // 词流（小端）→ ash 的 &[u32]；build.rs 只写整词，as_chunks 即全部字节
         let words: Vec<u32> = OVERLAY_DRAW_SPV
@@ -172,7 +172,7 @@ impl OverlayPipeline {
         depth_format: vk::Format,
         layout: vk::PipelineLayout,
         module: vk::ShaderModule,
-    ) -> Result<Self, VulkanError> {
+    ) -> Result<Self> {
         unsafe {
             let stages = [
                 vk::PipelineShaderStageCreateInfo::default()

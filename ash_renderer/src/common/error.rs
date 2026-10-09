@@ -44,3 +44,9 @@ impl TierError {
         Self::Fatal
     }
 }
+
+/// crate 级 `Result` 别名：缺省错误 = [`VulkanError`]，运行期 Vulkan 侧签名共用；
+/// 第二参显式可写（如 `Result<ImageSpec, ImageConvertError>`）。导入本名即遮蔽
+/// std 同名——文件里需要别的 `Result` 形态时用全称 `std::result::Result`
+///（common::syntax 泛型代码的惯例）。
+pub type Result<T, E = VulkanError> = std::result::Result<T, E>;

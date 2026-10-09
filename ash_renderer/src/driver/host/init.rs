@@ -19,7 +19,7 @@ use bevy::{
 use ash_macros::system;
 
 use crate::{
-    common::error::VulkanError,
+    common::error::{Result, VulkanError},
     overlay::{AtlasGpu, UiVertexRing},
     vulkan::{
         BindlessTables, Context, FramePool, GraphicsPipeline, ImageCache, MeshPool,
@@ -68,7 +68,7 @@ pub(super) fn init_vulkan(
 /// 失败处理集中在调用方（init_vulkan 的单点 match）。
 fn try_init_vulkan(
     wrapper: &Query<&RawHandleWrapper, With<PrimaryWindow>>,
-) -> Result<InitChain, VulkanError> {
+) -> Result<InitChain> {
     let wrapper = wrapper.single().map_err(|_| {
         VulkanError::Init(
             "PrimaryWindow 上没有 RawHandleWrapper：窗口未在 Startup 前建好，时序假设被打破".into(),

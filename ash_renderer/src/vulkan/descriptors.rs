@@ -33,7 +33,7 @@ use ash::{vk, Device, Instance};
 use bevy::image::ImageSamplerDescriptor;
 use bevy::log::info;
 
-use crate::common::error::VulkanError;
+use crate::common::error::{Result, VulkanError};
 
 use super::images::{sampler_key, GpuImage, ImageSpec};
 use super::resources::{BufferRole, GpuBuffer, MemoryContract};
@@ -146,7 +146,7 @@ impl SlotAllocator {
         }
     }
 
-    fn alloc(&mut self) -> Result<u32, VulkanError> {
+    fn alloc(&mut self) -> Result<u32> {
         if let Some(slot) = self.free.pop() {
             return Ok(slot);
         }
@@ -213,7 +213,7 @@ impl BindlessTables {
         uploader: &mut Uploader,
         graphics_family: u32,
         capacity: u32,
-    ) -> Result<Self, VulkanError> {        // ---- 1) 限额对账（3.3.2）：UAB 轨五项,逐项落日志留证据。注意这组限额
+    ) -> Result<Self> {        // ---- 1) 限额对账（3.3.2）：UAB 轨五项,逐项落日志留证据。注意这组限额
         //不在普通 Limits 里——它们是 descriptorIndexing 的 properties2 扩展
         //（PhysicalDeviceDescriptorIndexingProperties,经 Properties2 push_next 查询,
         //与 Features2 查支持同一形状）----
@@ -333,7 +333,7 @@ impl BindlessTables {
         capacity: u32,
         set0_layout: vk::DescriptorSetLayout,
         set1_layout: vk::DescriptorSetLayout,
-    ) -> Result<Self, VulkanError> {
+    ) -> Result<Self> {
         // ---- 3) UAB pool(三层配套的第三层;pool size 覆盖双表满载 + 每帧 UBO)----
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
@@ -551,7 +551,7 @@ impl BindlessTables {
         view: vk::ImageView,
         sampler: vk::Sampler,
         key: &super::images::SamplerKey,
-    ) -> Result<SlotBinding, VulkanError> {
+    ) -> Result<SlotBinding> {
         let texture = self.textures.alloc()?;
         let sampler_slot = match self.sampler_slots.get(key) {
             Some(&slot) => slot,

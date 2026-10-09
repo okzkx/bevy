@@ -34,7 +34,7 @@ use wgpu_types::{TextureDimension, TextureFormat};
 
 use super::resources::MemoryContract;
 use super::uploader::Ticket;
-use crate::common::error::VulkanError;
+use crate::common::error::{Result, VulkanError};
 
 /// bevy `Image` → 渲染器规格的映射拒绝。Tier①：不影响帧循环，warn 一次跳过该资产
 ///（与 [`super::mesh_convert::MeshConvertError`] 同责）。
@@ -143,7 +143,7 @@ impl GpuImage {
         contract: &MemoryContract,
         spec: &ImageSpec,
         sharing_families: &[u32],
-    ) -> Result<Self, VulkanError> {
+    ) -> Result<Self> {
         // 使用角色三用途:上传拷贝写(TRANSFER_DST)、读回校验拷贝读(TRANSFER_SRC,
         // 显存机制篇读回条款)、着色器采样(SAMPLED)。RGBA8 两档对这三用途都是
         // mandatory format support,但"必真"也要查过才用——证据落日志。
@@ -212,7 +212,7 @@ impl GpuImage {
         usage: vk::ImageUsageFlags,
         features: vk::FormatFeatureFlags,
         image: vk::Image,
-    ) -> Result<Self, VulkanError> {
+    ) -> Result<Self> {
         unsafe {
             // 绑定三条款的证据来源:requirements 三元组,一次查询全用上。
             // dedicated 分配(显存机制篇 §6:M2 形态;子分配等显存压力出现再立)。
@@ -297,7 +297,7 @@ impl GpuImage {
     fn create_sampler(
         device: &Device,
         d: &ImageSamplerDescriptor,
-    ) -> Result<vk::Sampler, VulkanError> {
+    ) -> Result<vk::Sampler> {
         let info = vk::SamplerCreateInfo::default()
             .mag_filter(filter(d.mag_filter))
             .min_filter(filter(d.min_filter))

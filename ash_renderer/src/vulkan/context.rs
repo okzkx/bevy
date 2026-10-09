@@ -26,7 +26,7 @@ use ash::{
 use bevy::log::{error, info};
 use raw_window_handle::RawWindowHandle;
 
-use crate::common::error::VulkanError;
+use crate::common::error::{Result, VulkanError};
 
 const VALIDATION_LAYER: &std::ffi::CStr = c"VK_LAYER_KHRONOS_validation";
 
@@ -86,7 +86,7 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(wrapper: &bevy::window::RawHandleWrapper) -> Result<Self, VulkanError> {
+    pub fn new(wrapper: &bevy::window::RawHandleWrapper) -> Result<Self> {
         // ---- 窗口句柄（Win32；hinstance 缺失时进程句柄兜底）----
         let (hwnd, hinstance) = match wrapper.get_window_handle() {
             RawWindowHandle::Win32(w) => (

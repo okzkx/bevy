@@ -20,7 +20,7 @@ use ash::vk;
 use bevy::{ecs::system::SystemParam, image::ImageSamplerDescriptor, prelude::*};
 
 use crate::{
-    common::error::VulkanError,
+    common::error::{Result, VulkanError},
     vulkan::{
         sampler_key, BindlessTables, BufferRole, Context, GpuBuffer, GpuImage, ImageSpec,
         SlotBinding, StagingImageCopy, UiDrawCall, UiPaint, UploadBatch, Uploader,
@@ -180,7 +180,7 @@ impl UiVertexRing {
     ///
     /// # Errors
     /// 任一 buffer 创建/分配/绑定/映射失败（Tier②，初始化链冒泡）。
-    pub fn new(ctx: &Context) -> Result<Self, VulkanError> {
+    pub fn new(ctx: &Context) -> Result<Self> {
         let mut slots = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             slots.push(UiRingSlot {
@@ -216,7 +216,7 @@ impl UiVertexRing {
         slot: usize,
         vertices: &[UiVertex],
         indices: &[u32],
-    ) -> Result<(), VulkanError> {
+    ) -> Result<()> {
         // # Safety:UiVertex/u32 均 repr 紧排、无填充（上方 const 断言 20B），
         // 字节视图只在 write 调用内存活
         let vbytes = unsafe {
@@ -281,7 +281,7 @@ pub(crate) fn paint_overlay(
     slot: usize,
     screen_px: vk::Extent2D,
     log: &mut OverlayLogState,
-) -> Result<Option<UiPaint>, VulkanError> {
+) -> Result<Option<UiPaint>> {
     // —— 1) 图集整传：镜像代数领先已传代数 → 全新 GpuImage + 独立批 + publish 新槽 ——
     let (mirror_image, mirror_generation) = mirror.snapshot();
     if gpu.uploaded_generation < mirror_generation {

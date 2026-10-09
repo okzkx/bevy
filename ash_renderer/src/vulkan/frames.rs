@@ -31,7 +31,7 @@ use std::slice;
 use ash::{vk, Device};
 use bevy::log::info;
 
-use crate::common::error::VulkanError;
+use crate::common::error::{Result, VulkanError};
 use crate::vulkan::overlay_pipeline::{pack_ui_push, UiPaint};
 use crate::vulkan::pipeline::{pack_push, PushData};
 use crate::vulkan::Context;
@@ -115,7 +115,7 @@ impl DepthTarget {
     ///
     /// # Errors
     /// D32_SFORMAT 的 optimal tiling feature 不足，或 Vulkan 创建/分配/绑定失败。
-    pub fn new(ctx: &Context, extent: vk::Extent2D) -> Result<Self, VulkanError> {
+    pub fn new(ctx: &Context, extent: vk::Extent2D) -> Result<Self> {
         let format = DEPTH_FORMAT;
         let features = unsafe {
             ctx.instance
@@ -159,7 +159,7 @@ impl DepthTarget {
     ///
     /// # Safety
     /// `image` 须刚创建成功且未销毁;错误返回后调用方不得再使用它。
-    unsafe fn create_inner(ctx: &Context, image: vk::Image) -> Result<Self, VulkanError> {
+    unsafe fn create_inner(ctx: &Context, image: vk::Image) -> Result<Self> {
         unsafe {
             let reqs = ctx.device.get_image_memory_requirements(image);
             let memory_type = ctx.memory_contract().find_type(
@@ -241,7 +241,7 @@ impl FramePool {
     ///
     /// # Errors
     /// 命令池/命令缓冲/信号量/fence/深度附件创建失败。
-    pub fn new(ctx: &Context, swapchain_extent: vk::Extent2D) -> Result<Self, VulkanError> {
+    pub fn new(ctx: &Context, swapchain_extent: vk::Extent2D) -> Result<Self> {
         let command_pool = unsafe {
             ctx.device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
@@ -278,7 +278,7 @@ impl FramePool {
                     depth: DepthTarget::new(ctx, swapchain_extent)?,
                 })
             })
-            .collect::<Result<Vec<_>, VulkanError>>()?;
+            .collect::<Result<Vec<_>>>()?;
         info!(
             "帧资源就绪：{MAX_FRAMES_IN_FLIGHT} 组在飞（命令缓冲 + image_available + fence + 深度附件 {}x{}；render_finished 按 image 住在 Swapchain）",
             swapchain_extent.width, swapchain_extent.height,
@@ -314,7 +314,7 @@ impl FramePool {
     ///
     /// # Errors
     /// 等待排空或新深度附件创建失败。
-    pub fn rebuild_depth(&mut self, ctx: &Context, extent: vk::Extent2D) -> Result<(), VulkanError> {
+    pub fn rebuild_depth(&mut self, ctx: &Context, extent: vk::Extent2D) -> Result<()> {
         if self.depth_extent == extent {
             return Ok(());
         }
@@ -339,7 +339,7 @@ impl FramePool {
     /// return（acquire OUT_OF_DATE / acquire 失败 / 重建失败）都会留下一个永远
     /// 无人 signal 的 unsignaled fence，下一帧 `wait_for_fences(u64::MAX)`
     /// 永久阻塞主线程和消息泵。
-    pub fn wait_for_slot(&self) -> Result<(), VulkanError> {
+    pub fn wait_for_slot(&self) -> Result<()> {
         let frame = &self.frames[self.current];
         unsafe {
             self.device
@@ -369,7 +369,7 @@ impl FramePool {
         view: vk::ImageView,
         extent: vk::Extent2D,
         draw: &FrameDraw<'_>,
-    ) -> Result<(), VulkanError> {
+    ) -> Result<()> {
         let frame = &self.frames[self.current];
         let device = &self.device;
         unsafe {
