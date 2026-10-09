@@ -14,6 +14,8 @@
 
 ## 本项目 Python 工具（ash_renderer 窗口验证）
 
+真实输入注入（含抢焦点）仅在用户声明"无人模式"时执行，见 `.agents/rules/鼠标操作与输入注入纪律.md`；截图、日志、PostMessage 不受限。
+
 - `capture_window.py`——按 PID 抓主窗口截图（PrintWindow，DPI 感知），stdout 报 hwnd/rect/尺寸/md5。
-- `inject_mouse.py`——SendInput 注入鼠标输入（DPI 感知）：`drag` 左键拖拽、`wheel` 滚轮，坐标为屏幕物理像素。
+- `inject_mouse.py`——SendInput 注入鼠标输入（DPI 感知）：`drag` 左键拖拽、`move` 纯移动不按键、`wheel` 滚轮，坐标为屏幕物理像素。
 - `focus_window.py`——把目标窗口置前台（AttachThreadInput 套路），注入输入前必须先执行。

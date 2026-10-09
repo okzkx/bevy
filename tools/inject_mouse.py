@@ -2,6 +2,7 @@
 
 用法:
   python tools/inject_mouse.py drag --x <物理x> --y <物理y> --dx <物理dx> --dy <物理dy> [--steps 24] [--step-ms 15]
+  python tools/inject_mouse.py move --x <物理x> --y <物理y>
   python tools/inject_mouse.py wheel --x <物理x> --y <物理y> --notches <正滚上/负滚下> [--per-notch-ms 80]
 
 坐标为屏幕物理像素（进程已 SetProcessDpiAwareness(2)，画面功能视觉验证
@@ -101,6 +102,10 @@ def main() -> None:
     p_drag.add_argument("--steps", type=int, default=24)
     p_drag.add_argument("--step-ms", type=int, default=15)
 
+    p_move = sub.add_parser("move", help="仅移动光标（不按键）——验证松开后拖选是否仍跟随")
+    p_move.add_argument("--x", type=int, required=True)
+    p_move.add_argument("--y", type=int, required=True)
+
     p_wheel = sub.add_parser("wheel", help="滚轮（正=向前滚上，负=向后滚下）")
     for name in ("x", "y", "notches"):
         p_wheel.add_argument(f"--{name}", type=int, required=True)
@@ -109,6 +114,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.cmd == "drag":
         drag(args.x, args.y, args.dx, args.dy, args.steps, args.step_ms)
+    elif args.cmd == "move":
+        move_to(args.x, args.y)
     else:
         wheel(args.x, args.y, args.notches, args.per_notch_ms)
     print(f"注入完成：{args.cmd} @ ({args.x},{args.y})")
