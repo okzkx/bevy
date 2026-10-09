@@ -10,8 +10,10 @@
 //! 与材质容器组装 DrawList（拓扑快照不跨 CPU 帧，GPU 执行异步——上传票据在
 //! GPU 侧等待，CPU 不阻塞）；材质按不透明调试策略覆盖（详见 draw_frame 收账日志）。
 //!
-//! 帧内失败分支（两 Tier 的 Tier② 现场见各分支注释）：acquire 成功之后的 Vulkan
-//! 真失败一律 error 冒泡到 main 优雅退出——那时同步状态已无法恢复，warn 后继续
+//! 帧内错误按两 Tier 快捷分流（[`ResultTierExt`]，common 工具层：错误点一行
+//! 完成"记录 + 分级"，收尾副作用在系统壳统一执行）——Tier① 不影响运行的失败
+//! warn 后本帧让路（Warn，下帧自愈）；Tier② acquire 成功之后的 Vulkan 真失败
+//! error 后优雅退出（Fatal → AppExit）：那时同步状态已无法恢复，warn 后继续
 //! 会等一个永远无人 signal 的 fence，直接死锁。
 
 use bevy::{
@@ -28,7 +30,8 @@ use ash::vk;
 use ash_macros::system;
 
 use crate::{
-    common::error::VulkanError,
+    common::error::{TierError, VulkanError},
+    common::syntax::ResultTierExt,
     overlay::{paint_overlay, OverlayLogState, RenderMode, UiDrawData},
     scene::CollectedScene,
     vulkan::{
@@ -111,7 +114,10 @@ pub(crate) struct DrawListState {
     warned_no_mode: bool,
 }
 
-/// ash 帧循环本体（编排见模块注释；注册与排序在 [`super::host`]）。
+/// ash 帧循环系统壳（注册与排序在 [`super::host`]）：主体 [`frame_body`] 以 `?`
+/// 快捷分流两 Tier，本壳只做收尾——Warn 本帧让路，Fatal 写 `AppExit` 优雅退出
+///（退出码 1）。退出裁决必须留在 system 内部：Bevy 的 system Result 通道只会把
+/// Err 交给无 world 访问权的 error handler，表达不了"写 AppExit 后有序退出"。
 #[expect(
     clippy::too_many_arguments,
     reason = "bevy 系统的参数表即依赖注入清单，逐项声明是框架惯例，非函数签名设计味道"
@@ -130,6 +136,53 @@ pub(crate) fn draw_frame(
     mut exit: MessageWriter<AppExit>,
     _main_thread: NonSendMarker,
 ) {
+    let outcome = frame_body(
+        &mut input,
+        &mut swapchain,
+        &mut frames,
+        &mut tables,
+        &mut resized,
+        &time,
+        &mut gate,
+        &mut draw_state,
+        &mut paint_log,
+        &mut exit,
+    );
+    match outcome {
+        Ok(()) => {}
+        // Tier①：warn 已在错误点记录，本帧到此为止，下帧自愈
+        Err(TierError::Warn) => {}
+        // Tier②：error 已在错误点记录，渲染链无法继续——优雅退出
+        Err(TierError::Fatal) => {
+            exit.write(AppExit::error());
+        }
+    }
+}
+
+/// 帧循环主体：resize 闸门 → 等帧槽位 → acquire → 组装 DrawList → 帧光照 UBO →
+/// overlay 绘制半边 → 录制提交 → present。错误点用 [`ResultTierExt`] 两 Tier
+/// 快捷分流，收尾副作用（重试置位 / AppExit）在系统壳统一执行。
+///
+/// # Errors
+/// [`TierError::Warn`] = 本帧让路（Tier①）；[`TierError::Fatal`] = 优雅退出
+///（Tier②，AppExit 由壳写入）。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bevy 系统侧拆出的主体函数：资源逐项传入是 draw_frame 依赖注入的延续，非函数设计味道"
+)]
+fn frame_body(
+    frame: &mut FrameInput,
+    swapchain: &mut Swapchain,
+    frames: &mut FramePool,
+    tables: &mut BindlessTables,
+    resized: &mut MessageReader<WindowResized>,
+    time: &Time,
+    gate: &mut ResizeGate,
+    draw_state: &mut DrawListState,
+    paint_log: &mut OverlayLogState,
+    exit: &mut MessageWriter<AppExit>,
+) -> Result<(), TierError> {
+    let overlay = frame.overlay.take();
     let FrameInput {
         ref ctx,
         ref scene,
@@ -143,8 +196,8 @@ pub(crate) fn draw_frame(
         ref ambient,
         ref render_mode,
         ref mut uploader,
-        overlay,
-    } = input;
+        ..
+    } = *frame;
     // —— 闸门①：读 resize 消息。一次 update 可能积压多条（拖拽 125Hz 输入 vs 60fps
     // 帧），逐条刷状态，最新一条定生死：非零尺寸 = 正常/恢复，(0,0) = 最小化。
     for msg in resized.read() {
@@ -163,7 +216,7 @@ pub(crate) fn draw_frame(
             gate.logged_minimized = true;
             info!("窗口最小化：帧循环整帧让路（不碰 swapchain），消息泵保持存活");
         }
-        return;
+        return Ok(());
     }
     if gate.logged_minimized {
         gate.logged_minimized = false;
@@ -172,29 +225,24 @@ pub(crate) fn draw_frame(
     // —— 闸门③：尺寸变化 → 帧首按需重建，时机在 acquire 之前。rebuild 幂等
     //（尺寸没变就空手而归），拖拽中每步一建、帧循环不断流——acquire 永远落在
     // 新 swapchain 上。深度附件随其后按新 extent 重建（同样幂等；重建自带
-    // device_wait_idle，在飞旧深度不可能被引用）。
+    // device_wait_idle，在飞旧深度不可能被引用）。pending 保持置位、两重建都
+    // 成功才清：重建失败的帧在 or_warn 处让路，下个帧首原样重试。
     if gate.pending {
+        swapchain
+            .rebuild(ctx)
+            .or_warn("resize 后重建失败，下帧重试")?;
+        frames
+            .rebuild_depth(ctx, swapchain.extent)
+            .or_fatal("深度附件重建失败，渲染链无法继续，优雅退出")?;
         gate.pending = false;
-        if let Err(e) = swapchain.rebuild(ctx) {
-            bevy::log::warn!("resize 后重建失败，下帧重试: {e}");
-            gate.pending = true;
-            return;
-        }
-        if let Err(e) = frames.rebuild_depth(ctx, swapchain.extent) {
-            error!("深度附件重建失败，渲染链无法继续，优雅退出: {e}");
-            exit.write(AppExit::error());
-            return;
-        }
     }
 
     // 1) 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在下方提交前一刻）。
     // 失败 = 等待/重置层面坏掉（设备丢失、内存枯竭），继续帧循环只会撞上未知的
-    // fence 状态——Tier② 冒泡退出
-    if let Err(e) = frames.wait_for_slot() {
-        error!("帧槽等待/重置失败，渲染链无法继续，优雅退出: {e}");
-        exit.write(AppExit::error());
-        return;
-    }
+    // fence 状态——Tier②
+    frames
+        .wait_for_slot()
+        .or_fatal("帧槽等待/重置失败，渲染链无法继续，优雅退出")?;
 
     // 2) acquire：拿到一张可画的 image；OUT_OF_DATE = 这个 swapchain 已不可用
     //（最小化/恢复/独占模式切换等），必须立即重建——等不得下一帧
@@ -206,16 +254,12 @@ pub(crate) fn draw_frame(
             index
         }
         Err(VulkanError::SwapchainOutOfDate) => {
-            if let Err(e) = swapchain.rebuild(ctx) {
-                bevy::log::warn!("acquire 过时后重建失败: {e}");
-            }
-            return;
+            // 无论重建成败，本帧作废（acquire 没拿到图）；重建失败 warn 后让路，
+            // 下帧 acquire 再过时就地重试重建
+            swapchain.rebuild(ctx).or_warn("acquire 过时后重建失败")?;
+            return Ok(());
         }
-        Err(e) => {
-            error!("acquire 失败，渲染链无法继续，优雅退出: {e}");
-            exit.write(AppExit::error());
-            return;
-        }
+        Err(e) => return Err(TierError::fatal("acquire 失败，渲染链无法继续，优雅退出", e)),
     };
 
     // 3) 组装 DrawList：同帧快照 → 驻留账本/资产容器 → push + 池引脚。
@@ -358,48 +402,43 @@ pub(crate) fn draw_frame(
             },
         );
     }
-    if let Err(e) = tables.frame_ubo(frames.current_index()).write(
-        0,
-        &pack_frame_uniforms(&FrameUniformsData {
-            view_proj,
-            dir_to_light,
-            ambient_color,
-            light_color,
-            mode: render_mode.as_u32(),
-        }),
-    ) {
-        error!("帧 UBO 写失败，渲染链无法继续，优雅退出: {e}");
-        exit.write(AppExit::error());
-        return;
-    }
+    tables
+        .frame_ubo(frames.current_index())
+        .write(
+            0,
+            &pack_frame_uniforms(&FrameUniformsData {
+                view_proj,
+                dir_to_light,
+                ambient_color,
+                light_color,
+                mode: render_mode.as_u32(),
+            }),
+        )
+        .or_fatal("帧 UBO 写失败，渲染链无法继续，优雅退出")?;
 
     // 4.5) overlay 绘制半边（3.7）：图集整传（可能多出一张 transfer 票据——本帧
     // 图形提交的 wait_ticket 在此后快照，flush_uploads 批与图集批都被等待）→
     // 镶嵌 → 顶点环写入 → UiPaint + 本帧槽 buffer 句柄（record_frame 的 UI 段
     // 接画）。资源束缺席 = overlay 未装，整段跳过（收账日志在 paint_overlay 内）。
+    // overlay 束按值消费（take 后本帧留 None；SystemParam 每帧重建，无残留）。
     let ui = match overlay {
         Some(mut ui_data) => {
             let ui_buffers = ui_data.ring.buffers(frames.current_index());
-            match paint_overlay(
+            let paint = paint_overlay(
                 ctx,
                 &ui_data.egui,
                 &mut ui_data.frame,
                 &ui_data.mirror,
                 &mut ui_data.gpu,
                 &mut ui_data.ring,
-                &mut tables,
-                &mut *uploader,
+                tables,
+                uploader,
                 frames.current_index(),
                 swapchain.extent,
-                &mut paint_log,
-            ) {
-                Ok(paint) => paint.map(|p| (p, ui_buffers)),
-                Err(e) => {
-                    error!("overlay 绘制半边失败，渲染链无法继续，优雅退出: {e}");
-                    exit.write(AppExit::error());
-                    return;
-                }
-            }
+                paint_log,
+            )
+            .or_fatal("overlay 绘制半边失败，渲染链无法继续，优雅退出")?;
+            paint.map(|p| (p, ui_buffers))
         }
         None => None,
     };
@@ -431,22 +470,21 @@ pub(crate) fn draw_frame(
         ticket_semaphore: uploader.ticket_semaphore(),
         clear: clear_color(time.elapsed_secs_f64()),
     };
-    if let Err(e) = frames.record_frame(
-        ctx,
-        swapchain.render_finished[index as usize],
-        image,
-        view,
-        swapchain.extent,
-        &frame_draw,
-    ) {
-        error!("录制/提交失败，渲染链无法继续，优雅退出: {e}");
-        exit.write(AppExit::error());
-        return;
-    }
+    frames
+        .record_frame(
+            ctx,
+            swapchain.render_finished[index as usize],
+            image,
+            view,
+            swapchain.extent,
+            &frame_draw,
+        )
+        .or_fatal("录制/提交失败，渲染链无法继续，优雅退出")?;
 
     // 6) present：把画好的 image 交给 present engine，等它的信号量按 acquire 的
     // image index 取（不按帧槽轮转）。SUBOPTIMAL/OUT_OF_DATE 都只是标记 pending
-    //（同 acquire 的次优），重建交给下个帧首的闸门③；其余真失败 Tier② 冒泡
+    //（同 acquire 的次优），重建交给下个帧首的闸门③；其余真失败 error + 记
+    // AppExit 后不提前返回——advance 照常推进，帧槽账本保持一致，退出由壳下轮生效
     if let Err(e) = swapchain.present(ctx.queue, swapchain.render_finished[index as usize], index) {
         match e {
             VulkanError::SwapchainOutOfDate => gate.pending = true,
@@ -458,6 +496,7 @@ pub(crate) fn draw_frame(
     }
 
     frames.advance();
+    Ok(())
 }
 
 /// 清屏颜色：深蓝↔青蓝慢速呼吸（周期约 10s），无任何几何也看得出每帧都在画。

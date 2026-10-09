@@ -8,6 +8,10 @@
 //!   补初始化路径的家族位）+ `LogDebug`/`WarnOrDefault`——bevy 系统返回 `()`，`?` 不可用，
 //!   "warn + 早退"正是 `()` 系统里的传播形式；逐实体遍历类系统（Query → 绘制列表）
 //!   是其预期主场（frenderer render_params.rs:35 同形状）；
+//! - ✅（ash_renderer 新增）`ResultTierExt`（or_warn/or_fatal）+ `TierError`——
+//!   两 Tier 分流的 `?` 形态：错误点一行"记录 + 分级"，Err 冒泡到 system 壳统一
+//!   收尾；主场 = 从 `()` 系统拆出、可返回 `Result` 的主体函数（现役首例
+//!   `draw_frame` 的 `frame_body`），`()` 系统本体仍走宏族；
 //! - ❌ `singleton` 系列：bevy `Resource` 就是全局状态的正解，搬进来反而诱导反模式；
 //! - ❌ `lock_mutex!`：bevy 调度器管并发，系统内不持手动锁；首个后台线程出现时再议；
 //! - ❌ `Option::some()`：anyhow `?` 链专用，这里 Option 早退已由 `unwrap_or_*` 覆盖。
@@ -21,12 +25,15 @@
 //! 仅供真正必要的断言场景：不可恢复的内部不变量且需要 backtrace 取证；经
 //! `UnwrapPanic` trait 同时吃 Option 与 Result）。
 //! 用法：`use ash_renderer::common::syntax::宏名;`——宏内部用 `$crate::` 全限定调 trait 方法，
-//! 调用方无需导 trait。宏家族当前无现役调用点，作为两 Tier 错误处理的控制流
-//! 标准件备用，故本模块关闭 `unused_macros`。
+//! 调用方无需导 trait。宏家族当前无现役调用点，作为 `()` 系统的两 Tier 控制流
+//! 标准件备用（可返回 `Result` 的主体函数走 [`ResultTierExt`]），故本模块关闭
+//! `unused_macros`。
 
 #![allow(unused_macros)]
 
 use bevy::log::{info, warn};
+
+use super::error::TierError;
 
 /// Result 旁路日志：错误打日志后**原样穿透**（可继续 `?` 传播或交给宏早退）。
 pub trait LogDebug<T> {
@@ -55,6 +62,34 @@ impl<T, D: std::fmt::Debug> LogDebug<T> for std::result::Result<T, D> {
 
     fn warn_ok(self) -> Option<T> {
         self.warn().ok()
+    }
+}
+
+/// Result 的两 Tier 分流：错误点一行完成"记录 + 分级"，`?` 把 Err 冒泡到 system
+/// 壳，收尾副作用（让路 / 写 `AppExit` 退出）由壳统一执行。
+///
+/// 与 [`LogDebug`] 的分工：`warn()` 是旁路日志（Err 原样穿透），本 trait 把 Err
+/// 改写成 [`TierError`]（变体即收尾裁决）。主场 = 从 `()` 系统拆出、可返回
+/// `Result` 的主体函数（现役首例 `draw_frame` 的 `frame_body`）。
+pub trait ResultTierExt<T, E>: Sized {
+    /// Tier①：Err → `warn!("{msg}: {e}")` + [`TierError::Warn`]——`?` 后丢弃本次
+    ///（资源未就绪/可自愈失败），调用方按语境让路。
+    fn or_warn(self, msg: &str) -> std::result::Result<T, TierError>;
+    /// Tier②：Err → `error!("{msg}: {e}")` + [`TierError::Fatal`]——`?` 后壳写
+    /// `AppExit` 优雅退出（状态已不可信，不得继续）。
+    fn or_fatal(self, msg: &str) -> std::result::Result<T, TierError>;
+}
+
+impl<T, E: std::fmt::Display> ResultTierExt<T, E> for std::result::Result<T, E> {
+    fn or_warn(self, msg: &str) -> std::result::Result<T, TierError> {
+        self.map_err(|e| {
+            warn!("{msg}: {e}");
+            TierError::Warn
+        })
+    }
+
+    fn or_fatal(self, msg: &str) -> std::result::Result<T, TierError> {
+        self.map_err(|e| TierError::fatal(msg, e))
     }
 }
 
