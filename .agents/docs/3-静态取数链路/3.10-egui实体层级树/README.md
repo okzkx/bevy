@@ -24,3 +24,7 @@
 
 - 本段只立"能查、能选"；3.11 的 Transform 编辑以 `SelectedEntity` 为目标来源（编辑操作封装为可复用函数，供 3.12 BRP 方法调同款实现）。
 - GPU 池/描述符槽回收不在此主张（归步骤 4.1 对象增量）。
+
+## 材料清单
+
+- [实体结构三视图：Blender大纲、glTF与Bevy ECS的对照与转换.md](实体结构三视图：Blender大纲、glTF与Bevy ECS的对照与转换.md)：机制讲解篇（2026-10-09）——Blender 大纲（数据块从属视图）、glTF（归一化仓库：平行数组+索引）、Bevy ECS（绘制单元树）三视图实测对照；两条转换链逐项映射（glTF→Blender 反归一化、glTF→Bevy 两段式草稿 World+反射展开，含代码锚点）；钉子：材质/网格在任何视图都不是实体、AssetId 分配序≠glTF 数组序（DefaultMaterial 占 0 偏移）、实体号无结构信息量。
