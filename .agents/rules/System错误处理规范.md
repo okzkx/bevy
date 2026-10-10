@@ -26,11 +26,14 @@
 - 忘标 severity 的错误默认 `Severity::Panic`（无 payload）→ handler 兜底按 Tier② 走——**不要依赖兜底，Tier② 必须显式标注**；
 - BRP 自定义方法 handler 不走本通道（协议层错误回 `BrpError`，如 `BrpError::internal`），但同样禁 panic。
 
-## 3. 语法糖家族（`common::syntax`）
+## 3. 语法糖家族（`common::syntax`）——核心代码里错误处理只许一行
 
-- `or_warn(msg)` / `or_fatal(msg)`：Result 链专用，一行完成"挂 context 负载 + 标级"，`?` 冒泡；
-- `fatal(msg, err)`：match 分支/裸错误值就地构造（msg 可 `format!` 带变量）；
-- `bevy_error!(Severity::Error, "fmt", args)`：无底层错误值的判空矛盾/内部矛盾（let-else、`ok_or_else`）；
+**模板方法尽可多写，业务代码必须精简**：判空/链式失败一律收成一行 `?`，let-else + `return Err(...)` 样板禁用。
+
+- `or_warn(msg)` / `or_fatal(msg)`：Result 链专用，一行完成"挂 context 负载 + 标级"（msg 可 `format!`）；
+- `ok_or_fatal(msg)`：Option 判空矛盾/判空缺席一行收口（镜像 std `ok_or_else`），判空不是断言岗；
+- `fatal(msg, err)`：match 分支/裸错误值就地构造（msg 可 `format!`）；
+- **负载只写失败含义**（什么坏了、为什么状态不可信），不写"优雅退出"这类通道已决定的收尾动作——处置是 handler/看门的事，写进消息是废话；
 - 坑：泛型代码里 `map_err(BevyError::from)` 解析不了 blanket From（bound 只有 `Into<BevyError>`），写 `map_err(|e| e.into())`。
 
 ## 4. 禁令
