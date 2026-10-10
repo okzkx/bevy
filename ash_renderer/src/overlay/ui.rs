@@ -2,8 +2,9 @@
 //! [`EguiFrame`] 交绘制半边。
 //!
 //! overlay 按内容分两半：本文件是框架半边——"怎么跑"（Context/字体、pass、
-//! 纹理增量折叠、帧产出）；窗口内容"画什么"是业务，住 [`super::debug_window`]
-//! （本文件的 pass 只负责在 begin/end 之间调它）。
+//! 纹理增量折叠、帧产出）；窗口内容"画什么"是业务，住 [`super::debug_window`]、
+//! [`super::debug_hub_window`] 与 [`super::entity_tree_window`]（本文件的 pass
+//! 只负责按总控开关在 begin/end 之间调它们）。
 //!
 //! pass 三件（egui 0.36，源码钉死见施工计划 §2.1）：`begin_pass(RawInput)` →
 //! 建窗口 UI → `end_pass() -> FullOutput`。`FullOutput.shapes` 是**未镶嵌**的
@@ -18,6 +19,7 @@
 use std::sync::Arc;
 
 use bevy::{
+    ecs::system::SystemParam,
     input::{
         keyboard::{KeyCode, KeyboardInput},
         mouse::{MouseButtonInput, MouseWheel},
@@ -27,7 +29,9 @@ use bevy::{
     window::{CursorLeft, CursorMoved, PrimaryWindow, Window, WindowFocused},
 };
 
-use super::debug_window::{DebugWindow, RenderMode, RendererStats};
+use super::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
+use super::debug_window::{DebugWindow, FpsMeter, RenderMode, RendererStats};
+use super::entity_tree_window::{EntityTreeData, EntityTreeWindow, SelectedEntity};
 use super::input::{egui_raw_input, EguiInput};
 use super::paint::{AtlasGpu, AtlasMirror};
 
@@ -72,6 +76,12 @@ fn init_egui(mut commands: Commands) {
     commands.insert_resource(state);
     commands.insert_resource(EguiFrame::default());
     commands.insert_resource(RenderMode::from_env());
+    // 各调试窗口显隐总控（3.10）：总控面板写、pass 显示门读，默认全开
+    commands.insert_resource(DebugWindowsOpen::default());
+    // 层级树点选（3.10）：3.11 编辑面板的目标来源
+    commands.insert_resource(SelectedEntity::default());
+    // 帧率显示平滑（3.10 收官后追记）：0.5s 出一次平均快照
+    commands.insert_resource(FpsMeter::default());
     // 图集镜像（Update 折入）与 GPU 代（Last 整传；空建——首帧有整图增量才落图）。
     // AtlasGpu 的拆除在 teardown_vulkan（graveyard 与表同寿的拆除序）
     commands.insert_resource(AtlasMirror::default());
@@ -108,11 +118,24 @@ fn load_fonts() -> egui::FontDefinitions {
     fonts
 }
 
-/// Update：组 RawInput → begin_pass → 调试窗口（[`super::debug_window`]）→
+/// 各调试窗口面板的一次性参数束（ui.rs 接线层）：统计、着色模式、显隐总控、
+/// 点选与层级树查询合成一个 SystemParam——系统参数上限 16（FrameInput 同款式
+/// 的束打法），3.10 新增件全走这里，不再撑大 pass 签名。
+#[derive(SystemParam)]
+struct DebugUiParams<'w, 's> {
+    stats: RendererStats<'w>,
+    mode: ResMut<'w, RenderMode>,
+    windows_open: ResMut<'w, DebugWindowsOpen>,
+    selected: ResMut<'w, SelectedEntity>,
+    fps: ResMut<'w, FpsMeter>,
+    tree: EntityTreeData<'w, 's>,
+}
+
+/// Update：组 RawInput → begin_pass → 总控 + 各调试窗口（按显隐开关）→
 /// end_pass → 存 [`EguiFrame`]。
 #[expect(
     clippy::too_many_arguments,
-    reason = "bevy 系统的参数表即依赖注入清单：六个事件读取器 + 窗口/时间/按键 + egui 状态帧与图集镜像资源 + vulkan 侧统计束，逐项声明是框架惯例"
+    reason = "bevy 系统的参数表即依赖注入清单：六个事件读取器 + 窗口/时间/按键 + egui 状态帧与图集镜像资源 + 调试窗口面板束，逐项声明是框架惯例"
 )]
 #[system]
 fn run_egui_pass(
@@ -120,11 +143,10 @@ fn run_egui_pass(
     mut frame: ResMut<EguiFrame>,
     mut input: ResMut<EguiInput>,
     mut mirror: ResMut<AtlasMirror>,
-    stats: RendererStats,
+    mut ui: DebugUiParams,
     window: Query<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut mode: ResMut<RenderMode>,
     mut keyboard: MessageReader<KeyboardInput>,
     mut mouse_button: MessageReader<MouseButtonInput>,
     mut wheel: MessageReader<MouseWheel>,
@@ -145,15 +167,31 @@ fn run_egui_pass(
         );
     state.ctx.set_pixels_per_point(ppp);
     state.ctx.begin_pass(raw);
-    DebugWindow {
-        ctx: &state.ctx,
-        time: &time,
-        window,
-        ppp,
-        mode: &mut mode,
-        stats: &stats,
+    // 帧率快照先喂再显示：0.5s 一刷，间隔内读数稳定
+    ui.fps.tick(time.delta_secs());
+    // 总控先行（自身不可关），其余窗口按开关显隐；[×] 与 checkbox 写同一字段
+    DebugHubWindow { ctx: &state.ctx, open: &mut ui.windows_open }.show();
+    if ui.windows_open.stats {
+        DebugWindow {
+            ctx: &state.ctx,
+            open: &mut ui.windows_open.stats,
+            fps: ui.fps.snapshot,
+            window,
+            ppp,
+            mode: &mut ui.mode,
+            stats: &ui.stats,
+        }
+        .show();
     }
-    .show();
+    if ui.windows_open.entity_tree {
+        EntityTreeWindow {
+            ctx: &state.ctx,
+            open: &mut ui.windows_open.entity_tree,
+            selected: &mut ui.selected,
+            data: &ui.tree,
+        }
+        .show();
+    }
     let mut output = state.ctx.end_pass();
     // 纹理增量（字体图集 dirty-rect）在 pass 出口就地消费：折进图集 CPU 镜像
     //（Update 侧——最小化帧 Update 照跑而 draw_frame 让路，折入不丢数据），折完
