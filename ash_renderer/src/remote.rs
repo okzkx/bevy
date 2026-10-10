@@ -4,7 +4,8 @@
 //! `world.summarize` 等）与内置 CRUD 随 [`RemotePlugin`] 默认注册，`rpc.discover`
 //! 可列全量；本模块只补三个场景语义方法，写侧全部复用既有封装（[`TransformEdit`]
 //! 的 [`apply_transform_edit`]、[`apply_camera_command`]），与 egui 面板同款实现、
-//! 不养两份逻辑。
+//! 不养两份逻辑。3.13 的虚拟鼠标方法族（[`crate::remote_mouse`]）同样注册在本
+//! 插件——协议面注册单点在 [`AshRemotePlugin`]，实现按域分模块。
 //!
 //! 机制与边界（侦察笔记《bevy_remote：BRP远程协议与自定义方法》）：handler 本身
 //! 就是一个 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍执行——写值下一帧
@@ -22,13 +23,15 @@ use serde_json::{json, Value};
 
 use crate::{
     overlay::{transform_edit::{apply_transform_edit, TransformEdit, TransformEditError}, EntityRow, is_relevant, node_label},
+    remote_mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     scene::mechanism::{apply_camera_command, CameraCommandError, CameraOrbitCommand},
 };
 
 use ash_macros::system;
 
-/// BRP 远程通道插件（3.12）：装协议 + HTTP 传输 + 三个场景语义方法。
-/// 宿主 main 照插件清单惯例只 `add_plugins`，方法注册收在本插件内。
+/// BRP 远程通道插件（3.12/3.13）：装协议 + HTTP 传输 + 场景语义方法族
+/// （本模块三个 + remote_mouse 虚拟鼠标四个）。宿主 main 照插件清单惯例
+/// 只 `add_plugins`，方法注册收在本插件内。
 pub struct AshRemotePlugin;
 
 impl Plugin for AshRemotePlugin {
@@ -37,14 +40,19 @@ impl Plugin for AshRemotePlugin {
             RemotePlugin::default()
                 .with_method_main("ash_renderer/scene_tree", scene_tree)
                 .with_method_main("ash_renderer/set_transform", set_transform)
-                .with_method_main("ash_renderer/set_camera", set_camera),
+                .with_method_main("ash_renderer/set_camera", set_camera)
+                .with_method_main("ash_renderer/mouse_move", mouse_move)
+                .with_method_main("ash_renderer/mouse_button", mouse_button)
+                .with_method_main("ash_renderer/mouse_wheel", mouse_wheel)
+                .with_method_main("ash_renderer/mouse_status", mouse_status),
             RemoteHttpPlugin::default(),
         ));
     }
 }
 
-/// 参数缺失/不合法的统一错误（JSON-RPC 标准段 -32602）。
-fn invalid_params(message: impl Into<String>) -> BrpError {
+/// 参数缺失/不合法的统一错误（JSON-RPC 标准段 -32602）。mouse 族方法
+/// （[`crate::remote_mouse`]）复用同款，协议面错误口径只有一处。
+pub(crate) fn invalid_params(message: impl Into<String>) -> BrpError {
     BrpError {
         code: error_codes::INVALID_PARAMS,
         message: message.into(),

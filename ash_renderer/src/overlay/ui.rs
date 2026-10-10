@@ -6,8 +6,9 @@
 //! [`super::debug_hub_window`] 与 [`super::entity_tree_window`]（本文件的 pass
 //! 只负责按总控开关在 begin/end 之间调它们）。
 //!
-//! pass 三件（egui 0.36，源码钉死见施工计划 §2.1）：`begin_pass(RawInput)` →
-//! 建窗口 UI → `end_pass() -> FullOutput`。`FullOutput.shapes` 是**未镶嵌**的
+//! pass 四件（egui 0.36，源码钉死见施工计划 §2.1）：`begin_pass(RawInput)` →
+//! 插件逐帧账本（on_begin_pass/on_end_pass，本文件下方注释）→ 建窗口 UI →
+//! `end_pass() -> FullOutput`。`FullOutput.shapes` 是**未镶嵌**的
 //! 原始形状——镶嵌（`ctx.tessellate`）归绘制半边在 `draw_frame` 内做（写顶点环
 //! 须过 `wait_for_slot` 的 fence，见施工计划 §3.2）。
 //!
@@ -86,8 +87,9 @@ fn init_egui(mut commands: Commands) {
         ctx: egui::Context::default(),
     };
     state.ctx.set_fonts(load_fonts());
-    // 跨标签文字选区（egui 0.36 默认开）在松开后仍按悬停位置重画选区——"选区跟随
-    // 鼠标"的根因，见 3.10.1 施工记录 §7：调试面板选区限制在单标签内。
+    // 跨标签文字选区（egui 0.36 默认开）允许选区端点在标签间迁移——拖选扫过多个
+    // 标签时杂染面更大（3.10.1 §8）：调试面板选区限制在单标签内。单标签内的无按键
+    // 悬停重投影由 pass 内补跑的插件生命周期收口（run_egui_pass）。
     let mut style = (*state.ctx.style_of(egui::Theme::Dark)).clone();
     style.interaction.multi_widget_text_select = false;
     state.ctx.set_style_of(egui::Theme::Dark, style);
@@ -193,6 +195,29 @@ fn run_egui_pass(
         );
     state.ctx.set_pixels_per_point(ppp);
     state.ctx.begin_pass(raw);
+    // 插件逐帧账本补跑：egui 默认插件的 on_begin_pass/on_end_pass 只在 run_ui 闭包
+    // API（run_ui_dyn）里被驱动，begin_pass/end_pass 裸集成必须自己补——否则
+    // LabelSelectionState 的 is_dragging 首次拖选后永不清零，选区随无按键悬停逐帧
+    // 重投影（3.10.1 §8 "选区跟随"残留的单标签形态；multi_widget_text_select=false
+    // 只封跨标签半边）。空 root Ui 仅作钩子宿主（同 run_ui_dyn 形状）；run_ui 的
+    // root_ui_available_rect 副产物不补（仲裁门定案走 layer_id_at）。其余默认插件
+    // 不补：CallbackPlugin 零注册即 no-op（且类型不可名）、DragAndDrop/DebugText-
+    // Plugin 钩子在本宿主零负载（无 DnD payload/无 debug text），将来用到时照此
+    // 各加一段。
+    let mut plugin_host = egui::Ui::new(
+        state.ctx.clone(),
+        egui::Id::new((state.ctx.viewport_id(), "__top_ui")),
+        egui::UiBuilder::new()
+            .layer_id(egui::LayerId::background())
+            .max_rect(state.ctx.viewport_rect()),
+    );
+    if let Some(label_selection) = state
+        .ctx
+        .plugin_opt::<egui::text_selection::LabelSelectionState>()
+    {
+        let mut plugin = label_selection.lock();
+        egui::Plugin::on_begin_pass(&mut *plugin, &mut plugin_host);
+    }
     // 帧率快照先喂再显示：0.5s 一刷，间隔内读数稳定
     ui.fps.tick(time.delta_secs());
     // 总控先行（自身不可关），其余窗口按开关显隐；[×] 与 checkbox 写同一字段
@@ -221,6 +246,13 @@ fn run_egui_pass(
         if let Some(edit) = edit {
             ui.edit_queue.0.push(edit);
         }
+    }
+    if let Some(label_selection) = state
+        .ctx
+        .plugin_opt::<egui::text_selection::LabelSelectionState>()
+    {
+        let mut plugin = label_selection.lock();
+        egui::Plugin::on_end_pass(&mut *plugin, &mut plugin_host);
     }
     let mut output = state.ctx.end_pass();
     // 纹理增量（字体图集 dirty-rect）在 pass 出口就地消费：折进图集 CPU 镜像
