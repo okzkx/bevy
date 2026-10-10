@@ -81,7 +81,7 @@ D3D12 的 `ID3D12Fence` 就是 timeline 语义的原生形态：`Signal(value)` 
 
 - **D3D11 / OpenGL 时代**：`UpdateSubresource` / `glBufferSubData` 把 staging 拷贝藏进驱动，应用手里没有"拷贝队列 + 进度值"这对玩具，引擎想流水也流不了——早期引擎普遍是 CPU 阻塞式收口，frenderer 是这个时代的忠实剪影。
 - **D3D12（2014）**：fence value + copy queue 从第一天就是一等公民，引擎据此重构出流水化上传。
-- **Vulkan 1.2（2019）**：收编 `VK_KHR_timeline_semaphore`；**1.3（2022）**：支持成为 mandatory（仍须显式启用，见 §1）。三家的同步模型自此事实上对齐。
+- **Vulkan 1.2（2020）**：收编 `VK_KHR_timeline_semaphore`，且**支持自此成为 mandatory**——规范"Feature Requirements"一节"All Vulkan graphics implementations must support"清单把 `timelineSemaphore` 列在 `ifdef::VK_VERSION_1_2` 分支下（即报 1.2 就必须支持；Vulkan SC 1.0 是唯一豁免）；**1.3（2022）**：延续强制（仍须显式启用，见 §1）。三家的同步模型自此事实上对齐。（2026-10-10 订正：原文误作"1.3 起支持成为 mandatory"、1.2 年份误作 2019——依据 Vulkan-Docs v1.3.289 chapters/features.adoc "Feature Requirements" 一节实抓，与 §1、3.2.1 的引用一致。）
 
 ### 四件套（三家共识）
 

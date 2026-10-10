@@ -39,8 +39,9 @@ pub(super) struct SelectedEntity(pub(super) Option<Entity>);
 
 /// 层级树一行的查询数据（11 项组合体抽型，免 clippy type_complexity）：
 /// 层级关系（Children/ChildOf）+ 角色标记（相机/光/资产根）+ 呈现要素
-/// （Name/Mesh/Material/两 Transform），逐项可缺。
-type EntityRow = (
+/// （Name/Mesh/Material/两 Transform），逐项可缺。3.12 的 BRP `scene_tree`
+/// 复用同一行形状——两侧看到同一棵树。
+pub(crate) type EntityRow = (
     Entity,
     Option<&'static Name>,
     Option<&'static Children>,
@@ -123,7 +124,7 @@ impl EntityTreeWindow<'_> {
     clippy::too_many_arguments,
     reason = "过滤谓词逐项对应 EntityRow 查询元组的字段，收拢成结构体只是换个地方数数"
 )]
-fn is_relevant(
+pub(crate) fn is_relevant(
     name: Option<&Name>,
     children: Option<&Children>,
     has_parent: bool,
@@ -185,8 +186,9 @@ fn draw_entity(
 }
 
 /// 节点行文本：Name 优先，无名按组件角色命名（相机/方向光/资产根），实体号
-/// 恒显（glTF 同名节点可区分），尾缀组件标签。
-fn node_label(
+/// 恒显（glTF 同名节点可区分），尾缀组件标签。3.12 的 BRP `scene_tree`
+/// 复用——CLI 树的行文本与 egui 树一致。
+pub(crate) fn node_label(
     entity: Entity,
     name: Option<&Name>,
     cam: bool,

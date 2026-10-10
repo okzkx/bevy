@@ -197,6 +197,7 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 
 - `项目目标与Bevy使用指南.md`（本文）
 - `学习目标实现步骤.md`（执行路线图：六步总览 + 每步目的/做什么/产出/完成标准；含"编号约定"节）
+- `外置拓展需求.md`（**外置拓展需求登记处**（2026-10-10 建档）：编号体系之外的拓展需求集中登记——有想法、未立案、不承判定线责任，不占步骤/段编号；条目写明来源/内容/恢复条件/边界，转正走追加段立案后移出；首个条目 = RenderDoc 描述符可见性验证（永久挂起））
 - `1-熟悉Bevy结构/Bevy结构笔记.md`（ECS 核心概念笔记：App/SubApp/Schedule/World + 一帧时间线 + runner 真身表 + update() 内部三层，随学习进度增补）
 - `1-熟悉Bevy结构/材料/SubApp机制与取舍.md`（SubApp 定位与判断标准、并行性真相、开销与风险账、对本项目的演进结论；§7 补遗：3d_scene 三 SubApp 创建者与渲染线程交接）
 - `1-熟悉Bevy结构/材料/Plugin与PluginGroup机制.md`（Plugin 添加=build 与生命周期四段、Plugin 添加 Plugin 的两种形式、`plugin_group!` 宏展开（`:::`/`#[custom]`）与 set/disable 链、disable::<RenderPlugin> 的完整语义）

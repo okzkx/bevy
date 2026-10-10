@@ -50,4 +50,4 @@
 - ~~swapchain UNORM 直出的输出编码缺位~~（2026-09-29 已决：**UNORM 底板 + SRGB view 别名**——swapchain_mutable_format 扩展 + 双格式清单 + MUTABLE_FORMAT 旗标三件套；blend 线性域、present 不经 view；回退分支（无 SRGB 支持）保留并响亮 warn。见施工记录 §3.2）
 - 背面剔除与 front face 变体：正高度下绕向未被镜像，开剔除前的绕向判定与双面/BLEND 变体另立（M2 维持 cull NONE）。
 - wgpu-hal 30 负高度翻转与本机实测相反的机制（wgpu 栈内补偿）：超出本项目范围，记录在案防同款直觉（施工记录 §3.3 诚实边界）。
-- RenderDoc 描述符可见性验证：环境就绪后补做（承 3.3）。
+- ~~RenderDoc 描述符可见性验证：环境就绪后补做（承 3.3）。~~（2026-10-10 用户拍板：**不做**，登记为[外置拓展需求](../../外置拓展需求.md)，本段判定线不受影响）

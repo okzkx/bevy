@@ -8,7 +8,7 @@
 //! | `util` | 子模块公共小工具 |
 
 mod content;
-mod mechanism;
+pub(crate) mod mechanism;
 mod util;
 
 pub use content::SceneEntryPlugin;

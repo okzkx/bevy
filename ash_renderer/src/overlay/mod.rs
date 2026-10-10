@@ -25,7 +25,7 @@ mod debug_window;
 mod entity_tree_window;
 mod input;
 mod paint;
-mod transform_edit;
+pub(crate) mod transform_edit;
 mod ui;
 
 pub use debug_window::RenderMode;
@@ -33,3 +33,6 @@ pub use paint::{AtlasGpu, AtlasMirror, UiVertexRing};
 pub use ui::{EguiFrame, EguiState, OverlayPlugin};
 
 pub(crate) use paint::{paint_overlay, OverlayLogState, UiDrawData};
+// 3.12 的 BRP scene_tree 复用树窗口的行数据、相关性过滤与节点命名——
+// CLI 树与 egui 树看到同一棵树、同一套"相关"语义，不养两份逻辑。
+pub(crate) use entity_tree_window::{EntityRow, is_relevant, node_label};

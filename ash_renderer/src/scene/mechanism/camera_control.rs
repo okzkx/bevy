@@ -1,6 +1,9 @@
 //! 相机轨道控制（机制半边）：左键拖动绕目标点环绕、滚轮沿视线推拉缩放，
 //! 零 Vulkan 代码，也不含写死的场景参数——环绕目标由组件携带，进场时由
 //! 业务半边（[`crate::scene::content::camera`]）按取景参数给出。
+//! 输入源有两个：鼠标（左键 + 滚轮，逐帧增量）与 CLI 给值（3.12 BRP
+//! `set_camera`，[`apply_camera_command`] 绝对值/系数覆盖，共用同一套球坐标
+//! 状态与 Transform 写路径）。
 //!
 //! 取舍：官方 0.21 新增的 `bevy_camera_controller::pan_orbit_camera` 是完整版
 //!（bevy_picking 命中测试决定旋转中心、动量/平滑可调、bevy_render 不可选依赖），
@@ -95,6 +98,61 @@ struct DragSession {
     dragging: bool,
     /// None = 指针离窗/未入场：不产生增量，重入时重新取基准（防跳变）。
     last_cursor: Option<Vec2>,
+}
+
+/// CLI 相机给值命令（3.12）：逐项可选（None = 不动该量）。角度用度数（与
+/// [`crate::overlay::transform_edit::TransformEdit`] 的欧拉口径一致），zoom
+/// 与滚轮的指数缩放同语义（<1 推近、>1 拉远）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CameraOrbitCommand {
+    /// 环绕中心（世界系）。
+    pub target: Option<Vec3>,
+    /// 方位角（度，绝对值覆盖）。
+    pub yaw_deg: Option<f32>,
+    /// 仰角（度，绝对值覆盖，限位同拖拽）。
+    pub pitch_deg: Option<f32>,
+    /// 距中心距离（绝对值覆盖，限位同滚轮）。
+    pub radius: Option<f32>,
+    /// 缩放系数：radius *= zoom 后限位（0.8 = 推近 20%）。
+    pub zoom: Option<f32>,
+}
+
+/// 相机命令被拒的原因：World 里没有带 [`CameraOrbit`] 的相机。
+#[derive(Debug)]
+pub enum CameraCommandError {
+    NoCamera,
+}
+
+/// 应用一次 CLI 相机给值（3.12）：3.9 的鼠标输入与 3.12 的 BRP 输入汇入同一
+/// 套球坐标状态——限位常量、target+offset 加 look_at 的 Transform 写路径全部
+/// 复用，无两套机位。命令在 RemoteLast（帧尾）执行，写值下一帧渲染。
+/// 返回命令后的轨道参数（读回值，供 BRP 响应回显）。
+pub fn apply_camera_command(
+    world: &mut World,
+    cmd: CameraOrbitCommand,
+) -> Result<CameraOrbit, CameraCommandError> {
+    let mut query = world.query::<(&mut Transform, &mut CameraOrbit, &Camera)>();
+    let Ok((mut transform, mut orbit, _)) = query.single_mut(world) else {
+        return Err(CameraCommandError::NoCamera);
+    };
+    if let Some(target) = cmd.target {
+        orbit.target = target;
+    }
+    if let Some(yaw) = cmd.yaw_deg {
+        orbit.yaw = yaw.to_radians();
+    }
+    if let Some(pitch) = cmd.pitch_deg {
+        orbit.pitch = pitch.to_radians().clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    }
+    if let Some(radius) = cmd.radius {
+        orbit.radius = radius.clamp(MIN_ORBIT_RADIUS, MAX_ORBIT_RADIUS);
+    }
+    if let Some(zoom) = cmd.zoom {
+        orbit.radius = (orbit.radius * zoom).clamp(MIN_ORBIT_RADIUS, MAX_ORBIT_RADIUS);
+    }
+    transform.translation = orbit.target + orbit.offset();
+    transform.look_at(orbit.target, Vec3::Y);
+    Ok(*orbit)
 }
 
 /// 相机轨道控制插件：Update 里读鼠标输入改写相机位姿，接线收在本插件内，
