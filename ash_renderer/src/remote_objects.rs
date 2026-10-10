@@ -135,6 +135,12 @@ pub(crate) fn increment_stats(In(_params): In<Option<Value>>, ledger: Res<Instan
             "bytes_total": s.upload_bytes_total,
             "last_batch_bytes": s.last_batch_bytes,
         },
+        "asset_events": {
+            "frame": s.asset_events,
+            "frame_dirty_rows": s.asset_dirty_rows,
+            "total": s.asset_events_total,
+            "invalidations_total": s.asset_invalidations_total,
+        },
     }))
 }
 
