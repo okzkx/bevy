@@ -1,5 +1,5 @@
-"""BRP 薄客户端（3.12）：把宿主 bevy_remote 的 HTTP JSON-RPC 协议封装成逐命令
-形状，AI 免记协议即可完成"查询 → 改 Transform → 相机环绕推拉"闭环。
+"""BRP 薄客户端（3.12/3.13）：把宿主 bevy_remote 的 HTTP JSON-RPC 协议封装成逐命令
+形状，AI 免记协议即可完成"查询 → 改 Transform → 相机环绕推拉 → 虚拟鼠标操控"闭环。
 
 用法:
   python tools/brp.py tree                                        # 场景层级树（ash_renderer/scene_tree）
@@ -7,11 +7,19 @@
   python tools/brp.py query --with Mesh3d --option all            # 实体查询（world.query）
   python tools/brp.py set-transform 4v1 --translation 0 0.3 0 [--rotation-deg Y P R] [--scale X Y Z]
   python tools/brp.py camera [--yaw-deg 30] [--pitch-deg 15] [--radius 2] [--target X Y Z] [--zoom 0.9]
+  python tools/brp.py mouse-move --x 640 --y 360                  # 虚拟鼠标移动（points 域逻辑像素，左上原点）
+  python tools/brp.py mouse-button --button left --action press   # 虚拟按下/抬起（press|release）
+  python tools/brp.py mouse-button --action release --all         # 释放全部按住键（卡"按住"保险）
+  python tools/brp.py mouse-wheel --lines 3                       # 虚拟滚轮（--lines|--pixels 二选一，正值向上滚=推近）
+  python tools/brp.py mouse-status                                # 鼠标状态读回（位置/按住键/窗口/本帧滚轮）
   python tools/brp.py discover                                    # 全部可用方法（rpc.discover）
   python tools/brp.py raw --method world.query --params-json '{...}'
 
 组件名支持短名（如 Mesh3d、Transform），内部向宿主 world.list_components 查
 全量路径后按"最后一个 :: 段"匹配展开；含 :: 的输入视为全路径原样透传。
+虚拟鼠标注入发生在应用层消息缓冲（Messages<WindowEvent>，与 bevy_winit 同层），
+不碰用户真实光标/焦点，不受无人模式纪律约束；操作序列先 mouse-move 再 press
+（按压需要指针落点），写值统一下一帧生效。
 宿主须先起（cargo run -p ash_renderer）；--host/--port 可覆盖，默认 127.0.0.1:15702。
 无鉴权仅本地：与宿主同机使用，不得对网开放（BRP 侦察笔记 §6 边界）。
 连接被拒时提示宿主未起，退出码 2；BRP 层错误（含 ENTITY_NOT_FOUND 等）原样
@@ -123,6 +131,32 @@ def cmd_camera(args):
     out(rpc(args.host, args.port, "ash_renderer/set_camera", params))
 
 
+def cmd_mouse_move(args):
+    out(rpc(args.host, args.port, "ash_renderer/mouse_move", {"x": args.x, "y": args.y}))
+
+
+def cmd_mouse_button(args):
+    params = {"action": args.action}
+    if args.all:
+        params["all"] = True
+    elif args.button:
+        params["button"] = args.button
+    out(rpc(args.host, args.port, "ash_renderer/mouse_button", params))
+
+
+def cmd_mouse_wheel(args):
+    params = {}
+    if args.lines is not None:
+        params["lines"] = args.lines
+    if args.pixels is not None:
+        params["pixels"] = args.pixels
+    out(rpc(args.host, args.port, "ash_renderer/mouse_wheel", params))
+
+
+def cmd_mouse_status(args):
+    out(rpc(args.host, args.port, "ash_renderer/mouse_status"))
+
+
 def cmd_discover(args):
     resp = rpc(args.host, args.port, "rpc.discover")
     if "result" in resp:
@@ -179,6 +213,24 @@ def main():
     p.add_argument("--target", nargs=3, type=float, metavar=("X", "Y", "Z"), help="环绕中心")
     p.add_argument("--zoom", type=float, help="缩放系数（radius *= zoom，0.9 = 推近 10%%）")
     p.set_defaults(func=cmd_camera)
+
+    p = sub.add_parser("mouse-move", help="虚拟鼠标移动（ash_renderer/mouse_move）")
+    p.add_argument("--x", type=float, required=True, help="points 域逻辑像素，左上原点")
+    p.add_argument("--y", type=float, required=True, help="points 域逻辑像素，左上原点")
+    p.set_defaults(func=cmd_mouse_move)
+
+    p = sub.add_parser("mouse-button", help="虚拟鼠标按下/抬起（ash_renderer/mouse_button）")
+    p.add_argument("--button", choices=["left", "right", "middle", "back", "forward"])
+    p.add_argument("--action", choices=["press", "release"], required=True)
+    p.add_argument("--all", action="store_true", help="释放全部按住键（仅 release；与 --button 互斥）")
+    p.set_defaults(func=cmd_mouse_button)
+
+    p = sub.add_parser("mouse-wheel", help="虚拟滚轮（ash_renderer/mouse_wheel）")
+    p.add_argument("--lines", type=float, help="滚动格数（正值向上滚 = 相机推近）")
+    p.add_argument("--pixels", type=float, help="滚动像素（egui 面板像素域滚动）")
+    p.set_defaults(func=cmd_mouse_wheel)
+
+    sub.add_parser("mouse-status", help="鼠标状态读回（ash_renderer/mouse_status）").set_defaults(func=cmd_mouse_status)
 
     sub.add_parser("discover", help="列出全部可用 BRP 方法").set_defaults(func=cmd_discover)
 

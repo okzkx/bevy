@@ -40,6 +40,10 @@
 //! - [`remote`]:BRP 远程直控通道(3.12,HTTP JSON-RPC @ 127.0.0.1:15702)——AI
 //!   免开 UI 查询/改值/推拉相机;读侧官方 inspection 方法族随 RemotePlugin 默认
 //!   注册,写侧复用 overlay 的 Transform 编辑封装与 scene 机制层的相机给值封装;
+//! - [`remote_mouse`]:BRP 虚拟鼠标(3.13)——窗口无关的鼠标输入源:移动/按下/
+//!   抬起/滚轮经 handler 注入 `Messages<WindowEvent>`(与 bevy_winit 同层,官方
+//!   拆分系统顺带维护 Window 光标位),下游输入资源/egui 桥/相机轨道零改动;
+//!   注册收在 remote::AshRemotePlugin;
 //! - [`driver`]:渲染驱动(3.6.1 自 src 根收拢)——bevy 调度侧编排,横跨 scene 与 vulkan:
 //!   `host`(宿主桥插件:禁渲染补位 + 系统进调度)、`init`(Vulkan 初始化链与反序拆除)、
 //!   `frame`(帧循环 draw_frame)、`upload`(上传编排:flush_uploads,Last 里 before
@@ -50,5 +54,6 @@ pub mod common;
 pub mod driver;
 pub mod overlay;
 pub mod remote;
+pub mod remote_mouse;
 pub mod scene;
 pub mod vulkan;
