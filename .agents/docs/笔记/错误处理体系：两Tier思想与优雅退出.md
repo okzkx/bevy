@@ -1,6 +1,8 @@
 # 错误处理体系：两Tier思想与优雅退出
 
 > 2026-09-21 从《错误处理语法糖》篇独立成篇。分工：**糖篇管工具**（frenderer 宏家族的移植与图谱），**本篇管思想与架构**——用户的错误处理哲学 + ash_renderer 的完整落地。语法糖是 Tier① 的工具箱；本文是整个错误处理体系的宪法。
+>
+> **2026-10-10 修订**：Tier② 收尾路线改走官方统一错误通道（`tier_handler` 按 Severity 分流 + `fatal_gate` 看门写 `AppExit`，见 §3 与定案篇《代码结构优化：统一错误通道定案》）；两 Tier 思想（§0）与非必要不 panic 不变。
 
 ## 0. 两Tier思想（用户定案，适用于所有工程）
 
@@ -66,13 +68,25 @@ fn main() -> AppExit（Termination：Success=0 / Error=1）
 | 资源**全有或全无**插入 | 部分插入会让 draw_frame 半途 panic，破坏两 Tier |
 | `fn main() -> AppExit` | bevy 已实现 `Termination`（bevy_app/src/app.rs:1597，**没有** `From<AppExit> for ExitCode`，Termination 是正路），退出码 1 传出 |
 
-## 3. Tier② 能用 `?` 的关键：失败处理集中
+## 3. Tier② 能用 `?` 的关键：统一错误通道（2026-10-10 施工，替代壳+body）
 
-bevy 系统返回 `()`，`?` 在系统里不可用——两 Tier 的实现答案不是给系统加返回值，而是**把可能失败的装配抽成返回 Result 的普通函数**（`try_init_vulkan`），系统里只留一个 match。这样：
+system 签名 `Result<(), BevyError>`，`?` 冒泡的 Err 由执行器交给统一 handler
+（`common::error::tier_handler`，`App::set_error_handler` 注册），按错误值的
+`Severity` 元数据两 Tier 分流：
 
-- 函数内部全程 `?` 传播（含 Option→`map_err` 折叠），失败语境不丢；
-- 系统侧单点决策：log + `AppExit` + return；
-- 装配逻辑与失败策略解耦，`try_xxx` 函数可复用可测试。
+- `Warning` → handler 就地 warn 丢弃（Tier①，下帧自愈）；
+- 其余 → error 留档 + 置位 `FATAL: AtomicBool`，`fatal_gate` 看门 system（Update
+  早位）写 `AppExit` 优雅退出（Tier②）——handler 是裸函数指针、无 world 访问权，
+  退出请求只能经静态位中转；
+- 错误消息用 `.context(...)` 挂进错误值，日志在 handler 统一打（错误点不再 log，
+  单点零重复）；**冒泡与否只看"是否要求提前 return"**——循环内逐项降级、时序
+  过程记录就地 log，不进通道。
+
+一次性装配（Startup 无自愈可言）仍走 `try_init_vulkan` 串链 + 系统内单点 match。
+统一通道的机制事实与坑钉正本见定案篇《代码结构优化：统一错误通道定案》。
+
+旧答案（壳+body，已退役）：主体拆成返回 `Result` 的普通函数、system 壳 match
+收尾——可行但收尾逻辑每个 system 各写一遍壳，无真正统一。
 
 ## 4. 实测证据（2026-09-21）
 
@@ -85,7 +99,7 @@ bevy 系统返回 `()`，`?` 在系统里不可用——两 Tier 的实现答案
 
 ## 5. 给后续的纪律
 
-1. **新代码禁 `panic!`/`unwrap()`/`expect()`**——失败按 Tier 归位：可跳过→糖（Tier①），影响运行→`try_xxx` + 冒泡（Tier②）；
-2. 需要"影响运行"的失败时，先问：抽成 `try_xxx` 返回 Result 了吗？守卫（`run_if(resource_exists)`）加了吗？
+1. **新代码禁 `panic!`/`unwrap()`/`expect()`**——失败按 Tier 归位：可跳过→就地 log/糖（Tier①），影响运行→`?` 冒泡统一通道（Tier②）；一次性装配→`try_xxx` + 单点 match；
+2. 需要"影响运行"的失败时，先问：system 签名 `Result<(), BevyError>`（或抽 `try_xxx`）了吗？守卫（`run_if(resource_exists)`）加了吗？
 3. OUT_OF_DATE 类"错误当控制流"是唯一允许的显式 match 失败分支——它是逻辑，不是丢弃；
 4. 真要 panic 时（目前不存在此类场景），用 `unwrap_or_panic!`（语法糖家族第 9 件，panic 位）并留下"为什么必须 panic"的注释。
