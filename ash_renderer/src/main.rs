@@ -36,7 +36,7 @@ use bevy::{
 /// 失败路径的"优雅"才算闭环（调用方能拿到退出码）
 fn main() -> AppExit {
     App::new()
-        // 统一错误通道（正本：笔记《代码结构优化：统一错误通道定案》篇）：system/
+        // 统一错误通道（正本：错误处理专题《代码结构优化：统一错误通道定案》篇）：system/
         // observer/command 的 Err 全走 tier_handler 按 Severity 分流（Warning→warn，
         // 其余→error + 置位），fatal_gate 看门写 AppExit 优雅退出。fatal_gate 是
         // Update 里首个注册的系统 = 早位；语义上任意位置都正确，早位只是让致命帧
