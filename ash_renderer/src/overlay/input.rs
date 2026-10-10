@@ -30,7 +30,7 @@ use bevy::{
 };
 
 /// egui 的五个指针按键（桥按位记账用）。
-const ALL_BUTTONS: [egui::PointerButton; egui::NUM_POINTER_BUTTONS] = [
+pub(crate) const ALL_BUTTONS: [egui::PointerButton; egui::NUM_POINTER_BUTTONS] = [
     egui::PointerButton::Primary,
     egui::PointerButton::Secondary,
     egui::PointerButton::Middle,

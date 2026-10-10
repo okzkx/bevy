@@ -73,6 +73,11 @@ fn init_egui(mut commands: Commands) {
         ctx: egui::Context::default(),
     };
     state.ctx.set_fonts(load_fonts());
+    // 跨标签文字选区（egui 0.36 默认开）在松开后仍按悬停位置重画选区——"选区跟随
+    // 鼠标"的根因，见 3.10.1 施工记录 §7：调试面板选区限制在单标签内。
+    let mut style = (*state.ctx.style_of(egui::Theme::Dark)).clone();
+    style.interaction.multi_widget_text_select = false;
+    state.ctx.set_style_of(egui::Theme::Dark, style);
     commands.insert_resource(state);
     commands.insert_resource(EguiFrame::default());
     commands.insert_resource(RenderMode::from_env());
