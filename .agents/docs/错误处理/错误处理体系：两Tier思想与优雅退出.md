@@ -34,14 +34,14 @@ Unity 映射：Tier① ≈ catch 后 log + 跳过（frame 不会因单个对象�
 | `Vk(vk::Result)` | 其余 Vulkan 调用失败 |
 | `Init(String)` | 初始化链路错误（带调用上下文；时序断言也折叠进来） |
 
-### Tier① 落地（帧循环，warn 丢弃继续）
+### Tier① 落地（不进通道，就地消化）
 
-- 通用兜底：`warn_unwrap_or_return!(frames.wait_and_reset())`——失败打 warn 跳过本帧；
-- 循环跳元素：`unwrap_or!(x, continue)`（步骤 3 逐实体收集的主场）；
-- 要业务上下文：显式 `if let` + 自写日志（resize 后重建失败）；
-- **错误当控制流**：显式 `match`（acquire/present 的 OUT_OF_DATE → rebuild → 重试）——两 Tier 的边界示范：不是所有 Err 都该丢弃，OUT_OF_DATE 的"重试"分支是逻辑本身。
+- 循环内逐项降级：转换拒绝/规格拒绝/材质未到货 → 就地 warn（一次去重）+ continue，脏行下帧重试（upload.rs §2）；
+- **错误当控制流**：显式 `match`（acquire/present 的 OUT_OF_DATE → rebuild → 重试）——不是所有 Err 都该丢弃，OUT_OF_DATE 的"重试"分支是逻辑本身；
+- 不提前 return 的裁决就地做：present 真失败 → 就地 error + `request_graceful_exit()`（advance 必须照常跑保持帧槽账本一致）；
+- 状态告知类（RenderMode 缺席、相机缺席 identity 兜底）→ 就地 warn 一次去重。
 
-### Tier② 落地（初始化，冒泡到 main 优雅退出）
+### Tier② 落地（提前 return 的失败，冒泡统一通道）
 
 ```
 try_init_vulkan（? 串链，一切失败折叠成 VulkanError）
@@ -49,16 +49,19 @@ try_init_vulkan（? 串链，一切失败折叠成 VulkanError）
   ├─ Context::new(wrapper)?
   ├─ Swapchain::new(&ctx)?
   └─ FramePool::new(&ctx)?
-        ↓ 单点 match（init_vulkan）
-Err → error!("Vulkan 初始化失败，宿主壳优雅退出: {e}")
-    → exit.write(AppExit::error())（资源全有或全无，一个都不插入）
-        ↓ bevy 退出链（同帧 Last 调度内）
+        ↓ init_vulkan：.context("Vulkan 初始化失败，宿主壳优雅退出")? 冒泡
+（错误点不打 log；资源全有或全无，一个都不插入）
+        ↓ 统一错误通道
+tier_handler：error 留档（带 system 名与负载）+ 置位 FATAL → fatal_gate 写 AppExit
+        ↓ bevy 退出链
 teardown_vulkan（OnAppExitSystems）反序拆除：FramePool → Swapchain → Context
         ↓
 despawn_windows 销毁 winit 窗口（hwnd 死时 Vulkan 已先死）
         ↓
 fn main() -> AppExit（Termination：Success=0 / Error=1）
 ```
+
+上传链（`flush_uploads`）同形状：转换/规格/材质未到货就地降级，容量保证/建图/提交/发布/驻留登记提前 return 的失败 `or_fatal` 冒泡（见 upload.rs）。
 
 三个配套缺一不可：
 
@@ -82,13 +85,15 @@ system 签名 `Result<(), BevyError>`，`?` 冒泡的 Err 由执行器交给统�
   单点零重复）；**冒泡与否只看"是否要求提前 return"**——循环内逐项降级、时序
   过程记录就地 log，不进通道。
 
-一次性装配（Startup 无自愈可言）仍走 `try_init_vulkan` 串链 + 系统内单点 match。
+一次性装配仍走 `try_init_vulkan` 串链，系统侧挂 context 负载 `?` 冒泡（同通道同裁决）。
 统一通道的机制事实与坑钉正本见定案篇《代码结构优化：统一错误通道定案》。
 
 旧答案（壳+body，已退役）：主体拆成返回 `Result` 的普通函数、system 壳 match
 收尾——可行但收尾逻辑每个 system 各写一遍壳，无真正统一。
 
-## 4. 实测证据（2026-09-21）
+## 4. 实测证据
+
+### 壳模式时代（2026-09-21，机制已退役、证据仍有效）
 
 | 路径 | 方法 | 结果 |
 |---|---|---|
@@ -97,9 +102,17 @@ system 签名 `Result<(), BevyError>`，`?` 冒泡的 Err 由执行器交给统�
 | 优雅退出（成功路径） | WM_CLOSE | ✅ teardown 反序拆除日志 → 干净退出 |
 | Tier① | 帧循环兜底（未人为触发失败，逻辑路径 review） | ✅ 编译期验证 + 行为同 if-let 展开 |
 
+### 统一通道版（2026-10-10）
+
+| 路径 | 方法 | 结果 |
+|---|---|---|
+| Tier② 失败路径 | 同伪造扩展名 → `init_vulkan` 冒泡 | ✅ handler error 留档带 system 名与负载（`System 'init_vulkan' failed: Vulkan 初始化失败…: vkCreateInstance 失败…`）→ fatal_gate 写 AppExit → 优雅拆除、退出码 1、**零 panic**；失败帧本帧剩余 system 照跑（半帧延迟语义实测） |
+| Tier② 正常路径 | 冒烟运行（上传链两批次 + 增量清账） | ✅ 全链就绪、零 ERROR/WARN 误报 |
+| Tier①（不进通道） | 转换拒绝/未到货/相机缺席等就地降级 | ✅ warn 一次去重，帧循环照常 |
+
 ## 5. 给后续的纪律
 
-1. **新代码禁 `panic!`/`unwrap()`/`expect()`**——失败按 Tier 归位：可跳过→就地 log/糖（Tier①），影响运行→`?` 冒泡统一通道（Tier②）；一次性装配→`try_xxx` + 单点 match；
+1. **新代码禁 `panic!`/`unwrap()`/`expect()`**——失败按 Tier 归位：可跳过→就地 log/糖（Tier①），影响运行→`?` 冒泡统一通道（Tier②）；一次性装配走 `try_xxx` 串链 + 系统侧 `?` 冒泡；不变式断言改 Err（BRP 侧回协议错误）；
 2. 需要"影响运行"的失败时，先问：system 签名 `Result<(), BevyError>`（或抽 `try_xxx`）了吗？守卫（`run_if(resource_exists)`）加了吗？
 3. OUT_OF_DATE 类"错误当控制流"是唯一允许的显式 match 失败分支——它是逻辑，不是丢弃；
 4. 真要 panic 时（目前不存在此类场景），用 `unwrap_or_panic!`（语法糖家族第 9 件，panic 位）并留下"为什么必须 panic"的注释。
