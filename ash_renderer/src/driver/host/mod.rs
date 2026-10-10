@@ -14,9 +14,12 @@
 //!
 //! 失败策略（两 Tier，**非必要不 panic**；[`init`]/[`frame`] 各失败分支按此分流）：
 //! ① 不影响运行 → warn 后丢弃继续（OUT_OF_DATE/SUBOPTIMAL 这类"重建后重试"属这层）；
-//! ② 影响运行 → error 冒泡到 main 优雅退出（资源反序拆除、窗口自关、退出码 1）。
-//!    帧循环里 acquire 成功之后的 Vulkan 真失败必须归②：此时同步对象已置位，
-//!    warn 后继续会等一个永远无人 signal 的 fence，直接死锁（见 [`frame::draw_frame`]）。
+//! ② 影响运行 → error 留档 + 优雅退出（资源反序拆除、窗口自关、退出码 1）。
+//! [`frame`] 走统一错误通道：`?` 冒泡给 `tier_handler` 按 Severity 分流，退出由
+//! `fatal_gate` 看门写 AppExit；[`init`] 是 `Startup` 一次性装配（无自愈可言），
+//! 仍就地 error + 写 AppExit。
+//! 帧循环里 acquire 成功之后的 Vulkan 真失败必须归②：此时同步对象已置位，
+//! warn 后继续会等一个永远无人 signal 的 fence，直接死锁（见 [`frame::draw_frame`]）。
 
 use bevy::{
     app::OnAppExitSystems,

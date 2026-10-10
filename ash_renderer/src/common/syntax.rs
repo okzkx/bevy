@@ -8,10 +8,12 @@
 //!   补初始化路径的家族位）+ `LogDebug`/`WarnOrDefault`——bevy 系统返回 `()`，`?` 不可用，
 //!   "warn + 早退"正是 `()` 系统里的传播形式；逐实体遍历类系统（Query → 绘制列表）
 //!   是其预期主场（frenderer render_params.rs:35 同形状）；
-//! - ✅（ash_renderer 新增）`ResultTierExt`（or_warn/or_fatal）+ `TierError`——
-//!   两 Tier 分流的 `?` 形态：错误点一行"记录 + 分级"，Err 冒泡到 system 壳统一
-//!   收尾；主场 = 从 `()` 系统拆出、可返回 `Result` 的主体函数（现役首例
-//!   `draw_frame` 的 `frame_body`），`()` 系统本体仍走宏族；
+//! - ✅（ash_renderer 新增）`ResultTierExt`（or_warn/or_fatal）+ `fatal` 构造——
+//!   统一错误通道的糖：错误点一行"挂 context 负载 + 标 Severity"，`?` 把
+//!   `BevyError` 冒泡给执行器进官方通道（[`crate::common::error::tier_handler`]
+//!   按 Severity 分流，退出收尾在看门 system）——日志在 handler 统一打，错误点
+//!   不再 log。主场 = 签名 `Result<(), BevyError>` 的系统（现役首例 `draw_frame`），
+//!   `()` 系统本体仍走宏族；
 //! - ❌ `singleton` 系列：bevy `Resource` 就是全局状态的正解，搬进来反而诱导反模式；
 //! - ❌ `lock_mutex!`：bevy 调度器管并发，系统内不持手动锁；首个后台线程出现时再议；
 //! - ❌ `Option::some()`：anyhow `?` 链专用，这里 Option 早退已由 `unwrap_or_*` 覆盖。
@@ -25,15 +27,14 @@
 //! 仅供真正必要的断言场景：不可恢复的内部不变量且需要 backtrace 取证；经
 //! `UnwrapPanic` trait 同时吃 Option 与 Result）。
 //! 用法：`use ash_renderer::common::syntax::宏名;`——宏内部用 `$crate::` 全限定调 trait 方法，
-//! 调用方无需导 trait。宏家族当前无现役调用点，作为 `()` 系统的两 Tier 控制流
-//! 标准件备用（可返回 `Result` 的主体函数走 [`ResultTierExt`]），故本模块关闭
-//! `unused_macros`。
+//! 调用方无需导 trait。宏家族当前无现役调用点，作为 `()` 系统的控制流
+//! 标准件备用（签名 `Result<(), BevyError>` 的系统走 [`ResultTierExt`]），故本模块
+//! 关闭 `unused_macros`。
 
 #![allow(unused_macros)]
 
+use bevy::ecs::error::{BevyError, ContextExt, ResultSeverityExt, Severity};
 use bevy::log::{info, warn};
-
-use super::error::TierError;
 
 /// Result 旁路日志：错误打日志后**原样穿透**（可继续 `?` 传播或交给宏早退）。
 pub trait LogDebug<T> {
@@ -65,32 +66,44 @@ impl<T, D: std::fmt::Debug> LogDebug<T> for std::result::Result<T, D> {
     }
 }
 
-/// Result 的两 Tier 分流：错误点一行完成"记录 + 分级"，`?` 把 Err 冒泡到 system
-/// 壳，收尾副作用（让路 / 写 `AppExit` 退出）由壳统一执行。
+/// Result 的两 Tier 分流：错误点一行完成"挂 context 负载 + 标 Severity"，`?` 把
+/// `BevyError` 冒泡给执行器进统一错误通道——日志在 [`crate::common::error::tier_handler`]
+/// 统一打（单点零重复），退出收尾在看门 system。
 ///
-/// 与 [`LogDebug`] 的分工：`warn()` 是旁路日志（Err 原样穿透），本 trait 把 Err
-/// 改写成 [`TierError`]（变体即收尾裁决）。主场 = 从 `()` 系统拆出、可返回
-/// `Result` 的主体函数（现役首例 `draw_frame` 的 `frame_body`）。
+/// 与 [`LogDebug`] 的分工：`warn()` 是旁路日志（Err 原样穿透、就地消化、不进
+/// 通道），本 trait 产出的是要冒泡的错误。主场 = 签名 `Result<(), BevyError>` 的
+/// 系统（现役首例 `draw_frame`）。
 pub trait ResultTierExt<T, E>: Sized {
-    /// Tier①：Err → `warn!("{msg}: {e}")` + [`TierError::Warn`]——`?` 后丢弃本次
-    ///（资源未就绪/可自愈失败），调用方按语境让路。
-    fn or_warn(self, msg: &str) -> std::result::Result<T, TierError>;
-    /// Tier②：Err → `error!("{msg}: {e}")` + [`TierError::Fatal`]——`?` 后壳写
-    /// `AppExit` 优雅退出（状态已不可信，不得继续）。
-    fn or_fatal(self, msg: &str) -> std::result::Result<T, TierError>;
+    /// Tier①：挂 `msg` context + 标 [`Severity::Warning`]——`?` 后本帧让路
+    ///（资源未就绪/可自愈失败），handler warn 统一打日志。
+    fn or_warn(self, msg: &'static str) -> std::result::Result<T, BevyError>;
+    /// Tier②：挂 `msg` context + 标 [`Severity::Error`]——`?` 后进统一通道，
+    /// error 留档 + 置位看门优雅退出（状态已不可信，不得继续）。
+    fn or_fatal(self, msg: &'static str) -> std::result::Result<T, BevyError>;
 }
 
-impl<T, E: std::fmt::Display> ResultTierExt<T, E> for std::result::Result<T, E> {
-    fn or_warn(self, msg: &str) -> std::result::Result<T, TierError> {
-        self.map_err(|e| {
-            warn!("{msg}: {e}");
-            TierError::Warn
-        })
+impl<T, E: Into<BevyError>> ResultTierExt<T, E> for std::result::Result<T, E> {
+    fn or_warn(self, msg: &'static str) -> std::result::Result<T, BevyError> {
+        self.map_err(|e| e.into())
+            .with_context(|| msg)
+            .with_severity(Severity::Warning)
     }
 
-    fn or_fatal(self, msg: &str) -> std::result::Result<T, TierError> {
-        self.map_err(|e| TierError::fatal(msg, e))
+    fn or_fatal(self, msg: &'static str) -> std::result::Result<T, BevyError> {
+        self.map_err(|e| e.into())
+            .with_context(|| msg)
+            .with_severity(Severity::Error)
     }
+}
+
+/// Tier② 就地构造：裸错误 → 带负载的 `BevyError`（match 分支里接出错值用；
+/// `?` 链上的 Result 用 [`ResultTierExt::or_fatal`]，裸消息用 `bevy_error!` 宏或
+/// `BevyError::new`）。context 负载 = 出错含义，日志由统一 handler 打。
+pub fn fatal(msg: &'static str, err: impl Into<BevyError>) -> BevyError {
+    Err::<(), _>(err.into())
+        .context(msg)
+        .unwrap_err()
+        .with_severity(Severity::Error)
 }
 
 /// warn 后以 `Default` 兜底：线程入口/后台任务的"失败不炸"语义。
