@@ -159,12 +159,12 @@ fn set_transform(In(params): In<Option<Value>>, world: &mut World) -> BrpResult 
             return Err(BrpError::component_not_present("Transform", p.entity));
         }
     }
-    // 刚写入成功，组件必在；unwrap 的是不变式而非外部输入（Tier② 语义）
-    let t = world
-        .get_entity(p.entity)
-        .ok()
-        .and_then(|er| er.get::<Transform>())
-        .expect("apply_transform_edit 成功后 Transform 必在");
+    // 刚写入成功，组件必在；查无 = 内部矛盾，回协议错误不 panic
+    let Some(t) = world.get_entity(p.entity).ok().and_then(|er| er.get::<Transform>()) else {
+        return Err(BrpError::internal(
+            "apply_transform_edit 成功后 Transform 缺席——状态矛盾",
+        ));
+    };
     let (yaw, pitch, roll) = t.rotation.to_euler(bevy::math::EulerRot::YXZ);
     Ok(json!({
         "entity": p.entity.to_string(),

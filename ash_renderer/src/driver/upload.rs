@@ -7,10 +7,11 @@
 //! 时序(施工计划 §2 终态表):PostUpdate 账本对账 → **Last:准备+上传提交** →
 //! 同帧图形提交(图形侧等票据=draw 挂 ticket 信号量等待,见 frames.rs)。
 //! 本系统住 `Last`,由 [`crate::driver::host`] 的 `draw_frame` 链成序(先上传
-//! 后画),失败两 Tier:
-//! 资产未到货/转换拒绝 = Tier①(跳过重试或 warn 一次),Vulkan/账本失败 =
-//! Tier②(error + `AppExit::error()` 优雅退出;提交失败不发布票据,池内
-//! bump 游标随下次容量保证自然前移,不留指向未上传数据的账本行)。
+//! 后画)。失败按统一错误通道分流(判定线=冒泡与否只看是否提前 return):
+//! 资产未到货/转换拒绝 = 循环内逐项降级,就地 warn 重试不进通道;提前 return
+//! 的 Vulkan/账本失败 = Tier②,`.or_fatal`/`bevy_error!` 挂负载 `?` 冒泡
+//! (error 留档 + fatal_gate 写 AppExit;提交失败不发布票据,池内 bump 游标随
+//! 下次容量保证自然前移,不留指向未上传数据的账本行)。
 //!
 //! 增量纪律(4.1):发现侧只把"新增/换柄"的行放进脏集——盘点只过脏行,
 //! 静态场景稳态脏集为空,**零盘点零上传**;盘点时已全驻留的行就地清标(空批
@@ -30,6 +31,7 @@ use std::collections::HashSet;
 use bevy::{
     app::OnAppExitSystems,
     asset::AssetId,
+    ecs::bevy_error,
     ecs::system::SystemParam,
     image::Image,
     pbr::StandardMaterial,
@@ -39,6 +41,7 @@ use bevy::{
 use ash_macros::system;
 
 use crate::{
+    common::syntax::{fatal, ResultTierExt},
     scene::InstanceLedger,
     vulkan::{
         sampler_key, FramePool, GpuImage, ImageCache, MeshPool, StagingImageCopy, UploadBatch,
@@ -103,6 +106,10 @@ pub(crate) struct UploadData<'w> {
 
 /// flush_uploads 本体:账本脏行 → 去重(mesh 直读 + 贴图经材质五槽)→ 转换/建图
 /// → 容量保证(可能触发维护迁移)→ 合批提交 → 驻留登记。空批次(无新资产)不提交。
+///
+/// 失败不设壳:提前 return 的失败 `or_fatal`/`bevy_error!` 挂负载 `?` 直冒泡——
+/// Err 上交统一错误通道(tier_handler 分流,fatal_gate 写 AppExit 优雅退出),
+/// 日志在 handler 统一打,本系统只管控制流。
 #[system]
 pub(crate) fn flush_uploads(
     data: UploadData,
@@ -111,8 +118,7 @@ pub(crate) fn flush_uploads(
     mut tables: ResMut<crate::vulkan::BindlessTables>,
     mut uploader: ResMut<Uploader>,
     mut state: Local<UploadState>,
-    mut exit: MessageWriter<AppExit>,
-) {
+) -> Result<(), BevyError> {
     let UploadData {
         ref meshes,
         ref std_materials,
@@ -215,32 +221,31 @@ pub(crate) fn flush_uploads(
         }
     }
     if converted.is_empty() && image_specs.is_empty() {
-        return; // 空批次不提交(3.2.4.1):未到货/全拒绝/全已驻留都走这里
+        return Ok(()); // 空批次不提交(3.2.4.1):未到货/全拒绝/全已驻留都走这里
     }
     // —— 3) 容量保证(初次懒建或维护迁移,等待/迁移在池内分账;迁移销毁旧池
     // 前经 frames.wait_all_inflight 等"图形最后使用",4.1.1)——
     let (vertex_bytes, index_bytes) = converted.iter().fold((0u64, 0u64), |(v, i), (_, c)| {
         (v + c.vertices.len() as u64, i + c.indices.len() as u64)
     });
-    if let Err(e) = pool.ensure_capacity(
+    pool.ensure_capacity(
         &mut uploader,
         vertex_bytes,
         index_bytes,
         &mut || frames.wait_all_inflight(),
-    ) {
-        error!("池容量保证失败,上传链无法继续,优雅退出: {e}");
-        exit.write(AppExit::error());
-        return;
-    }
+    )
+    .or_fatal("池容量保证失败,上传链无法继续,优雅退出")?;
     let Some(vertex_buffer) = pool.vertex_buffer() else {
-        error!("容量保证后顶点池仍缺席,状态矛盾,优雅退出");
-        exit.write(AppExit::error());
-        return;
+        return Err(bevy_error!(
+            Severity::Error,
+            "容量保证后顶点池仍缺席,状态矛盾,优雅退出"
+        ));
     };
     let Some(index_buffer) = pool.index_buffer() else {
-        error!("容量保证后索引池仍缺席,状态矛盾,优雅退出");
-        exit.write(AppExit::error());
-        return;
+        return Err(bevy_error!(
+            Severity::Error,
+            "容量保证后索引池仍缺席,状态矛盾,优雅退出"
+        ));
     };
     // —— 4a) 建图(Tier②):每张贴图 VkImage+dedicated memory+view+sampler——
     // 创建先于排批(拷贝目标必须已存在);提交失败走 Tier② 退出,局部变量随
@@ -252,21 +257,16 @@ pub(crate) fn flush_uploads(
     };
     let mut gpu_images: Vec<(AssetId<Image>, GpuImage)> = Vec::with_capacity(image_specs.len());
     for (id, _, spec) in &image_specs {
-        match GpuImage::create(
+        let g = GpuImage::create(
             &ctx.device,
             &ctx.instance,
             ctx.physical_device,
             ctx.memory_contract(),
             spec,
             &image_sharing,
-        ) {
-            Ok(g) => gpu_images.push((*id, g)),
-            Err(e) => {
-                error!("贴图创建失败,上传链无法继续,优雅退出: {e}");
-                exit.write(AppExit::error());
-                return;
-            }
-        }
+        )
+        .or_fatal("贴图创建失败,上传链无法继续,优雅退出")?;
+        gpu_images.push((*id, g));
     }
     // —— 4b) 排批:staging 连续排布(网格两段 + 每贴图一段);分配必在
     // ensure_capacity 之后——"不写越界"的顺序契约——
@@ -310,16 +310,20 @@ pub(crate) fn flush_uploads(
     }
     for ((id, handle, spec), (_, gpu)) in image_specs.iter().zip(&gpu_images) {
         // 贴图字节直取:上一阶段已验 Some;同一次系统调用内资产不变,状态矛盾
-        // 按 Tier② 报(与"容量保证后池缺席"同级,不 panic)
+        // 按 Tier② 冒泡(与"容量保证后池缺席"同级,不 panic)
         let Some(image) = image_assets.get(handle) else {
-            error!("贴图 {id:?} 在规格映射与排批之间消失,状态矛盾,优雅退出");
-            exit.write(AppExit::error());
-            return;
+            return Err(bevy_error!(
+                Severity::Error,
+                "贴图 {:?} 在规格映射与排批之间消失,状态矛盾,优雅退出",
+                id
+            ));
         };
         let Some(bytes) = image.data.as_ref() else {
-            error!("贴图 {id:?} 像素数据消失,状态矛盾,优雅退出");
-            exit.write(AppExit::error());
-            return;
+            return Err(bevy_error!(
+                Severity::Error,
+                "贴图 {:?} 像素数据消失,状态矛盾,优雅退出",
+                id
+            ));
         };
         let src_offset = staging.len() as u64;
         staging.extend_from_slice(bytes);
@@ -346,13 +350,8 @@ pub(crate) fn flush_uploads(
             // 驻留登记只在提交成功之后:失败路径不会留下指向未上传数据的账本行
             let planned_count = planned.len();
             for (id, c, vertex, index) in planned {
-                if let Err(e) =
-                    pool.commit(id, vertex, index, c.vertex_count, c.index_count, ticket)
-                {
-                    error!("驻留登记失败,上传链无法继续,优雅退出: {e}");
-                    exit.write(AppExit::error());
-                    return;
-                }
+                pool.commit(id, vertex, index, c.vertex_count, c.index_count, ticket)
+                    .or_fatal("驻留登记失败,上传链无法继续,优雅退出")?;
             }
             // —— 3.3.4 槽位发布:提交成功 → 分槽(采样器按功能键去重) → 驻留登记
             // 带槽位。只写 free list 的新槽,覆盖竞态在结构上不存在;采样 draw 的
@@ -361,15 +360,14 @@ pub(crate) fn flush_uploads(
             let mut sampler_slots_hit = HashSet::new();
             for ((id, _, spec), (gid, gpu)) in image_specs.iter().zip(gpu_images) {
                 debug_assert_eq!(*id, gid, "image_specs 与 gpu_images 同序构建,错位即内部矛盾");
-                let slots =
-                    match tables.publish(gpu.view(), gpu.sampler(), &sampler_key(&spec.sampler)) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!("贴图 {id:?} 槽位发布失败,上传链无法继续,优雅退出: {e}");
-                            exit.write(AppExit::error());
-                            return;
-                        }
-                    };
+                let slots = tables
+                    .publish(gpu.view(), gpu.sampler(), &sampler_key(&spec.sampler))
+                    .map_err(|e| {
+                        fatal(
+                            format!("贴图 {id:?} 槽位发布失败,上传链无法继续,优雅退出"),
+                            e,
+                        )
+                    })?;
                 sampler_slots_hit.insert(slots.sampler);
                 image_cache.commit(*id, gpu, ticket, slots);
             }
@@ -402,14 +400,18 @@ pub(crate) fn flush_uploads(
             );
         }
         // staging 非空的批次必有提交;空批已在入口 return。此分支按内部契约
-        // 矛盾处理(两 Tier 的 Tier②),不 panic
+        // 矛盾处理(Tier② 冒泡),不 panic
         Ok(None) => {
-            error!("内部矛盾:staging 非空的批次未产生提交,优雅退出");
-            exit.write(AppExit::error());
+            return Err(bevy_error!(
+                Severity::Error,
+                "内部矛盾:staging 非空的批次未产生提交,优雅退出"
+            ));
         }
         Err(e) => {
-            error!("transfer 提交失败,上传链无法继续,优雅退出(未发布票据): {e}");
-            exit.write(AppExit::error());
+            return Err(fatal(
+                "transfer 提交失败,上传链无法继续,优雅退出(未发布票据)",
+                e,
+            ));
         }
     }
     // —— 6) 收账:脏集清空且账本非空 = 全部资产驻留,报一次(稳态基准证据:
@@ -421,4 +423,5 @@ pub(crate) fn flush_uploads(
             ledger.len()
         );
     }
+    Ok(())
 }

@@ -97,9 +97,12 @@ impl<T, E: Into<BevyError>> ResultTierExt<T, E> for std::result::Result<T, E> {
 }
 
 /// Tier② 就地构造：裸错误 → 带负载的 `BevyError`（match 分支里接出错值用；
-/// `?` 链上的 Result 用 [`ResultTierExt::or_fatal`]，裸消息用 `bevy_error!` 宏或
-/// `BevyError::new`）。context 负载 = 出错含义，日志由统一 handler 打。
-pub fn fatal(msg: &'static str, err: impl Into<BevyError>) -> BevyError {
+/// `?` 链上的 Result 用 [`ResultTierExt::or_fatal`]，裸消息（判空矛盾/内部矛盾）
+/// 用 `bevy_error!` 宏）。context 负载 = 出错含义（可 format!），日志由统一 handler 打。
+pub fn fatal(
+    msg: impl Into<std::borrow::Cow<'static, str>>,
+    err: impl Into<BevyError>,
+) -> BevyError {
     Err::<(), _>(err.into())
         .context(msg)
         .unwrap_err()
