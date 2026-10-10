@@ -23,6 +23,7 @@ use serde_json::{json, Value};
 
 use crate::{
     overlay::{transform_edit::{apply_transform_edit, TransformEdit, TransformEditError}, EntityRow, is_relevant, node_label},
+    remote_assets::mutate_asset_cmd,
     remote_mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     remote_objects::{increment_stats, replace_handles, spawn_primitive},
     scene::mechanism::{apply_camera_command, CameraCommandError, CameraOrbitCommand},
@@ -44,6 +45,7 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/set_camera", set_camera)
                 .with_method_main("ash_renderer/spawn_primitive", spawn_primitive)
                 .with_method_main("ash_renderer/replace_handles", replace_handles)
+                .with_method_main("ash_renderer/mutate_asset", mutate_asset_cmd)
                 .with_method_main("ash_renderer/increment_stats", increment_stats)
                 .with_method_main("ash_renderer/mouse_move", mouse_move)
                 .with_method_main("ash_renderer/mouse_button", mouse_button)

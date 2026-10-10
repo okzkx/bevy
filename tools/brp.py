@@ -24,6 +24,10 @@
 官方 world.despawn_entity / world.remove_components 薄封装——反射通道按组件名
 操作，不需要构造组件值）：变更写值均下一帧生效，账本经 Changed/Removed 通道
 自动对账，increment_stats 读到的 processed_rows 就是"动了谁"的答案。
+4.2 资产增量族（mutate = ash_renderer/mutate_asset，操作本体 asset_ops 可复用层）：
+改资产内容走 Assets::get_mut 原位变更，AssetEvent::Modified 经读侧失效联动 →
+同柄重传（swap-on-commit）→ 画面次帧生效；stats 的 asset_events/asset_dirty_rows
+是事件读数的对账口。
 宿主须先起（cargo run -p ash_renderer）；--host/--port 可覆盖，默认 127.0.0.1:15702。
 无鉴权仅本地：与宿主同机使用，不得对网开放（BRP 侦察笔记 §6 边界）。
 连接被拒时提示宿主未起，退出码 2；BRP 层错误（含 ENTITY_NOT_FOUND 等）原样
@@ -191,6 +195,19 @@ def cmd_remove(args):
     out(rpc(args.host, args.port, "world.remove_components", params))
 
 
+def cmd_mutate(args):
+    params = {"entity": args.entity}
+    if args.base_color:
+        params["base_color"] = [float(x) for x in args.base_color]
+    if args.slot_base_color_from:
+        params["slot_base_color_from"] = args.slot_base_color_from
+    if args.mesh_vertex_scale is not None:
+        params["mesh_vertex_scale"] = float(args.mesh_vertex_scale)
+    if args.image_tint:
+        params["image_tint"] = [float(x) for x in args.image_tint]
+    out(rpc(args.host, args.port, "ash_renderer/mutate_asset", params))
+
+
 def cmd_stats(args):
     out(rpc(args.host, args.port, "ash_renderer/increment_stats"))
 
@@ -290,6 +307,14 @@ def main():
     p.add_argument("entity", help="目标实体号")
     p.add_argument("--components", nargs="+", required=True, help="要摘的组件（短名或全路径，如 Mesh3d）")
     p.set_defaults(func=cmd_remove)
+
+    p = sub.add_parser("mutate", help="改资产内容：同 AssetId 原位变更，触发 Modified（ash_renderer/mutate_asset）")
+    p.add_argument("entity", help="定位实体（取它身上的 Mesh3d/MeshMaterial3d 柄）")
+    p.add_argument("--base-color", nargs=4, metavar=("R", "G", "B", "A"), help="材质 base_color（线性域 RGBA）")
+    p.add_argument("--slot-base-color-from", help="换材质贴图槽：拷源实体的 base_color_texture 柄")
+    p.add_argument("--mesh-vertex-scale", type=float, help="mesh 顶点绕原点均匀缩放系数")
+    p.add_argument("--image-tint", nargs=3, metavar=("R", "G", "B"), help="base_color_texture 像素按通道乘的色调")
+    p.set_defaults(func=cmd_mutate)
 
     sub.add_parser("stats", help="增量计量读数（ash_renderer/increment_stats）").set_defaults(func=cmd_stats)
 

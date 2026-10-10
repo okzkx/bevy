@@ -375,6 +375,11 @@ impl Drop for GpuImage {
 #[derive(bevy::prelude::Resource, Default)]
 pub struct ImageCache {
     resident: HashMap<AssetId<BevyImage>, (GpuImage, Ticket, super::descriptors::SlotBinding)>,
+    /// 内容替换的旧图停尸房（4.2.3）：换条目时旧 `GpuImage` 移入此处而非就地
+    /// Drop——描述符槽重写后，在飞 draw 仍可能经旧描述符或已取的引用读旧图，
+    /// 销毁必须等"图形最后使用"（排空时由调用方经帧侧等待闸门收口，4.1.1
+    /// 契约的第二次兑现）；Drop 自身不等 GPU，与全部 Vulkan 资源同契约。
+    graveyard: Vec<GpuImage>,
 }
 
 impl ImageCache {
@@ -388,6 +393,41 @@ impl ImageCache {
     #[must_use]
     pub fn resident_count(&self) -> usize {
         self.resident.len()
+    }
+
+    /// 停尸房当前张数(4.2.3 排空判定的统计口)。
+    #[must_use]
+    pub fn graveyard_len(&self) -> usize {
+        self.graveyard.len()
+    }
+
+    /// 内容替换取条目（4.2.3）：旧图移入停尸房、条目让位，返回旧槽位绑定
+    /// 供新图**原槽重写**（`BindlessTables::rebind`——纹理槽占用不因内容变化
+    /// 增长）。停尸房里的旧图由 [`Self::drain_graveyard`] 在安全点销毁。
+    pub fn take(&mut self, id: AssetId<BevyImage>) -> Option<super::descriptors::SlotBinding> {
+        let (image, _, slots) = self.resident.remove(&id)?;
+        self.graveyard.push(image);
+        Some(slots)
+    }
+
+    /// 排空停尸房（4.2.3）：`wait_draws` 等"图形最后使用"（全部帧槽 fence，
+    /// 4.1.1 闸门）通过后才销毁旧图——此刻无任何在飞 draw 再经描述符或引用
+    /// 读它们。空房直接返回不等待（稳态零成本）。
+    ///
+    /// # Errors
+    /// 帧侧等待失败（排空未发生，停尸房保留，下帧重试）。
+    pub fn drain_graveyard(
+        &mut self,
+        wait_draws: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        if self.graveyard.is_empty() {
+            return Ok(());
+        }
+        wait_draws()?;
+        let count = self.graveyard.len();
+        self.graveyard.clear(); // Drop 序：sampler/view 先于 image，memory 最后
+        info!("贴图停尸房排空:销毁 {count} 张旧图（等待图形最后使用后,4.2 内容替换收尾）");
+        Ok(())
     }
 
     /// 驻留登记:仅在对应批次提交成功后调用(失败路径不留账本行,与 pool.commit 同责)。

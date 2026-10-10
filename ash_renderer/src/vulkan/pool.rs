@@ -331,6 +331,31 @@ impl MeshPool {
         }
         Ok(())
     }
+
+    /// 同身份内容替换登记(4.2):条目已在 = 换新槽位、返回旧槽位。旧区间的
+    /// bump 空间**不回收**(孤儿化——池从不写旧区间,在飞 draw 读它天然安全;
+    /// 空间回收归 4.4 池维护,与 3.2.2.2"不回收空洞"同一笔账)。与 [`Self::commit`]
+    /// 的分工:编排层持失效凭据(AssetInvalidations)才允许走 replace,
+    /// 纪律边界在编排层,vulkan 层只提供换条目的能力。
+    #[must_use]
+    pub fn replace(
+        &mut self,
+        id: AssetId<Mesh>,
+        vertex: PoolRange,
+        index: PoolRange,
+        vertex_count: u32,
+        index_count: u32,
+        ticket: u64,
+    ) -> Option<MeshSlot> {
+        let slot = MeshSlot {
+            vertex,
+            index,
+            vertex_count,
+            index_count,
+            ticket,
+        };
+        self.residency.insert(id, slot)
+    }
 }
 
 impl Drop for MeshPool {

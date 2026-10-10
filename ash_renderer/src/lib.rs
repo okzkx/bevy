@@ -60,6 +60,7 @@ pub mod driver;
 pub mod overlay;
 pub mod remote;
 pub mod remote_mouse;
+pub mod remote_assets;
 pub mod remote_objects;
 pub mod scene;
 pub mod vulkan;

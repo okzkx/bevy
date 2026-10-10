@@ -591,6 +591,63 @@ impl BindlessTables {
         })
     }
 
+    /// 原槽重写（4.2.3 内容重传）：把既有纹理槽的描述符指到新 `view`，纹理槽
+    /// 占用不因内容变化增长。UAB 旗标（3.3.2 契约类开关）保证"set 已提交仍在
+    /// 飞时改写槽位"合法——在飞 draw 竞态读到的要么是旧图要么是新图，两个
+    /// 本体都活着（旧图在 [`super::images::ImageCache`] 停尸房），无悬空。
+    /// 采样器仍按功能键解析（同键共享槽；内容变化若连采样参数一起变了，
+    /// 老键的采样器槽孤儿化——罕见路径，与池孤儿区间同一笔 4.4 账）。
+    ///
+    /// 前置条件（编排层保证，vulkan 层只管写入）：新图的"上传完成才可采样"
+    /// 由新票据承担，与本表无关。
+    ///
+    /// # Errors
+    /// 新采样键首次出现且采样器槽容量耗尽。
+    pub fn rebind(
+        &mut self,
+        texture_slot: u32,
+        view: vk::ImageView,
+        sampler: vk::Sampler,
+        key: &super::images::SamplerKey,
+    ) -> Result<SlotBinding> {
+        let sampler_slot = match self.sampler_slots.get(key) {
+            Some(&slot) => slot,
+            None => {
+                let slot = self.samplers.alloc()?;
+                self.sampler_slots.insert(*key, slot);
+                slot
+            }
+        };
+        let image_info = vk::DescriptorImageInfo::default()
+            .image_view(view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        let sampler_info = vk::DescriptorImageInfo::default().sampler(sampler);
+        // # Safety:set 常驻、binding 0/1 带 UAB 旗标,在飞改写合法(特性族篇契约)
+        unsafe {
+            self.device.update_descriptor_sets(
+                &[
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(self.resident_set)
+                        .dst_binding(0)
+                        .dst_array_element(texture_slot)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(std::slice::from_ref(&image_info)),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(self.resident_set)
+                        .dst_binding(1)
+                        .dst_array_element(sampler_slot)
+                        .descriptor_type(vk::DescriptorType::SAMPLER)
+                        .image_info(std::slice::from_ref(&sampler_info)),
+                ],
+                &[],
+            );
+        }
+        Ok(SlotBinding {
+            texture: texture_slot,
+            sampler: sampler_slot,
+        })
+    }
+
     /// 槽回收(M2 不调用的释放入口;运行时淘汰归步骤 4)。**前置条件即安全契约**:
     /// ① 该槽最后一次 GPU 使用的完成票据已等过(否则在飞 draw 采样悬空槽);
     /// ② 槽内 view/sampler 本体的宿主侧引用方已同步退出(采样器槽是多图共享的

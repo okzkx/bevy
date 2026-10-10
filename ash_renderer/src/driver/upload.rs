@@ -41,7 +41,7 @@ use ash_macros::system;
 
 use crate::{
     common::syntax::{OnceLog, OptionTierExt, ResultTierExt},
-    scene::InstanceLedger,
+    scene::{AssetInvalidations, InstanceLedger},
     vulkan::{
         sampler_key, FramePool, GpuImage, ImageCache, MeshPool, StagingImageCopy, UploadBatch,
         Uploader,
@@ -72,6 +72,7 @@ impl Plugin for AshUploadPlugin {
                 .run_if(resource_exists::<MeshPool>)
                 .run_if(resource_exists::<ImageCache>)
                 .run_if(resource_exists::<crate::vulkan::BindlessTables>)
+                .run_if(resource_exists::<AssetInvalidations>)
                 .before(crate::driver::host::draw_frame)
                 .before(OnAppExitSystems),
         );
@@ -98,6 +99,9 @@ pub(crate) struct UploadData<'w> {
     image_assets: Res<'w, Assets<Image>>,
     /// 账本(独占:消费脏行、写上传计量)。
     ledger: ResMut<'w, InstanceLedger>,
+    /// 资产失效凭据(4.2.2 读侧产物:换内容成功的身份在此销账,未成功的保留
+    /// 供行级重试)。
+    invalidations: ResMut<'w, AssetInvalidations>,
     ctx: Res<'w, crate::vulkan::Context>,
     /// 帧槽:池迁移销毁旧池前的"图形最后使用"等待经此接线(4.1.1)。
     frames: Res<'w, FramePool>,
@@ -123,17 +127,27 @@ pub(crate) fn flush_uploads(
         ref std_materials,
         ref image_assets,
         mut ledger,
+        mut invalidations,
         ref ctx,
         ref frames,
     } = data;
+    // —— 0) 停尸房排空(4.2.3 内容重传的收尾):上一轮换下的旧图等"图形最后
+    // 使用"(全部帧槽 fence,4.1.1 闸门)后销毁。空房直接返回,稳态零成本;排空
+    // 失败保留停尸房下帧重试(旧图多活一帧,无悬空)。
+    image_cache
+        .drain_graveyard(&mut || frames.wait_all_inflight())
+        .or_fatal("贴图停尸房排空失败(帧侧等待),旧图保留下帧重试")?;
     // —— 1) 脏行盘点(4.1.4:上传清单 = 账本脏行):每行查其资产身份的驻留
     // 状态——全驻留的行就地清标;有未驻留身份的行保持脏标(重试),身份进本批。
+    // 4.2.3:判定从"查无才传"放宽为"查无**或失效**才传"——失效凭据放行
+    // "已驻留但内容变了"的资产,走换条目重传(swap-on-commit,驻留不留空洞)。
     // mesh:脏行直读;贴图:material 柄 → 五槽解引用(材质未到货 = 该行保持脏,
     // 下帧重试,与 mesh 异步到货同口径)。
     let mut seen = HashSet::new();
-    let mut fresh: Vec<(AssetId<Mesh>, Handle<Mesh>)> = Vec::new();
+    // (身份, 柄, 是否换条目重传)——第三位凭据决定 commit 走登记还是替换
+    let mut fresh: Vec<(AssetId<Mesh>, Handle<Mesh>, bool)> = Vec::new();
     let mut img_seen = HashSet::new();
-    let mut fresh_images: Vec<(AssetId<Image>, Handle<Image>)> = Vec::new();
+    let mut fresh_images: Vec<(AssetId<Image>, Handle<Image>, bool)> = Vec::new();
     let mut materials_pending = 0usize;
     let mut settled_rows: Vec<Entity> = Vec::new();
     let dirty_entities: Vec<Entity> = ledger.dirty_entities().collect();
@@ -145,20 +159,24 @@ pub(crate) fn flush_uploads(
         };
         let mut complete = true;
         let mesh_id = row.mesh.id();
-        if pool.resident(mesh_id).is_none() {
+        let mesh_replace = invalidations.mesh_pending(mesh_id);
+        if pool.resident(mesh_id).is_none() || mesh_replace {
             complete = false;
             if seen.insert(mesh_id) {
-                fresh.push((mesh_id, row.mesh.clone()));
+                let had_old = pool.resident(mesh_id).is_some();
+                fresh.push((mesh_id, row.mesh.clone(), had_old));
             }
         }
         match std_materials.get(&row.material) {
             Some(material) => {
                 for handle in TEXTURE_SLOTS(material).into_iter().flatten() {
                     let id = handle.id();
-                    if image_cache.resident(id).is_none() {
+                    let img_replace = invalidations.image_pending(id);
+                    if image_cache.resident(id).is_none() || img_replace {
                         complete = false;
                         if img_seen.insert(id) {
-                            fresh_images.push((id, handle.clone()));
+                            let had_old = image_cache.resident(id).is_some();
+                            fresh_images.push((id, handle.clone(), had_old));
                         }
                     }
                 }
@@ -187,13 +205,13 @@ pub(crate) fn flush_uploads(
         ));
     }
     // —— 2) 转换/规格映射(Tier①:未到货跳过重试,拒绝 warn 一次)——
-    let mut converted: Vec<(AssetId<Mesh>, crate::vulkan::ConvertedMesh)> = Vec::new();
+    let mut converted: Vec<(AssetId<Mesh>, crate::vulkan::ConvertedMesh, bool)> = Vec::new();
     let mut pending = 0usize;
-    for (id, handle) in fresh {
+    for (id, handle, replace) in fresh {
         match meshes.get(&handle) {
             None => pending += 1, // 异步加载未到货,下帧脏行重试
             Some(mesh) => match crate::vulkan::convert_mesh(mesh) {
-                Ok(c) => converted.push((id, c)),
+                Ok(c) => converted.push((id, c, replace)),
                 Err(e) => {
                     if state.warned.insert(id) {
                         warn!("mesh {id:?} 转换拒绝({e}),本步不绘制该资产,帧循环照常");
@@ -202,14 +220,14 @@ pub(crate) fn flush_uploads(
             },
         }
     }
-    let mut image_specs: Vec<(AssetId<Image>, Handle<Image>, crate::vulkan::ImageSpec)> =
+    let mut image_specs: Vec<(AssetId<Image>, Handle<Image>, crate::vulkan::ImageSpec, bool)> =
         Vec::new();
     let mut pending_images = 0usize;
-    for (id, handle) in fresh_images {
+    for (id, handle, replace) in fresh_images {
         match image_assets.get(&handle) {
             None => pending_images += 1, // 异步加载未到货,下帧脏行重试
             Some(image) => match crate::vulkan::image_spec(image) {
-                Ok(spec) => image_specs.push((id, handle, spec)),
+                Ok(spec) => image_specs.push((id, handle, spec, replace)),
                 Err(e) => {
                     if state.warned_images.insert(id) {
                         warn!("贴图 {id:?} 规格拒绝({e}),本步不采样该资产,帧循环照常");
@@ -223,7 +241,7 @@ pub(crate) fn flush_uploads(
     }
     // —— 3) 容量保证(初次懒建或维护迁移,等待/迁移在池内分账;迁移销毁旧池
     // 前经 frames.wait_all_inflight 等"图形最后使用",4.1.1)——
-    let (vertex_bytes, index_bytes) = converted.iter().fold((0u64, 0u64), |(v, i), (_, c)| {
+    let (vertex_bytes, index_bytes) = converted.iter().fold((0u64, 0u64), |(v, i), (_, c, _)| {
         (v + c.vertices.len() as u64, i + c.indices.len() as u64)
     });
     pool.ensure_capacity(
@@ -248,7 +266,7 @@ pub(crate) fn flush_uploads(
         Vec::new()
     };
     let mut gpu_images: Vec<(AssetId<Image>, GpuImage)> = Vec::with_capacity(image_specs.len());
-    for (id, _, spec) in &image_specs {
+    for (id, _, spec, _) in &image_specs {
         let g = GpuImage::create(
             &ctx.device,
             &ctx.instance,
@@ -264,7 +282,7 @@ pub(crate) fn flush_uploads(
     // ensure_capacity 之后——"不写越界"的顺序契约——
     let image_bytes: u64 = image_specs
         .iter()
-        .map(|(_, handle, _)| {
+        .map(|(_, handle, _, _)| {
             image_assets
                 .get(handle)
                 .and_then(|img| img.data.as_ref())
@@ -276,11 +294,12 @@ pub(crate) fn flush_uploads(
     let mut image_uploads = Vec::with_capacity(image_specs.len());
     let mut planned: Vec<(
         AssetId<Mesh>,
+        bool,
         crate::vulkan::ConvertedMesh,
         crate::vulkan::PoolRange,
         crate::vulkan::PoolRange,
     )> = Vec::with_capacity(converted.len());
-    for (id, c) in converted {
+    for (id, c, replace) in converted {
         let (vertex, index) = pool.alloc(c.vertices.len() as u64, c.indices.len() as u64);
         let v_src = staging.len() as u64;
         staging.extend_from_slice(&c.vertices);
@@ -298,9 +317,9 @@ pub(crate) fn flush_uploads(
             dst_offset: index.offset,
             size: index.size,
         });
-        planned.push((id, c, vertex, index));
+        planned.push((id, replace, c, vertex, index));
     }
-    for ((id, handle, spec), (_, gpu)) in image_specs.iter().zip(&gpu_images) {
+    for ((id, handle, spec, _), (_, gpu)) in image_specs.iter().zip(&gpu_images) {
         // 贴图字节直取:上一阶段已验 Some;同一次系统调用内资产不变,状态矛盾
         // 按 Tier② 冒泡(与"容量保证后池缺席"同级,不 panic)
         let image = image_assets.get(handle).ok_or_fatal(format!(
@@ -336,28 +355,63 @@ pub(crate) fn flush_uploads(
         .submit_batch(batch)
         .or_fatal("transfer 提交失败,上传链无法继续(未发布票据)")?
         .ok_or_fatal("内部矛盾:staging 非空的批次未产生提交")?;
-    // 驻留登记只在提交成功之后:失败路径不会留下指向未上传数据的账本行
+    // 驻留登记只在提交成功之后:失败路径不会留下指向未上传数据的账本行。
+    // 4.2.3:持失效凭据的身份走 replace 换条目(旧区间孤儿化,回收归 4.4),
+    // 其余走 commit 严格登记(重复登记仍按编排 bug 报错)
+    let mut replaced_meshes = 0usize;
+    let mut committed_meshes: Vec<AssetId<Mesh>> = Vec::with_capacity(planned.len());
     let planned_count = planned.len();
-    for (id, c, vertex, index) in planned {
-        pool.commit(id, vertex, index, c.vertex_count, c.index_count, ticket)
-            .or_fatal("驻留登记失败,上传链无法继续")?;
+    for (id, replace, c, vertex, index) in planned {
+        if replace {
+            // 旧槽位孤儿化(区间空间随池同寿,回收归 4.4),返回值无需持有
+            let _old_slot = pool.replace(id, vertex, index, c.vertex_count, c.index_count, ticket);
+            replaced_meshes += 1;
+        } else {
+            pool.commit(id, vertex, index, c.vertex_count, c.index_count, ticket)
+                .or_fatal("驻留登记失败,上传链无法继续")?;
+        }
+        committed_meshes.push(id);
     }
     // —— 3.3.4 槽位发布:提交成功 → 分槽(采样器按功能键去重) → 驻留登记
     // 带槽位。只写 free list 的新槽,覆盖竞态在结构上不存在;采样 draw 的
     // "上传完成才可使用"由票据承担(图形提交挂 draw 的 ticket 信号量等待)。
     // 发布失败 = 槽容量耗尽,按 Tier② 冒泡(施工计划:不静默截断)
     let mut sampler_slots_hit = HashSet::new();
-    for ((id, _, spec), (gid, gpu)) in image_specs.iter().zip(gpu_images) {
+    let mut replaced_images = 0usize;
+    let mut committed_images: Vec<AssetId<Image>> = Vec::with_capacity(image_specs.len());
+    for ((id, _, spec, replace), (gid, gpu)) in image_specs.iter().zip(gpu_images) {
         debug_assert_eq!(*id, gid, "image_specs 与 gpu_images 同序构建,错位即内部矛盾");
-        let slots = tables
-            .publish(gpu.view(), gpu.sampler(), &sampler_key(&spec.sampler))
-            .or_fatal(format!("贴图 {id:?} 槽位发布失败,上传链无法继续"))?;
+        let slots = if *replace {
+            // 换条目重传:旧图先进停尸房(在飞安全),描述符**原槽重写**——
+            // 纹理槽占用不因内容变化增长(4.2.3)
+            let old = image_cache.take(*id).ok_or_fatal(format!(
+                "贴图 {id:?} 持失效凭据但驻留条目缺席,状态矛盾"
+            ))?;
+            let s = tables
+                .rebind(old.texture, gpu.view(), gpu.sampler(), &sampler_key(&spec.sampler))
+                .or_fatal(format!("贴图 {id:?} 原槽重写失败,上传链无法继续"))?;
+            replaced_images += 1;
+            s
+        } else {
+            tables
+                .publish(gpu.view(), gpu.sampler(), &sampler_key(&spec.sampler))
+                .or_fatal(format!("贴图 {id:?} 槽位发布失败,上传链无法继续"))?
+        };
         sampler_slots_hit.insert(slots.sampler);
         image_cache.commit(*id, gpu, ticket, slots);
+        committed_images.push(*id);
+    }
+    // 换内容成功的身份销账(4.2.2 凭据消费);未成功(未到货/被拒)的保留,
+    // 行保持脏标下帧重试
+    for id in committed_meshes {
+        invalidations.consume_mesh(id);
+    }
+    for id in committed_images {
+        invalidations.consume_image(id);
     }
     let srgb_count = image_specs
         .iter()
-        .filter(|(_, _, spec)| spec.srgb_role())
+        .filter(|(_, _, spec, _)| spec.srgb_role())
         .count();
     // 4.1.4 计量:上传侧累计进账本(判定线的字节/批次口径)
     let batch_bytes = vertex_bytes + index_bytes + image_bytes;
@@ -368,11 +422,12 @@ pub(crate) fn flush_uploads(
     stats.last_batch_bytes = batch_bytes;
     stats.dirty_rows = dirty_after;
     info!(
-        "上传批次 #{ticket}:mesh {planned_count} 个(顶点 {vertex_bytes}B / 索引 {index_bytes}B)\
-         + 贴图 {} 张({image_bytes}B,sRGB 角色 {srgb_count} / 线性 {});\
+        "上传批次 #{ticket}:mesh {} 个(其中换内容 {replaced_meshes},顶点 {vertex_bytes}B / 索引 {index_bytes}B)\
+         + 贴图 {} 张(其中换内容重传 {replaced_images},{image_bytes}B,sRGB 角色 {srgb_count} / 线性 {});\
          槽位发布:纹理槽 {}/{}(含 fallback 0 号)、采样器槽 {} 种(本批涉及 {new_sampler});\
          未到货跳过 mesh {pending} / 贴图 {pending_images}(材质缺 {materials_pending});\
          已驻留 mesh {} / 贴图 {}",
+        planned_count,
         image_specs.len(),
         image_specs.len() - srgb_count,
         tables.used_texture_slots(),

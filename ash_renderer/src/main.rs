@@ -16,8 +16,8 @@ use ash_renderer::{
     overlay::OverlayPlugin,
     remote::AshRemotePlugin,
     scene::{
-        AshCameraAspectPlugin, AshCameraControlPlugin, AshLedgerPlugin, AshMaterialHookPlugin,
-        SceneEntryPlugin,
+        AshAssetEventPlugin, AshCameraAspectPlugin, AshCameraControlPlugin, AshLedgerPlugin,
+        AshMaterialHookPlugin, SceneEntryPlugin,
     },
 };
 use bevy::{
@@ -79,6 +79,9 @@ fn main() -> AppExit {
         // 稳定槽账本（4.1，机制半边）：PostUpdate 传播后对账——Changed/Removed
         // 增量维护 Entity→实例数据账本，取代 3.1.4 的每帧全量快照重建
         .add_plugins(AshLedgerPlugin)
+        // 资产事件读侧（4.2，机制半边）：AssetEvent::Modified → 失效凭据 +
+        // 关联行重挂脏标（发现侧第二条入口，与对象五类变更并轨同一脏集）
+        .add_plugins(AshAssetEventPlugin)
         // BRP 远程直控（3.12）：World 经 HTTP JSON-RPC 暴露在 127.0.0.1:15702，
         // 官方 inspection 方法族 + 场景语义自定义方法（查询/改 Transform/相机给值）
         .add_plugins(AshRemotePlugin)
