@@ -5,7 +5,7 @@
 //! | 时机 | 系统 | 系统本体 | 职责 |
 //! |---|---|---|---|
 //! | `Startup` | `init_vulkan` | [`init`] | 串链创建全部 Vulkan 资源（**全有或全无**）；失败 → `error!` + `AppExit::error()` 优雅退出 |
-//! | `Last` | `flush_uploads`（upload 模块注册，先于本表下一行） | [`super::upload`] | 上传链：快照去重 → 合批 transfer 提交，先于帧循环 |
+//! | `Last` | `flush_uploads`（upload 模块注册，先于本表下一行） | [`super::upload`] | 上传链：账本脏行盘点 → 合批 transfer 提交，先于帧循环 |
 //! | `Last` | `draw_frame.run_if(resource_exists::<Context>)` | [`frame`] | 帧循环：resize 闸门 → 等 fence → acquire → 组装 DrawList → 录制提交 → present |
 //! | `Last` | `teardown_vulkan.in_set(OnAppExitSystems)` | [`init`] | AppExit 写入后、窗口销毁前反序拆除 |
 //!

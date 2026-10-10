@@ -20,6 +20,10 @@
 虚拟鼠标注入发生在应用层消息缓冲（Messages<WindowEvent>，与 bevy_winit 同层），
 不碰用户真实光标/焦点，不受无人模式纪律约束；操作序列先 mouse-move 再 press
 （按压需要指针落点），写值统一下一帧生效。
+4.1 对象增量族（spawn/replace/stats = ash_renderer 自定义；despawn/remove =
+官方 world.despawn_entity / world.remove_components 薄封装——反射通道按组件名
+操作，不需要构造组件值）：变更写值均下一帧生效，账本经 Changed/Removed 通道
+自动对账，increment_stats 读到的 processed_rows 就是"动了谁"的答案。
 宿主须先起（cargo run -p ash_renderer）；--host/--port 可覆盖，默认 127.0.0.1:15702。
 无鉴权仅本地：与宿主同机使用，不得对网开放（BRP 侦察笔记 §6 边界）。
 连接被拒时提示宿主未起，退出码 2；BRP 层错误（含 ENTITY_NOT_FOUND 等）原样
@@ -157,6 +161,40 @@ def cmd_mouse_status(args):
     out(rpc(args.host, args.port, "ash_renderer/mouse_status"))
 
 
+def cmd_spawn(args):
+    params = {"source": args.source}
+    if args.offset:
+        params["offset"] = args.offset
+    if args.name_suffix:
+        params["name_suffix"] = args.name_suffix
+    out(rpc(args.host, args.port, "ash_renderer/spawn_primitive", params))
+
+
+def cmd_despawn(args):
+    out(rpc(args.host, args.port, "world.despawn_entity", {"entity": args.entity}))
+
+
+def cmd_replace(args):
+    params = {"entity": args.entity}
+    if args.mesh_from:
+        params["mesh_from"] = args.mesh_from
+    if args.material_from:
+        params["material_from"] = args.material_from
+    out(rpc(args.host, args.port, "ash_renderer/replace_handles", params))
+
+
+def cmd_remove(args):
+    params = {
+        "entity": args.entity,
+        "components": [resolve_component(args.host, args.port, n) for n in args.components],
+    }
+    out(rpc(args.host, args.port, "world.remove_components", params))
+
+
+def cmd_stats(args):
+    out(rpc(args.host, args.port, "ash_renderer/increment_stats"))
+
+
 def cmd_discover(args):
     resp = rpc(args.host, args.port, "rpc.discover")
     if "result" in resp:
@@ -231,6 +269,29 @@ def main():
     p.set_defaults(func=cmd_mouse_wheel)
 
     sub.add_parser("mouse-status", help="鼠标状态读回（ash_renderer/mouse_status）").set_defaults(func=cmd_mouse_status)
+
+    p = sub.add_parser("spawn", help="克隆 primitive（ash_renderer/spawn_primitive，共享资产柄）")
+    p.add_argument("--source", required=True, help="源 primitive 实体号（树内 [mesh][mat] 行）")
+    p.add_argument("--offset", nargs=3, type=float, metavar=("X", "Y", "Z"), help="相对源实体的平移偏移")
+    p.add_argument("--name-suffix", help="Name 后缀（默认 （副本））")
+    p.set_defaults(func=cmd_spawn)
+
+    p = sub.add_parser("despawn", help="删实体及其子树（官方 world.despawn_entity，递归）")
+    p.add_argument("entity", help="目标实体号（树节点或 primitive）")
+    p.set_defaults(func=cmd_despawn)
+
+    p = sub.add_parser("replace", help="换柄：从源实体拷 mesh/material 柄（ash_renderer/replace_handles）")
+    p.add_argument("entity", help="目标实体号")
+    p.add_argument("--mesh-from", help="mesh 柄的来源实体号")
+    p.add_argument("--material-from", help="material 柄的来源实体号")
+    p.set_defaults(func=cmd_replace)
+
+    p = sub.add_parser("remove", help="摘组件（官方 world.remove_components，按组件名）")
+    p.add_argument("entity", help="目标实体号")
+    p.add_argument("--components", nargs="+", required=True, help="要摘的组件（短名或全路径，如 Mesh3d）")
+    p.set_defaults(func=cmd_remove)
+
+    sub.add_parser("stats", help="增量计量读数（ash_renderer/increment_stats）").set_defaults(func=cmd_stats)
 
     sub.add_parser("discover", help="列出全部可用 BRP 方法").set_defaults(func=cmd_discover)
 

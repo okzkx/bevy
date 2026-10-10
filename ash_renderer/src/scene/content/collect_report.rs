@@ -1,6 +1,6 @@
 //! 采集核验（业务侧）：一次性核验系统，报一次即歇，读
-//! [`crate::scene::mechanism::CollectedScene`] 快照与资产容器做采集判定线——
-//! 期望值（"期望 6"等）随当前场景写死，采集机制本体不背这些数。
+//! [`crate::scene::mechanism::InstanceLedger`] 账本与资产容器做采集判定线——
+//! 期望值（"期望 6"等）随当前场景写死，账本机制本体不背这些数。
 
 use std::collections::HashSet;
 
@@ -8,13 +8,13 @@ use bevy::{ecs::system::SystemParam, mesh::Indices, pbr::StandardMaterial, prelu
 
 use ash_macros::system;
 
-use crate::scene::{util::fmt_vec3, CollectedScene};
+use crate::scene::{util::fmt_vec3, InstanceLedger};
 
-/// 核验要读的成组数据：快照 + 层级查询 + 两个资产容器。SystemParam 打包让系统
+/// 核验要读的成组数据：账本 + 层级查询 + 两个资产容器。SystemParam 打包让系统
 /// 签名保持三参——官方渲染侧的 Extract 系统同样用参数束装下成排的 Query/Res。
 #[derive(SystemParam)]
 pub(super) struct CollectData<'w, 's> {
-    scene: Res<'w, CollectedScene>,
+    ledger: Res<'w, InstanceLedger>,
     /// primitive 全集（含尚未缝上材质的）——三样俱全与否由此比对得出。
     hierarchy: Query<
         'w,
@@ -53,7 +53,7 @@ pub(super) fn report_scene_collected(
     if state.done {
         return;
     }
-    if data.scene.primitives.is_empty() {
+    if data.ledger.is_empty() {
         // 场景未展开：等。到货问题由进场到货报告（super::world_asset）告警，这里不重复。
         state.waited_secs += time.delta_secs();
         if state.waited_secs > 10.0 {
@@ -64,7 +64,7 @@ pub(super) fn report_scene_collected(
     }
 
     let total = data.hierarchy.iter().count();
-    let joined = data.scene.primitives.len();
+    let joined = data.ledger.len();
     let mut resolved = joined == total;
     let mut with_parent = 0usize;
     let mut detail = Vec::new();
@@ -72,11 +72,11 @@ pub(super) fn report_scene_collected(
     let mut tex_ids = HashSet::new();
     let mut unlit = 0usize;
     let (mut max_dt, mut max_dev) = (0.0_f32, 0.0_f32);
-    for row in &data.scene.primitives {
+    for (entity, row) in data.ledger.rows() {
         // 传播契约：子 GlobalTransform == 父 GlobalTransform × 本地 Transform（无父链
         // 则 == 本地）。FlightHelmet 六节点全恒等——种子值与传播值重合，本核验守的
         // 是"读在传播之后 + 数据合法"；非恒等父链的逐帧正确性由画面判定。
-        let Ok((local, global, child_of)) = data.hierarchy.get(row.entity) else {
+        let Ok((local, global, child_of)) = data.hierarchy.get(entity) else {
             resolved = false;
             continue;
         };
@@ -143,7 +143,7 @@ pub(super) fn report_scene_collected(
         };
         detail.push(format!(
             "  #{:<3} 位 {} {mesh_note}；材质 {mat_note}",
-            row.entity.index(),
+            entity.index(),
             fmt_vec3(pos)
         ));
     }

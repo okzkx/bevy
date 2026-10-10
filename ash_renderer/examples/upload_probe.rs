@@ -9,8 +9,9 @@
 //!   完成 CPU 等待后,经 pool→readback 拷贝逐字节比对池内容;重复快照查驻留缓存
 //!   零新提交(票据不增,判定线"重复快照不重复上传")。
 //! - 组 C(维护扩容观察组):小容量池(首个批次触发 1MiB 初建)先收小资产,再收
-//!   1.2MiB 资产触发显式维护——等在飞票据 → 整段迁移 → 等迁移票据 → 销毁旧池,
-//!   停顿入账;迁移后新旧两资产内容逐字节复核(迁移没搬坏数据)。
+//!   1.2MiB 资产触发显式维护——等在飞票据 → 整段迁移 → 等迁移票据 → 等图形
+//!   最后使用(4.1.1)→ 销毁旧池,停顿入账;迁移后新旧两资产内容逐字节复核
+//!   (迁移没搬坏数据);wait_draws 钩子断言=迁移恰等一次、初建不触发。
 //! - 组 D(跨族依赖观察组,3.4 接线预演):transfer 提交批末 release(仅当本机有
 //!   专用 transfer 族),graphics 提交侧等 timeline 票据(GPU 侧等待,CPU 不阻塞)
 //!   + acquire + 真实读(pool→readback)+ fence;宿主比对。EXCLUSIVE 成对
@@ -27,6 +28,7 @@
 use std::sync::Mutex;
 
 use ash::{ext::debug_utils, vk, Device, Entry};
+use ash_renderer::common::error::VulkanError;
 use ash_renderer::vulkan::{
     convert_mesh, BufferRole, CopyRegion, GpuBuffer, MemoryContract, MeshConvertError, MeshPool,
     PoolRange, StagingCopy, UploadBatch, Uploader, VERTEX_STRIDE,
@@ -357,13 +359,14 @@ fn upload_asset(
     uploader: &mut Uploader,
     id: AssetId<Mesh>,
     converted: ash_renderer::vulkan::ConvertedMesh,
+    wait_draws: &mut dyn FnMut() -> Result<(), VulkanError>,
 ) -> u64 {
     if pool.resident(id).is_some() {
         return 0; // 去重:重复快照零提交(与 App 编排同判定)
     }
     let vertex_size = converted.vertices.len() as u64;
     let index_size = converted.indices.len() as u64;
-    pool.ensure_capacity(uploader, vertex_size, index_size)
+    pool.ensure_capacity(uploader, vertex_size, index_size, wait_draws)
         .expect("容量保证(含维护路径)");
     let vertex_buffer = pool.vertex_buffer().expect("容量保证后顶点池必在");
     let index_buffer = pool.index_buffer().expect("容量保证后索引池必在");
@@ -508,8 +511,8 @@ fn group_b_upload_closure(
     let quad_expect_v = quad_converted.vertices.clone();
     let quad_expect_i = quad_converted.indices.clone();
 
-    let t1 = upload_asset(&mut pool, &mut uploader, id_small, small_converted);
-    let t2 = upload_asset(&mut pool, &mut uploader, id_quad, quad_converted);
+    let t1 = upload_asset(&mut pool, &mut uploader, id_small, small_converted, &mut || Ok(()));
+    let t2 = upload_asset(&mut pool, &mut uploader, id_quad, quad_converted, &mut || Ok(()));
     println!("[提交] 两资产分两批:票据 #{t1}、#{t2}(单调 +1,一次合批一次 transfer 提交)");
     assert_eq!(t1, 1);
     assert_eq!(t2, 2);
@@ -523,6 +526,7 @@ fn group_b_upload_closure(
         &mut uploader,
         id_small,
         convert_mesh(&demo_mesh(0, 4, false)).expect("重复转换"),
+        &mut || Ok(()),
     );
     assert_eq!(t3, 0, "重复身份零提交");
     assert_eq!(uploader.last_issued_ticket(), 2, "重复快照不发票据");
@@ -593,7 +597,13 @@ fn group_c_maintenance(
     let small = convert_mesh(&demo_mesh(0, 4, false)).expect("C small 转换");
     let small_expect_v = small.vertices.clone();
     let small_expect_i = small.indices.clone();
-    let t1 = upload_asset(&mut pool, &mut uploader, id_small, small);
+    // 图形最后使用等待的计数钩子(4.1.1):迁移路径必须等它,非迁移路径不调
+    let wait_draws_calls = std::cell::Cell::new(0u32);
+    let mut wait_draws = || {
+        wait_draws_calls.set(wait_draws_calls.get() + 1);
+        Ok(())
+    };
+    let t1 = upload_asset(&mut pool, &mut uploader, id_small, small, &mut wait_draws);
     let ((uv, cv), _) = pool.usage();
     println!("[初建] 小资产票据 #{t1},顶点 {uv}/{cv}B(1MiB 起步——需量加余量,不预付猜测容量)");
 
@@ -616,15 +626,20 @@ fn group_c_maintenance(
     let big_converted = convert_mesh(&big).expect("C big 转换");
     let big_expect_v = big_converted.vertices.clone();
     let big_expect_i = big_converted.indices.clone();
-    let t2 = upload_asset(&mut pool, &mut uploader, id_big, big_converted);
+    let t2 = upload_asset(&mut pool, &mut uploader, id_big, big_converted, &mut wait_draws);
     let ((uv2, cv2), (ui2, ci2)) = pool.usage();
     let ledger = pool.maintenance_ledger();
     println!(
-        "[维护] 大资产票据 #{t2}:顶点 {uv2}/{cv2}B 索引 {ui2}/{ci2}B;扩容 {grow} 次,累计停顿 {pause}ms(等在飞 + 迁移 + 等迁移票据,与正常上传分账)",
+        "[维护] 大资产票据 #{t2}:顶点 {uv2}/{cv2}B 索引 {ui2}/{ci2}B;扩容 {grow} 次,累计停顿 {pause}ms(等在飞+迁移+图形最后使用,与正常上传分账;wait_draws 断言见上)",
         grow = ledger.grow_count,
         pause = ledger.pause_ms_total,
     );
     assert_eq!(ledger.grow_count, 1, "恰好一次显式扩容");
+    assert_eq!(
+        wait_draws_calls.get(),
+        1,
+        "图形最后使用等待恰一次(4.1.1:迁移销毁旧池前等帧槽 fence;初建/普通上传不触发)"
+    );
     assert_eq!(
         t2, 3,
         "迁移批耗掉 #2,大资产批拿 #3——维护与上传共用单调票据序列"
@@ -697,6 +712,7 @@ fn group_d_cross_family(
         &mut uploader,
         converted.vertices.len() as u64,
         converted.indices.len() as u64,
+        &mut || Ok(()),
     )
     .expect("D 容量");
     let vertex_pool = pool.vertex_buffer().expect("顶点池");

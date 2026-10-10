@@ -332,6 +332,20 @@ impl FramePool {
         Ok(())
     }
 
+    /// 等待全部帧槽的在飞提交完成（4.1.1 池迁移的"图形最后使用"等待）。fence
+    /// 只证提交完成：全部槽位 fence 皆 signaled ⇒ 没有任何命令缓冲还在 GPU 上
+    /// 执行 ⇒ 在飞 draw 对旧池的读取已全部收口。已完成的槽立即通过，正常路径
+    /// 至多等 MAX_FRAMES_IN_FLIGHT-1 个在飞尾帧；等待不重置 fence，与
+    /// `wait_for_slot` 的"只等不重置"纪律一致。
+    ///
+    /// # Errors
+    /// fence 等待失败（设备丢失等，Tier② 语义由调用方分流）。
+    pub fn wait_all_inflight(&self) -> Result<()> {
+        let fences: Vec<vk::Fence> = self.frames.iter().map(|f| f.in_flight).collect();
+        unsafe { self.device.wait_for_fences(&fences, true, u64::MAX)? };
+        Ok(())
+    }
+
     /// 帧首：等本槽位上一轮提交完成（GPU 侧 fence），重置命令缓冲。
     ///
     /// D2 定案：这里**只等不重置 fence**。fence 的重置挪到

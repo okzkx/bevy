@@ -15,7 +15,7 @@ use ash_renderer::{
     overlay::OverlayPlugin,
     remote::AshRemotePlugin,
     scene::{
-        AshCameraAspectPlugin, AshCameraControlPlugin, AshCollectPlugin, AshMaterialHookPlugin,
+        AshCameraAspectPlugin, AshCameraControlPlugin, AshLedgerPlugin, AshMaterialHookPlugin,
         SceneEntryPlugin,
     },
 };
@@ -68,8 +68,9 @@ fn main() -> AppExit {
         .add_plugins(AshCameraControlPlugin)
         // 场景进场（step3 任务 3.1.2，业务半边）：load FlightHelmet + spawn WorldAssetRoot + 到货统计
         .add_plugins(SceneEntryPlugin)
-        // 场景采集（step3 任务 3.1.4，机制半边）：PostUpdate 帧末直读 primitive 三样，产 CollectedScene 快照
-        .add_plugins(AshCollectPlugin)
+        // 稳定槽账本（4.1，机制半边）：PostUpdate 传播后对账——Changed/Removed
+        // 增量维护 Entity→实例数据账本，取代 3.1.4 的每帧全量快照重建
+        .add_plugins(AshLedgerPlugin)
         // BRP 远程直控（3.12）：World 经 HTTP JSON-RPC 暴露在 127.0.0.1:15702，
         // 官方 inspection 方法族 + 场景语义自定义方法（查询/改 Transform/相机给值）
         .add_plugins(AshRemotePlugin)

@@ -1,0 +1,7 @@
+interface:
+  display_name: "plan-execute：按施工计划开工"
+  short_description: "按已立案施工计划开工执行：建临时分支、施工产出文档、三级测试验证"
+  default_prompt: "$plan-execute 按《施工计划：对象增量三线拆解》（4.1）开工：建临时分支、施工、测试"
+
+policy:
+  allow_implicit_invocation: false

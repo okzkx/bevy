@@ -6,8 +6,9 @@
 //! [`super::init`]。
 //!
 //! 住址：`Last`，与采集同帧闭环——Update 变更 → PostUpdate 传播+采集
-//!（`scene::collect` 产快照）→ Last 消费快照：查驻留账本（MeshPool/ImageCache）
-//! 与材质容器组装 DrawList（拓扑快照不跨 CPU 帧，GPU 执行异步——上传票据在
+//!（`scene::ledger` 账本对账，4.1 起增量维护）→ Last 消费账本：查驻留账本
+//!（MeshPool/ImageCache）
+//! 与材质容器组装 DrawList（账本跨帧存活，读侧零扫描；GPU 执行异步——上传票据在
 //! GPU 侧等待，CPU 不阻塞）；材质按不透明调试策略覆盖（详见 draw_frame 收账日志）。
 //!
 //! 帧内错误按两 Tier 快捷分流（[`ResultTierExt`]，common 工具层：错误点一行
@@ -33,7 +34,7 @@ use crate::{
     common::error::{TierError, VulkanError},
     common::syntax::ResultTierExt,
     overlay::{paint_overlay, OverlayLogState, RenderMode, UiDrawData},
-    scene::CollectedScene,
+    scene::InstanceLedger,
     vulkan::{
         pack_frame_uniforms, AcquireOutcome, BindlessTables, Context, DrawCall, FrameDraw,
         FramePool, FrameUniformsData, GraphicsPipeline, ImageCache, MeshPool, OverlayPipeline,
@@ -66,7 +67,8 @@ pub(crate) struct ResizeGate {
 #[derive(SystemParam)]
 pub(crate) struct FrameInput<'w, 's> {
     ctx: Res<'w, Context>,
-    scene: Res<'w, CollectedScene>,
+    /// 稳定槽账本（4.1 起取代每帧全量快照：跨帧维护，读侧零扫描）。
+    ledger: Res<'w, InstanceLedger>,
     std_materials: Res<'w, Assets<StandardMaterial>>,
     pool: Res<'w, MeshPool>,
     image_cache: Res<'w, ImageCache>,
@@ -182,7 +184,7 @@ fn frame_body(
     let overlay = frame.overlay.take();
     let FrameInput {
         ref ctx,
-        ref scene,
+        ref ledger,
         ref std_materials,
         ref pool,
         ref image_cache,
@@ -259,14 +261,14 @@ fn frame_body(
         Err(e) => return Err(TierError::fatal("acquire 失败，渲染链无法继续，优雅退出", e)),
     };
 
-    // 3) 组装 DrawList：同帧快照 → 驻留账本/资产容器 → push + 池引脚。
-    // mesh/材质未驻留/未到货 = 该 primitive 暂缓（Tier①，下帧快照再来）；缺
-    // base color 贴图 = fallback 白图照画（缺资源用有效 fallback 或暂缓 draw，
-    // 贴图缺不拦几何）。
-    let mut draws: Vec<DrawCall> = Vec::with_capacity(scene.primitives.len());
+    // 3) 组装 DrawList：账本行 → 驻留账本/资产容器 → push + 池引脚。
+    // mesh/材质未驻留/未到货 = 该 primitive 暂缓（Tier①，账本行驻留后自愈）；
+    // 缺 base color 贴图 = fallback 白图照画（缺资源用有效 fallback 或暂缓 draw，
+    // 贴图缺不拦几何）。账本读是纯 HashMap 走访——零组件扫描零 tick 比较。
+    let mut draws: Vec<DrawCall> = Vec::with_capacity(ledger.len());
     let mut pending_rows = 0usize;
     let mut alpha_override = 0usize;
-    for row in &scene.primitives {
+    for (_entity, row) in ledger.rows() {
         let Some(slot) = pool.resident(row.mesh.id()) else {
             pending_rows += 1;
             continue;
@@ -301,20 +303,17 @@ fn frame_body(
             draw_state.warned_pending = true;
             info!(
                 "DrawList 暂缓 {pending_rows}/{} 行（mesh/材质未驻留或未到货，上传链自愈后消失）",
-                scene.primitives.len(),
+                ledger.len(),
             );
         }
     } else {
         draw_state.warned_pending = false;
     }
-    if !draw_state.override_logged
-        && !scene.primitives.is_empty()
-        && pending_rows == 0
-    {
+    if !draw_state.override_logged && !ledger.is_empty() && pending_rows == 0 {
         draw_state.override_logged = true;
         info!(
             "材质调试覆盖：{} 个 primitive 全部按不透明绘制——blend 关闭（alpha<1 的 {} 行照常画出，glTF BLEND 镜片在此列）；贴图只采 base color 槽，其余四槽不进调试着色；着色模式按 ASH_RENDER_MODE（三态，见灯光收账日志）",
-            scene.primitives.len(),
+            ledger.len(),
             alpha_override,
         );
     }
@@ -327,7 +326,7 @@ fn frame_body(
     let render_mode = match render_mode.as_deref() {
         Some(mode) => *mode,
         None => {
-            if !draw_state.warned_no_mode && !scene.primitives.is_empty() {
+            if !draw_state.warned_no_mode && !ledger.is_empty() {
                 draw_state.warned_no_mode = true;
                 warn!("RenderMode 资源缺席（overlay 未装）：材质模式按 lambert 兜底");
             }
@@ -363,7 +362,7 @@ fn frame_body(
         }
         None => ([0.5, 1.0, 0.3, 0.0], [0.0; 4]), // 无灯：直射项归零，方向留合法占位
     };
-    if light_count != 1 && !draw_state.warned_light_count && !scene.primitives.is_empty() {
+    if light_count != 1 && !draw_state.warned_light_count && !ledger.is_empty() {
         draw_state.warned_light_count = true;
         warn!("方向光 {light_count} 盏（取第一盏/无灯直射项归零），多灯支持未实现");
     }

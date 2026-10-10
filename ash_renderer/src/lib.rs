@@ -8,7 +8,7 @@
 //! 依赖方向单向无环（3.6.1 分层定案）：
 //!
 //! ```text
-//! main ──► driver（渲染驱动）──┬─► scene（ECS 取数，读 CollectedScene 快照）
+//! main ──► driver（渲染驱动）──┬─► scene（ECS 取数：账本 + 变更发现，4.1 起增量维护）
 //!                              ├─► overlay（egui 调试 UI，ECS 侧）
 //!                              └─► vulkan（Vulkan 资源）──► common（工具层）
 //! ```
@@ -25,8 +25,9 @@
 //!   票据,3.2.4)、`mesh_convert`(纯函数:32B 交错转换,3.2.3)、`images`(资产级:贴图
 //!   链路,3.3.1)、`descriptors`(资产级:常驻描述符表 + 槽位发布,3.3.2~3.3.4)、
 //!   `pipeline`(接口件:图形管线,3.4.2);
-//! - [`scene`]:ECS 侧取数（step3 施工 3.1，3.6.2 分机制/业务两半）——机制半边
-//!   `mechanism`(材质缝接线/采集快照/宽高比补位,换场景内容不变)+ 业务半边
+//! - [`scene`]:ECS 侧取数（step3 施工 3.1，3.6.2 分机制/业务两半；4.1 起取数
+//!   形态从"每帧全量快照"改为"稳定槽账本 + 变更发现"）——机制半边
+//!   `mechanism`(材质缝接线/账本与变更发现/宽高比补位,换场景内容不变)+ 业务半边
 //!   `content`(FlightHelmet 进场/取景/灯光参数/施工核验),零 Vulkan 代码;
 //! - [`overlay`]:egui 调试 UI(3.7,裸接 ash——禁渲染宿主挂不上 bevy_egui/
 //!   egui-wgpu),框架/业务两半:`input`(bevy 事件→egui RawInput 输入桥)、`ui`
@@ -44,6 +45,10 @@
 //!   抬起/滚轮经 handler 注入 `Messages<WindowEvent>`(与 bevy_winit 同层,官方
 //!   拆分系统顺带维护 Window 光标位),下游输入资源/egui 桥/相机轨道零改动;
 //!   注册收在 remote::AshRemotePlugin;
+//! - [`remote_objects`]:BRP 对象生命周期方法族(4.1)——spawn 克隆/换柄两个
+//!   写方法(官方反射通道表达不了"引用既有资产的柄")+ increment_stats 增量
+//!   计量读数;despawn/摘组件复用官方内置(world.despawn_entity/
+//!   world.remove_components),操作本体在 scene::mechanism::object_ops;
 //! - [`driver`]:渲染驱动(3.6.1 自 src 根收拢)——bevy 调度侧编排,横跨 scene 与 vulkan:
 //!   `host`(宿主桥插件:禁渲染补位 + 系统进调度)、`init`(Vulkan 初始化链与反序拆除)、
 //!   `frame`(帧循环 draw_frame)、`upload`(上传编排:flush_uploads,Last 里 before
@@ -55,5 +60,6 @@ pub mod driver;
 pub mod overlay;
 pub mod remote;
 pub mod remote_mouse;
+pub mod remote_objects;
 pub mod scene;
 pub mod vulkan;

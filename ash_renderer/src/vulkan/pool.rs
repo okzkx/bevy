@@ -16,12 +16,10 @@
 //! 3. **容量维护**(3.2.2.3):放不下时走显式维护路径——**不写越界**:先按
 //!    "需量与现有驻留加余量"算新容量;等待全部在飞上传票据完成(迁移拷贝的
 //!    源不再被 GPU 读)→ 分配新池 → 已驻留内容整段迁移(old→new 设备拷贝)
-//!    → 等迁移票据 → 才销毁旧池。迁移与销毁的等待全部记账,与正常上传分账
-//!    (施工计划 §0 判定线 6:维护等待单列,不冒充"正常上传零 idle")。
-//!    图形侧最后使用:draw 每帧读池区间(依赖方向=帧提交挂票据等待,frames 侧)。
-//!    旧池销毁按契约须"上传票据∧图形最后使用"双条件,本模块迁移只等前者,
-//!    图形半边未接线——M2 靠两条事实兜底:素材规模不触发迁移、退出排空
-//!    device_wait_idle 先于 Drop;迁移常态化前须补帧侧等待(责任边界文档②)。
+//!    → 等迁移票据 → **等图形侧最后使用**(`wait_draws` 回调,4.1.1 补齐:
+//!    等全部帧槽 fence ⇒ 无在飞 draw 再读旧池)→ 才销毁旧池。迁移与销毁的
+//!    等待全部记账,与正常上传分账(施工计划 §0 判定线 6:维护等待单列,
+//!    不冒充"正常上传零 idle")。
 //!
 //! 销毁纪律:本类型 Drop 不等 GPU——"最后一次使用完成"由两个上游负责:在飞
 //! 上传票据由容量维护在迁移前等待,进程级退出排空由 `host::teardown_vulkan` 的
@@ -168,13 +166,18 @@ impl MeshPool {
     /// (初次懒建或显式维护迁移)。任何路径失败报错,调用方不得在未保证
     /// 容量的情况下 [`Self::alloc`]——那才可能写越界。
     ///
+    /// `wait_draws`:销毁旧池前的"图形最后使用"等待(4.1.1,责任边界契约②的
+    /// 图形半边)——调用方经它等全部帧槽 fence,保证没有在飞 draw 还在读旧池。
+    /// 池不认识帧资源,以回调接线保持依赖单向(vulkan 层内 pool 不依赖 frames)。
+    ///
     /// # Errors
-    /// 新池分配/迁移拷贝提交失败,或等待在飞票据失败。
+    /// 新池分配/迁移拷贝提交失败,或等待在飞票据/帧侧等待失败。
     pub fn ensure_capacity(
         &mut self,
         uploader: &mut Uploader,
         extra_vertex: u64,
         extra_index: u64,
+        wait_draws: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
         let need_vertex = self.used_vertex + extra_vertex;
         let need_index = self.used_index + extra_index;
@@ -210,8 +213,8 @@ impl MeshPool {
         )?;
         if migrating {
             // 已驻留内容整段迁移:bump 布局保证 [0, used) 就是全部有效数据。
-            // 迁移批自己的票据在销毁旧池前等完——只覆盖上传侧;在飞 draw 对
-            // 旧池的读取不在此等待,归属见模块头"图形侧最后使用"
+            // 迁移批自己的票据在销毁旧池前等完——覆盖上传侧;图形侧在下面
+            // wait_draws 里收口(4.1.1)
             let ticket = uploader
                 .submit_batch(UploadBatch {
                     device_copies: vec![
@@ -234,11 +237,14 @@ impl MeshPool {
                 })?
                 .expect("迁移批含拷贝,必有票据");
             uploader.wait_until(ticket)?;
+            // 图形最后使用:等全部帧槽 fence——没有命令缓冲还在 GPU 上执行,
+            // 在飞 draw 对旧池的读取必然已收口(契约②的双条件至此补齐)
+            wait_draws()?;
         }
         let pause_ms = pause.elapsed().as_millis();
         if migrating {
             info!(
-                "池扩容维护:顶点 {old_v}B→{new_v}B 索引 {old_i}B→{new_i}B,迁移 {mv}B+{mi}B(等待在飞 + 设备拷贝 + 等迁移票据,停顿 {pause_ms}ms)",
+                "池扩容维护:顶点 {old_v}B→{new_v}B 索引 {old_i}B→{new_i}B,迁移 {mv}B+{mi}B(等待在飞上传+迁移+图形最后使用,停顿 {pause_ms}ms)",
                 old_v = self.capacity_vertex,
                 new_v = new_vertex_cap,
                 old_i = self.capacity_index,
@@ -249,8 +255,8 @@ impl MeshPool {
         } else {
             info!("池初建:顶点 {new_vertex_cap}B 索引 {new_index_cap}B(按当时收齐的需求 + 余量,懒分配不预付)");
         }
-        // 迁移路径在 submit_migration 内已等迁移票据完成;此刻旧池再无 GPU
-        // 引用,放心销毁。新池换上后 bump 游标保持不变(数据原偏移平移)。
+        // 迁移路径在上方已等完迁移票据与帧侧等待;此刻旧池再无 GPU 引用,
+        // 放心销毁。新池换上后 bump 游标保持不变(数据原偏移平移)。
         self.vertex = Some(new_vertex);
         self.index = Some(new_index);
         self.capacity_vertex = new_vertex_cap;
@@ -329,10 +335,9 @@ impl MeshPool {
 
 impl Drop for MeshPool {
     fn drop(&mut self) {
-        // 契约边界(与 GpuBuffer::Drop 同款):不等 GPU。在飞上传票据由容量
-        // 维护在迁移前等待;退出排空由 teardown_vulkan 的 device_wait_idle
-        // 先于一切 Drop 完成(D4)。draw 在飞读取的等待面见模块头
-        // "图形侧最后使用"。
+        // 契约边界(与 GpuBuffer::Drop 同款):不等 GPU。在飞上传票据与图形侧
+        // 最后使用由容量维护在销毁旧池前等待(4.1.1 起双条件齐);退出排空由
+        // teardown_vulkan 的 device_wait_idle 先于一切 Drop 完成(D4)。
         self.vertex = None;
         self.index = None;
     }

@@ -1,9 +1,10 @@
-//! 上传编排(3.2.4 flush_uploads + 3.3.1 贴图段的 bevy 侧系统):消费 [`CollectedScene`]
-//! 快照,把未驻留的 `Assets<Mesh>` 去重转换、未驻留的贴图经材质五槽去重建图,合成
+//! 上传编排(3.2.4 flush_uploads + 3.3.1 贴图段的 bevy 侧系统;4.1.4 起吃账本
+//! 脏行):消费 [`InstanceLedger`] 的**待盘点行**(新增/换柄的增量,非全量快照),
+//! 把未驻留的 `Assets<Mesh>` 去重转换、未驻留的贴图经材质五槽去重建图,合成
 //! **一个批次**送进 GPU(网格进池、贴图进 dedicated memory)。零裸 Vulkan 调用——
 //! 资源操作全部走 [`crate::vulkan`] 的 pool/uploader/images 出口。
 //!
-//! 时序(施工计划 §2 终态表):PostUpdate 采集 → **Last:准备+上传提交** →
+//! 时序(施工计划 §2 终态表):PostUpdate 账本对账 → **Last:准备+上传提交** →
 //! 同帧图形提交(图形侧等票据=draw 挂 ticket 信号量等待,见 frames.rs)。
 //! 本系统住 `Last`,由 [`crate::driver::host`] 的 `draw_frame` 链成序(先上传
 //! 后画),失败两 Tier:
@@ -11,10 +12,13 @@
 //! Tier②(error + `AppExit::error()` 优雅退出;提交失败不发布票据,池内
 //! bump 游标随下次容量保证自然前移,不留指向未上传数据的账本行)。
 //!
-//! 去重纪律:每帧快照都会带着同一批 mesh/贴图柄来——只有"驻留缓存查无此身份"
-//! 的才转换上传(3.2.2.2);重复快照零重复上传,批次日志可证。贴图身份从快照的
-//! material 柄出发去 `Assets<StandardMaterial>` 解引用五槽(快照只带拓扑的既定
-//! 契约不破),再按资产身份去重——FlightHelmet 实测:材质 6、贴图槽 24、去重 15。
+//! 增量纪律(4.1):发现侧只把"新增/换柄"的行放进脏集——盘点只过脏行,
+//! 静态场景稳态脏集为空,**零盘点零上传**;盘点时已全驻留的行就地清标(空批
+//! 不提交)。资产身份去重跨行跨帧:同一身份只有驻留缓存查无才转换上传
+//! (3.2.2.2)。贴图身份从脏行的 material 柄出发去 `Assets<StandardMaterial>`
+//! 解引用五槽,再按资产身份去重——FlightHelmet 实测:材质 6、贴图槽 24、
+//! 去重 15。资产未到货/被拒的行保持脏标下帧重试(与全量快照时代同语义,
+//! 只是重试队列从"全部在场行"收敛为"脏行")。
 //!
 //! 贴图上传形态(显存机制篇判定线):staging 字节 → `vkCmdCopyBufferToImage`
 //! (重排由 copy 引擎完成),前后置布局屏障与跨族 release 在 uploader 图像段;
@@ -35,9 +39,10 @@ use bevy::{
 use ash_macros::system;
 
 use crate::{
-    scene::CollectedScene,
+    scene::InstanceLedger,
     vulkan::{
-        sampler_key, GpuImage, ImageCache, MeshPool, StagingImageCopy, UploadBatch, Uploader,
+        sampler_key, FramePool, GpuImage, ImageCache, MeshPool, StagingImageCopy, UploadBatch,
+        Uploader,
     },
 };
 
@@ -71,16 +76,15 @@ impl Plugin for AshUploadPlugin {
     }
 }
 
-/// 上传状态(跨帧 `Local`):warn 去重 + "全部驻留"一次性收账。
+/// 上传状态(跨帧 `Local`):warn 去重 + "增量链首次清账"一次性收账。
 #[derive(Default)]
 pub(crate) struct UploadState {
     /// 转换拒绝已 warn 过的 mesh 身份(一次一资产,不刷屏)。
     warned: HashSet<AssetId<Mesh>>,
     /// 规格映射拒绝已 warn 过的贴图身份(一次一资产,不刷屏)。
     warned_images: HashSet<AssetId<Image>>,
-    /// "静态资产全部驻留"报过一次即歇(mesh/贴图各一次)。
+    /// "脏集首次清空且账本非空"报一次(稳态零盘点零上传的基准证据)。
     settled_logged: bool,
-    images_settled_logged: bool,
 }
 
 /// flush_uploads 的只读参数束(SystemParam,与 3.1.4 CollectData 同款:官方渲染侧
@@ -90,12 +94,15 @@ pub(crate) struct UploadData<'w> {
     meshes: Res<'w, Assets<Mesh>>,
     std_materials: Res<'w, Assets<StandardMaterial>>,
     image_assets: Res<'w, Assets<Image>>,
-    scene: Res<'w, CollectedScene>,
+    /// 账本(独占:消费脏行、写上传计量)。
+    ledger: ResMut<'w, InstanceLedger>,
     ctx: Res<'w, crate::vulkan::Context>,
+    /// 帧槽:池迁移销毁旧池前的"图形最后使用"等待经此接线(4.1.1)。
+    frames: Res<'w, FramePool>,
 }
 
-/// flush_uploads 本体:快照 → 去重(mesh 直读 + 贴图经材质五槽)→ 转换/建图 →
-/// 容量保证(可能触发维护)→ 合批提交 → 驻留登记。空批次(无新资产)不提交。
+/// flush_uploads 本体:账本脏行 → 去重(mesh 直读 + 贴图经材质五槽)→ 转换/建图
+/// → 容量保证(可能触发维护迁移)→ 合批提交 → 驻留登记。空批次(无新资产)不提交。
 #[system]
 pub(crate) fn flush_uploads(
     data: UploadData,
@@ -110,43 +117,77 @@ pub(crate) fn flush_uploads(
         ref meshes,
         ref std_materials,
         ref image_assets,
-        ref scene,
+        mut ledger,
         ref ctx,
+        ref frames,
     } = data;
-    // —— 1) 快照去重:本帧在场、未驻留的身份(保序去重)——
-    // mesh:快照直读;贴图:material 柄 → 五槽解引用(材质未到货 = 该 primitive
-    // 的贴图暂缺,下帧快照再来,与 mesh 异步到货同口径)
+    // —— 1) 脏行盘点(4.1.4:上传清单 = 账本脏行):每行查其资产身份的驻留
+    // 状态——全驻留的行就地清标;有未驻留身份的行保持脏标(重试),身份进本批。
+    // mesh:脏行直读;贴图:material 柄 → 五槽解引用(材质未到货 = 该行保持脏,
+    // 下帧重试,与 mesh 异步到货同口径)。
     let mut seen = HashSet::new();
     let mut fresh: Vec<(AssetId<Mesh>, Handle<Mesh>)> = Vec::new();
-    for row in &scene.primitives {
-        let id = row.mesh.id();
-        if pool.resident(id).is_some() || !seen.insert(id) {
-            continue;
-        }
-        fresh.push((id, row.mesh.clone()));
-    }
     let mut img_seen = HashSet::new();
     let mut fresh_images: Vec<(AssetId<Image>, Handle<Image>)> = Vec::new();
     let mut materials_pending = 0usize;
-    for row in &scene.primitives {
-        let Some(material) = std_materials.get(&row.material) else {
-            materials_pending += 1;
+    let mut settled_rows: Vec<Entity> = Vec::new();
+    let dirty_entities: Vec<Entity> = ledger.dirty_entities().collect();
+    for entity in dirty_entities {
+        let Some(row) = ledger.row(entity) else {
+            // 行已清(同帧先摘后挂等时序):脏标一并清,不留悬空脏标
+            settled_rows.push(entity);
             continue;
         };
-        for handle in TEXTURE_SLOTS(material).into_iter().flatten() {
-            let id = handle.id();
-            if image_cache.resident(id).is_some() || !img_seen.insert(id) {
-                continue;
+        let mut complete = true;
+        let mesh_id = row.mesh.id();
+        if pool.resident(mesh_id).is_none() {
+            complete = false;
+            if seen.insert(mesh_id) {
+                fresh.push((mesh_id, row.mesh.clone()));
             }
-            fresh_images.push((id, handle.clone()));
         }
+        match std_materials.get(&row.material) {
+            Some(material) => {
+                for handle in TEXTURE_SLOTS(material).into_iter().flatten() {
+                    let id = handle.id();
+                    if image_cache.resident(id).is_none() {
+                        complete = false;
+                        if img_seen.insert(id) {
+                            fresh_images.push((id, handle.clone()));
+                        }
+                    }
+                }
+            }
+            None => {
+                // 材质未到货：整行保持脏标下帧重试
+                complete = false;
+                materials_pending += 1;
+            }
+        }
+        if complete {
+            settled_rows.push(entity);
+        }
+    }
+    // 清标不依赖后续步骤成败:行"全驻留"是账本事实,与提交无关
+    for entity in settled_rows {
+        ledger.clear_dirty(entity);
+    }
+    // —— 1.5) 收账:脏集清空且账本非空 = 全部资产驻留,报一次(稳态基准证据:
+    // 之后每帧盘点 0 行、上传 0B,处理成本只剩 DrawList 读账本)。放空批
+    // early-return 之前——清空脏集的那帧多半就是空批帧,放在后面永远打不出。
+    if ledger.dirty_count() == 0 && !ledger.is_empty() && !state.settled_logged {
+        state.settled_logged = true;
+        info!(
+            "增量链首次清账:账本 {} 行全部资产驻留,脏集空——稳态帧零盘点零上传(4.1 判定线基准)",
+            ledger.len()
+        );
     }
     // —— 2) 转换/规格映射(Tier①:未到货跳过重试,拒绝 warn 一次)——
     let mut converted: Vec<(AssetId<Mesh>, crate::vulkan::ConvertedMesh)> = Vec::new();
     let mut pending = 0usize;
     for (id, handle) in fresh {
         match meshes.get(&handle) {
-            None => pending += 1, // 异步加载未到货,下帧快照再来
+            None => pending += 1, // 异步加载未到货,下帧脏行重试
             Some(mesh) => match crate::vulkan::convert_mesh(mesh) {
                 Ok(c) => converted.push((id, c)),
                 Err(e) => {
@@ -162,7 +203,7 @@ pub(crate) fn flush_uploads(
     let mut pending_images = 0usize;
     for (id, handle) in fresh_images {
         match image_assets.get(&handle) {
-            None => pending_images += 1, // 异步加载未到货,下帧快照再来
+            None => pending_images += 1, // 异步加载未到货,下帧脏行重试
             Some(image) => match crate::vulkan::image_spec(image) {
                 Ok(spec) => image_specs.push((id, handle, spec)),
                 Err(e) => {
@@ -176,11 +217,17 @@ pub(crate) fn flush_uploads(
     if converted.is_empty() && image_specs.is_empty() {
         return; // 空批次不提交(3.2.4.1):未到货/全拒绝/全已驻留都走这里
     }
-    // —— 3) 容量保证(初次懒建或维护迁移,等待/迁移在池内分账)——
+    // —— 3) 容量保证(初次懒建或维护迁移,等待/迁移在池内分账;迁移销毁旧池
+    // 前经 frames.wait_all_inflight 等"图形最后使用",4.1.1)——
     let (vertex_bytes, index_bytes) = converted.iter().fold((0u64, 0u64), |(v, i), (_, c)| {
         (v + c.vertices.len() as u64, i + c.indices.len() as u64)
     });
-    if let Err(e) = pool.ensure_capacity(&mut uploader, vertex_bytes, index_bytes) {
+    if let Err(e) = pool.ensure_capacity(
+        &mut uploader,
+        vertex_bytes,
+        index_bytes,
+        &mut || frames.wait_all_inflight(),
+    ) {
         error!("池容量保证失败,上传链无法继续,优雅退出: {e}");
         exit.write(AppExit::error());
         return;
@@ -330,6 +377,14 @@ pub(crate) fn flush_uploads(
                 .iter()
                 .filter(|(_, _, spec)| spec.srgb_role())
                 .count();
+            // 4.1.4 计量:上传侧累计进账本(判定线的字节/批次口径)
+            let batch_bytes = vertex_bytes + index_bytes + image_bytes;
+            let dirty_after = ledger.dirty_count();
+            let stats = &mut ledger.stats;
+            stats.upload_batches_total += 1;
+            stats.upload_bytes_total += batch_bytes;
+            stats.last_batch_bytes = batch_bytes;
+            stats.dirty_rows = dirty_after;
             info!(
                 "上传批次 #{ticket}:mesh {planned_count} 个(顶点 {vertex_bytes}B / 索引 {index_bytes}B)\
                  + 贴图 {} 张({image_bytes}B,sRGB 角色 {srgb_count} / 线性 {});\
@@ -357,27 +412,13 @@ pub(crate) fn flush_uploads(
             exit.write(AppExit::error());
         }
     }
-    // —— 6) 收账:快照里的身份全部驻留时报一次(mesh/贴图各一次)——
-    let unique = scene
-        .primitives
-        .iter()
-        .map(|row| row.mesh.id())
-        .collect::<HashSet<_>>()
-        .len();
-    if unique > 0 && pool.resident_count() >= unique && !state.settled_logged {
+    // —— 6) 收账:脏集清空且账本非空 = 全部资产驻留,报一次(稳态基准证据:
+    // 之后每帧盘点 0 行、上传 0B,处理成本只剩 DrawList 读账本)
+    if ledger.dirty_count() == 0 && !ledger.is_empty() && !state.settled_logged {
         state.settled_logged = true;
         info!(
-            "静态资产全部驻留(mesh):{unique} 个,重复快照不再上传(判定线:异步到货/重复快照零重复上传)"
-        );
-    }
-    if !img_seen.is_empty()
-        && image_cache.resident_count() >= img_seen.len()
-        && !state.images_settled_logged
-    {
-        state.images_settled_logged = true;
-        info!(
-            "静态资产全部驻留(贴图):{} 张,重复快照不再上传(判定线:异步到货/重复快照零重复上传)",
-            img_seen.len()
+            "增量链首次清账:账本 {} 行全部资产驻留,脏集空——稳态帧零盘点零上传(4.1 判定线基准)",
+            ledger.len()
         );
     }
 }

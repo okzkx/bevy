@@ -143,6 +143,7 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 > │   ├── 写文档纪律：帧流程三轮返工的教训.md     ← 方法论篇
 > │   ├── 开发工具与语法笔记.md        ← 工具层知识
 > │   ├── 错误处理语法糖：frenderer syntax与ash_renderer移植.md  ← 工具篇
+> │   ├── 代码结构优化：统一错误通道定案.md  ← 设计定案篇（官方通道统一 Tier② 裁决，壳+body 退役；未施工）
 > │   └── bevy_remote：BRP远程协议与自定义方法.md  ← 侦察篇（Web Console 候选底座）
 > └── N-*/
 >     ├── README.md                ← 材料目录（索引）
@@ -214,6 +215,7 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 - `笔记/开发工具与语法笔记.md`（**非引擎结构**的工具层知识：Rust 宏语法、cargo、调试工具等，随读源码沉淀）
 - `笔记/错误处理语法糖：frenderer syntax与ash_renderer移植.md`（frenderer 自写错误处理宏语法糖全图谱：anyhow 单类型底座 + LogDebug 扩展 + 9 控制流宏（8 件原件 + ash_renderer 新增 unwrap_or_panic!；前缀定输入/后缀定出口）、"错误就地消化"哲学、ash_renderer 移植版四适配与未搬三件——**工具篇**）
 - `笔记/错误处理体系：两Tier思想与优雅退出.md`（**宪法篇**：用户两 Tier 错误处理思想（非必要不 panic——①不影响运行 warn 丢弃继续 ②影响运行冒泡 main 优雅退出）、VulkanError 类型层、try_init `?` 串链 + AppExit 优雅退出全链、`?` 可用=失败处理集中、两 Tier 实测证据、后续纪律）
+- `笔记/代码结构优化：统一错误通道定案.md`（**设计定案篇**（2026-10-10，未施工——4.1 施工优先）：统一错误通道替代壳+body——官方 API 基建三件（`set_error_handler` 自定义 tier_handler 按 Severity 分流 + `FATAL: AtomicBool` + `fatal_gate` 看门写 AppExit），业务 system 直接签名 `Result<(), BevyError>` + `?` 冒泡，`TierError`/frame_body 壳/upload.rs 九处样板全退役；**判定线=冒泡与否只看是否提前 return**（逐项降级/时序记录就地 log 不进通道，冒泡消息走 context、日志落点挪 handler 零双 log）；翻旧定案"错误值无负载"改带 context 负载；改 bevy_ecs handler 带 World 被否（多线程执行器 worker 线程无 world 是架构约束 + bevy_ecs 分层禁引 AppExit + error/executor 官方活跃区 merge 热点）；坑钉=全局静态进程级前提单 App、panic 的 resume_unwind 分支必须保留、半帧延迟与壳模式等价）
 - `笔记/写文档纪律：帧流程三轮返工的教训.md`（**方法论篇**（2026-09-22）：帧流程篇同日三轮返工的沉淀——机制先于比喻、判定线加粗立 §0、对着读者的下一个问题写、精简=删重复不删信息；配图三层验证与箭头锚点钉死规则）
 - `笔记/bevy_remote：BRP远程协议与自定义方法.md`（**侦察篇**（2026-09-22）：bevy_remote=可选插件，把 App 经 JSON-RPC/HTTP 暴露成"ECS 服务端"（127.0.0.1:15702）——架构两层（协议/传输解耦、handler=system 帧节拍执行）、内置方法全景、反射边界（存在性全量/取值需 ReflectComponent）、自定义方法（构建期 with_method_main + 运行期 RemoteMethods::insert，handler 可独占 &mut World）、Web Console 落点（CORS Headers 已留口未验证、无鉴权仅限本地、渲染器内部状态应注册成自定义方法暴露）；0.20 方法名已整体改名 world.* 系列，旧资料照抄会 METHOD_NOT_FOUND）
 - `笔记/术语速查：UBO、UAB、VUID与常用缩写.md`（**速查篇**（2026-09-28）：读施工记录/知识篇/代码注释遇到缩写先查这里——核心三件（UBO=数据容器装什么 / UAB=绑定后更新的时序契约与三件套配套 / VUID=规范约束编号+本项目六枚钉号）、着色工具链、图像色彩、硬件单元、Unity 合批、工程内部编号（M/D/set0/b0/V1/Tier）五张分类表；钉子=UBO 管"装什么"、UAB 管"什么时候允许写"）
