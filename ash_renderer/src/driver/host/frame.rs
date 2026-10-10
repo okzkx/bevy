@@ -129,7 +129,6 @@ pub(crate) fn draw_frame(
     mut frames: ResMut<FramePool>,
     mut tables: ResMut<BindlessTables>,
     mut resized: MessageReader<WindowResized>,
-    time: Res<Time>,
     mut gate: Local<ResizeGate>,
     mut draw_state: Local<DrawListState>,
     mut paint_log: Local<OverlayLogState>,
@@ -142,7 +141,6 @@ pub(crate) fn draw_frame(
         &mut frames,
         &mut tables,
         &mut resized,
-        &time,
         &mut gate,
         &mut draw_state,
         &mut paint_log,
@@ -176,7 +174,6 @@ fn frame_body(
     frames: &mut FramePool,
     tables: &mut BindlessTables,
     resized: &mut MessageReader<WindowResized>,
-    time: &Time,
     gate: &mut ResizeGate,
     draw_state: &mut DrawListState,
     paint_log: &mut OverlayLogState,
@@ -468,7 +465,7 @@ fn frame_body(
             .unwrap_or((vk::Buffer::null(), vk::Buffer::null())),
         wait_ticket: uploader.last_issued_ticket(),
         ticket_semaphore: uploader.ticket_semaphore(),
-        clear: clear_color(time.elapsed_secs_f64()),
+        clear: CLEAR_COLOR,
     };
     frames
         .record_frame(
@@ -499,11 +496,9 @@ fn frame_body(
     Ok(())
 }
 
-/// 清屏颜色：深蓝↔青蓝慢速呼吸（周期约 10s），无任何几何也看得出每帧都在画。
-fn clear_color(t: f64) -> [f32; 4] {
-    let s = (t * 0.6).sin().abs() as f32;
-    [0.02 + 0.03 * s, 0.06 + 0.13 * s, 0.14 + 0.22 * s, 1.0]
-}
+/// 清屏色：固定深蓝纯色。线性域值——SRGB view 在 ROP 写出时才做编码
+///（frames.rs），调色时按线性直觉给值，不要拿 sRGB 十六进制直接换算。
+const CLEAR_COLOR: [f32; 4] = [0.02, 0.06, 0.14, 1.0];
 
 /// [f32; 4] 的收账日志格式（灯光 UBO 的 rgb 分量可读性）。
 fn fmt_vec4(v: [f32; 4]) -> String {

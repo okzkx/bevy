@@ -31,9 +31,12 @@ use bevy::{
 
 use super::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
 use super::debug_window::{DebugWindow, FpsMeter, RenderMode, RendererStats};
-use super::entity_tree_window::{EntityTreeData, EntityTreeWindow, SelectedEntity};
+use super::entity_tree_window::{
+    EntityTreeData, EntityTreeWindow, SelectedDetails, SelectedEntity, collect_selected_details,
+};
 use super::input::{egui_raw_input, EguiInput};
 use super::paint::{AtlasGpu, AtlasMirror};
+use super::transform_edit::{TransformEditQueue, apply_transform_edits};
 
 use ash_macros::system;
 
@@ -45,7 +48,17 @@ impl Plugin for OverlayPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, init_egui)
             .init_resource::<EguiInput>()
-            .add_systems(Update, run_egui_pass);
+            // 3.11 属性链：采集（产快照）→ egui pass（显示 + 组编辑）→ 编辑清账，
+            // 链式定序；清账完 PostUpdate 传播才读 Transform，同帧 relay 保画面跟随
+            .add_systems(
+                Update,
+                (
+                    collect_selected_details,
+                    run_egui_pass,
+                    apply_transform_edits,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -73,13 +86,22 @@ fn init_egui(mut commands: Commands) {
         ctx: egui::Context::default(),
     };
     state.ctx.set_fonts(load_fonts());
+    // 跨标签文字选区（egui 0.36 默认开）在松开后仍按悬停位置重画选区——"选区跟随
+    // 鼠标"的根因，见 3.10.1 施工记录 §7：调试面板选区限制在单标签内。
+    let mut style = (*state.ctx.style_of(egui::Theme::Dark)).clone();
+    style.interaction.multi_widget_text_select = false;
+    state.ctx.set_style_of(egui::Theme::Dark, style);
     commands.insert_resource(state);
     commands.insert_resource(EguiFrame::default());
     commands.insert_resource(RenderMode::from_env());
     // 各调试窗口显隐总控（3.10）：总控面板写、pass 显示门读，默认全开
     commands.insert_resource(DebugWindowsOpen::default());
-    // 层级树点选（3.10）：3.11 编辑面板的目标来源
+    // 层级树点选（3.10）：属性面板的编辑目标来源
     commands.insert_resource(SelectedEntity::default());
+    // 属性快照（3.11.1）：采集系统每帧重写，Startup 先落空壳
+    commands.insert_resource(SelectedDetails::default());
+    // Transform 编辑队列（3.11.2）：pass 产、清账系统消费
+    commands.insert_resource(TransformEditQueue::default());
     // 帧率显示平滑（3.10 收官后追记）：0.5s 出一次平均快照
     commands.insert_resource(FpsMeter::default());
     // 图集镜像（Update 折入）与 GPU 代（Last 整传；空建——首帧有整图增量才落图）。
@@ -129,6 +151,10 @@ struct DebugUiParams<'w, 's> {
     selected: ResMut<'w, SelectedEntity>,
     fps: ResMut<'w, FpsMeter>,
     tree: EntityTreeData<'w, 's>,
+    /// 属性快照（3.11.1，采集系统产，只读消费）
+    details: Res<'w, SelectedDetails>,
+    /// Transform 编辑排队（3.11.2，pass 产，清账系统消费）
+    edit_queue: ResMut<'w, TransformEditQueue>,
 }
 
 /// Update：组 RawInput → begin_pass → 总控 + 各调试窗口（按显隐开关）→
@@ -184,13 +210,17 @@ fn run_egui_pass(
         .show();
     }
     if ui.windows_open.entity_tree {
-        EntityTreeWindow {
+        let edit = EntityTreeWindow {
             ctx: &state.ctx,
             open: &mut ui.windows_open.entity_tree,
             selected: &mut ui.selected,
             data: &ui.tree,
+            details: &ui.details,
         }
         .show();
+        if let Some(edit) = edit {
+            ui.edit_queue.0.push(edit);
+        }
     }
     let mut output = state.ctx.end_pass();
     // 纹理增量（字体图集 dirty-rect）在 pass 出口就地消费：折进图集 CPU 镜像
