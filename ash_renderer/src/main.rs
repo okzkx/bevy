@@ -13,6 +13,7 @@
 use ash_renderer::{
     driver::{AshHostPlugin, AshUploadPlugin},
     overlay::OverlayPlugin,
+    remote::AshRemotePlugin,
     scene::{
         AshCameraAspectPlugin, AshCameraControlPlugin, AshCollectPlugin, AshMaterialHookPlugin,
         SceneEntryPlugin,
@@ -69,6 +70,9 @@ fn main() -> AppExit {
         .add_plugins(SceneEntryPlugin)
         // 场景采集（step3 任务 3.1.4，机制半边）：PostUpdate 帧末直读 primitive 三样，产 CollectedScene 快照
         .add_plugins(AshCollectPlugin)
+        // BRP 远程直控（3.12）：World 经 HTTP JSON-RPC 暴露在 127.0.0.1:15702，
+        // 官方 inspection 方法族 + 场景语义自定义方法（查询/改 Transform/相机给值）
+        .add_plugins(AshRemotePlugin)
         // egui 调试 UI 的 ECS 半边（3.7，裸接 ash）：Update 里输入桥 + pass + 调试窗口，
         // 产 EguiFrame/RenderMode 给帧循环
         .add_plugins(OverlayPlugin)

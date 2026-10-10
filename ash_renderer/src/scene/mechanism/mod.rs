@@ -18,6 +18,7 @@ mod material_hook;
 
 pub use camera_aspect::AshCameraAspectPlugin;
 pub use camera_control::{AshCameraControlPlugin, CameraOrbit};
+pub(crate) use camera_control::{apply_camera_command, CameraCommandError, CameraOrbitCommand};
 pub use collect::{AshCollectPlugin, CollectedPrimitive, CollectedScene};
 pub use material_hook::AshMaterialHookPlugin;
 
