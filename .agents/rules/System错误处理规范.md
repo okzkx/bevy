@@ -28,7 +28,7 @@
 
 ## 3. 语法糖家族（`common::syntax`）——核心代码里错误处理只许一行
 
-**模板方法尽可多写，业务代码必须精简**：判空/链式失败一律收成一行 `?`，let-else + `return Err(...)` 样板禁用。
+**模板方法尽可多写，业务代码必须精简**（分层思想的总纲见 [代码生成规范 §2.3](代码生成规范.md)）：判空/链式失败一律收成一行 `?`，let-else + `return Err(...)` 样板禁用；一次性收账旗标同理走 [`OnceLog::log`] 一行（`common::syntax`）。
 
 - `or_warn(msg)` / `or_fatal(msg)`：Result 链专用，一行完成"挂 context 负载 + 标级"（msg 可 `format!`）；
 - `ok_or_fatal(msg)`：Option 判空矛盾/判空缺席一行收口（镜像 std `ok_or_else`），判空不是断言岗；
