@@ -9,8 +9,10 @@ license = "MIT OR Apache-2.0"
 # 落位决策与施工记录：.agents/docs/2-宿主壳/
 # bevy 用默认 feature，对齐 step1《DefaultPlugins分类》"默认 feature 下 34 条插件"的审计口径；
 # 渲染族插件在运行时 disable（step2 施工项②，实测后再评估是否收窄 feature 面）。
+# 3.11 起加开 debug：ComponentInfo::name()/DebugName 实名（官方 local_inspector 同款口径），
+# 组件全清单展示依赖它；只影响类型名字符串，无行为差异。
 [dependencies]
-bevy = { path = ".." }
+bevy = { path = "..", features = ["debug"] }
 ash = "0.38.0"
 # bevy 依赖 rwh 0.6 但未再出口，读 RawHandleWrapper 里的 Win32 句柄需要它
 raw-window-handle = "0.6"
