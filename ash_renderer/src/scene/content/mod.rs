@@ -9,13 +9,13 @@ mod collect_report;
 mod lights;
 mod world_asset;
 
-use super::mechanism::collect_scene;
+use super::mechanism::update_ledger;
 use bevy::prelude::*;
 
 /// 场景进场插件：Startup 里场景元素各自进场——WorldAsset 进场请求、相机、灯光
 /// 一一解耦成组：**一个元素 = 一个 spawn + 一个就位核验（+ 专属修正）**，
 /// 组与组零耦合，任意搭场景就是在本清单里增删组。采集核验排 PostUpdate，
-/// 锚在机制侧 [`collect_scene`]（快照重建）之后读快照。
+/// 锚在机制侧 [`update_ledger`]（账本对账）之后读账本。
 pub struct SceneEntryPlugin;
 
 impl Plugin for SceneEntryPlugin {
@@ -38,7 +38,7 @@ impl Plugin for SceneEntryPlugin {
         )
         .add_systems(
             PostUpdate,
-            collect_report::report_scene_collected.after(collect_scene),
+            collect_report::report_scene_collected.after(update_ledger),
         );
     }
 }
