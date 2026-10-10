@@ -9,8 +9,8 @@
 //! 本系统住 `Last`,由 [`crate::driver::host`] 的 `draw_frame` 链成序(先上传
 //! 后画)。失败按统一错误通道分流(判定线=冒泡与否只看是否提前 return):
 //! 资产未到货/转换拒绝 = 循环内逐项降级,就地 warn 重试不进通道;提前 return
-//! 的 Vulkan/账本失败 = Tier②,`.or_fatal`/`bevy_error!` 挂负载 `?` 冒泡
-//! (error 留档 + fatal_gate 写 AppExit;提交失败不发布票据,池内 bump 游标随
+//! 的 Vulkan/账本失败 = Tier②(`.or_fatal`/`ok_or_fatal` 挂负载 `?` 冒泡,
+//! 负载只写失败含义;提交失败不发布票据,池内 bump 游标随
 //! 下次容量保证自然前移,不留指向未上传数据的账本行)。
 //!
 //! 增量纪律(4.1):发现侧只把"新增/换柄"的行放进脏集——盘点只过脏行,
@@ -31,7 +31,6 @@ use std::collections::HashSet;
 use bevy::{
     app::OnAppExitSystems,
     asset::AssetId,
-    ecs::bevy_error,
     ecs::system::SystemParam,
     image::Image,
     pbr::StandardMaterial,
@@ -41,7 +40,7 @@ use bevy::{
 use ash_macros::system;
 
 use crate::{
-    common::syntax::{fatal, ResultTierExt},
+    common::syntax::{OptionTierExt, ResultTierExt},
     scene::InstanceLedger,
     vulkan::{
         sampler_key, FramePool, GpuImage, ImageCache, MeshPool, StagingImageCopy, UploadBatch,
@@ -107,9 +106,9 @@ pub(crate) struct UploadData<'w> {
 /// flush_uploads 本体:账本脏行 → 去重(mesh 直读 + 贴图经材质五槽)→ 转换/建图
 /// → 容量保证(可能触发维护迁移)→ 合批提交 → 驻留登记。空批次(无新资产)不提交。
 ///
-/// 失败不设壳:提前 return 的失败 `or_fatal`/`bevy_error!` 挂负载 `?` 直冒泡——
-/// Err 上交统一错误通道(tier_handler 分流,fatal_gate 写 AppExit 优雅退出),
-/// 日志在 handler 统一打,本系统只管控制流。
+/// 失败不设壳:提前 return 的失败 `or_fatal`/`ok_or_fatal` 挂负载 `?` 直冒泡——
+/// Err 上交统一错误通道(tier_handler 分流,fatal_gate 写 AppExit),负载只写
+/// 失败含义,本系统只管控制流。
 #[system]
 pub(crate) fn flush_uploads(
     data: UploadData,
@@ -234,19 +233,13 @@ pub(crate) fn flush_uploads(
         index_bytes,
         &mut || frames.wait_all_inflight(),
     )
-    .or_fatal("池容量保证失败,上传链无法继续,优雅退出")?;
-    let Some(vertex_buffer) = pool.vertex_buffer() else {
-        return Err(bevy_error!(
-            Severity::Error,
-            "容量保证后顶点池仍缺席,状态矛盾,优雅退出"
-        ));
-    };
-    let Some(index_buffer) = pool.index_buffer() else {
-        return Err(bevy_error!(
-            Severity::Error,
-            "容量保证后索引池仍缺席,状态矛盾,优雅退出"
-        ));
-    };
+    .or_fatal("池容量保证失败,上传链无法继续")?;
+    let vertex_buffer = pool
+        .vertex_buffer()
+        .ok_or_fatal("容量保证后顶点池仍缺席,状态矛盾")?;
+    let index_buffer = pool
+        .index_buffer()
+        .ok_or_fatal("容量保证后索引池仍缺席,状态矛盾")?;
     // —— 4a) 建图(Tier②):每张贴图 VkImage+dedicated memory+view+sampler——
     // 创建先于排批(拷贝目标必须已存在);提交失败走 Tier② 退出,局部变量随
     // 返回 Drop,不留半建对象。跨族设备:CONCURRENT 双族(3.4 定案,与池同款)
@@ -265,7 +258,7 @@ pub(crate) fn flush_uploads(
             spec,
             &image_sharing,
         )
-        .or_fatal("贴图创建失败,上传链无法继续,优雅退出")?;
+        .or_fatal("贴图创建失败,上传链无法继续")?;
         gpu_images.push((*id, g));
     }
     // —— 4b) 排批:staging 连续排布(网格两段 + 每贴图一段);分配必在
@@ -311,20 +304,13 @@ pub(crate) fn flush_uploads(
     for ((id, handle, spec), (_, gpu)) in image_specs.iter().zip(&gpu_images) {
         // 贴图字节直取:上一阶段已验 Some;同一次系统调用内资产不变,状态矛盾
         // 按 Tier② 冒泡(与"容量保证后池缺席"同级,不 panic)
-        let Some(image) = image_assets.get(handle) else {
-            return Err(bevy_error!(
-                Severity::Error,
-                "贴图 {:?} 在规格映射与排批之间消失,状态矛盾,优雅退出",
-                id
-            ));
-        };
-        let Some(bytes) = image.data.as_ref() else {
-            return Err(bevy_error!(
-                Severity::Error,
-                "贴图 {:?} 像素数据消失,状态矛盾,优雅退出",
-                id
-            ));
-        };
+        let image = image_assets.get(handle).ok_or_fatal(format!(
+            "贴图 {id:?} 在规格映射与排批之间消失,状态矛盾"
+        ))?;
+        let bytes = image
+            .data
+            .as_ref()
+            .ok_or_fatal(format!("贴图 {id:?} 像素数据消失,状态矛盾"))?;
         let src_offset = staging.len() as u64;
         staging.extend_from_slice(bytes);
         image_uploads.push(StagingImageCopy {
@@ -338,82 +324,65 @@ pub(crate) fn flush_uploads(
     // 记录 release/待办 acquire——上传批次的图像收尾是纯布局转换(IGNORED 族),
     // 跨队列内存可见性由图形提交等票据信号量收口(见 frames.rs 提交段注释)。
     // EXCLUSIVE 的 release/acquire 成对语义保留在 image_probe 组 C 作机制实证。
-    // —— 5) 一次合批 = 一个 staging 范围 + 一次 transfer 提交(3.2.4/3.3.1)——
+    // —— 5) 一次合批 = 一个 staging 范围 + 一次 transfer 提交(3.2.4/3.3.1)。
+    // staging 非空的批次必有提交、空批已在入口 return——查无提交是内部契约矛盾。
+    // 提交失败不发布票据,池内 bump 游标随下次容量保证自然前移
     let batch = UploadBatch {
         staging,
         uploads,
         image_uploads,
         ..Default::default()
     };
-    match uploader.submit_batch(batch) {
-        Ok(Some(ticket)) => {
-            // 驻留登记只在提交成功之后:失败路径不会留下指向未上传数据的账本行
-            let planned_count = planned.len();
-            for (id, c, vertex, index) in planned {
-                pool.commit(id, vertex, index, c.vertex_count, c.index_count, ticket)
-                    .or_fatal("驻留登记失败,上传链无法继续,优雅退出")?;
-            }
-            // —— 3.3.4 槽位发布:提交成功 → 分槽(采样器按功能键去重) → 驻留登记
-            // 带槽位。只写 free list 的新槽,覆盖竞态在结构上不存在;采样 draw 的
-            // "上传完成才可使用"由票据承担(图形提交挂 draw 的 ticket 信号量等待)。
-            // 发布失败 = 槽容量耗尽,按 Tier② 冒泡(施工计划:不静默截断)
-            let mut sampler_slots_hit = HashSet::new();
-            for ((id, _, spec), (gid, gpu)) in image_specs.iter().zip(gpu_images) {
-                debug_assert_eq!(*id, gid, "image_specs 与 gpu_images 同序构建,错位即内部矛盾");
-                let slots = tables
-                    .publish(gpu.view(), gpu.sampler(), &sampler_key(&spec.sampler))
-                    .map_err(|e| {
-                        fatal(
-                            format!("贴图 {id:?} 槽位发布失败,上传链无法继续,优雅退出"),
-                            e,
-                        )
-                    })?;
-                sampler_slots_hit.insert(slots.sampler);
-                image_cache.commit(*id, gpu, ticket, slots);
-            }
-            let srgb_count = image_specs
-                .iter()
-                .filter(|(_, _, spec)| spec.srgb_role())
-                .count();
-            // 4.1.4 计量:上传侧累计进账本(判定线的字节/批次口径)
-            let batch_bytes = vertex_bytes + index_bytes + image_bytes;
-            let dirty_after = ledger.dirty_count();
-            let stats = &mut ledger.stats;
-            stats.upload_batches_total += 1;
-            stats.upload_bytes_total += batch_bytes;
-            stats.last_batch_bytes = batch_bytes;
-            stats.dirty_rows = dirty_after;
-            info!(
-                "上传批次 #{ticket}:mesh {planned_count} 个(顶点 {vertex_bytes}B / 索引 {index_bytes}B)\
-                 + 贴图 {} 张({image_bytes}B,sRGB 角色 {srgb_count} / 线性 {});\
-                 槽位发布:纹理槽 {}/{}(含 fallback 0 号)、采样器槽 {} 种(本批涉及 {new_sampler});\
-                 未到货跳过 mesh {pending} / 贴图 {pending_images}(材质缺 {materials_pending});\
-                 已驻留 mesh {} / 贴图 {}",
-                image_specs.len(),
-                image_specs.len() - srgb_count,
-                tables.used_texture_slots(),
-                tables.capacity(),
-                tables.used_sampler_slots(),
-                pool.resident_count(),
-                image_cache.resident_count(),
-                new_sampler = sampler_slots_hit.len(),
-            );
-        }
-        // staging 非空的批次必有提交;空批已在入口 return。此分支按内部契约
-        // 矛盾处理(Tier② 冒泡),不 panic
-        Ok(None) => {
-            return Err(bevy_error!(
-                Severity::Error,
-                "内部矛盾:staging 非空的批次未产生提交,优雅退出"
-            ));
-        }
-        Err(e) => {
-            return Err(fatal(
-                "transfer 提交失败,上传链无法继续,优雅退出(未发布票据)",
-                e,
-            ));
-        }
+    let ticket = uploader
+        .submit_batch(batch)
+        .or_fatal("transfer 提交失败,上传链无法继续(未发布票据)")?
+        .ok_or_fatal("内部矛盾:staging 非空的批次未产生提交")?;
+    // 驻留登记只在提交成功之后:失败路径不会留下指向未上传数据的账本行
+    let planned_count = planned.len();
+    for (id, c, vertex, index) in planned {
+        pool.commit(id, vertex, index, c.vertex_count, c.index_count, ticket)
+            .or_fatal("驻留登记失败,上传链无法继续")?;
     }
+    // —— 3.3.4 槽位发布:提交成功 → 分槽(采样器按功能键去重) → 驻留登记
+    // 带槽位。只写 free list 的新槽,覆盖竞态在结构上不存在;采样 draw 的
+    // "上传完成才可使用"由票据承担(图形提交挂 draw 的 ticket 信号量等待)。
+    // 发布失败 = 槽容量耗尽,按 Tier② 冒泡(施工计划:不静默截断)
+    let mut sampler_slots_hit = HashSet::new();
+    for ((id, _, spec), (gid, gpu)) in image_specs.iter().zip(gpu_images) {
+        debug_assert_eq!(*id, gid, "image_specs 与 gpu_images 同序构建,错位即内部矛盾");
+        let slots = tables
+            .publish(gpu.view(), gpu.sampler(), &sampler_key(&spec.sampler))
+            .or_fatal(format!("贴图 {id:?} 槽位发布失败,上传链无法继续"))?;
+        sampler_slots_hit.insert(slots.sampler);
+        image_cache.commit(*id, gpu, ticket, slots);
+    }
+    let srgb_count = image_specs
+        .iter()
+        .filter(|(_, _, spec)| spec.srgb_role())
+        .count();
+    // 4.1.4 计量:上传侧累计进账本(判定线的字节/批次口径)
+    let batch_bytes = vertex_bytes + index_bytes + image_bytes;
+    let dirty_after = ledger.dirty_count();
+    let stats = &mut ledger.stats;
+    stats.upload_batches_total += 1;
+    stats.upload_bytes_total += batch_bytes;
+    stats.last_batch_bytes = batch_bytes;
+    stats.dirty_rows = dirty_after;
+    info!(
+        "上传批次 #{ticket}:mesh {planned_count} 个(顶点 {vertex_bytes}B / 索引 {index_bytes}B)\
+         + 贴图 {} 张({image_bytes}B,sRGB 角色 {srgb_count} / 线性 {});\
+         槽位发布:纹理槽 {}/{}(含 fallback 0 号)、采样器槽 {} 种(本批涉及 {new_sampler});\
+         未到货跳过 mesh {pending} / 贴图 {pending_images}(材质缺 {materials_pending});\
+         已驻留 mesh {} / 贴图 {}",
+        image_specs.len(),
+        image_specs.len() - srgb_count,
+        tables.used_texture_slots(),
+        tables.capacity(),
+        tables.used_sampler_slots(),
+        pool.resident_count(),
+        image_cache.resident_count(),
+        new_sampler = sampler_slots_hit.len(),
+    );
     // —— 6) 收账:脏集清空且账本非空 = 全部资产驻留,报一次(稳态基准证据:
     // 之后每帧盘点 0 行、上传 0B,处理成本只剩 DrawList 读账本)
     if ledger.dirty_count() == 0 && !ledger.is_empty() && !state.settled_logged {

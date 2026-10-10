@@ -191,7 +191,7 @@ pub(crate) fn draw_frame(
             .or_warn("resize 后重建失败，下帧重试")?;
         frames
             .rebuild_depth(ctx, swapchain.extent)
-            .or_fatal("深度附件重建失败，渲染链无法继续，优雅退出")?;
+            .or_fatal("深度附件重建失败，渲染链无法继续")?;
         gate.pending = false;
     }
 
@@ -200,7 +200,7 @@ pub(crate) fn draw_frame(
     // fence 状态——Tier②
     frames
         .wait_for_slot()
-        .or_fatal("帧槽等待/重置失败，渲染链无法继续，优雅退出")?;
+        .or_fatal("帧槽等待/重置失败，渲染链无法继续")?;
 
     // 2) acquire：拿到一张可画的 image；OUT_OF_DATE = 这个 swapchain 已不可用
     //（最小化/恢复/独占模式切换等），必须立即重建——等不得下一帧
@@ -217,7 +217,7 @@ pub(crate) fn draw_frame(
             swapchain.rebuild(ctx).or_warn("acquire 过时后重建失败")?;
             return Ok(());
         }
-        Err(e) => return Err(fatal("acquire 失败，渲染链无法继续，优雅退出", e)),
+        Err(e) => return Err(fatal("acquire 失败，渲染链无法继续", e)),
     };
 
     // 3) 组装 DrawList：账本行 → 驻留账本/资产容器 → push + 池引脚。
@@ -369,7 +369,7 @@ pub(crate) fn draw_frame(
                 mode: render_mode.as_u32(),
             }),
         )
-        .or_fatal("帧 UBO 写失败，渲染链无法继续，优雅退出")?;
+        .or_fatal("帧 UBO 写失败，渲染链无法继续")?;
 
     // 4.5) overlay 绘制半边（3.7）：图集整传（可能多出一张 transfer 票据——本帧
     // 图形提交的 wait_ticket 在此后快照，flush_uploads 批与图集批都被等待）→
@@ -392,7 +392,7 @@ pub(crate) fn draw_frame(
                 swapchain.extent,
                 &mut paint_log,
             )
-            .or_fatal("overlay 绘制半边失败，渲染链无法继续，优雅退出")?;
+            .or_fatal("overlay 绘制半边失败，渲染链无法继续")?;
             paint.map(|p| (p, ui_buffers))
         }
         None => None,
@@ -434,7 +434,7 @@ pub(crate) fn draw_frame(
             swapchain.extent,
             &frame_draw,
         )
-        .or_fatal("录制/提交失败，渲染链无法继续，优雅退出")?;
+        .or_fatal("录制/提交失败，渲染链无法继续")?;
 
     // 6) present：把画好的 image 交给 present engine，等它的信号量按 acquire 的
     // image index 取（不按帧槽轮转）。SUBOPTIMAL/OUT_OF_DATE 都只是标记 pending
@@ -446,7 +446,7 @@ pub(crate) fn draw_frame(
         match e {
             VulkanError::SwapchainOutOfDate => gate.pending = true,
             e => {
-                error!("present 失败，渲染链无法继续，优雅退出: {e}");
+                error!("present 失败，渲染链无法继续: {e}");
                 request_graceful_exit();
             }
         }

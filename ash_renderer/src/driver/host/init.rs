@@ -20,6 +20,7 @@ use ash_macros::system;
 
 use crate::{
     common::error::{Result, VulkanError},
+    common::syntax::ResultTierExt,
     overlay::{AtlasGpu, UiVertexRing},
     vulkan::{
         BindlessTables, Context, FramePool, GraphicsPipeline, ImageCache, MeshPool,
@@ -42,8 +43,7 @@ pub(super) fn init_vulkan(
 ) -> Result<(), BevyError> {
     let (ctx, swapchain, frames, pool, uploader, image_cache, tables, pipeline, overlay_pipeline, ui_ring) =
         try_init_vulkan(&wrapper)
-            .context("Vulkan 初始化失败，宿主壳优雅退出")
-            .with_severity(Severity::Error)?; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过
+            .or_fatal("Vulkan 初始化失败，资源束一个都不插入")?; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过
     info!(
         "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader（3.2 上传链）+ ImageCache（3.3.1 贴图）+ BindlessTables（3.3.3 常驻表，容量 {TABLE_CAPACITY}）+ GraphicsPipeline（3.4.2）+ OverlayPipeline（3.7.3 overlay 管线）+ UiVertexRing（3.7.2 overlay 顶点环）；清屏+绘制自下一帧（Last）起"
     );

@@ -72,33 +72,49 @@ impl<T, D: std::fmt::Debug> LogDebug<T> for std::result::Result<T, D> {
 ///
 /// 与 [`LogDebug`] 的分工：`warn()` 是旁路日志（Err 原样穿透、就地消化、不进
 /// 通道），本 trait 产出的是要冒泡的错误。主场 = 签名 `Result<(), BevyError>` 的
-/// 系统（现役首例 `draw_frame`）。
+/// 系统（现役：`draw_frame`/`flush_uploads`/`init_vulkan`）。
 pub trait ResultTierExt<T, E>: Sized {
-    /// Tier①：挂 `msg` context + 标 [`Severity::Warning`]——`?` 后本帧让路
-    ///（资源未就绪/可自愈失败），handler warn 统一打日志。
-    fn or_warn(self, msg: &'static str) -> std::result::Result<T, BevyError>;
-    /// Tier②：挂 `msg` context + 标 [`Severity::Error`]——`?` 后进统一通道，
-    /// error 留档 + 置位看门优雅退出（状态已不可信，不得继续）。
-    fn or_fatal(self, msg: &'static str) -> std::result::Result<T, BevyError>;
+    /// Tier①：挂 `msg` context（可 `format!`）+ 标 [`Severity::Warning`]——`?` 后
+    /// 本帧让路（资源未就绪/可自愈失败），handler warn 统一打日志。
+    fn or_warn(self, msg: impl Into<std::borrow::Cow<'static, str>>) -> std::result::Result<T, BevyError>;
+    /// Tier②：挂 `msg` context（可 `format!`）+ 标 [`Severity::Error`]——`?` 后进
+    /// 统一通道，error 留档 + 置位看门优雅退出（状态已不可信，不得继续）。
+    fn or_fatal(self, msg: impl Into<std::borrow::Cow<'static, str>>) -> std::result::Result<T, BevyError>;
 }
 
 impl<T, E: Into<BevyError>> ResultTierExt<T, E> for std::result::Result<T, E> {
-    fn or_warn(self, msg: &'static str) -> std::result::Result<T, BevyError> {
+    fn or_warn(self, msg: impl Into<std::borrow::Cow<'static, str>>) -> std::result::Result<T, BevyError> {
         self.map_err(|e| e.into())
-            .with_context(|| msg)
+            .with_context(move || msg)
             .with_severity(Severity::Warning)
     }
 
-    fn or_fatal(self, msg: &'static str) -> std::result::Result<T, BevyError> {
+    fn or_fatal(self, msg: impl Into<std::borrow::Cow<'static, str>>) -> std::result::Result<T, BevyError> {
         self.map_err(|e| e.into())
-            .with_context(|| msg)
+            .with_context(move || msg)
             .with_severity(Severity::Error)
     }
 }
 
+/// Option 的 Tier② 收口：判空矛盾/判空缺席一行 `?` 冒泡——**判空矛盾不是断言岗**
+/// （"容量保证后 XX 必在"这类状态矛盾按 Tier② 优雅退出，不 panic），let-else +
+/// `return Err(...)` 样板禁用，一律收成本 trait 的一行。
+pub trait OptionTierExt<T>: Sized {
+    /// None → Tier②：挂 `msg` 负载（可 `format!`）标 [`Severity::Error`]，`?` 后
+    /// 进统一通道（error 留档 + 置位看门优雅退出）。
+    fn ok_or_fatal(self, msg: impl Into<std::borrow::Cow<'static, str>>) -> std::result::Result<T, BevyError>;
+}
+
+impl<T> OptionTierExt<T> for Option<T> {
+    fn ok_or_fatal(self, msg: impl Into<std::borrow::Cow<'static, str>>) -> std::result::Result<T, BevyError> {
+        self.ok_or_else(|| BevyError::new(Severity::Error, msg.into()))
+    }
+}
+
 /// Tier② 就地构造：裸错误 → 带负载的 `BevyError`（match 分支里接出错值用；
-/// `?` 链上的 Result 用 [`ResultTierExt::or_fatal`]，裸消息（判空矛盾/内部矛盾）
-/// 用 `bevy_error!` 宏）。context 负载 = 出错含义（可 format!），日志由统一 handler 打。
+/// `?` 链上的 Result 用 [`ResultTierExt::or_fatal`]，Option 判空用
+/// [`OptionTierExt::ok_or_fatal`]）。context 负载 = 出错含义（可 format!），
+/// 日志由统一 handler 打。
 pub fn fatal(
     msg: impl Into<std::borrow::Cow<'static, str>>,
     err: impl Into<BevyError>,

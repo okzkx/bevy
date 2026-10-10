@@ -495,16 +495,12 @@ impl FramePool {
                 // 面板定案：draws 非空时池 buffer 必在（upload 链先于帧循环驻留成功
                 // 才会有 draw），None 是状态矛盾——返回 Err 经统一通道按 Tier②
                 // 优雅退出（比静默跳过整个场景诚实）
-                let Some(vertex_buffer) = draw.vertex_buffer else {
-                    return Err(VulkanError::Upload(
-                        "DrawList 非空但顶点池缺席——上传链与绘制链的状态矛盾".into(),
-                    ));
-                };
-                let Some(index_buffer) = draw.index_buffer else {
-                    return Err(VulkanError::Upload(
-                        "DrawList 非空但索引池缺席——上传链与绘制链的状态矛盾".into(),
-                    ));
-                };
+                let vertex_buffer = draw.vertex_buffer.ok_or_else(|| {
+                    VulkanError::Upload("DrawList 非空但顶点池缺席——上传链与绘制链的状态矛盾".into())
+                })?;
+                let index_buffer = draw.index_buffer.ok_or_else(|| {
+                    VulkanError::Upload("DrawList 非空但索引池缺席——上传链与绘制链的状态矛盾".into())
+                })?;
                 device.cmd_bind_pipeline(
                     frame.command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
