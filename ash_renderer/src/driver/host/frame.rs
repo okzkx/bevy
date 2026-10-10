@@ -34,7 +34,7 @@ use ash_macros::system;
 
 use crate::{
     common::error::{request_graceful_exit, VulkanError},
-    common::syntax::{fatal, ResultTierExt},
+    common::syntax::{fatal, OnceLog, ResultTierExt},
     overlay::{paint_overlay, OverlayLogState, RenderMode, UiDrawData},
     scene::InstanceLedger,
     vulkan::{
@@ -103,19 +103,20 @@ pub(crate) struct FrameInput<'w, 's> {
 #[derive(Default)]
 pub(crate) struct DrawListState {
     /// "快照未全部可画（缺驻留/缺材质）"已 warn 过（下帧自愈，不逐帧刷屏）。
+    /// 可逆旗标：pending 清零时复位重开（区别于一次性收账的 [`OnceLog`]）。
     warned_pending: bool,
     /// 相机缺席告警只报一次。
-    warned_no_camera: bool,
+    warned_no_camera: OnceLog,
     /// 环境光缺席告警只报一次。
-    warned_no_ambient: bool,
+    warned_no_ambient: OnceLog,
     /// 不透明调试覆盖策略报一次（首个完整 DrawList 时）。
-    override_logged: bool,
+    override_logged: OnceLog,
     /// 灯光数据收账报一次（首个取到灯光的帧；值随帧可变，只报"链路已通"）。
-    lights_logged: bool,
+    lights_logged: OnceLog,
     /// 多方向光/无方向光的状态告警去重。
-    warned_light_count: bool,
+    warned_light_count: OnceLog,
     /// RenderMode 资源缺席告警只报一次。
-    warned_no_mode: bool,
+    warned_no_mode: OnceLog,
 }
 
 /// ash 帧循环系统（注册与排序在 [`super::host`]）：resize 闸门 → 等帧槽位 →
@@ -268,13 +269,12 @@ pub(crate) fn draw_frame(
     } else {
         draw_state.warned_pending = false;
     }
-    if !draw_state.override_logged && !ledger.is_empty() && pending_rows == 0 {
-        draw_state.override_logged = true;
-        info!(
+    if !ledger.is_empty() && pending_rows == 0 {
+        draw_state.override_logged.log(|| info!(
             "材质调试覆盖：{} 个 primitive 全部按不透明绘制——blend 关闭（alpha<1 的 {} 行照常画出，glTF BLEND 镜片在此列）；贴图只采 base color 槽，其余四槽不进调试着色；着色模式按 ASH_RENDER_MODE（三态，见灯光收账日志）",
             ledger.len(),
             alpha_override,
-        );
+        ));
     }
 
     // 4) 相机/灯光 → 本帧槽 UBO。复用安全 = wait_for_slot 的 fence：写
@@ -285,9 +285,10 @@ pub(crate) fn draw_frame(
     let render_mode = match render_mode.as_deref() {
         Some(mode) => *mode,
         None => {
-            if !draw_state.warned_no_mode && !ledger.is_empty() {
-                draw_state.warned_no_mode = true;
-                warn!("RenderMode 资源缺席（overlay 未装）：材质模式按 lambert 兜底");
+            if !ledger.is_empty() {
+                draw_state.warned_no_mode.log(|| {
+                    warn!("RenderMode 资源缺席（overlay 未装）：材质模式按 lambert 兜底")
+                });
             }
             RenderMode::Lambert
         }
@@ -299,12 +300,9 @@ pub(crate) fn draw_frame(
             view_proj = projection.get_clip_from_view() * global.affine().inverse();
             per_camera_ambient = ambient_override;
         }
-        Err(_) => {
-            if !draw_state.warned_no_camera {
-                draw_state.warned_no_camera = true;
-                warn!("相机缺席：view_proj 用 identity 兜底（画面不可读属预期，查相机装配）");
-            }
-        }
+        Err(_) => draw_state
+            .warned_no_camera
+            .log(|| warn!("相机缺席：view_proj 用 identity 兜底（画面不可读属预期，查相机装配）")),
     }
     // —— 方向光：取第一盏（多灯告警一次，多灯支持未实现）。
     // 数值约定与 bevy prepare_lights 同款：dir_to_light = 实体 back()（forward 取
@@ -321,9 +319,10 @@ pub(crate) fn draw_frame(
         }
         None => ([0.5, 1.0, 0.3, 0.0], [0.0; 4]), // 无灯：直射项归零，方向留合法占位
     };
-    if light_count != 1 && !draw_state.warned_light_count && !ledger.is_empty() {
-        draw_state.warned_light_count = true;
-        warn!("方向光 {light_count} 盏（取第一盏/无灯直射项归零），多灯支持未实现");
+    if light_count != 1 && !ledger.is_empty() {
+        draw_state.warned_light_count.log(|| {
+            warn!("方向光 {light_count} 盏（取第一盏/无灯直射项归零），多灯支持未实现")
+        });
     }
     // —— 环境光：相机组件 AmbientLight（若挂）压过全局 GlobalAmbientLight 资源；
     // 数值 = linear × brightness（bevy prepare_lights 同款）。
@@ -334,17 +333,15 @@ pub(crate) fn draw_frame(
                 LinearRgba::from(global.color).to_f32_array().map(|c| c * global.brightness)
             }
             None => {
-                if !draw_state.warned_no_ambient {
-                    draw_state.warned_no_ambient = true;
-                    warn!("环境光缺席：GlobalAmbientLight 资源与相机 AmbientLight 均无，环境项归零");
-                }
+                draw_state.warned_no_ambient.log(|| {
+                    warn!("环境光缺席：GlobalAmbientLight 资源与相机 AmbientLight 均无，环境项归零")
+                });
                 [0.0; 4]
             }
         },
     };
-    if !draw_state.lights_logged && light_count > 0 {
-        draw_state.lights_logged = true;
-        info!(
+    if light_count > 0 {
+        draw_state.lights_logged.log(|| info!(
             "灯光 UBO 收账：方向光 {light_count} 盏（dir_to_light = back()，light = {}）；\
              环境 = {}（来源 {}）；材质模式 = {}（ASH_RENDER_MODE）",
             fmt_vec4(light_color),
@@ -355,7 +352,7 @@ pub(crate) fn draw_frame(
                 RenderMode::Unlit => "unlit",
                 RenderMode::Normal => "normal",
             },
-        );
+        ));
     }
     tables
         .frame_ubo(frames.current_index())

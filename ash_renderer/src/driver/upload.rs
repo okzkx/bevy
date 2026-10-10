@@ -40,7 +40,7 @@ use bevy::{
 use ash_macros::system;
 
 use crate::{
-    common::syntax::{OptionTierExt, ResultTierExt},
+    common::syntax::{OnceLog, OptionTierExt, ResultTierExt},
     scene::InstanceLedger,
     vulkan::{
         sampler_key, FramePool, GpuImage, ImageCache, MeshPool, StagingImageCopy, UploadBatch,
@@ -86,7 +86,7 @@ pub(crate) struct UploadState {
     /// 规格映射拒绝已 warn 过的贴图身份(一次一资产,不刷屏)。
     warned_images: HashSet<AssetId<Image>>,
     /// "脏集首次清空且账本非空"报一次(稳态零盘点零上传的基准证据)。
-    settled_logged: bool,
+    settled_logged: OnceLog,
 }
 
 /// flush_uploads 的只读参数束(SystemParam,与 3.1.4 CollectData 同款:官方渲染侧
@@ -180,12 +180,11 @@ pub(crate) fn flush_uploads(
     // —— 1.5) 收账:脏集清空且账本非空 = 全部资产驻留,报一次(稳态基准证据:
     // 之后每帧盘点 0 行、上传 0B,处理成本只剩 DrawList 读账本)。放空批
     // early-return 之前——清空脏集的那帧多半就是空批帧,放在后面永远打不出。
-    if ledger.dirty_count() == 0 && !ledger.is_empty() && !state.settled_logged {
-        state.settled_logged = true;
-        info!(
+    if ledger.dirty_count() == 0 && !ledger.is_empty() {
+        state.settled_logged.log(|| info!(
             "增量链首次清账:账本 {} 行全部资产驻留,脏集空——稳态帧零盘点零上传(4.1 判定线基准)",
             ledger.len()
-        );
+        ));
     }
     // —— 2) 转换/规格映射(Tier①:未到货跳过重试,拒绝 warn 一次)——
     let mut converted: Vec<(AssetId<Mesh>, crate::vulkan::ConvertedMesh)> = Vec::new();
@@ -385,12 +384,11 @@ pub(crate) fn flush_uploads(
     );
     // —— 6) 收账:脏集清空且账本非空 = 全部资产驻留,报一次(稳态基准证据:
     // 之后每帧盘点 0 行、上传 0B,处理成本只剩 DrawList 读账本)
-    if ledger.dirty_count() == 0 && !ledger.is_empty() && !state.settled_logged {
-        state.settled_logged = true;
-        info!(
+    if ledger.dirty_count() == 0 && !ledger.is_empty() {
+        state.settled_logged.log(|| info!(
             "增量链首次清账:账本 {} 行全部资产驻留,脏集空——稳态帧零盘点零上传(4.1 判定线基准)",
             ledger.len()
-        );
+        ));
     }
     Ok(())
 }

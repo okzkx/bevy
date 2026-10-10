@@ -125,6 +125,21 @@ pub fn fatal(
         .with_severity(Severity::Error)
 }
 
+/// 一次性收账日志标准件：首次 [`OnceLog::log`] 执行并置位，此后静默。
+/// 收账旗标 + "未置位则置位并打日志"三行样板的标准下沉——核心代码处一行调用。
+#[derive(Default)]
+pub struct OnceLog(bool);
+
+impl OnceLog {
+    /// 首次调用执行 `f`（打日志/收账），之后静默。
+    pub fn log(&mut self, f: impl FnOnce()) {
+        if !self.0 {
+            self.0 = true;
+            f();
+        }
+    }
+}
+
 /// warn 后以 `Default` 兜底：线程入口/后台任务的"失败不炸"语义。
 pub trait WarnOrDefault<T> {
     fn warn_unwrap_or_default(self) -> T;
