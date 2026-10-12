@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 
 use crate::{
     overlay::{transform_edit::{apply_transform_edit, TransformEdit, TransformEditError}, EntityRow, is_relevant, node_label},
-    remote_assets::mutate_asset_cmd,
+    remote_assets::{load_image_cmd, load_mesh_cmd, mutate_asset_cmd},
     remote_mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     remote_objects::{increment_stats, replace_handles, spawn_primitive},
     scene::mechanism::{apply_camera_command, CameraCommandError, CameraOrbitCommand},
@@ -31,9 +31,10 @@ use crate::{
 
 use ash_macros::system;
 
-/// BRP 远程通道插件（3.12/3.13/4.1）：装协议 + HTTP 传输 + 场景语义方法族
-/// （本模块三个 + remote_mouse 虚拟鼠标四个 + remote_objects 对象生命周期三个）。
-/// 宿主 main 照插件清单惯例只 `add_plugins`，方法注册收在本插件内。
+/// BRP 远程通道插件（3.12/3.13/4.1/4.2/4.3）：装协议 + HTTP 传输 + 场景语义
+/// 方法族（本模块三个 + remote_mouse 虚拟鼠标四个 + remote_objects 对象生命周期
+/// 与统计 + remote_assets 资产变更与动态加载）。宿主 main 照插件清单惯例只
+/// `add_plugins`，方法注册收在本插件内。
 pub struct AshRemotePlugin;
 
 impl Plugin for AshRemotePlugin {
@@ -46,6 +47,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/spawn_primitive", spawn_primitive)
                 .with_method_main("ash_renderer/replace_handles", replace_handles)
                 .with_method_main("ash_renderer/mutate_asset", mutate_asset_cmd)
+                .with_method_main("ash_renderer/load_mesh", load_mesh_cmd)
+                .with_method_main("ash_renderer/load_image", load_image_cmd)
                 .with_method_main("ash_renderer/increment_stats", increment_stats)
                 .with_method_main("ash_renderer/mouse_move", mouse_move)
                 .with_method_main("ash_renderer/mouse_button", mouse_button)
