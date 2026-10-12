@@ -3,8 +3,8 @@
 //! 分工（与 4.2 [`AssetInvalidations`] 同款资产身份粒度）：账本行是实体粒度
 //! （[`InstanceLedger`]），pending 是**资产身份粒度**的账（跨行共享身份只记
 //! 一份），两层各自键控。发现侧只有 flush_uploads 一个写入点——它是最先撞见
-//! "查无"与"到货"的地方；失败读侧（本模块系统）只记账不裁决，行是否出队由
-//! flush 盘点时结合整行状态统一判定（见 upload.rs 盘点段）。
+//! "查无"与"到货"的地方；失败记账不裁决，行是否出队由 flush 盘点时结合整行
+//! 状态统一判定（见 upload.rs 盘点段）。
 //!
 //! 就绪判定（立案计划 §5 钉明）：**`Assets::get` 命中即就绪，逐腿递归**——
 //! Mesh/Image 内容自包含；StandardMaterial 的依赖（五槽 Image）由 flush 逐槽
@@ -12,26 +12,29 @@
 //! 的"递归依赖全齐"是容器级语义（glTF/WorldAsset 整体），本宿主账本行只挂
 //! 叶级资产，不消费该事件（收到只走 4.2 的计数口径）。
 //!
-//! 失败语义（判定线"失败可见且不无限重试"）：加载失败（[`AssetLoadFailedEvent`]
-//! ，现行零读侧的缺口）与转换/规格拒绝（flush 内）都进 failed 集——该身份
-//! 不再进重试批；引用它的行在 flush 盘点时若无其余 pending 腿即出队（清脏标
-//! ，防僵尸重试）。`Added`/`Modified` 事件复活身份（文件修复后重载、mutate
-//! 修数据可重试），自动恢复的上限归 4.4 热重载。
+//! 失败语义（判定线"失败可见且不无限重试"）：加载失败（`AssetLoadFailedEvent`
+//! ）与转换/规格拒绝（flush 内）都进 failed 集——该身份不再进重试批；引用它
+//! 的行在 flush 盘点时若无其余 pending 腿即出队（清脏标，防僵尸重试）。
+//! `Added`/`Modified` 事件复活身份（文件修复后重载、mutate 修数据可重试），
+//! 自动恢复的上限归 4.4 热重载。
 //!
 //! 取消语义（判定线"等待期间删除或换柄不错误复活"）：pending 身份当帧没有
 //! 任何脏行引用（despawn 清行 / 换柄改指）即出账计取消——到货后无行可服务
 //! ，天然不上传不错误复活（行驱动盘点是结构性保证，测试钉证据）。
+//!
+//! 失败记账入口（4.5 F4 修订）：failed 侧的 note_failure/revive/clear 全部
+//! 并入 [`super::asset_events::propagate_asset_changes`] 单一系统——原先
+//! "失败读侧"独立系统与事件读侧无排序约束，复活（Added 清旗标）与重挂
+//! （读旗标重挂行）分属两系统，调度顺序不同结果不同（CPU 复现 dirty=1/0）。
+//! 单入口后同帧"失败+复活"对由系统内固定次序裁决。本模块只定义账面结构与
+//! 计量，写入点全在 flush_uploads（pending 侧）与统一事件读侧（failed 侧）。
 //!
 //! 零 Vulkan 代码：GPU 侧"上传完成才可使用"由 3.2.4 票据承担，本模块只补
 //! ECS 侧账面与计量。
 
 use std::collections::{HashMap, HashSet};
 
-use bevy::{asset::AssetLoadFailedEvent, image::Image, pbr::StandardMaterial, prelude::*};
-
-use ash_macros::system;
-
-use super::ledger::update_ledger;
+use bevy::{image::Image, pbr::StandardMaterial, prelude::*};
 
 /// 异步就绪计量（判定线证据口径，与 [`super::ledger::IncrementStats`] 分列）：
 /// pending/等待/到货/失败/取消分开报，不把"零上传"说成"零账面成本"。
@@ -61,8 +64,8 @@ pub struct ReadinessStats {
 
 /// 异步就绪账面（4.3.1）：pending 身份集（身份 → 已等待帧数）+ failed 身份集
 /// （加载失败 ∪ 转换拒绝，不再重试）+ 失败读侧计量。flush_uploads 独占写
-/// pending 侧（mark/arrive/expel/reconcile），失败读侧系统独占写 failed 侧
-/// （note_failure/revive）——两侧不同系统不并发（Bevy 系统级互斥）。
+/// pending 侧（mark/arrive/expel/reconcile），failed 侧（note_failure/revive/
+/// clear）由统一事件读侧单点写（4.5 F4：原独立失败读侧系统并入事件读侧）。
 #[derive(Resource, Default)]
 pub struct AssetReadiness {
     pending_meshes: HashMap<AssetId<Mesh>, u64>,
@@ -228,82 +231,13 @@ impl AssetReadiness {
     }
 }
 
-/// 异步就绪读侧插件：初始化 [`AssetReadiness`]，把 [`track_asset_failures`]
-/// 挂 PostUpdate（账本对账之后，与 4.2 事件读侧同节拍）。接线收在本插件内。
+/// 异步就绪读侧插件：初始化 [`AssetReadiness`]。failed 侧记账并入 4.2 的
+/// 统一事件读侧（4.5 F4 单入口），本插件不再挂系统；接线收在
+/// [`super::asset_events::AshAssetEventPlugin`]。
 pub struct AshReadinessPlugin;
 
 impl Plugin for AshReadinessPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<AssetReadiness>().add_systems(
-            PostUpdate,
-            track_asset_failures.after(update_ledger),
-        );
-    }
-}
-
-/// 失败读侧本体（4.3.2）：三类资产 [`AssetLoadFailedEvent`] 进 failed 集 +
-/// 计量 + 一次可见告警（现行零读侧缺口的收口点）。**只记账不裁决**——行出队
-/// 由 flush 盘点结合整行状态判定（失败腿 + 无其余 pending 腿才清脏标），本
-/// 系统不碰账本。`Added`/`Modified` 事件复活身份（重载/修数据重试放行）。
-/// 无引用者的失败也计数（事件不误伤的镜像面：失败不因无人等待而失明）。
-#[system]
-pub(crate) fn track_asset_failures(
-    mut mesh_failures: MessageReader<AssetLoadFailedEvent<Mesh>>,
-    mut material_failures: MessageReader<AssetLoadFailedEvent<StandardMaterial>>,
-    mut image_failures: MessageReader<AssetLoadFailedEvent<Image>>,
-    // Added/Modified = "身份有新内容进场"：加载失败后重试成功 / mutate 修数据
-    // 的重试放行口。三类分开读（与 4.2 读侧同款，不并链）。
-    mut mesh_events: MessageReader<AssetEvent<Mesh>>,
-    mut material_events: MessageReader<AssetEvent<StandardMaterial>>,
-    mut image_events: MessageReader<AssetEvent<Image>>,
-    mut readiness: ResMut<AssetReadiness>,
-) {
-    readiness.stats.failures_frame = 0;
-    let mut failures = 0usize;
-    for event in mesh_failures.read() {
-        failures += 1;
-        readiness.note_failure_mesh(event.id);
-        warn!(
-            "资产加载失败 mesh {:?}（{}），出重试队列不再重试",
-            event.id,
-            event.error
-        );
-    }
-    for event in material_failures.read() {
-        failures += 1;
-        readiness.note_failure_material(event.id);
-        warn!(
-            "资产加载失败 材质 {:?}（{}），出重试队列不再重试",
-            event.id,
-            event.error
-        );
-    }
-    for event in image_failures.read() {
-        failures += 1;
-        readiness.note_failure_image(event.id);
-        warn!(
-            "资产加载失败贴图 {:?}（{}），出重试队列不再重试",
-            event.id,
-            event.error
-        );
-    }
-    // 复活：只清旗标不计量（重试是身份的自然权利，不是事件）
-    for event in mesh_events.read() {
-        if let AssetEvent::Added { id } | AssetEvent::Modified { id } = event {
-            readiness.revive_mesh(*id);
-        }
-    }
-    for event in material_events.read() {
-        if let AssetEvent::Added { id } | AssetEvent::Modified { id } = event {
-            readiness.revive_material(*id);
-        }
-    }
-    for event in image_events.read() {
-        if let AssetEvent::Added { id } | AssetEvent::Modified { id } = event {
-            readiness.revive_image(*id);
-        }
-    }
-    if failures > 0 {
-        info!("资产失败读侧:本帧 {failures} 个身份进 failed 集，行出队由 flush 盘点裁决");
+        app.init_resource::<AssetReadiness>();
     }
 }

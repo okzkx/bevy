@@ -82,8 +82,11 @@ pub struct IncrementStats {
     pub asset_dirty_rows: usize,
     /// 资产事件累计。
     pub asset_events_total: u64,
-    /// 资产失效累计（mesh+image 身份数，Modified 才计）。
+    /// 资产失效累计（mesh+image 的 Modified 事件累计，只增；4.5 F10 订正：
+    /// 原实现误赋当前集合长度——累计与存量混记）。
     pub asset_invalidations_total: u64,
+    /// 当前待换内容身份集规模（存量口径，mesh+image 失效集现值；4.5 F10 另列）。
+    pub asset_invalidations_current: usize,
 }
 
 /// 稳定槽账本：在场可渲染 primitive 的 Entity→实例数据关联（跨帧存活），

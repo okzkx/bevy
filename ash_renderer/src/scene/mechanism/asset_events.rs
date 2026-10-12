@@ -20,13 +20,25 @@
 //! 显式 remove）翻译成**待回收身份**（[`AssetRetirements`]），flush_uploads
 //! 开头消费：驻留条目出账（网格区间/旧图进停尸房，描述符槽进待回收账），
 //! 排空后才真正销毁/复用（在飞安全，4.4.2）。`Unused`（引用掉零但资产仍被
-//! 容器持有）只计数——本宿主是否触发是探针口径，不据此动作。材质 `Removed`
-//! 无驻留内容，只出清失败记录。账本行持强柄（`InstanceRow` 的 Handle），
-//! 能发 `Removed` 的身份必然已无行引用——读侧不用查账本，retire 天然安全。
+//! 容器持有）计数 + 出清失败记录（4.5 F8：未到货失败的资产只发 `Unused`
+//! 不发 `Removed`，不出清则失败账只增不减）。材质 `Removed` 无驻留内容，
+//! 只出清失败记录。账本行持强柄（`InstanceRow` 的 Handle）：强引用归零的
+//! 释放路径必然已无行引用；**显式 `Assets::remove` 可与行引用并存**（4.5 F9
+//! 订正：原"能发 Removed 必无行引用"表述只适用强引用归零路径）——同身份
+//! 重插的重新驱动靠下方 `Added` 联动兜底。
 //!
-//! 事件纪律（判定线"事件不误伤"）：`Modified` 触发失效、`Removed` 触发回收、
-//! `Unused` 只计数；`Added`/`LoadedWithDependencies` 是首次驻留链的事（flush
-//! 查无即传，不需要凭据）。
+//! 事件纪律（判定线"事件不误伤"）：`Modified` 触发失效 + 复活（mutate 修
+//! 数据重试放行，4.5 F6 的复活前提）、`Removed` 触发回收、`Unused` 计数 +
+//! 失败出清、`Added` 无条件参与复活/重挂（4.5 F9：同身份卸载重插后行仍
+//! "干净"，无联动则驻留被回收而无新上传驱动；无条件重挂的代价 = 初始加载期
+//! 已脏行被重复标脏，幂等无成本）；`LoadedWithDependencies` 只计数（容器级
+//! 语义，见 asset_readiness 模块说明）。
+//!
+//! 失败记账（4.5 F4 单入口）：三类 [`AssetLoadFailedEvent`] 的 failed 记账
+//! 并入本系统（原独立 track_asset_failures 与本系统无排序约束，复活清旗标
+//! 与重挂读旗标分属两系统，调度顺序不同结果不同，CPU 复现 dirty=1/0）。
+//! 系统内固定次序 = 先失败记账、后 AssetEvent 复活/重挂，同帧"失败+复活"对
+//! 确定性裁决。
 //!
 //! 时序：本系统挂 PostUpdate、账本对账之后——同帧失效集与脏行在 Last 被
 //! flush_uploads 消费。BRP 写值发生在 RemoteLast（Last 之后），事件经
@@ -37,7 +49,13 @@
 
 use std::collections::HashSet;
 
-use bevy::{asset::AssetEvent, ecs::system::SystemParam, image::Image, pbr::StandardMaterial, prelude::*};
+use bevy::{
+    asset::{AssetEvent, AssetLoadFailedEvent},
+    ecs::system::SystemParam,
+    image::Image,
+    pbr::StandardMaterial,
+    prelude::*,
+};
 
 use ash_macros::system;
 
@@ -144,18 +162,26 @@ impl Plugin for AshAssetEventPlugin {
     }
 }
 
-/// 三类资产的类型化事件 reader 束（SystemParam 参数束，与 upload.rs 的
-/// UploadData 同款惯例：系统签名保持精简，`AssetEvent<A>` 的 Item 随泛型
-/// 而异本就 chain 不了，分开读不并链）。
+/// 六路事件 reader 束（SystemParam 参数束，与 upload.rs 的 UploadData 同款
+/// 惯例：系统签名保持精简；`AssetEvent<A>`/`AssetLoadFailedEvent<A>` 的 Item
+/// 随泛型而异本就 chain 不了，分开读不并链。4.5 F4 起失败事件并入此处，
+/// 复活与重挂同系统单入口）。
 #[derive(SystemParam)]
 pub(crate) struct AssetEventReaders<'w, 's> {
     mesh_events: MessageReader<'w, 's, AssetEvent<Mesh>>,
     material_events: MessageReader<'w, 's, AssetEvent<StandardMaterial>>,
     image_events: MessageReader<'w, 's, AssetEvent<Image>>,
+    mesh_failures: MessageReader<'w, 's, AssetLoadFailedEvent<Mesh>>,
+    material_failures: MessageReader<'w, 's, AssetLoadFailedEvent<StandardMaterial>>,
+    image_failures: MessageReader<'w, 's, AssetLoadFailedEvent<Image>>,
 }
 
-/// 事件读侧本体：三类资产的 `Modified` 进失效集 + 引用行重挂脏标 + 计量；
-/// `Removed` 进卸载回收账（4.4.1）+ 失败记录出清；`Unused` 只计数。
+/// 事件读侧本体（4.5 F4 起单一入口）：三类资产的 `Modified` 进失效集、复活
+/// 并引用行重挂脏标；`Removed` 进卸载回收账（4.4.1）+ 失败记录出清；`Unused`
+/// 计数 + 失败记录出清（F8）；`Added` 无条件参与复活/重挂（F9）；三类
+/// `AssetLoadFailedEvent` 进 failed 集 + 计量 + 一次可见告警。系统内固定次序
+/// = 先失败记账、后 AssetEvent 复活/重挂（F4：同帧"失败+复活"对确定性裁决，
+/// 不依赖两个无序系统）。无引用者的失败也计数（事件不误伤的镜像面）。
 #[system]
 pub(crate) fn propagate_asset_changes(
     mut readers: AssetEventReaders,
@@ -169,14 +195,44 @@ pub(crate) fn propagate_asset_changes(
         ref mut mesh_events,
         ref mut material_events,
         ref mut image_events,
+        ref mut mesh_failures,
+        ref mut material_failures,
+        ref mut image_failures,
     } = readers;
+    // 失败记账先于 AssetEvent 复活判定（F4 固定次序）；帧窗口计量先归零
+    //（F10：当帧字段每帧刷新，空事件帧不滞留上帧值）
+    readiness.stats.failures_frame = 0;
+    let mut failures = 0usize;
+    for event in mesh_failures.read() {
+        failures += 1;
+        readiness.note_failure_mesh(event.id);
+        warn!("资产加载失败 mesh {:?}（{}），出重试队列不再重试", event.id, event.error);
+    }
+    for event in material_failures.read() {
+        failures += 1;
+        readiness.note_failure_material(event.id);
+        warn!("资产加载失败 材质 {:?}（{}），出重试队列不再重试", event.id, event.error);
+    }
+    for event in image_failures.read() {
+        failures += 1;
+        readiness.note_failure_image(event.id);
+        warn!("资产加载失败贴图 {:?}（{}），出重试队列不再重试", event.id, event.error);
+    }
+    if failures > 0 {
+        info!("资产失败读侧:本帧 {failures} 个身份进 failed 集，行出队由 flush 盘点裁决");
+    }
     let mut modified_count = 0usize;
+    let mut invalidating_count = 0usize; // mesh+image 的 Modified（进失效集，计量口径）
     let mut ignored_count = 0usize;
+    // 事件总数按"收到计"取消费前的 reader 剩余量（F10：全部变体进总数）
+    let asset_events_frame =
+        mesh_events.len() + material_events.len() + image_events.len();
     let mut modified_materials: HashSet<AssetId<StandardMaterial>> = HashSet::new();
-    // 复活联动集（4.4.3）：failed 身份有新内容进场（文件修复后重载的 Added/
-    // mutate 修数据的 Modified）——出 failed 集 + 引用行重挂脏标。失败的行在
-    // flush 盘点时已出队（清脏标），reload 成功不再有脏行驱动盘点——无联动
-    // 则修复后的资产永不重试（4.3 留口的另一半：复活口有事件源、联动缺位）。
+    // 复活联动集（4.4.3，4.5 F9 起无条件参与）：failed 身份有新内容进场
+    //（文件修复后重载的 Added）或同身份重插（卸载后 `Assets::insert`）——
+    // 出 failed 集 + 引用行重挂脏标。失败的行在 flush 盘点时已出队（清脏标
+    // ），无联动则修复后的资产永不重试；卸载重插的行驻留已回收且行干净，
+    // 无联动则新内容永不上传。
     let mut revived_meshes: HashSet<AssetId<Mesh>> = HashSet::new();
     let mut revived_images: HashSet<AssetId<Image>> = HashSet::new();
 
@@ -184,18 +240,21 @@ pub(crate) fn propagate_asset_changes(
         match event {
             AssetEvent::Modified { id } => {
                 modified_count += 1;
+                invalidating_count += 1;
                 invalidations.meshes.insert(*id);
+                readiness.revive_mesh(*id); // F6 复活前提：mutate 修数据重试放行
             }
             AssetEvent::Removed { id } => {
                 retirements.retire_mesh(*id);
                 readiness.clear_failure_mesh(*id);
             }
-            AssetEvent::Unused { .. } => retirements.note_unused(),
+            AssetEvent::Unused { id } => {
+                retirements.note_unused();
+                readiness.clear_failure_mesh(*id); // F8：Unused 不出清则失败账只增
+            }
             AssetEvent::Added { id } => {
-                if readiness.mesh_failed(*id) {
-                    readiness.revive_mesh(*id);
-                    revived_meshes.insert(*id);
-                }
+                readiness.revive_mesh(*id);
+                revived_meshes.insert(*id); // F9：无条件参与重挂判定
             }
             AssetEvent::LoadedWithDependencies { .. } => ignored_count += 1,
         }
@@ -204,15 +263,17 @@ pub(crate) fn propagate_asset_changes(
         match event {
             AssetEvent::Modified { id } => {
                 modified_count += 1;
+                readiness.revive_material(*id);
                 modified_materials.insert(*id);
             }
             AssetEvent::Removed { id } => readiness.clear_failure_material(*id),
-            AssetEvent::Unused { .. } => retirements.note_unused(),
+            AssetEvent::Unused { id } => {
+                retirements.note_unused();
+                readiness.clear_failure_material(*id); // F8 同口径
+            }
             AssetEvent::Added { id } => {
-                if readiness.material_failed(*id) {
-                    readiness.revive_material(*id);
-                    modified_materials.insert(*id);
-                }
+                readiness.revive_material(*id);
+                modified_materials.insert(*id); // F7：材质复活也重挂引用行
             }
             AssetEvent::LoadedWithDependencies { .. } => ignored_count += 1,
         }
@@ -221,29 +282,44 @@ pub(crate) fn propagate_asset_changes(
         match event {
             AssetEvent::Modified { id } => {
                 modified_count += 1;
+                invalidating_count += 1;
                 invalidations.images.insert(*id);
+                readiness.revive_image(*id);
             }
             AssetEvent::Removed { id } => {
                 retirements.retire_image(*id);
                 readiness.clear_failure_image(*id);
             }
-            AssetEvent::Unused { .. } => retirements.note_unused(),
+            AssetEvent::Unused { id } => {
+                retirements.note_unused();
+                readiness.clear_failure_image(*id); // F8 同口径
+            }
             AssetEvent::Added { id } => {
-                if readiness.image_failed(*id) {
-                    readiness.revive_image(*id);
-                    revived_images.insert(*id);
-                }
+                readiness.revive_image(*id);
+                revived_images.insert(*id); // F9 同口径
             }
             AssetEvent::LoadedWithDependencies { .. } => ignored_count += 1,
         }
     }
+    // 帧窗口统计先落账再谈早退（F10）：当帧字段每帧刷新，累计量只增，
+    // 当前失效集规模（存量）另列
+    {
+        let stats = &mut ledger.stats;
+        stats.asset_events = asset_events_frame;
+        stats.asset_events_total += asset_events_frame as u64;
+        stats.asset_dirty_rows = 0;
+        stats.asset_invalidations_total += invalidating_count as u64;
+        stats.asset_invalidations_current =
+            invalidations.meshes.len() + invalidations.images.len();
+    }
     if modified_count == 0
-        && retirements.meshes.is_empty()
-        && retirements.images.is_empty()
+        && modified_materials.is_empty()
         && revived_meshes.is_empty()
         && revived_images.is_empty()
+        && retirements.meshes.is_empty()
+        && retirements.images.is_empty()
     {
-        return; // 稳态零事件：早退，不付重扫账本的成本
+        return; // 稳态零事件：早退，不付重扫账本的成本（帧统计已落）
     }
 
     // —— 失效联动：重扫账本行，引用了失效资产的行重挂脏标（flush 盘点后
@@ -268,11 +344,7 @@ pub(crate) fn propagate_asset_changes(
     }
 
     let stats: &mut IncrementStats = &mut ledger.stats;
-    stats.asset_events = modified_count + ignored_count;
-    stats.asset_events_total += (modified_count + ignored_count) as u64;
     stats.asset_dirty_rows = requeued;
-    stats.asset_invalidations_total =
-        (invalidations.meshes.len() + invalidations.images.len()) as u64;
     info!(
         "资产事件:Modified {modified_count} / 忽略 {ignored_count},失效凭据 mesh {} + 贴图 {},\
          关联重挂脏标 {requeued} 行;卸载回收账 mesh {} + 贴图 {} 待出账,Unused 累计 {}",

@@ -260,6 +260,9 @@ pub(crate) fn flush_uploads(
     for entity in settled_rows {
         ledger.clear_dirty(entity);
     }
+    // 4.5 F10 订正:重试队列规模在此定案(清标后即最终值),空批帧也要刷新,
+    // 不能等提交尾段赋值——空批早退会让该字段滞留上帧值
+    ledger.stats.dirty_rows = ledger.dirty_count();
     readiness.note_failed_rows_cleared(failed_settled_rows);
     // —— 1.5) 收账:脏集清空且账本非空 = 全部资产驻留,报一次(稳态基准证据:
     // 之后每帧盘点 0 行、上传 0B,处理成本只剩 DrawList 读账本)。放空批
@@ -286,10 +289,13 @@ pub(crate) fn flush_uploads(
             Some(mesh) => match crate::vulkan::convert_mesh(mesh) {
                 Ok(c) => converted.push((id, c, replace)),
                 Err(e) => {
+                    // 4.5 F6 订正:expel 在日志去重条件之外——拒绝必须每次记账,
+                    // 否则"拒绝→Modified 复活→再拒绝"第二次不进 failed 集,脏行
+                    // 无限重试。warned 集只管日志一次一资产
                     if state.warned.insert(id) {
                         warn!("mesh {id:?} 转换拒绝({e}),本步不绘制该资产,帧循环照常");
-                        readiness.expel_mesh(id);
                     }
+                    readiness.expel_mesh(id);
                 }
             },
         }
@@ -308,10 +314,11 @@ pub(crate) fn flush_uploads(
             Some(image) => match crate::vulkan::image_spec(image) {
                 Ok(spec) => image_specs.push((id, handle, spec, replace)),
                 Err(e) => {
+                    // 4.5 F6 同口径:expel 在日志去重条件之外,拒绝每次记账
                     if state.warned_images.insert(id) {
                         warn!("贴图 {id:?} 规格拒绝({e}),本步不采样该资产,帧循环照常");
-                        readiness.expel_image(id);
                     }
+                    readiness.expel_image(id);
                 }
             },
         }

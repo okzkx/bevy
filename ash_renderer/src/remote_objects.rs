@@ -61,6 +61,9 @@ pub(crate) fn object_op_error(err: ObjectOpError) -> BrpError {
             message: format!("实体 {e:?} 的材质资产不在容器中，槽写拒绝"),
             data: None,
         },
+        ObjectOpError::InvalidAssetPath(what) => invalid_params(format!(
+            "资产路径解析失败（坏标签/坏 source 语法）：{what}"
+        )),
     }
 }
 
@@ -162,6 +165,7 @@ pub(crate) fn increment_stats(
             "frame_dirty_rows": s.asset_dirty_rows,
             "total": s.asset_events_total,
             "invalidations_total": s.asset_invalidations_total,
+            "invalidations_current": s.asset_invalidations_current,
         },
         "readiness": {
             "pending_meshes": r.pending_meshes,

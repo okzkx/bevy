@@ -171,7 +171,12 @@ pub(crate) fn reload_asset_cmd(In(params): In<Option<Value>>, world: &mut World)
     let value = params.ok_or_else(|| invalid_params("params 缺失：需要 path"))?;
     let p: ReloadAssetParams =
         serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
-    world.resource::<AssetServer>().reload(p.path.clone());
+    // reload 收 `impl Into<AssetPath>`，String → AssetPath 的 From 走 panic
+    // 解析器——统一 try_parse 预校验，非法路径回协议错误（4.5 F5）
+    let path = bevy::asset::AssetPath::try_parse(&p.path)
+        .map_err(|e| invalid_params(format!("资产路径解析失败：{}: {e}", p.path)))?
+        .into_owned();
+    world.resource::<AssetServer>().reload(path);
     Ok(json!({
         "path": p.path,
         "state": "reloading",
