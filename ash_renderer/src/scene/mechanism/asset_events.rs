@@ -173,6 +173,12 @@ pub(crate) fn propagate_asset_changes(
     let mut modified_count = 0usize;
     let mut ignored_count = 0usize;
     let mut modified_materials: HashSet<AssetId<StandardMaterial>> = HashSet::new();
+    // 复活联动集（4.4.3）：failed 身份有新内容进场（文件修复后重载的 Added/
+    // mutate 修数据的 Modified）——出 failed 集 + 引用行重挂脏标。失败的行在
+    // flush 盘点时已出队（清脏标），reload 成功不再有脏行驱动盘点——无联动
+    // 则修复后的资产永不重试（4.3 留口的另一半：复活口有事件源、联动缺位）。
+    let mut revived_meshes: HashSet<AssetId<Mesh>> = HashSet::new();
+    let mut revived_images: HashSet<AssetId<Image>> = HashSet::new();
 
     for event in mesh_events.read() {
         match event {
@@ -185,7 +191,13 @@ pub(crate) fn propagate_asset_changes(
                 readiness.clear_failure_mesh(*id);
             }
             AssetEvent::Unused { .. } => retirements.note_unused(),
-            _ => ignored_count += 1,
+            AssetEvent::Added { id } => {
+                if readiness.mesh_failed(*id) {
+                    readiness.revive_mesh(*id);
+                    revived_meshes.insert(*id);
+                }
+            }
+            AssetEvent::LoadedWithDependencies { .. } => ignored_count += 1,
         }
     }
     for event in material_events.read() {
@@ -196,7 +208,13 @@ pub(crate) fn propagate_asset_changes(
             }
             AssetEvent::Removed { id } => readiness.clear_failure_material(*id),
             AssetEvent::Unused { .. } => retirements.note_unused(),
-            _ => ignored_count += 1,
+            AssetEvent::Added { id } => {
+                if readiness.material_failed(*id) {
+                    readiness.revive_material(*id);
+                    modified_materials.insert(*id);
+                }
+            }
+            AssetEvent::LoadedWithDependencies { .. } => ignored_count += 1,
         }
     }
     for event in image_events.read() {
@@ -210,10 +228,21 @@ pub(crate) fn propagate_asset_changes(
                 readiness.clear_failure_image(*id);
             }
             AssetEvent::Unused { .. } => retirements.note_unused(),
-            _ => ignored_count += 1,
+            AssetEvent::Added { id } => {
+                if readiness.image_failed(*id) {
+                    readiness.revive_image(*id);
+                    revived_images.insert(*id);
+                }
+            }
+            AssetEvent::LoadedWithDependencies { .. } => ignored_count += 1,
         }
     }
-    if modified_count == 0 && retirements.meshes.is_empty() && retirements.images.is_empty() {
+    if modified_count == 0
+        && retirements.meshes.is_empty()
+        && retirements.images.is_empty()
+        && revived_meshes.is_empty()
+        && revived_images.is_empty()
+    {
         return; // 稳态零事件：早退，不付重扫账本的成本
     }
 
@@ -223,10 +252,11 @@ pub(crate) fn propagate_asset_changes(
     // 或失效"判定，材质行重挂后若全部身份照旧驻留，就地清标零动作。
     let mut hit_rows: Vec<Entity> = Vec::new();
     for (entity, row) in ledger.rows() {
-        let mesh_hit = invalidations.mesh_pending(row.mesh.id());
+        let mesh_hit = invalidations.mesh_pending(row.mesh.id()) || revived_meshes.contains(&row.mesh.id());
         let material_hit = modified_materials.contains(&row.material.id());
         let image_hit = std_materials.get(&row.material).is_some_and(|m| {
-            material_texture_slots(m).any(|id| invalidations.image_pending(id))
+            material_texture_slots(m)
+                .any(|id| invalidations.image_pending(id) || revived_images.contains(&id))
         });
         if mesh_hit || material_hit || image_hit {
             hit_rows.push(entity);
