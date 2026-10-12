@@ -4,7 +4,7 @@
 //!
 //! | 时机 | 系统 | 系统本体 | 职责 |
 //! |---|---|---|---|
-//! | `Startup` | `init_vulkan` | [`init`] | 串链创建全部 Vulkan 资源（**全有或全无**）；失败 → `error!` + `AppExit::error()` 优雅退出 |
+//! | `Startup` | `init_vulkan` | [`init`] | 串链创建全部 Vulkan 资源（**全有或全无**）；失败冒泡统一通道 → `fatal_gate` 优雅退出 |
 //! | `Last` | `flush_uploads`（upload 模块注册，先于本表下一行） | [`super::upload`] | 上传链：账本脏行盘点 → 合批 transfer 提交，先于帧循环 |
 //! | `Last` | `draw_frame.run_if(resource_exists::<Context>)` | [`frame`] | 帧循环：resize 闸门 → 等 fence → acquire → 组装 DrawList → 录制提交 → present |
 //! | `Last` | `teardown_vulkan.in_set(OnAppExitSystems)` | [`init`] | AppExit 写入后、窗口销毁前反序拆除 |
@@ -14,9 +14,11 @@
 //!
 //! 失败策略（两 Tier，**非必要不 panic**；[`init`]/[`frame`] 各失败分支按此分流）：
 //! ① 不影响运行 → warn 后丢弃继续（OUT_OF_DATE/SUBOPTIMAL 这类"重建后重试"属这层）；
-//! ② 影响运行 → error 冒泡到 main 优雅退出（资源反序拆除、窗口自关、退出码 1）。
-//!    帧循环里 acquire 成功之后的 Vulkan 真失败必须归②：此时同步对象已置位，
-//!    warn 后继续会等一个永远无人 signal 的 fence，直接死锁（见 [`frame::draw_frame`]）。
+//! ② 影响运行 → error 留档 + 优雅退出（资源反序拆除、窗口自关、退出码 1）。
+//! 两者都走统一错误通道：[`init`]/[`frame`] 签名 `Result<(), BevyError>`，`?` 冒泡
+//! 给 `tier_handler` 按 Severity 分流，退出由 `fatal_gate` 看门写 AppExit。
+//! 帧循环里 acquire 成功之后的 Vulkan 真失败必须归②：此时同步对象已置位，
+//! warn 后继续会等一个永远无人 signal 的 fence，直接死锁（见 [`frame::draw_frame`]）。
 
 use bevy::{
     app::OnAppExitSystems,

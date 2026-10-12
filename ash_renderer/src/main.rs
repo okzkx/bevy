@@ -11,12 +11,13 @@
 //! 失败策略（两 Tier，非必要不 panic）见 host 模块文档与《错误处理体系：两Tier思想与优雅退出》篇。
 
 use ash_renderer::{
+    common::error::{fatal_gate, tier_handler},
     driver::{AshHostPlugin, AshUploadPlugin},
     overlay::OverlayPlugin,
     remote::AshRemotePlugin,
     scene::{
-        AshCameraAspectPlugin, AshCameraControlPlugin, AshLedgerPlugin, AshMaterialHookPlugin,
-        SceneEntryPlugin,
+        AshAssetEventPlugin, AshCameraAspectPlugin, AshCameraControlPlugin, AshLedgerPlugin,
+        AshMaterialHookPlugin, SceneEntryPlugin,
     },
 };
 use bevy::{
@@ -35,6 +36,13 @@ use bevy::{
 /// 失败路径的"优雅"才算闭环（调用方能拿到退出码）
 fn main() -> AppExit {
     App::new()
+        // 统一错误通道（正本：错误处理专题《代码结构优化：统一错误通道定案》篇）：system/
+        // observer/command 的 Err 全走 tier_handler 按 Severity 分流（Warning→warn，
+        // 其余→error + 置位），fatal_gate 看门写 AppExit 优雅退出。fatal_gate 是
+        // Update 里首个注册的系统 = 早位；语义上任意位置都正确，早位只是让致命帧
+        // 少跑剩余业务系统。
+        .set_error_handler(tier_handler)
+        .add_systems(Update, fatal_gate)
         .add_plugins(
             DefaultPlugins
                 .build()
@@ -71,6 +79,9 @@ fn main() -> AppExit {
         // 稳定槽账本（4.1，机制半边）：PostUpdate 传播后对账——Changed/Removed
         // 增量维护 Entity→实例数据账本，取代 3.1.4 的每帧全量快照重建
         .add_plugins(AshLedgerPlugin)
+        // 资产事件读侧（4.2，机制半边）：AssetEvent::Modified → 失效凭据 +
+        // 关联行重挂脏标（发现侧第二条入口，与对象五类变更并轨同一脏集）
+        .add_plugins(AshAssetEventPlugin)
         // BRP 远程直控（3.12）：World 经 HTTP JSON-RPC 暴露在 127.0.0.1:15702，
         // 官方 inspection 方法族 + 场景语义自定义方法（查询/改 Transform/相机给值）
         .add_plugins(AshRemotePlugin)

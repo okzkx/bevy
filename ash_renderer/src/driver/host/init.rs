@@ -3,7 +3,7 @@
 //!
 //! | 系统 | 调度位置 | 职责 |
 //! |---|---|---|
-//! | `init_vulkan` | `Startup` | `try_init_vulkan` 用 `?` 串链创建资源束（**全有或全无**）；失败 → `error!` + `AppExit::error()` 优雅退出 |
+//! | `init_vulkan` | `Startup` | `try_init_vulkan` 用 `?` 串链创建资源束（**全有或全无**）；失败冒泡统一错误通道，`fatal_gate` 写 `AppExit` 优雅退出 |
 //! | `teardown_vulkan` | `Last` + `OnAppExitSystems` | AppExit 写入后、窗口销毁前反序拆除 |
 //!
 //! 资源束见 [`InitChain`]；系统注册在 [`super::host`]（AshHostPlugin），帧循环在
@@ -20,6 +20,7 @@ use ash_macros::system;
 
 use crate::{
     common::error::{Result, VulkanError},
+    common::syntax::ResultTierExt,
     overlay::{AtlasGpu, UiVertexRing},
     vulkan::{
         BindlessTables, Context, FramePool, GraphicsPipeline, ImageCache, MeshPool,
@@ -31,23 +32,18 @@ use crate::{
 /// 钉在主线程（Win32 句柄与 Vulkan 均主线程亲和）。
 ///
 /// 失败统一走 Tier② 冒泡：`try_init_vulkan` 把一切失败（含时序假设被打破）折叠成
-/// `VulkanError`，此处单点 match：记日志 + `AppExit::error()` 优雅退出。
+/// `VulkanError`，此处挂 context 负载后 `?` 直冒泡——Err 上交统一错误通道
+/// （tier_handler error 留档 + 置位看门，fatal_gate 写 `AppExit` 优雅退出；Startup
+/// 失败置位后下一次 Update 即收口，同帧退出）。
 #[system]
 pub(super) fn init_vulkan(
     wrapper: Query<&RawHandleWrapper, With<PrimaryWindow>>,
     _main_thread: NonSendMarker,
     mut commands: Commands,
-    mut exit: MessageWriter<AppExit>,
-) {
+) -> Result<(), BevyError> {
     let (ctx, swapchain, frames, pool, uploader, image_cache, tables, pipeline, overlay_pipeline, ui_ring) =
-        match try_init_vulkan(&wrapper) {
-            Ok(ok) => ok,
-            Err(e) => {
-                error!("Vulkan 初始化失败，宿主壳优雅退出: {e}");
-                exit.write(AppExit::error());
-                return; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过
-            }
-        };
+        try_init_vulkan(&wrapper)
+            .or_fatal("Vulkan 初始化失败，资源束一个都不插入")?; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过
     info!(
         "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader（3.2 上传链）+ ImageCache（3.3.1 贴图）+ BindlessTables（3.3.3 常驻表，容量 {TABLE_CAPACITY}）+ GraphicsPipeline（3.4.2）+ OverlayPipeline（3.7.3 overlay 管线）+ UiVertexRing（3.7.2 overlay 顶点环）；清屏+绘制自下一帧（Last）起"
     );
@@ -62,6 +58,7 @@ pub(super) fn init_vulkan(
     commands.insert_resource(pipeline);
     commands.insert_resource(overlay_pipeline);
     commands.insert_resource(ui_ring);
+    Ok(())
 }
 
 /// 创建链本体：`?` 串起全部创建步骤，任一层失败即短路返回 `VulkanError`；
@@ -174,7 +171,7 @@ pub(super) fn teardown_vulkan(world: &mut World) {
     // 与 bindless 表同寿同序（先拆借用账本，再拆本体；overlay 未装时 no-op）
     world.remove_resource::<AtlasGpu>();
     world.remove_resource::<Context>();
-    // 初始化失败路径资源从未插入，此处静默即可——error! 已在 init_vulkan 记过根因
+    // 初始化失败路径资源从未插入，此处静默即可——根因已由统一 handler 记过 error
     if had_vulkan {
         info!("退出拆除完成：排空 → 帧级(帧池/UI 顶点环) → resize 级 → 管线(场景/overlay) → 资产级(池/上传/描述符表/贴图缓存/图集 graveyard) → 进程级");
     }

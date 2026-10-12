@@ -1,14 +1,24 @@
-//! 类型化错误（施工④）。
+//! 类型化错误与统一错误通道。
 //!
 //! 帧循环的核心分支逻辑就是区分 `ERROR_OUT_OF_DATE_KHR`（必须重建后重试，不算错误）
 //! 与真失败——`String` 承载不了这个语义，所以引入 enum。初始化失败仍带调用上下文，
 //! 走 `Init(String)`。
 //!
-//! [`TierError`] 是两 Tier 收尾指令载体（无错误负载——日志在错误点就地记录），
-//! 由 [`crate::common::syntax::ResultTierExt`] 产出、system 壳消费。
+//! 统一错误通道（正本见《代码结构优化：统一错误通道定案》篇）：system 签名
+//! `Result<(), BevyError>`，`?` 冒泡的 Err 由执行器交给 [`tier_handler`]，按错误值的
+//! `Severity` 元数据两 Tier 分流——`Warning` 就地 warn 丢弃（Tier①），其余 error
+//! 留档 + 置位 [`FATAL`]，由 [`fatal_gate`] 看门写 `AppExit` 优雅退出（Tier②）。
+//! handler 是裸函数指针、无 world 访问权，退出请求只能经静态位中转给看门 system。
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ash::vk;
-use bevy::log::error;
+use bevy::app::AppExit;
+use bevy::ecs::error::{BevyError, ErrorContext, Severity};
+use bevy::ecs::message::MessageWriter;
+use bevy::log::{error, warn};
+
+use ash_macros::system;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VulkanError {
@@ -23,25 +33,51 @@ pub enum VulkanError {
     Init(String),
 }
 
-/// 系统内部错误的两 Tier 收尾指令：变体即裁决，收尾副作用（让路 / 写 `AppExit`
-/// 退出）由调用方的 system 壳统一执行。
+/// 进程级优雅退出请求位：Tier② 裁决的统一落点，[`fatal_gate`] 唯一消费者。
 ///
-/// 收尾必须留在 system 壳——Bevy 的 system Result 通道把 Err 交给无 world 访问权
-/// 的 error handler，写不了 `AppExit`，两 Tier 的退出裁决进不了 Bevy 通道。
-#[derive(Debug, Clone, Copy)]
-pub enum TierError {
-    /// Tier①：已 warn，丢弃本次（本帧/本批让路，下轮自愈）。
-    Warn,
-    /// Tier②：已 error，状态已不可信，优雅退出。
-    Fatal,
+/// 进程级全局静态，多 App 并存会串扰——本项目单进程单 App，前提钉死。
+static FATAL: AtomicBool = AtomicBool::new(false);
+
+/// 统一错误处理器（`App::set_error_handler` 注册；system/observer/command 的 Err
+/// 全走这里）：按 `Severity` 元数据两 Tier 分流。
+///
+/// - `Warning` = Tier①：影响不大、下帧自愈，warn 后丢弃，运行继续；
+/// - 其余 = Tier②：状态不可信，error 留档 + 置位 `FATAL`，看门 system 写 `AppExit`
+///   优雅退出。忘标 severity 的错误默认 `Severity::Panic`（官方 `From` 转换语义）
+///   且无 payload，落到本分支按 Tier② 走——"非必要不 panic"在通道侧坐实。
+///
+/// panic 岗必须保留：真 panic 被 `handle_unwind` 捕获后带着 payload 转进本 handler，
+/// `resume_unwind` 原样还回去，保住 backtrace 取证；吞掉 payload = 丢取证能力。
+pub fn tier_handler(mut err: BevyError, ctx: ErrorContext) {
+    if matches!(err.severity(), Severity::Panic)
+        && let Some(payload) = err.take_payload()
+    {
+        std::panic::resume_unwind(payload);
+    }
+    match err.severity() {
+        Severity::Warning => warn!("{ctx}: {err}"),
+        _ => {
+            error!("{ctx}: {err}");
+            FATAL.store(true, Ordering::Release);
+        }
+    }
 }
 
-impl TierError {
-    /// Tier② 就地构造：error 记录后返回 Fatal。match 分支里接裸错误用；
-    /// `?` 链上的 Result 用 [`crate::common::syntax::ResultTierExt::or_fatal`]。
-    pub fn fatal(msg: &str, e: impl core::fmt::Display) -> Self {
-        error!("{msg}: {e}");
-        Self::Fatal
+/// Tier② 裁决但不能提前 return 的现场就地置位（现役唯一：present 失败后必须照常
+/// advance 保持帧槽账本一致）；退出由下一帧的 [`fatal_gate`] 生效。
+pub(crate) fn request_graceful_exit() {
+    FATAL.store(true, Ordering::Release);
+}
+
+/// 看门 system（Update 早位）：`FATAL` 置位 → 写 `AppExit` 优雅退出。
+///
+/// swap 清位：连续多个 Tier② 只退一次。置位到生效有半帧延迟——本帧剩余 system
+/// 照跑、runner 帧末查 `AppExit` 才停，与壳模式等价（壳 return 也只跳过本 system），
+/// 且本帧正常收尾更平滑。
+#[system]
+pub fn fatal_gate(mut exit: MessageWriter<AppExit>) {
+    if FATAL.swap(false, Ordering::AcqRel) {
+        exit.write(AppExit::error());
     }
 }
 

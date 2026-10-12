@@ -11,11 +11,13 @@
 //! 与材质容器组装 DrawList（账本跨帧存活，读侧零扫描；GPU 执行异步——上传票据在
 //! GPU 侧等待，CPU 不阻塞）；材质按不透明调试策略覆盖（详见 draw_frame 收账日志）。
 //!
-//! 帧内错误按两 Tier 快捷分流（[`ResultTierExt`]，common 工具层：错误点一行
-//! 完成"记录 + 分级"，收尾副作用在系统壳统一执行）——Tier① 不影响运行的失败
-//! warn 后本帧让路（Warn，下帧自愈）；Tier② acquire 成功之后的 Vulkan 真失败
-//! error 后优雅退出（Fatal → AppExit）：那时同步状态已无法恢复，warn 后继续
-//! 会等一个永远无人 signal 的 fence，直接死锁。
+//! 帧内错误走统一错误通道（[`crate::common::error::tier_handler`]）：错误点一行
+//! `or_warn/or_fatal`（挂 context 负载 + 标 Severity）后 `?` 直冒泡，日志在 handler
+//! 统一打、退出裁决在看门 system——Tier① Warning 本帧让路（下帧自愈）；Tier②
+//! 优雅退出。两处保持显式分支、不走 `?`：OUT_OF_DATE 是"重试"不是失败（控制流）；
+//! present 特例不提前 return（advance 必须照常跑保持帧槽账本一致，就地裁决）。
+//! Tier② 的红线：acquire 成功之后的 Vulkan 真失败必须优雅退出——那时同步状态
+//! 已无法恢复，warn 后继续会等一个永远无人 signal 的 fence，直接死锁。
 
 use bevy::{
     camera::{Camera, Projection},
@@ -31,8 +33,8 @@ use ash::vk;
 use ash_macros::system;
 
 use crate::{
-    common::error::{TierError, VulkanError},
-    common::syntax::ResultTierExt,
+    common::error::{request_graceful_exit, VulkanError},
+    common::syntax::{fatal, OnceLog, ResultTierExt},
     overlay::{paint_overlay, OverlayLogState, RenderMode, UiDrawData},
     scene::InstanceLedger,
     vulkan::{
@@ -101,25 +103,28 @@ pub(crate) struct FrameInput<'w, 's> {
 #[derive(Default)]
 pub(crate) struct DrawListState {
     /// "快照未全部可画（缺驻留/缺材质）"已 warn 过（下帧自愈，不逐帧刷屏）。
+    /// 可逆旗标：pending 清零时复位重开（区别于一次性收账的 [`OnceLog`]）。
     warned_pending: bool,
     /// 相机缺席告警只报一次。
-    warned_no_camera: bool,
+    warned_no_camera: OnceLog,
     /// 环境光缺席告警只报一次。
-    warned_no_ambient: bool,
+    warned_no_ambient: OnceLog,
     /// 不透明调试覆盖策略报一次（首个完整 DrawList 时）。
-    override_logged: bool,
+    override_logged: OnceLog,
     /// 灯光数据收账报一次（首个取到灯光的帧；值随帧可变，只报"链路已通"）。
-    lights_logged: bool,
+    lights_logged: OnceLog,
     /// 多方向光/无方向光的状态告警去重。
-    warned_light_count: bool,
+    warned_light_count: OnceLog,
     /// RenderMode 资源缺席告警只报一次。
-    warned_no_mode: bool,
+    warned_no_mode: OnceLog,
 }
 
-/// ash 帧循环系统壳（注册与排序在 [`super::host`]）：主体 [`frame_body`] 以 `?`
-/// 快捷分流两 Tier，本壳只做收尾——Warn 本帧让路，Fatal 写 `AppExit` 优雅退出
-///（退出码 1）。退出裁决必须留在 system 内部：Bevy 的 system Result 通道只会把
-/// Err 交给无 world 访问权的 error handler，表达不了"写 AppExit 后有序退出"。
+/// ash 帧循环系统（注册与排序在 [`super::host`]）：resize 闸门 → 等帧槽位 →
+/// acquire → 组装 DrawList → 帧光照 UBO → overlay 绘制半边 → 录制提交 → present。
+///
+/// 失败不设壳：错误点 `or_warn/or_fatal` 挂负载标级后 `?` 直冒泡——Err 上交统一
+/// 错误通道（[`crate::common::error::tier_handler`] 分流：Warning 本帧让路，其余
+/// 置位看门优雅退出），日志在 handler 统一打，本系统只管控制流。
 #[expect(
     clippy::too_many_arguments,
     reason = "bevy 系统的参数表即依赖注入清单，逐项声明是框架惯例，非函数签名设计味道"
@@ -134,54 +139,9 @@ pub(crate) fn draw_frame(
     mut gate: Local<ResizeGate>,
     mut draw_state: Local<DrawListState>,
     mut paint_log: Local<OverlayLogState>,
-    mut exit: MessageWriter<AppExit>,
     _main_thread: NonSendMarker,
-) {
-    let outcome = frame_body(
-        &mut input,
-        &mut swapchain,
-        &mut frames,
-        &mut tables,
-        &mut resized,
-        &mut gate,
-        &mut draw_state,
-        &mut paint_log,
-        &mut exit,
-    );
-    match outcome {
-        Ok(()) => {}
-        // Tier①：warn 已在错误点记录，本帧到此为止，下帧自愈
-        Err(TierError::Warn) => {}
-        // Tier②：error 已在错误点记录，渲染链无法继续——优雅退出
-        Err(TierError::Fatal) => {
-            exit.write(AppExit::error());
-        }
-    }
-}
-
-/// 帧循环主体：resize 闸门 → 等帧槽位 → acquire → 组装 DrawList → 帧光照 UBO →
-/// overlay 绘制半边 → 录制提交 → present。错误点用 [`ResultTierExt`] 两 Tier
-/// 快捷分流，收尾副作用（重试置位 / AppExit）在系统壳统一执行。
-///
-/// # Errors
-/// [`TierError::Warn`] = 本帧让路（Tier①）；[`TierError::Fatal`] = 优雅退出
-///（Tier②，AppExit 由壳写入）。
-#[expect(
-    clippy::too_many_arguments,
-    reason = "bevy 系统侧拆出的主体函数：资源逐项传入是 draw_frame 依赖注入的延续，非函数设计味道"
-)]
-fn frame_body(
-    frame: &mut FrameInput,
-    swapchain: &mut Swapchain,
-    frames: &mut FramePool,
-    tables: &mut BindlessTables,
-    resized: &mut MessageReader<WindowResized>,
-    gate: &mut ResizeGate,
-    draw_state: &mut DrawListState,
-    paint_log: &mut OverlayLogState,
-    exit: &mut MessageWriter<AppExit>,
-) -> Result<(), TierError> {
-    let overlay = frame.overlay.take();
+) -> Result<(), BevyError> {
+    let overlay = input.overlay.take();
     let FrameInput {
         ref ctx,
         ref ledger,
@@ -196,7 +156,7 @@ fn frame_body(
         ref render_mode,
         ref mut uploader,
         ..
-    } = *frame;
+    } = input;
     // —— 闸门①：读 resize 消息。一次 update 可能积压多条（拖拽 125Hz 输入 vs 60fps
     // 帧），逐条刷状态，最新一条定生死：非零尺寸 = 正常/恢复，(0,0) = 最小化。
     for msg in resized.read() {
@@ -232,7 +192,7 @@ fn frame_body(
             .or_warn("resize 后重建失败，下帧重试")?;
         frames
             .rebuild_depth(ctx, swapchain.extent)
-            .or_fatal("深度附件重建失败，渲染链无法继续，优雅退出")?;
+            .or_fatal("深度附件重建失败，渲染链无法继续")?;
         gate.pending = false;
     }
 
@@ -241,7 +201,7 @@ fn frame_body(
     // fence 状态——Tier②
     frames
         .wait_for_slot()
-        .or_fatal("帧槽等待/重置失败，渲染链无法继续，优雅退出")?;
+        .or_fatal("帧槽等待/重置失败，渲染链无法继续")?;
 
     // 2) acquire：拿到一张可画的 image；OUT_OF_DATE = 这个 swapchain 已不可用
     //（最小化/恢复/独占模式切换等），必须立即重建——等不得下一帧
@@ -258,7 +218,7 @@ fn frame_body(
             swapchain.rebuild(ctx).or_warn("acquire 过时后重建失败")?;
             return Ok(());
         }
-        Err(e) => return Err(TierError::fatal("acquire 失败，渲染链无法继续，优雅退出", e)),
+        Err(e) => return Err(fatal("acquire 失败，渲染链无法继续", e)),
     };
 
     // 3) 组装 DrawList：账本行 → 驻留账本/资产容器 → push + 池引脚。
@@ -309,13 +269,12 @@ fn frame_body(
     } else {
         draw_state.warned_pending = false;
     }
-    if !draw_state.override_logged && !ledger.is_empty() && pending_rows == 0 {
-        draw_state.override_logged = true;
-        info!(
+    if !ledger.is_empty() && pending_rows == 0 {
+        draw_state.override_logged.log(|| info!(
             "材质调试覆盖：{} 个 primitive 全部按不透明绘制——blend 关闭（alpha<1 的 {} 行照常画出，glTF BLEND 镜片在此列）；贴图只采 base color 槽，其余四槽不进调试着色；着色模式按 ASH_RENDER_MODE（三态，见灯光收账日志）",
             ledger.len(),
             alpha_override,
-        );
+        ));
     }
 
     // 4) 相机/灯光 → 本帧槽 UBO。复用安全 = wait_for_slot 的 fence：写
@@ -326,9 +285,10 @@ fn frame_body(
     let render_mode = match render_mode.as_deref() {
         Some(mode) => *mode,
         None => {
-            if !draw_state.warned_no_mode && !ledger.is_empty() {
-                draw_state.warned_no_mode = true;
-                warn!("RenderMode 资源缺席（overlay 未装）：材质模式按 lambert 兜底");
+            if !ledger.is_empty() {
+                draw_state.warned_no_mode.log(|| {
+                    warn!("RenderMode 资源缺席（overlay 未装）：材质模式按 lambert 兜底")
+                });
             }
             RenderMode::Lambert
         }
@@ -340,12 +300,9 @@ fn frame_body(
             view_proj = projection.get_clip_from_view() * global.affine().inverse();
             per_camera_ambient = ambient_override;
         }
-        Err(_) => {
-            if !draw_state.warned_no_camera {
-                draw_state.warned_no_camera = true;
-                warn!("相机缺席：view_proj 用 identity 兜底（画面不可读属预期，查相机装配）");
-            }
-        }
+        Err(_) => draw_state
+            .warned_no_camera
+            .log(|| warn!("相机缺席：view_proj 用 identity 兜底（画面不可读属预期，查相机装配）")),
     }
     // —— 方向光：取第一盏（多灯告警一次，多灯支持未实现）。
     // 数值约定与 bevy prepare_lights 同款：dir_to_light = 实体 back()（forward 取
@@ -362,9 +319,10 @@ fn frame_body(
         }
         None => ([0.5, 1.0, 0.3, 0.0], [0.0; 4]), // 无灯：直射项归零，方向留合法占位
     };
-    if light_count != 1 && !draw_state.warned_light_count && !ledger.is_empty() {
-        draw_state.warned_light_count = true;
-        warn!("方向光 {light_count} 盏（取第一盏/无灯直射项归零），多灯支持未实现");
+    if light_count != 1 && !ledger.is_empty() {
+        draw_state.warned_light_count.log(|| {
+            warn!("方向光 {light_count} 盏（取第一盏/无灯直射项归零），多灯支持未实现")
+        });
     }
     // —— 环境光：相机组件 AmbientLight（若挂）压过全局 GlobalAmbientLight 资源；
     // 数值 = linear × brightness（bevy prepare_lights 同款）。
@@ -375,17 +333,15 @@ fn frame_body(
                 LinearRgba::from(global.color).to_f32_array().map(|c| c * global.brightness)
             }
             None => {
-                if !draw_state.warned_no_ambient {
-                    draw_state.warned_no_ambient = true;
-                    warn!("环境光缺席：GlobalAmbientLight 资源与相机 AmbientLight 均无，环境项归零");
-                }
+                draw_state.warned_no_ambient.log(|| {
+                    warn!("环境光缺席：GlobalAmbientLight 资源与相机 AmbientLight 均无，环境项归零")
+                });
                 [0.0; 4]
             }
         },
     };
-    if !draw_state.lights_logged && light_count > 0 {
-        draw_state.lights_logged = true;
-        info!(
+    if light_count > 0 {
+        draw_state.lights_logged.log(|| info!(
             "灯光 UBO 收账：方向光 {light_count} 盏（dir_to_light = back()，light = {}）；\
              环境 = {}（来源 {}）；材质模式 = {}（ASH_RENDER_MODE）",
             fmt_vec4(light_color),
@@ -396,7 +352,7 @@ fn frame_body(
                 RenderMode::Unlit => "unlit",
                 RenderMode::Normal => "normal",
             },
-        );
+        ));
     }
     tables
         .frame_ubo(frames.current_index())
@@ -410,7 +366,7 @@ fn frame_body(
                 mode: render_mode.as_u32(),
             }),
         )
-        .or_fatal("帧 UBO 写失败，渲染链无法继续，优雅退出")?;
+        .or_fatal("帧 UBO 写失败，渲染链无法继续")?;
 
     // 4.5) overlay 绘制半边（3.7）：图集整传（可能多出一张 transfer 票据——本帧
     // 图形提交的 wait_ticket 在此后快照，flush_uploads 批与图集批都被等待）→
@@ -427,13 +383,13 @@ fn frame_body(
                 &ui_data.mirror,
                 &mut ui_data.gpu,
                 &mut ui_data.ring,
-                tables,
+                &mut tables,
                 uploader,
                 frames.current_index(),
                 swapchain.extent,
-                paint_log,
+                &mut paint_log,
             )
-            .or_fatal("overlay 绘制半边失败，渲染链无法继续，优雅退出")?;
+            .or_fatal("overlay 绘制半边失败，渲染链无法继续")?;
             paint.map(|p| (p, ui_buffers))
         }
         None => None,
@@ -475,18 +431,20 @@ fn frame_body(
             swapchain.extent,
             &frame_draw,
         )
-        .or_fatal("录制/提交失败，渲染链无法继续，优雅退出")?;
+        .or_fatal("录制/提交失败，渲染链无法继续")?;
 
     // 6) present：把画好的 image 交给 present engine，等它的信号量按 acquire 的
     // image index 取（不按帧槽轮转）。SUBOPTIMAL/OUT_OF_DATE 都只是标记 pending
-    //（同 acquire 的次优），重建交给下个帧首的闸门③；其余真失败 error + 记
-    // AppExit 后不提前返回——advance 照常推进，帧槽账本保持一致，退出由壳下轮生效
+    //（同 acquire 的次优），重建交给下个帧首的闸门③；其余真失败不进通道也不
+    // 提前返回——advance 必须照常推进保持帧槽账本一致，就地 error 留档 + 置位
+    // 看门，退出由下一帧 Update 的 fatal_gate 生效（判定线：不提前 return 的
+    // 失败不冒泡，就地处理）。
     if let Err(e) = swapchain.present(ctx.queue, swapchain.render_finished[index as usize], index) {
         match e {
             VulkanError::SwapchainOutOfDate => gate.pending = true,
             e => {
-                error!("present 失败，渲染链无法继续，优雅退出: {e}");
-                exit.write(AppExit::error());
+                error!("present 失败，渲染链无法继续: {e}");
+                request_graceful_exit();
             }
         }
     }

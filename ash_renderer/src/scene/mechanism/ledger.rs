@@ -76,6 +76,14 @@ pub struct IncrementStats {
     pub upload_bytes_total: u64,
     /// 最近一批字节。
     pub last_batch_bytes: u64,
+    /// 本帧收到的资产事件数（4.2 读侧，按收到计含忽略变体）。
+    pub asset_events: usize,
+    /// 本帧因资产内容变化重挂脏标的行数（4.2 失效联动）。
+    pub asset_dirty_rows: usize,
+    /// 资产事件累计。
+    pub asset_events_total: u64,
+    /// 资产失效累计（mesh+image 身份数，Modified 才计）。
+    pub asset_invalidations_total: u64,
 }
 
 /// 稳定槽账本：在场可渲染 primitive 的 Entity→实例数据关联（跨帧存活），
@@ -127,6 +135,12 @@ impl InstanceLedger {
     /// 清一行脏标（flush_uploads 盘点完调用）。
     pub(crate) fn clear_dirty(&mut self, entity: Entity) {
         self.dirty.remove(&entity);
+    }
+
+    /// 重挂一行脏标（4.2 失效联动：资产内容变化波及的引用者重新进盘点；
+    /// 发现侧第二条入口，与 update_ledger 的 Changed/Removed 通道并轨同一脏集）。
+    pub(crate) fn mark_dirty(&mut self, entity: Entity) {
+        self.dirty.insert(entity);
     }
 }
 

@@ -4,7 +4,7 @@
 
 ## 0. 一句话结论
 
-一套"**错误就地消化**"的应用层错误处理风格：anyhow 单类型底座 + 3 个扩展 trait + 8 个控制流宏——错误永远"打日志 + 安全降级继续跑"，不上浮、不 panic；Option 与 Result 用同一套语法消化。ash_renderer 已移植控制流族 + 两个 trait，并新增第 9 件 `unwrap_or_panic!`（补初始化路径的家族位，见 §3/§5）（`ash_renderer/src/syntax.rs`），与 thiserror 类型化错误**互补而非替代**（§6）。
+一套"**错误就地消化**"的应用层错误处理风格：anyhow 单类型底座 + 3 个扩展 trait + 8 个控制流宏——错误永远"打日志 + 安全降级继续跑"，不上浮、不 panic；Option 与 Result 用同一套语法消化。ash_renderer 已移植控制流族 + 两个 trait，并新增第 9 件 `unwrap_or_panic!`（补初始化路径的家族位，见 §3/§5）（`ash_renderer/src/common/syntax.rs`），与 thiserror 类型化错误**互补而非替代**（§6）。
 
 ## 1. 底座：anyhow 单类型错误
 
@@ -57,7 +57,7 @@ let pack = warn_unwrap_or!(render_tool_pack_index_sp_map().get_mut(idx), continu
 1. `log` → `bevy::log`（宏名相同，tracing 直换）；
 2. 宏内用 `$crate::syntax::LogDebug::warn(...)` **全限定调 trait 方法**——调用方只导宏、免导 trait，宏自包含（frenderel 靠 `use syntax::*` 一揽子导入，我们选择显式）；
 3. 全部 `#[macro_export]`（跨 crate 导出的硬要求，漏了报 E0364）+ 模块内 `pub use` 提供 `syntax::宏名` 路径——`ash_renderer::宏名` 与 `ash_renderer::syntax::宏名` 双通道；
-4. 模块级 `#![allow(unused_macros)]`——多数宏为 步骤 3+ 预备（逐实体收集 = `unwrap_or!(x, continue)` 主场），当前仅 `warn_unwrap_or_return!` 在 draw_frame 就业。
+4. 模块级 `#![allow(unused_macros)]`——宏家族现无现役调用点（曾用于 draw_frame 的 `warn_unwrap_or_return!` 已随统一错误通道施工退役，见宪法篇 §3），作为 `()` 系统的控制流标准件备用。
 
 **未搬三件及理由**：`singleton` 系列（bevy `Resource` 就是全局状态的正解，搬进来反而诱导反模式）；`lock_mutex!`（bevy 调度器管并发，系统内不持手动锁，首个后台线程出现时再议）；`Option::some()`（anyhow `?` 链专用，本 crate 的 Option 早退已由 `unwrap_or_*` 覆盖）。
 
@@ -78,9 +78,9 @@ panic 只在真正"必要"时出场（断言不可恢复的内部不变量且需
 
 ## 6. 与 bevy 的关系（为什么糖在 bevy 里比 anyhow 更顺）
 
-- bevy 系统返回 `()`，`?` 主通道**根本不可用**——"warn + 早退"的糖恰好是 `()` 系统里唯一的传播形式；
-- bevy 原生备选路：系统返回 `Result<(), BevyError>`，错误交 `ErrorHandler`（`bevy_ecs/src/error/handler.rs:105`，现成 `panic`/`warn` 两实现，`world.set_error_handler` 可换）——解决"panic 还是打日志"，解决不了"OUT_OF_DATE 要重建重试"的分流，只能辅助；
-- 最终分工：**thiserror 类型化管边界与分支**（init 失败、OUT_OF_DATE 控制流），**糖管帧循环内非致命失败的就地消化**。
+- bevy 系统现可签名 `Result<(), BevyError>`（2026-10-10 统一错误通道施工，见宪法篇 §3）：`?` 冒泡的 Err 交官方 `ErrorHandler`，ash_renderer 以 `tier_handler`（Severity 分流）+ `fatal_gate`（写 AppExit）接管——可返回 `Result` 的系统走 `ResultTierExt`（or_warn/or_fatal，挂 context 负载标 Severity），不再需要壳；
+- `()` 系统里 `?` 仍不可用——"warn + 早退"的糖是 `()` 系统的传播形式（宏家族备用）；
+- 最终分工：**thiserror 类型化管边界与分支**（OUT_OF_DATE 控制流），**统一通道管冒泡收尾**（可返回 Result 的系统），**糖管 `()` 系统内非致命失败的就地消化**。
 
 ## 7. 用量证据（frenderer 业务代码，grep 全 modules/ 排除 syntax 自身）
 
