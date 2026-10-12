@@ -154,6 +154,30 @@ pub(crate) fn load_image_cmd(In(params): In<Option<Value>>, world: &mut World) -
     }))
 }
 
+/// `ash_renderer/reload_asset` 的请求参数。
+#[derive(serde::Deserialize)]
+struct ReloadAssetParams {
+    /// 资产路径（含 glTF 子资产标签，与 load 方法同口径）。
+    path: String,
+}
+
+/// `ash_renderer/reload_asset`：手动触发重载（4.4.3 热重载链的可复现驱动）。
+/// `AssetServer::reload` 重走加载链——失败过的资产修复后由此复活（`Added`/
+/// `Modified` 事件 → revive → flush 重试），文件监听是自动通道、本方法是
+/// 测试与 AI 的确定性对照（不依赖 watcher 时序，受理即返回）。加载是异步链，
+/// 本方法不等到货。
+#[system]
+pub(crate) fn reload_asset_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 path"))?;
+    let p: ReloadAssetParams =
+        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    world.resource::<AssetServer>().reload(p.path.clone());
+    Ok(json!({
+        "path": p.path,
+        "state": "reloading",
+    }))
+}
+
 /// 资产操作错误 → 协议错误码（AssetOpError 是 Tier② 语义的载体，只翻译
 /// 不吞——原 message 原样带出）。
 fn asset_op_error(err: AssetOpError) -> BrpError {

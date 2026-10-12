@@ -13,8 +13,12 @@ license = "MIT OR Apache-2.0"
 # 组件全清单展示依赖它；只影响类型名字符串，无行为差异。
 # 3.12 起加开 bevy_remote：BRP 远程直控通道（AI 免开 UI 查询/改值/推拉相机），
 # 官方内置方法随 RemotePlugin 默认注册，宿主再补三个场景语义自定义方法（src/remote.rs）。
+# 4.4 起加开 file_watcher：热重载链的自动通道（notify-debouncer 监听 assets 目录，
+# 文件变更 → AssetServer 重载 → AssetEvent 链路；watch_for_changes_override 缺省
+# = cfg!("watch")，feature 开启即默认监听）。依赖面：notify-debouncer-full 进 lock
+# （multi_threaded 本就在 bevy 默认特征面内，无新增执行器）。
 [dependencies]
-bevy = { path = "..", features = ["debug", "bevy_remote"] }
+bevy = { path = "..", features = ["debug", "bevy_remote", "file_watcher"] }
 ash = "0.38.0"
 # BRP 自定义方法的 params/响应都走 serde_json::Value（bevy_remote 同款形状）
 serde_json = "1.0.140"

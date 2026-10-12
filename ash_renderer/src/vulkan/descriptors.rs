@@ -192,6 +192,14 @@ pub struct BindlessTables {
     samplers: SlotAllocator,
     /// 功能参数键 → 采样器槽（去重账本）。
     sampler_slots: HashMap<super::images::SamplerKey, u32>,
+    /// 卸载请求的待回收槽账（4.4.1）：retire_* 只把槽记进此账、**不进**
+    /// free list——在飞 draw 仍可能正采样这些槽的描述符，槽复用必须等
+    /// "图形最后使用"（排空点=[`Self::drain_retired_slots`]，由 flush 停尸房
+    /// 段在帧侧等待后调用，与 GpuImage/池区间共用同一次等待）。采样器槽的
+    /// 去重账目（sampler_slots）在请求时即移除：新发布者拿新槽，不与待回收
+    /// 槽交叠（前置条件③由排空点+此移除共同保证）。
+    retired_textures: Vec<u32>,
+    retired_samplers: Vec<u32>,
     /// fallback 贴图本体（白 1×1；槽 0 的 view/sampler 来源，随表同寿）。
     fallback: GpuImage,
     /// fallback 上传批次票据（M2 只留账；销毁前的等待由退出排空统一覆盖）。
@@ -457,6 +465,8 @@ impl BindlessTables {
             textures: SlotAllocator::new(capacity),
             samplers: SlotAllocator::new(capacity),
             sampler_slots: HashMap::new(),
+            retired_textures: Vec::new(),
+            retired_samplers: Vec::new(),
             fallback,
             fallback_ticket,
         };
@@ -648,21 +658,54 @@ impl BindlessTables {
         })
     }
 
-    /// 槽回收(M2 不调用的释放入口;运行时淘汰归步骤 4)。**前置条件即安全契约**:
-    /// ① 该槽最后一次 GPU 使用的完成票据已等过(否则在飞 draw 采样悬空槽);
-    /// ② 槽内 view/sampler 本体的宿主侧引用方已同步退出(采样器槽是多图共享的
-    /// "首个发布者句柄"借用——retire 采样器槽前,同键全部贴图都得先退场);
-    /// ③ 回收后同槽再发布,新资源内容与旧票据完成之间无交叠。
-    /// 三条任一不满足即不得调用——验证层对"在飞改写"不保证执法(特性族篇 §0
-    /// 契约类开关的责任转移),防线上只剩本契约。
+    /// 槽回收请求（4.4.1）：把槽记进待回收账，**不立即进 free list**——在飞
+    /// draw 仍可能正采样这些槽（描述符在 draw 执行时被 GPU 读），立即复用 =
+    /// 在飞 draw 看到新贴图（覆盖）或悬空。前置条件（编排层保证）：
+    /// ① 槽内 view/sampler 本体已同步进停尸房（GpuImage 销毁由同一排空点
+    /// 收口，"本体先于槽复用消失"不成立的方向被停尸房挡住）；
+    /// ② 采样器槽仅当同键共享方全部退场才请求（请求时移除去重账目，见
+    /// [`Self::retire_sampler`]）；
+    /// ③ 槽真正回 free list 在 [`Self::drain_retired_slots`]（"图形最后使用"
+    /// 之后），回收后同槽再发布与旧票据完成无交叠。
     pub fn retire_texture(&mut self, texture: u32) {
-        self.textures.free.push(texture);
+        self.retired_textures.push(texture);
     }
 
-    /// 采样器槽回收(前置条件见 [`Self::retire_texture`] ②:同键共享方全部退场)。
+    /// 采样器槽回收请求（前置条件②见 [`Self::retire_texture`]；去重账目在
+    /// 此移除——新发布者拿新槽，不与待回收槽交叠）。
     pub fn retire_sampler(&mut self, key: &super::images::SamplerKey, sampler: u32) {
         self.sampler_slots.remove(key);
-        self.samplers.free.push(sampler);
+        self.retired_samplers.push(sampler);
+    }
+
+    /// 按槽号回收采样器槽（4.4.1）：反查功能键后走 [`Self::retire_sampler`]
+    /// ——调用方（ImageCache）持驻留条目的槽位绑定，功能键在表内；查无 =
+    /// 静默 no-op（fallback 槽 0 之外不该发生，发生即账目漂移的可见信号）。
+    pub fn retire_sampler_by_slot(&mut self, sampler: u32) {
+        if let Some(key) = self
+            .sampler_slots
+            .iter()
+            .find(|(_, s)| **s == sampler)
+            .map(|(k, _)| *k)
+        {
+            self.retire_sampler(&key, sampler);
+        }
+    }
+
+    /// 排空待回收槽（4.4.2）：调用点 = flush 停尸房段（帧侧等待"图形最后
+    /// 使用"通过后）——此刻无在飞 draw 再采样这些槽，归还 free list 可复用。
+    /// 返回归还的槽总数（读数口）。
+    pub fn drain_retired_slots(&mut self) -> usize {
+        let count = self.retired_textures.len() + self.retired_samplers.len();
+        self.textures.free.append(&mut self.retired_textures);
+        self.samplers.free.append(&mut self.retired_samplers);
+        count
+    }
+
+    /// 待回收槽数（排空判定的统计口）。
+    #[must_use]
+    pub fn retired_slot_count(&self) -> usize {
+        self.retired_textures.len() + self.retired_samplers.len()
     }
 }
 

@@ -43,7 +43,7 @@ use ash_macros::system;
 
 use crate::{
     common::syntax::{OnceLog, OptionTierExt, ResultTierExt},
-    scene::{AssetInvalidations, AssetReadiness, InstanceLedger},
+    scene::{AssetInvalidations, AssetReadiness, AssetRetirements, InstanceLedger},
     vulkan::{
         sampler_key, FramePool, GpuImage, ImageCache, MeshPool, StagingImageCopy, UploadBatch,
         Uploader,
@@ -76,6 +76,7 @@ impl Plugin for AshUploadPlugin {
                 .run_if(resource_exists::<crate::vulkan::BindlessTables>)
                 .run_if(resource_exists::<AssetInvalidations>)
                 .run_if(resource_exists::<AssetReadiness>)
+                .run_if(resource_exists::<AssetRetirements>)
                 .before(crate::driver::host::draw_frame)
                 .before(OnAppExitSystems),
         );
@@ -108,6 +109,9 @@ pub(crate) struct UploadData<'w> {
     /// 异步就绪账面(4.3.1):pending/failed 身份账,本系统独占写 pending 侧
     /// (mark/arrive/expel/reconcile),失败读侧只写 failed 侧。
     readiness: ResMut<'w, AssetReadiness>,
+    /// 卸载回收账面(4.4.1):事件读侧记下的待回收身份,本系统独占消费
+    /// (take + 驻留条目出账)。
+    retirements: ResMut<'w, AssetRetirements>,
     ctx: Res<'w, crate::vulkan::Context>,
     /// 帧槽:池迁移销毁旧池前的"图形最后使用"等待经此接线(4.1.1)。
     frames: Res<'w, FramePool>,
@@ -135,15 +139,46 @@ pub(crate) fn flush_uploads(
         mut ledger,
         mut invalidations,
         mut readiness,
+        mut retirements,
         ref ctx,
         ref frames,
     } = data;
-    // —— 0) 停尸房排空(4.2.3 内容重传的收尾):上一轮换下的旧图等"图形最后
-    // 使用"(全部帧槽 fence,4.1.1 闸门)后销毁。空房直接返回,稳态零成本;排空
-    // 失败保留停尸房下帧重试(旧图多活一帧,无悬空)。
+    // —— 0) 停尸房排空(4.2.3 内容重传的收尾;4.4 扩为卸载/替换统一排空点):
+    // 上一轮换下的旧图/旧网格区间/待回收描述符槽等"图形最后使用"(全部帧槽
+    // fence,4.1.1 闸门)后销毁/归还——三条销毁路径各自空房判定,非空才等待。
+    // 排空失败保留停尸房下帧重试(旧件多活一帧,无悬空)。
     image_cache
         .drain_graveyard(&mut || frames.wait_all_inflight())
         .or_fatal("贴图停尸房排空失败(帧侧等待),旧图保留下帧重试")?;
+    pool.drain_graveyard(&mut || frames.wait_all_inflight())
+        .or_fatal("网格回收停尸房排空失败(帧侧等待),区间保留下帧重试")?;
+    let drained_slots = tables.drain_retired_slots();
+    // —— 0.5) 卸载回收消费(4.4.1):事件读侧记下的待回收身份出账——驻留条目
+    // 进停尸房(网格区间/旧图)、描述符槽进待回收账(下帧步骤 0 排空后才真正
+    // 复用/销毁),失效凭据一并出清(资产已不在容器,凭据是僵尸账)。**先于脏行
+    // 盘点**——同帧"卸载又重载同身份"的行要看到驻留已出账(查无 → 进本批),
+    // 不能被旧条目的"驻留命中"误判完成。
+    let mut reclaimed = 0u64;
+    for id in retirements.take_meshes() {
+        if pool.retire(id).is_some() {
+            reclaimed += 1;
+        }
+        invalidations.consume_mesh(id);
+    }
+    for id in retirements.take_images() {
+        if image_cache.retire(id, &mut tables) {
+            reclaimed += 1;
+        }
+        invalidations.consume_image(id);
+    }
+    retirements.stats.resident_reclaimed_total += reclaimed;
+    retirements.stats.slots_reclaimed_total += drained_slots as u64;
+    if reclaimed > 0 || drained_slots > 0 {
+        info!(
+            "卸载回收出账:驻留条目 {reclaimed} 个(mesh+image,区间/旧图进停尸房下帧排空),\
+             描述符槽归还 {drained_slots} 条"
+        );
+    }
     // —— 1) 脏行盘点(4.1.4:上传清单 = 账本脏行):每行查其资产身份的驻留
     // 状态——全驻留的行就地清标;有未驻留身份的行保持脏标(重试),身份进本批。
     // 4.2.3:判定从"查无才传"放宽为"查无**或失效**才传"——失效凭据放行
@@ -403,14 +438,14 @@ pub(crate) fn flush_uploads(
         .or_fatal("transfer 提交失败,上传链无法继续(未发布票据)")?
         .ok_or_fatal("内部矛盾:staging 非空的批次未产生提交")?;
     // 驻留登记只在提交成功之后:失败路径不会留下指向未上传数据的账本行。
-    // 4.2.3:持失效凭据的身份走 replace 换条目(旧区间孤儿化,回收归 4.4),
-    // 其余走 commit 严格登记(重复登记仍按编排 bug 报错)
+    // 4.2.3:持失效凭据的身份走 replace 换条目(旧区间进停尸房,4.4 排空后
+    // 归还 free list),其余走 commit 严格登记(重复登记仍按编排 bug 报错)
     let mut replaced_meshes = 0usize;
     let mut committed_meshes: Vec<AssetId<Mesh>> = Vec::with_capacity(planned.len());
     let planned_count = planned.len();
     for (id, replace, c, vertex, index) in planned {
         if replace {
-            // 旧槽位孤儿化(区间空间随池同寿,回收归 4.4),返回值无需持有
+            // 旧槽位进停尸房(在飞安全,4.4.2 排空后归还 free list),返回值无需持有
             let _old_slot = pool.replace(id, vertex, index, c.vertex_count, c.index_count, ticket);
             replaced_meshes += 1;
         } else {

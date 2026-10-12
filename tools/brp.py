@@ -240,6 +240,10 @@ def cmd_load_image(args):
             {"path": args.path, "entity": args.entity}))
 
 
+def cmd_reload(args):
+    out(rpc(args.host, args.port, "ash_renderer/reload_asset", {"path": args.path}))
+
+
 def cmd_discover(args):
     resp = rpc(args.host, args.port, "rpc.discover")
     if "result" in resp:
@@ -358,6 +362,10 @@ def main():
     p.add_argument("--path", required=True, help="贴图文件路径（相对资产根）")
     p.add_argument("--entity", required=True, help="定位实体（取其材质槽写入）")
     p.set_defaults(func=cmd_load_image)
+
+    p = sub.add_parser("reload", help="手动触发资产重载（ash_renderer/reload_asset，4.4 热重载链的确定性驱动；文件监听是自动通道）")
+    p.add_argument("--path", required=True, help="资产路径（相对资产根，含 glTF 子资产标签）")
+    p.set_defaults(func=cmd_reload)
 
     sub.add_parser("discover", help="列出全部可用 BRP 方法").set_defaults(func=cmd_discover)
 
