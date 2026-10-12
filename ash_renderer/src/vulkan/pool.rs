@@ -130,7 +130,7 @@ pub struct MeshPool {
     residency: HashMap<AssetId<Mesh>, MeshSlot>,
     /// 回收停尸房(4.4.2):卸载/替换换下的旧区间(顶点,索引),在飞 draw 可能
     /// 还在读——排空(等"图形最后使用")前不得复用,防覆盖判定线违反。
-    graveyard: Vec<(PoolRange, PoolRange)>,
+    graveyard: Vec<(PoolRange, PoolRange, u64)>,
     /// 回收就绪空洞(4.4.2):停尸房排空后归还的区间,alloc first-fit 优先
     /// 复用;偏移/长度保持对齐倍数(进入前已对齐,分裂按对齐倍数切)。
     free_vertex: Vec<PoolRange>,
@@ -381,37 +381,51 @@ impl MeshPool {
 
     /// 卸载驻留条目(4.4.1):区间进停尸房(**不复用**——在飞 draw 可能还在读
     /// 旧内容,排空后才归还 free list),返回释放的字节 `(顶点, 索引)`;未驻留
-    /// = None 幂等(重复 Removed/无驻留身份不误动作)。
+    /// = None 幂等(重复 Removed/无驻留身份不误动作)。上传票据随行(4.5 F3:
+    /// 排空双条件之一)。
     pub fn retire(&mut self, id: AssetId<Mesh>) -> Option<(u64, u64)> {
         let slot = self.residency.remove(&id)?;
-        self.graveyard.push((slot.vertex, slot.index));
+        self.graveyard.push((slot.vertex, slot.index, slot.ticket));
         self.recycled.retired_slots_total += 1;
         self.recycled.retired_vertex_bytes_total += slot.vertex.size;
         self.recycled.retired_index_bytes_total += slot.index.size;
         Some((slot.vertex.size, slot.index.size))
     }
 
-    /// 排空回收停尸房(4.4.2):`wait_draws` 等"图形最后使用"后旧区间归还
-    /// free list 可复用——此刻无任何在飞 draw 再读旧区间,复用覆盖不再构成
-    /// 竞态。空房直接返回不等待(稳态零成本);失败保留停尸房下帧重试(区间
-    /// 多活一帧,无悬空)。池迁移([`Self::ensure_capacity`])与排空的先后由
-    /// 编排层保证:ensure 先等帧侧(4.1.1),排空在 flush 开头先于 ensure——
-    /// 迁移时停尸房必空,区间数据随 `[0, used)` 整段平移,偏移不变语义不变。
+    /// 排空回收停尸房(4.4.2,4.5 F3 凭据补全):双条件齐备后旧区间归还 free
+    /// list 可复用——`wait_draws` 等"图形最后使用"(帧槽 fence),`uploader`
+    /// 等"上传完成"(停尸房票据的时间线信号量;最小化期间 flush 仍可提交
+    /// transfer 而无图形提交,帧 fence 完成不蕴含上传完成)。空房直接返回不
+    /// 等待(稳态零成本);失败保留停尸房下帧重试(区间多活一帧,无悬空)。池
+    /// 迁移([`Self::ensure_capacity`])与排空的先后由编排层保证:ensure 先等
+    /// 帧侧(4.1.1),排空在 flush 开头先于 ensure——迁移时停尸房必空,区间数据
+    /// 随 `[0, used)` 整段平移,偏移不变语义不变。
     ///
     /// # Errors
-    /// 帧侧等待失败(排空未发生,区间保留下帧重试)。
-    pub fn drain_graveyard(&mut self, wait_draws: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+    /// 帧侧等待或票据等待失败(排空未发生,区间保留下帧重试)。
+    pub fn drain_graveyard(
+        &mut self,
+        uploader: &Uploader,
+        wait_draws: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
         if self.graveyard.is_empty() {
             return Ok(());
         }
         wait_draws()?;
+        // 票据取最大值一次等待:同一条时间线信号量按值单调,等最大即等全部
+        let max_ticket = self
+            .graveyard
+            .iter()
+            .map(|(_, _, ticket)| *ticket)
+            .fold(0u64, u64::max);
+        uploader.wait_until(max_ticket)?;
         let count = self.graveyard.len();
-        for (vertex, index) in self.graveyard.drain(..) {
+        for (vertex, index, _) in self.graveyard.drain(..) {
             self.free_vertex.push(vertex);
             self.free_index.push(index);
         }
         info!(
-            "网格回收停尸房排空:归还 {count} 组区间(等待图形最后使用后,4.4 卸载/替换收尾)"
+            "网格回收停尸房排空:归还 {count} 组区间(双条件齐备:图形最后使用 + 上传票据,4.4/4.5 F3)"
         );
         Ok(())
     }
@@ -468,7 +482,7 @@ impl MeshPool {
         };
         let old = self.residency.insert(id, slot);
         if let Some(old) = &old {
-            self.graveyard.push((old.vertex, old.index));
+            self.graveyard.push((old.vertex, old.index, old.ticket));
             self.recycled.retired_slots_total += 1;
             self.recycled.retired_vertex_bytes_total += old.vertex.size;
             self.recycled.retired_index_bytes_total += old.index.size;

@@ -186,7 +186,7 @@ fn main() {
         sampler: ImageSamplerDescriptor::linear(),
     };
     let white = GpuImage::create(&device, &instance, pd, &contract, &white_spec, &[]).expect("白色贴图");
-    match small_tables.publish(white.view(), white.sampler(), &lin) {
+    match small_tables.publish(white.view(), &lin) {
         Ok(_) => panic!("容量 4 的小表第 4 次发布竟然成功——容量纪律失效"),
         Err(e) => {
             assert!(e.to_string().contains("容量耗尽"), "耗尽报错文案异常: {e}");
@@ -340,7 +340,7 @@ fn upload_and_publish(
     uploader.wait_until(ticket).expect("等上传票据");
     for (name, key) in batch {
         let (img, _) = &textures[name];
-        let slots = tables.publish(img.view(), img.sampler(), key).expect("发布");
+        let slots = tables.publish(img.view(), key).expect("发布");
         println!("[发布] {name} → 纹理槽 {} / 采样器槽 {}", slots.texture, slots.sampler);
     }
 }

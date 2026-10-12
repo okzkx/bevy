@@ -112,6 +112,9 @@ pub(crate) struct UploadData<'w> {
     /// 卸载回收账面(4.4.1):事件读侧记下的待回收身份,本系统独占消费
     /// (take + 驻留条目出账)。
     retirements: ResMut<'w, AssetRetirements>,
+    /// overlay 图集账面(4.5 F15):旧代停尸房并入本排空点;overlay 未装时
+    /// 缺席 = None(no-op)。
+    atlas: Option<ResMut<'w, crate::overlay::AtlasGpu>>,
     ctx: Res<'w, crate::vulkan::Context>,
     /// 帧槽:池迁移销毁旧池前的"图形最后使用"等待经此接线(4.1.1)。
     frames: Res<'w, FramePool>,
@@ -140,17 +143,19 @@ pub(crate) fn flush_uploads(
         mut invalidations,
         mut readiness,
         mut retirements,
+        mut atlas,
         ref ctx,
         ref frames,
     } = data;
-    // —— 0) 停尸房排空(4.2.3 内容重传的收尾;4.4 扩为卸载/替换统一排空点):
-    // 上一轮换下的旧图/旧网格区间/待回收描述符槽等"图形最后使用"(全部帧槽
-    // fence,4.1.1 闸门)后销毁/归还——三条销毁路径各自空房判定,非空才等待。
-    // 排空失败保留停尸房下帧重试(旧件多活一帧,无悬空)。
+    // —— 0) 停尸房排空(4.2.3 内容重传的收尾;4.4 扩为卸载/替换统一排空点;
+    // 4.5 F15 起含 overlay 图集旧代):上一轮换下的旧图/旧网格区间/待回收描述
+    // 符槽等"双条件"(图形最后使用=全部帧槽 fence,4.1.1 闸门 + 上传完成=
+    // 停尸房票据,4.5 F3 凭据补全)后销毁/归还——三条销毁路径各自空房判定,
+    // 非空才等待。排空失败保留停尸房下帧重试(旧件多活一帧,无悬空)。
     image_cache
-        .drain_graveyard(&mut || frames.wait_all_inflight())
+        .drain_graveyard(&uploader, &mut || frames.wait_all_inflight())
         .or_fatal("贴图停尸房排空失败(帧侧等待),旧图保留下帧重试")?;
-    pool.drain_graveyard(&mut || frames.wait_all_inflight())
+    pool.drain_graveyard(&uploader, &mut || frames.wait_all_inflight())
         .or_fatal("网格回收停尸房排空失败(帧侧等待),区间保留下帧重试")?;
     let drained_slots = tables.drain_retired_slots();
     // —— 0.5) 卸载回收消费(4.4.1):事件读侧记下的待回收身份出账——驻留条目
@@ -178,6 +183,14 @@ pub(crate) fn flush_uploads(
             "卸载回收出账:驻留条目 {reclaimed} 个(mesh+image,区间/旧图进停尸房下帧排空),\
              描述符槽归还 {drained_slots} 条"
         );
+    }
+    // —— 0.6) overlay 图集旧代排空(4.5 F15):整传换下的旧 GpuImage 走同一
+    // 双条件(帧侧等待 + 上传票据);overlay 未装时 atlas = None,空房 no-op。
+    // 旧代纹理槽已在整传帧随退场进待回收账,同帧 drain_retired_slots 归还。
+    if let Some(atlas) = atlas.as_mut() {
+        atlas
+            .drain_graveyard(&uploader, &mut || frames.wait_all_inflight())
+            .or_fatal("图集停尸房排空失败(双条件等待),旧代保留下帧重试")?;
     }
     // —— 1) 脏行盘点(4.1.4:上传清单 = 账本脏行):每行查其资产身份的驻留
     // 状态——全驻留的行就地清标;有未驻留身份的行保持脏标(重试),身份进本批。
@@ -461,33 +474,26 @@ pub(crate) fn flush_uploads(
         }
         committed_meshes.push(id);
     }
-    // —— 3.3.4 槽位发布:提交成功 → 分槽(采样器按功能键去重) → 驻留登记
-    // 带槽位。只写 free list 的新槽,覆盖竞态在结构上不存在;采样 draw 的
-    // "上传完成才可使用"由票据承担(图形提交挂 draw 的 ticket 信号量等待)。
-    // 发布失败 = 槽容量耗尽,按 Tier② 冒泡(施工计划:不静默截断)
+    // —— 3.3.4 槽位发布:提交成功 → 分槽(采样器按功能键去重,本体归表,4.5 F2)
+    // → 驻留登记带槽位。只写排空点归还过的新槽;换内容改走"新槽发布 + 旧槽
+    // 延迟回收"(4.5 F1:原槽重写对在飞 draw 不安全,UAB 不授权覆盖仍被未完成
+    // 命令消费的描述符)。发布失败 = 槽容量耗尽,按 Tier② 冒泡(施工计划:不
+    // 静默截断)
     let mut sampler_slots_hit = HashSet::new();
     let mut replaced_images = 0usize;
     let mut committed_images: Vec<AssetId<Image>> = Vec::with_capacity(image_specs.len());
     for ((id, _, spec, replace), (gid, gpu)) in image_specs.iter().zip(gpu_images) {
         debug_assert_eq!(*id, gid, "image_specs 与 gpu_images 同序构建,错位即内部矛盾");
-        let slots = if *replace {
-            // 换条目重传:旧图先进停尸房(在飞安全),描述符**原槽重写**——
-            // 纹理槽占用不因内容变化增长(4.2.3)
-            let old = image_cache.take(*id).ok_or_fatal(format!(
-                "贴图 {id:?} 持失效凭据但驻留条目缺席,状态矛盾"
-            ))?;
-            let s = tables
-                .rebind(old.texture, gpu.view(), gpu.sampler(), &sampler_key(&spec.sampler))
-                .or_fatal(format!("贴图 {id:?} 原槽重写失败,上传链无法继续"))?;
+        let slots = tables
+            .publish(gpu.view(), &sampler_key(&spec.sampler))
+            .or_fatal(format!("贴图 {id:?} 槽位发布失败,上传链无法继续"))?;
+        if *replace {
             replaced_images += 1;
-            s
-        } else {
-            tables
-                .publish(gpu.view(), gpu.sampler(), &sampler_key(&spec.sampler))
-                .or_fatal(format!("贴图 {id:?} 槽位发布失败,上传链无法继续"))?
-        };
+        }
         sampler_slots_hit.insert(slots.sampler);
-        image_cache.commit(*id, gpu, ticket, slots);
+        // 换条目重传的旧条目随登记原子退场(旧图进停尸房、旧纹理槽进待回收账
+        // ——在飞 draw 经旧槽读旧图直到排空;新 draw 经新槽读新图,4.5 F1)
+        image_cache.swap_commit(*id, gpu, ticket, slots, &mut tables);
         committed_images.push(*id);
     }
     // 换内容成功的身份销账(4.2.2 凭据消费);未成功(未到货/被拒)的保留,

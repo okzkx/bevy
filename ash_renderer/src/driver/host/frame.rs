@@ -214,8 +214,12 @@ pub(crate) fn draw_frame(
         }
         Err(VulkanError::SwapchainOutOfDate) => {
             // 无论重建成败，本帧作废（acquire 没拿到图）；重建失败 warn 后让路，
-            // 下帧 acquire 再过时就地重试重建
+            // 下帧 acquire 再过时就地重试重建。4.5 F14:重建后置 pending——
+            // rebuild 对"尺寸没变"的表面失配（显示器模式切换/热插拔类）幂等
+            // 早退，不置位则本分支每帧空转重试、渲染不自愈；置位后帧首闸门③
+            // 接管（rebuild 幂等，重复调用无成本）
             swapchain.rebuild(ctx).or_warn("acquire 过时后重建失败")?;
+            gate.pending = true;
             return Ok(());
         }
         Err(e) => return Err(fatal("acquire 失败，渲染链无法继续", e)),

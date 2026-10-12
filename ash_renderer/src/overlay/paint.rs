@@ -23,7 +23,7 @@ use crate::{
     common::error::{Result, VulkanError},
     vulkan::{
         sampler_key, BindlessTables, BufferRole, Context, GpuBuffer, GpuImage, ImageSpec,
-        SlotBinding, StagingImageCopy, UiDrawCall, UiPaint, UploadBatch, Uploader,
+        SlotBinding, StagingImageCopy, Ticket, UiDrawCall, UiPaint, UploadBatch, Uploader,
         MAX_FRAMES_IN_FLIGHT, UI_VERTEX_STRIDE,
     },
 };
@@ -133,14 +133,16 @@ fn blit(
     }
 }
 
-/// 图集 GPU 侧：当前代资源 + 退役代 graveyard。
+/// 图集 GPU 侧：当前代资源 + 退役代 graveyard（4.5 F15 起接统一排空点）。
 #[derive(Resource, Default)]
 pub struct AtlasGpu {
     /// 当前在用的图集代（最近一次整传）。
     current: Option<AtlasSlot>,
-    /// 退役代：整传后旧 GpuImage 进来，与 BindlessTables 同寿——槽位持有的是
-    /// view/sampler 句柄借用，本体必须活到表拆除（teardown 序：表先、本体后）。
-    graveyard: Vec<GpuImage>,
+    /// 退役代：整传换下的旧 GpuImage（上传票据随行）——由 flush_uploads 的
+    /// 统一排空点在"图形最后使用 + 上传完成"双条件后销毁（4.5 F15 订正：
+    /// 原实现与 BindlessTables 同寿不排空，逐 dirty-rect 代数增长下停尸房与
+    /// 纹理槽无界积聚）。
+    graveyard: Vec<(GpuImage, Ticket)>,
     /// 已整传的镜像代数。
     uploaded_generation: u64,
 }
@@ -148,6 +150,8 @@ pub struct AtlasGpu {
 /// 一代图集的 GPU 资源与 bindless 槽位。
 struct AtlasSlot {
     image: GpuImage,
+    /// 本代整传票据（排空双条件之一）。
+    ticket: Ticket,
     slots: SlotBinding,
 }
 
@@ -160,6 +164,33 @@ impl AtlasGpu {
     /// graveyard 累计张数（调试窗口统计行）。
     pub(crate) fn graveyard_len(&self) -> usize {
         self.graveyard.len()
+    }
+
+    /// 排空旧代停尸房（4.5 F15）：与 ImageCache/MeshPool 同款双条件——
+    /// `wait_draws` 等"图形最后使用"（帧槽 fence），`uploader` 等"上传完成"
+    ///（旧代整传票据）。空房直接返回不等待（稳态零成本）。
+    ///
+    /// # Errors
+    /// 帧侧等待或票据等待失败（排空未发生，停尸房保留，下帧重试）。
+    pub(crate) fn drain_graveyard(
+        &mut self,
+        uploader: &Uploader,
+        wait_draws: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        if self.graveyard.is_empty() {
+            return Ok(());
+        }
+        wait_draws()?;
+        let max_ticket = self
+            .graveyard
+            .iter()
+            .map(|(_, ticket)| *ticket)
+            .fold(0u64, u64::max);
+        uploader.wait_until(max_ticket)?;
+        let count = self.graveyard.len();
+        self.graveyard.clear(); // Drop 序：view 先于 image，memory 最后
+        info!("图集停尸房排空:销毁 {count} 张旧代（双条件齐备后,4.5 F15）");
+        Ok(())
     }
 }
 
@@ -333,22 +364,23 @@ pub(crate) fn paint_overlay(
         match uploader.submit_batch(batch)? {
             Some(ticket) => {
                 // 槽位发布在提交成功后（失败不留指向未上传数据的槽，与 flush_uploads
-                // 同纪律）；只写新槽，UAB 覆盖竞态结构上不存在
-                let slots = tables.publish(
-                    gpu_image.view(),
-                    gpu_image.sampler(),
-                    &sampler_key(&spec.sampler),
-                )?;
+                // 同纪律）；只写新槽（4.5 F1 同款：不覆盖在飞消费的旧槽）
+                let slots = tables.publish(gpu_image.view(), &sampler_key(&spec.sampler))?;
                 if let Some(old) = gpu.current.replace(AtlasSlot {
                     image: gpu_image,
+                    ticket,
                     slots,
                 }) {
-                    gpu.graveyard.push(old.image);
+                    // 旧代退场：本体进停尸房（票据随行，排空点销毁）、纹理槽进
+                    // 待回收账（采样器槽不退——图集用 LINEAR 键与真实贴图共享，
+                    // 本体归表后槽内句柄不随旧代消失，4.5 F2/F15）
+                    tables.retire_texture(old.slots.texture);
+                    gpu.graveyard.push((old.image, old.ticket));
                 }
                 gpu.uploaded_generation = mirror_generation;
                 info!(
                     "图集整传 #{ticket}：{}×{}（第 {mirror_generation} 代），纹理槽 {}/{}；\
-                     旧代入 graveyard（累计 {} 张，与表同寿）",
+                     旧代入 graveyard（当前 {} 张待排空,4.5 F15）",
                     spec.width,
                     spec.height,
                     slots.texture,
