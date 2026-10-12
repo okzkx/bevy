@@ -321,7 +321,10 @@ pub(crate) fn draw_frame(
                 [r * light.illuminance, g * light.illuminance, b * light.illuminance, a],
             )
         }
-        None => ([0.5, 1.0, 0.3, 0.0], [0.0; 4]), // 无灯：直射项归零，方向留合法占位
+        None => (
+            crate::vulkan::PLACEHOLDER_DIR_TO_LIGHT,
+            [0.0; 4],
+        ), // 无灯：直射项归零，方向留合法占位（共享常量见 descriptors.rs）
     };
     if light_count != 1 && !ledger.is_empty() {
         draw_state.warned_light_count.log(|| {
@@ -412,7 +415,6 @@ pub(crate) fn draw_frame(
         set1: tables.frame_set(frames.current_index()),
         vertex_buffer: pool.vertex_buffer(),
         index_buffer: pool.index_buffer(),
-        depth_view: frames.current().depth.view,
         draws: &draws,
         overlay_pipeline: overlay_pipeline.pipeline(),
         overlay_layout: overlay_pipeline.layout(),

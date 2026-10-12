@@ -55,6 +55,19 @@ pub struct Swapchain {
 }
 
 impl Swapchain {
+    /// UNORM 底板 → SRGB 别名候选：color attachment 支持查过才用（支持与启用
+    /// 分开，3.3.2 口径），不满足回退 None（调用方回退 UNORM 直出并 warn）。
+    fn srgb_alias_if_supported(ctx: &Context, srgb: vk::Format) -> Option<vk::Format> {
+        let features = unsafe {
+            ctx.instance
+                .get_physical_device_format_properties(ctx.physical_device, srgb)
+        }
+        .optimal_tiling_features;
+        features
+            .contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT)
+            .then_some(srgb)
+    }
+
     pub fn new(ctx: &Context) -> Result<Self> {
         let fns = swapchain::Device::new(&ctx.instance, &ctx.device);
 
@@ -83,18 +96,14 @@ impl Swapchain {
         // 声明双格式（swapchain image 由此按 MUTABLE_FORMAT 形态创建）；③ SRGB 变体
         // 的 color attachment 支持查过才用（支持与启用分开），不满足回退 UNORM 直出
         // 并响亮记日志——输出编码缺位会在受光中间调上显形（偏暗），不能静默。
+        // 4.5 F21:R8G8B8A8_UNORM 底板（移动/部分平台常见）同享 SRGB 别名分支——
+        // 此前只有 B8G8R8A8 一条路,R8G8B8A8 平台的输出编码契约静默降级
         let srgb_alias = match surface_format.format {
             vk::Format::B8G8R8A8_UNORM => {
-                let features = unsafe {
-                    ctx.instance
-                        .get_physical_device_format_properties(ctx.physical_device, vk::Format::B8G8R8A8_SRGB)
-                }
-                .optimal_tiling_features;
-                if features.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT) {
-                    Some(vk::Format::B8G8R8A8_SRGB)
-                } else {
-                    None
-                }
+                Self::srgb_alias_if_supported(ctx, vk::Format::B8G8R8A8_SRGB)
+            }
+            vk::Format::R8G8B8A8_UNORM => {
+                Self::srgb_alias_if_supported(ctx, vk::Format::R8G8B8A8_SRGB)
             }
             _ => None,
         };

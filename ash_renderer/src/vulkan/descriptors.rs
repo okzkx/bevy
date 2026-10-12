@@ -390,7 +390,8 @@ impl BindlessTables {
         let mut frame_sets = sets;
         let resident_set = frame_sets.remove(0);
         // ---- 5) 每帧 UBO(帧槽一一对应)+ set1 描述符写入(初值 = identity view_proj
-        // + 灯光归零 + Lambert 模式;3.5.1 起运行期每帧重写)----
+        // + 灯光占位(方向留非零防 NaN,直射/环境/灯色全零) + Lambert 模式;
+        // 3.5.1 起运行期每帧重写)----
         let mut frame_ubos = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let mut ubo = GpuBuffer::create(device, contract, FRAME_UBO_SIZE, BufferRole::FrameUniform)?;
@@ -710,13 +711,17 @@ impl Drop for BindlessTables {
     }
 }
 
-/// identity 初值的帧数据（view_proj = identity、灯光归零、Lambert 模式）：
+/// 无灯帧的方向光占位（xyz 单位化合法方向，防归一化 NaN；直射/环境/灯色全零）。
+/// descriptors.rs 的 identity 初值与 frame.rs 的无灯分支双点共用（4.5 订正拆重）。
+pub const PLACEHOLDER_DIR_TO_LIGHT: [f32; 4] = [0.5, 1.0, 0.3, 0.0];
+
+/// identity 初值的帧数据（view_proj = identity、灯光占位、Lambert 模式）：
 /// 表建好到首帧写入之间若被采样（理论不发生，帧循环首帧即重写），画面同
 /// 3.4 之前的 identity 形状而非悬空值。
 fn identity_frame_uniforms() -> FrameUniformsData {
     FrameUniformsData {
         view_proj: bevy::math::Mat4::IDENTITY,
-        dir_to_light: [0.5, 1.0, 0.3, 0.0],
+        dir_to_light: PLACEHOLDER_DIR_TO_LIGHT,
         ambient_color: [0.0; 4],
         light_color: [0.0; 4],
         mode: FRAME_MODE_LAMBERT,

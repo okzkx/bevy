@@ -101,7 +101,10 @@ fn scene_tree(In(_params): In<Option<Value>>, rows: Query<EntityRow>) -> BrpResu
         .collect();
     roots.sort_by_key(|e| e.index());
     let relevant_count = relevant.len();
-    let tree: Vec<Value> = roots.iter().map(|r| tree_node_json(*r, &relevant)).collect();
+    let tree: Vec<Value> = roots
+        .iter()
+        .map(|r| tree_node_json(*r, &relevant, 0))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(json!({
         "relevant": relevant_count,
         "total": total,
@@ -109,20 +112,36 @@ fn scene_tree(In(_params): In<Option<Value>>, rows: Query<EntityRow>) -> BrpResu
     }))
 }
 
+/// 递归深度上限（4.5 F16）：病态深树在栈溢出前显式拒绝——栈溢出走 abort 是
+/// "禁 panic"规则下唯一不可兜底路径，深度越限回协议错误。上限 1024 远超真实
+/// 场景层级，同时远低于典型线程栈的溢出深度。
+const TREE_MAX_DEPTH: usize = 1024;
+
 /// 递归序列化一个相关子树：子实体里不相关的整枝跳过（与 egui 树同语义）。
-/// 调用方保证 `entity` 在表内。
-fn tree_node_json(entity: Entity, relevant: &HashMap<Entity, (String, Vec<Entity>, bool)>) -> Value {
+/// 调用方保证 `entity` 在表内；`depth` 越过 [`TREE_MAX_DEPTH`] 回协议错误。
+fn tree_node_json(
+    entity: Entity,
+    relevant: &HashMap<Entity, (String, Vec<Entity>, bool)>,
+    depth: usize,
+) -> BrpResult {
+    if depth > TREE_MAX_DEPTH {
+        return Err(BrpError {
+            code: error_codes::INTERNAL_ERROR,
+            message: format!("scene_tree 层级超过深度上限 {TREE_MAX_DEPTH}（病态深树拒绝序列化）"),
+            data: None,
+        });
+    }
     let (label, children, _) = &relevant[&entity];
     let children: Vec<Value> = children
         .iter()
         .filter(|c| relevant.contains_key(*c))
-        .map(|c| tree_node_json(*c, relevant))
-        .collect();
-    json!({
+        .map(|c| tree_node_json(*c, relevant, depth + 1))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({
         "entity": entity.to_string(),
         "label": label,
         "children": children,
-    })
+    }))
 }
 
 /// `ash_renderer/set_transform` 的请求参数：逐组可选（缺省 = 不动该组），
@@ -230,6 +249,13 @@ fn set_camera(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
             return Err(BrpError {
                 code: error_codes::COMPONENT_ERROR,
                 message: "World 里没有带 CameraOrbit 的相机".to_owned(),
+                data: None,
+            });
+        }
+        Err(CameraCommandError::AmbiguousCamera) => {
+            return Err(BrpError {
+                code: error_codes::COMPONENT_ERROR,
+                message: "World 里带 CameraOrbit 的相机不止一台,机位目标不明确".to_owned(),
                 data: None,
             });
         }

@@ -117,10 +117,13 @@ pub struct CameraOrbitCommand {
     pub zoom: Option<f32>,
 }
 
-/// 相机命令被拒的原因：World 里没有带 [`CameraOrbit`] 的相机。
+/// 相机命令被拒的原因（4.5 小账：多相机与无相机混报拆开）。
 #[derive(Debug)]
 pub enum CameraCommandError {
+    /// World 里没有带 [`CameraOrbit`] 的相机。
     NoCamera,
+    /// 带相机实体不止一台（single_mut 拒绝），机位目标不明确。
+    AmbiguousCamera,
 }
 
 /// 应用一次 CLI 相机给值（3.12）：3.9 的鼠标输入与 3.12 的 BRP 输入汇入同一
@@ -132,9 +135,23 @@ pub fn apply_camera_command(
     cmd: CameraOrbitCommand,
 ) -> Result<CameraOrbit, CameraCommandError> {
     let mut query = world.query::<(&mut Transform, &mut CameraOrbit, &Camera)>();
-    let Ok((mut transform, mut orbit, _)) = query.single_mut(world) else {
-        return Err(CameraCommandError::NoCamera);
-    };
+    match query.single_mut(world) {
+        Ok((mut transform, mut orbit, _)) => {
+            apply_orbit_command(&mut transform, &mut orbit, &cmd)
+        }
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            Err(CameraCommandError::AmbiguousCamera)
+        }
+        Err(_) => Err(CameraCommandError::NoCamera),
+    }
+}
+
+/// 单相机命中后的命令落盘（原内联体摘出，多/无相机分流在上层）。
+fn apply_orbit_command(
+    transform: &mut Transform,
+    orbit: &mut CameraOrbit,
+    cmd: &CameraOrbitCommand,
+) -> Result<CameraOrbit, CameraCommandError> {
     if let Some(target) = cmd.target {
         orbit.target = target;
     }

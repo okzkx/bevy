@@ -39,6 +39,10 @@ pub enum MeshConvertError {
     /// POSITION 缺失或不是 Float32x3——没有位置就无法绘制,拒绝。
     #[error("POSITION 缺失或不是 Float32x3")]
     MissingPosition,
+    /// POSITION 属性长度与顶点数不符(畸形资产;4.5 F17 由 debug_assert 升运行
+    /// 时检查——release 下索引越界 panic 绕过统一错误通道)。
+    #[error("POSITION 长度 {0} 与顶点数 {1} 不符")]
+    PositionLengthMismatch(usize, usize),
     /// 空网格(0 顶点):没有可上传的内容。
     #[error("网格为空(0 顶点)")]
     EmptyMesh,
@@ -74,9 +78,19 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
     else {
         return Err(MeshConvertError::MissingPosition);
     };
-    debug_assert_eq!(positions.len(), vertex_count);
+    // 4.5 F17:长度核对升运行时检查——畸形资产拒收入通道,不以越界 panic 出局
+    if positions.len() != vertex_count {
+        return Err(MeshConvertError::PositionLengthMismatch(
+            positions.len(),
+            vertex_count,
+        ));
+    }
     let normals = match mesh.try_attribute(Mesh::ATTRIBUTE_NORMAL) {
-        Ok(VertexAttributeValues::Float32x3(n)) => Some(n),
+        Ok(VertexAttributeValues::Float32x3(n)) if n.len() == vertex_count => Some(n),
+        Ok(VertexAttributeValues::Float32x3(n)) => {
+            bevy::log::warn!("NORMAL 长度 {} 与顶点数 {vertex_count} 不符,按全 0 填充", n.len());
+            None
+        }
         Ok(other) => {
             bevy::log::warn!("NORMAL 是 {other:?} 而非 Float32x3,按全 0 填充");
             None
@@ -84,7 +98,11 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
         Err(_) => None,
     };
     let uvs = match mesh.try_attribute(Mesh::ATTRIBUTE_UV_0) {
-        Ok(VertexAttributeValues::Float32x2(uv)) => Some(uv),
+        Ok(VertexAttributeValues::Float32x2(uv)) if uv.len() == vertex_count => Some(uv),
+        Ok(VertexAttributeValues::Float32x2(uv)) => {
+            bevy::log::warn!("UV_0 长度 {} 与顶点数 {vertex_count} 不符,按全 0 填充", uv.len());
+            None
+        }
         Ok(other) => {
             bevy::log::warn!("UV_0 是 {other:?} 而非 Float32x2,按全 0 填充");
             None

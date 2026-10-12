@@ -151,12 +151,13 @@ pub(crate) fn flush_uploads(
     // 4.5 F15 起含 overlay 图集旧代):上一轮换下的旧图/旧网格区间/待回收描述
     // 符槽等"双条件"(图形最后使用=全部帧槽 fence,4.1.1 闸门 + 上传完成=
     // 停尸房票据,4.5 F3 凭据补全)后销毁/归还——三条销毁路径各自空房判定,
-    // 非空才等待。排空失败保留停尸房下帧重试(旧件多活一帧,无悬空)。
+    // 非空才等待。排空失败按 Tier② 致命退出(4.5 订正:原"下帧重试"表述失真
+    // ——or_fatal 走统一错误通道由 fatal_gate 写 AppExit,停尸房不会重试)。
     image_cache
         .drain_graveyard(&uploader, &mut || frames.wait_all_inflight())
-        .or_fatal("贴图停尸房排空失败(帧侧等待),旧图保留下帧重试")?;
+        .or_fatal("贴图停尸房排空失败(帧侧等待),上传链无法继续")?;
     pool.drain_graveyard(&uploader, &mut || frames.wait_all_inflight())
-        .or_fatal("网格回收停尸房排空失败(帧侧等待),区间保留下帧重试")?;
+        .or_fatal("网格回收停尸房排空失败(帧侧等待),上传链无法继续")?;
     let drained_slots = tables.drain_retired_slots();
     // —— 0.5) 卸载回收消费(4.4.1):事件读侧记下的待回收身份出账——驻留条目
     // 进停尸房(网格区间/旧图)、描述符槽进待回收账(下帧步骤 0 排空后才真正
@@ -190,7 +191,7 @@ pub(crate) fn flush_uploads(
     if let Some(atlas) = atlas.as_mut() {
         atlas
             .drain_graveyard(&uploader, &mut || frames.wait_all_inflight())
-            .or_fatal("图集停尸房排空失败(双条件等待),旧代保留下帧重试")?;
+            .or_fatal("图集停尸房排空失败(双条件等待),上传链无法继续")?;
     }
     // —— 1) 脏行盘点(4.1.4:上传清单 = 账本脏行):每行查其资产身份的驻留
     // 状态——全驻留的行就地清标;有未驻留身份的行保持脏标(重试),身份进本批。

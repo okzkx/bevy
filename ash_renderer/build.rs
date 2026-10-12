@@ -130,7 +130,12 @@ fn locate_spirv_val() -> Option<PathBuf> {
 /// 跑一次 spirv-val：词流写临时 .spv，--target-env vulkan1.3。被拒返回 Err 文本。
 fn run_spirv_val(val_exe: &Path, words: &[u32]) -> Result<(), String> {
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-    let spv_path = std::env::temp_dir().join("ash_renderer_build_val.spv");
+    // 4.5 小账:临时文件名混 pid——并发 cargo 调用（多 target/多工作区共享构建脚本
+    // 路径）不再互踩同一 .spv
+    let spv_path = std::env::temp_dir().join(format!(
+        "ash_renderer_build_val_{}.spv",
+        std::process::id()
+    ));
     std::fs::write(&spv_path, &bytes).map_err(|e| format!("写临时 .spv 失败: {e}"))?;
     let result = std::process::Command::new(val_exe)
         .arg("--target-env")

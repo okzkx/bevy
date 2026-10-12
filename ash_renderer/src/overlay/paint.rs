@@ -33,7 +33,7 @@ use super::ui::{EguiFrame, EguiState};
 /// 单槽 UI 顶点容量（个数；×20B = 1.25MB/槽）。调试 UI 单帧数百万顶点不可能，
 /// 超容 = Tier① 丢当帧 UI（可交互性损失不拦帧循环）。
 const UI_VERTEX_CAPACITY: usize = 64 * 1024;
-/// 单槽 UI 索引容量（个数；×4B = 256KB/槽）。
+/// 单槽 UI 索引容量（个数；×4B = 384KB/槽；4.5 订正：原注释 256KB 系误写）。
 const UI_INDEX_CAPACITY: usize = 96 * 1024;
 
 /// epaint 顶点的 Rust 镜像：与 overlay_draw.wgsl 的顶点输入同一契约

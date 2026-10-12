@@ -32,6 +32,7 @@ mod uploader;
 pub use context::Context;
 pub use descriptors::{
     pack_frame_uniforms, BindlessTables, FrameUniformsData, SlotBinding, TABLE_CAPACITY,
+    PLACEHOLDER_DIR_TO_LIGHT,
     FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
 };
 pub use frames::{DepthTarget, DrawCall, FrameDraw, Frame, FramePool, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT};

@@ -473,7 +473,9 @@ fn show_details(
             match &row.fields {
                 Some(fields) => {
                     egui::CollapsingHeader::new(egui::RichText::new(&row.name).monospace())
-                        .id_salt(row.name.as_str())
+                        // 4.5 小账:id_salt 混实体号——同短名组件(如多个 Transform 行)
+                        // 的折叠状态不再跨实体互串
+                        .id_salt(format!("{}/{}", entity.index(), row.name))
                         .default_open(false)
                         .show(ui, |ui| {
                             for (fname, fvalue) in fields {

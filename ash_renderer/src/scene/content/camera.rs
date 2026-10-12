@@ -93,8 +93,14 @@ pub(super) fn report_camera_setup(
         "非透视投影（意外）".to_string()
     };
     // 判定线：前向与"位置→注视点"夹角应近 0（浮点级）；超 1° 说明朝向语义被破坏
+    //（4.5 F19:越线升 warn 对齐同文件另两处核验的 Tier① 口径,不再静默 info）
     let expected = (CAMERA_TARGET - CAMERA_POS).normalize_or_zero();
     let deviation = (*cam_tf.forward()).angle_between(expected).to_degrees();
+    if deviation > 1.0 {
+        warn!(
+            "相机朝向核验越线：前向与位置→注视点夹角 {deviation:.4}° > 1°（朝向语义被破坏）"
+        );
+    }
     info!(
         "相机就位：1 台 @ {} 前向 {} 与位置→注视点夹角 {deviation:.4}°（looking_at 语义），{aspect}",
         fmt_vec3(cam_tf.translation()),
