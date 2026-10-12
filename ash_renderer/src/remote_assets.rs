@@ -1,10 +1,15 @@
-//! BRP 资产内容变更方法族（4.2.4）：测试驱动与 AI 通道的资产级变更入口。
+//! BRP 资产内容变更方法族（4.2.4）+ 运行期动态加载（4.3.3）：测试驱动与
+//! AI 通道的资产级变更入口。
 //!
 //! 分工（与 4.1.5 remote_objects 同款钉子）：**官方 BRP 没有资产内容写通道**
 //! ——反射 mutate 走 `world.mutate_component` 是组件值反射，够不着
 //! `Assets<T>` 容器里的资产本体，本方法族自研；操作本体在
-//! [`crate::scene::mechanism::mutate_asset`]（与将来 egui 面板共用的可复用
-//! 实现），本模块只是协议薄壳。
+//! [`crate::scene::mechanism::mutate_asset`] 与 [`object_ops`] 的加载封装
+//! （与将来 egui 面板共用的可复用实现），本模块只是协议薄壳。
+//!
+//! 动态加载语义（4.3.3）：`load_mesh`/`load_image` 受理即返回加载中柄——
+//! 路径失败经 [`AssetLoadFailedEvent`] 读侧收账（失败可见、行出队），到货经
+//! flush 转换上传、readiness 计量对账；加载是异步链，本方法族不等到货。
 //!
 //! 机制与边界：handler 是 Bevy system，跑在 `RemoteLast`（Last 之后）按帧
 //! 节拍执行——`Assets::get_mut` 触发的 `AssetEvent::Modified` 经 Messages
@@ -14,9 +19,13 @@
 use bevy::{prelude::*, remote::{error_codes, BrpError, BrpResult}};
 use serde_json::{json, Value};
 
-use crate::scene::mechanism::{mutate_asset, AssetOpError, MutateAsset};
+use crate::scene::mechanism::{
+    load_image_slot, load_mesh_rebind, mutate_asset, spawn_with_loaded_mesh, AssetOpError,
+    MutateAsset,
+};
 
 use super::remote::invalid_params;
+use super::remote_objects::object_op_error;
 
 use ash_macros::system;
 
@@ -65,6 +74,83 @@ pub(crate) fn mutate_asset_cmd(In(params): In<Option<Value>>, world: &mut World)
             "mesh": readback.mesh.map(|id| id.to_string()),
             "image": readback.image.map(|id| id.to_string()),
         },
+    }))
+}
+
+/// `ash_renderer/load_mesh` 的请求参数：`entity`（换到既有实体）与 `source`
+/// （克隆源结构挂新实体）二选一，都缺/都给 = 参数错。
+#[derive(serde::Deserialize)]
+struct LoadMeshParams {
+    /// 资产路径（含 glTF 子资产标签，如 `models/.../x.gltf#Mesh0/Primitive0`）。
+    path: String,
+    #[serde(default)]
+    entity: Option<Entity>,
+    #[serde(default)]
+    source: Option<Entity>,
+    /// spawn 模式的平移偏移（仅 source 模式，缺省 [0,0,0]）。
+    #[serde(default)]
+    offset: Option<[f32; 3]>,
+    #[serde(default)]
+    name_suffix: Option<String>,
+}
+
+/// `ash_renderer/load_mesh`：运行期异步加载新 mesh（4.3.3 动态加载驱动）。
+/// 受理即返回加载中柄的身份读回——pending/到货/失败经 `increment_stats` 的
+/// readiness 段与失败日志对账（加载是异步链，本方法不等到货）。
+#[system]
+pub(crate) fn load_mesh_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let value = params
+        .ok_or_else(|| invalid_params("params 缺失：需要 path 与 entity|source 二选一"))?;
+    let p: LoadMeshParams =
+        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    if p.entity.is_some() == p.source.is_some() {
+        return Err(invalid_params("entity 与 source 恰好给一个"));
+    }
+    let readback = if let Some(entity) = p.entity {
+        load_mesh_rebind(world, entity, &p.path)
+    } else {
+        spawn_with_loaded_mesh(
+            world,
+            p.source.unwrap_or(Entity::PLACEHOLDER),
+            &p.path,
+            p.offset.map(Vec3::from_array).unwrap_or(Vec3::ZERO),
+            p.name_suffix.as_deref().unwrap_or("（异步）"),
+        )
+    }
+    .map_err(object_op_error)?;
+    let material = world
+        .get::<bevy::pbr::MeshMaterial3d<bevy::pbr::StandardMaterial>>(readback.entity)
+        .map(|m| m.0.id().to_string())
+        .unwrap_or_default();
+    Ok(json!({
+        "entity": readback.entity.to_string(),
+        "mesh": readback.mesh.to_string(),
+        "material": material,
+        "state": "loading",
+    }))
+}
+
+/// `ash_renderer/load_image` 的请求参数。
+#[derive(serde::Deserialize)]
+struct LoadImageParams {
+    /// 贴图文件路径（相对资产根，如 `models/.../base_color.png`）。
+    path: String,
+    /// 定位实体（取它材质的 base_color 槽写入）。
+    entity: Entity,
+}
+
+/// `ash_renderer/load_image`：运行期异步加载新贴图并换 base_color 槽（4.3.3
+/// 贴图腿驱动）。共享材质语义：目标材质被原位改写，全部引用者同变。
+#[system]
+pub(crate) fn load_image_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 path 与 entity"))?;
+    let p: LoadImageParams =
+        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let image = load_image_slot(world, p.entity, &p.path).map_err(object_op_error)?;
+    Ok(json!({
+        "entity": p.entity.to_string(),
+        "image": image.to_string(),
+        "state": "loading",
     }))
 }
 

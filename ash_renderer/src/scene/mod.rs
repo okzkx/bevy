@@ -14,5 +14,6 @@ mod util;
 pub use content::SceneEntryPlugin;
 pub use mechanism::{
     AshAssetEventPlugin, AshCameraAspectPlugin, AshCameraControlPlugin, AshLedgerPlugin,
-    AshMaterialHookPlugin, AssetInvalidations, IncrementStats, InstanceLedger, InstanceRow,
+    AshMaterialHookPlugin, AshReadinessPlugin, AssetInvalidations, AssetReadiness, IncrementStats,
+    InstanceLedger, InstanceRow, ReadinessStats,
 };

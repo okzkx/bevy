@@ -28,6 +28,10 @@
 改资产内容走 Assets::get_mut 原位变更，AssetEvent::Modified 经读侧失效联动 →
 同柄重传（swap-on-commit）→ 画面次帧生效；stats 的 asset_events/asset_dirty_rows
 是事件读数的对账口。
+4.3 异步就绪族（load-mesh/load-image = ash_renderer 自定义，操作本体 object_ops
+加载封装）：受理即返回**加载中柄**（AssetId 已定型），pending/到货/失败/取消
+看 stats 的 readiness 段；路径失败经失败读侧收账（出重试队列，宿主存活），
+到货帧画面生效。加载是异步链，命令不等到货。
 宿主须先起（cargo run -p ash_renderer）；--host/--port 可覆盖，默认 127.0.0.1:15702。
 无鉴权仅本地：与宿主同机使用，不得对网开放（BRP 侦察笔记 §6 边界）。
 连接被拒时提示宿主未起，退出码 2；BRP 层错误（含 ENTITY_NOT_FOUND 等）原样
@@ -212,6 +216,30 @@ def cmd_stats(args):
     out(rpc(args.host, args.port, "ash_renderer/increment_stats"))
 
 
+def cmd_load_mesh(args):
+    params = {"path": args.path}
+    if args.entity and args.source:
+        print("brp: entity 与 source 恰好给一个")
+        sys.exit(1)
+    if args.entity:
+        params["entity"] = args.entity
+    elif args.source:
+        params["source"] = args.source
+    else:
+        print("brp: 需要 entity（换到既有实体）或 source（克隆挂新实体）之一")
+        sys.exit(1)
+    if args.offset:
+        params["offset"] = args.offset
+    if args.name_suffix:
+        params["name_suffix"] = args.name_suffix
+    out(rpc(args.host, args.port, "ash_renderer/load_mesh", params))
+
+
+def cmd_load_image(args):
+    out(rpc(args.host, args.port, "ash_renderer/load_image",
+            {"path": args.path, "entity": args.entity}))
+
+
 def cmd_discover(args):
     resp = rpc(args.host, args.port, "rpc.discover")
     if "result" in resp:
@@ -317,6 +345,19 @@ def main():
     p.set_defaults(func=cmd_mutate)
 
     sub.add_parser("stats", help="增量计量读数（ash_renderer/increment_stats）").set_defaults(func=cmd_stats)
+
+    p = sub.add_parser("load-mesh", help="异步加载新 mesh：entity=换到既有实体 / source=克隆挂新实体（ash_renderer/load_mesh）")
+    p.add_argument("--path", required=True, help='资产路径（如 "models/FlightHelmet/FlightHelmet.gltf#Mesh0/Primitive1"）')
+    p.add_argument("--entity", help="既有实体号：换绑其 Mesh3d 柄为加载中柄")
+    p.add_argument("--source", help="源 primitive 实体号：克隆结构后换柄（新对象待到货出现）")
+    p.add_argument("--offset", nargs=3, type=float, metavar=("X", "Y", "Z"), help="spawn 模式相对源实体的平移偏移")
+    p.add_argument("--name-suffix", help="spawn 模式 Name 后缀（默认 （异步））")
+    p.set_defaults(func=cmd_load_mesh)
+
+    p = sub.add_parser("load-image", help="异步加载新贴图换目标材质 base_color 槽（ash_renderer/load_image，共享材质全引用者同变）")
+    p.add_argument("--path", required=True, help="贴图文件路径（相对资产根）")
+    p.add_argument("--entity", required=True, help="定位实体（取其材质槽写入）")
+    p.set_defaults(func=cmd_load_image)
 
     sub.add_parser("discover", help="列出全部可用 BRP 方法").set_defaults(func=cmd_discover)
 

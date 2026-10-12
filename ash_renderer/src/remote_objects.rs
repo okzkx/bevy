@@ -17,8 +17,8 @@ use bevy::{pbr::StandardMaterial, prelude::*, remote::{error_codes, BrpError, Br
 use serde_json::{json, Value};
 
 use crate::scene::mechanism::{
-    replace_handles as apply_handle_swap, spawn_primitive_clone, HandleSwapReadback,
-    InstanceLedger, ObjectOpError,
+    replace_handles as apply_handle_swap, spawn_primitive_clone, AssetReadiness,
+    HandleSwapReadback, InstanceLedger, ObjectOpError,
 };
 
 use super::remote::invalid_params;
@@ -39,8 +39,9 @@ struct SpawnPrimitiveParams {
 }
 
 /// 把操作层错误映射到协议错误码（ObjectOpError 是 Tier② 语义的载体，这里
-/// 只做翻译，不吞——原 message 原样带出）。
-fn object_op_error(err: ObjectOpError) -> BrpError {
+/// 只做翻译，不吞——原 message 原样带出）。`pub(crate)` 给 remote_assets 的
+/// 加载方法族复用（4.3.3）。
+pub(crate) fn object_op_error(err: ObjectOpError) -> BrpError {
     match err {
         ObjectOpError::EntityMissing(e) => BrpError::entity_not_found(e),
         ObjectOpError::SourceNotPrimitive(e) => BrpError {
@@ -52,6 +53,11 @@ fn object_op_error(err: ObjectOpError) -> BrpError {
             BrpError::component_not_present(name, entity)
         }
         ObjectOpError::NothingToDo => invalid_params("至少一项变更（mesh_from / material_from）"),
+        ObjectOpError::MaterialAssetMissing(e) => BrpError {
+            code: error_codes::COMPONENT_ERROR,
+            message: format!("实体 {e:?} 的材质资产不在容器中，槽写拒绝"),
+            data: None,
+        },
     }
 }
 
@@ -111,10 +117,16 @@ pub(crate) fn replace_handles(In(params): In<Option<Value>>, world: &mut World) 
 }
 
 /// `ash_renderer/increment_stats`：账本与增量计量读数（只读，判定线证据通道）。
-/// 处理数/扫描数分列——"零上传"不说成"零 CPU 每对象成本"。
+/// 处理数/扫描数分列——"零上传"不说成"零 CPU 每对象成本"。4.3：readiness 段
+/// 报异步就绪账（pending/等待/到货/失败/取消分列）。
 #[system]
-pub(crate) fn increment_stats(In(_params): In<Option<Value>>, ledger: Res<InstanceLedger>) -> BrpResult {
+pub(crate) fn increment_stats(
+    In(_params): In<Option<Value>>,
+    ledger: Res<InstanceLedger>,
+    readiness: Res<AssetReadiness>,
+) -> BrpResult {
     let s = ledger.stats;
+    let r = readiness.stats;
     Ok(json!({
         "rows": ledger.len(),
         "discovery": {
@@ -140,6 +152,18 @@ pub(crate) fn increment_stats(In(_params): In<Option<Value>>, ledger: Res<Instan
             "frame_dirty_rows": s.asset_dirty_rows,
             "total": s.asset_events_total,
             "invalidations_total": s.asset_invalidations_total,
+        },
+        "readiness": {
+            "pending_meshes": r.pending_meshes,
+            "pending_images": r.pending_images,
+            "wait_frames_total": r.wait_frames_total,
+            "last_arrival_wait": r.last_arrival_wait,
+            "arrivals_total": r.arrivals_total,
+            "failures_total": r.failures_total,
+            "failures_frame": r.failures_frame,
+            "rejects_total": r.rejects_total,
+            "cancelled_total": r.cancelled_total,
+            "failed_rows_cleared_total": r.failed_rows_cleared_total,
         },
     }))
 }

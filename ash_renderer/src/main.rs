@@ -17,7 +17,7 @@ use ash_renderer::{
     remote::AshRemotePlugin,
     scene::{
         AshAssetEventPlugin, AshCameraAspectPlugin, AshCameraControlPlugin, AshLedgerPlugin,
-        AshMaterialHookPlugin, SceneEntryPlugin,
+        AshMaterialHookPlugin, AshReadinessPlugin, SceneEntryPlugin,
     },
 };
 use bevy::{
@@ -82,6 +82,9 @@ fn main() -> AppExit {
         // 资产事件读侧（4.2，机制半边）：AssetEvent::Modified → 失效凭据 +
         // 关联行重挂脏标（发现侧第二条入口，与对象五类变更并轨同一脏集）
         .add_plugins(AshAssetEventPlugin)
+        // 异步就绪读侧（4.3，机制半边）：pending 身份账 + AssetLoadFailedEvent
+        // 读侧（失败进 failed 集不再重试，行出队由 flush 盘点裁决）
+        .add_plugins(AshReadinessPlugin)
         // BRP 远程直控（3.12）：World 经 HTTP JSON-RPC 暴露在 127.0.0.1:15702，
         // 官方 inspection 方法族 + 场景语义自定义方法（查询/改 Transform/相机给值）
         .add_plugins(AshRemotePlugin)

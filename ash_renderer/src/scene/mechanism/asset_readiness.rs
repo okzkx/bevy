@@ -1,0 +1,292 @@
+//! 异步就绪账面与失败取消（4.3.1/4.3.2）：资产"还没到货"这条时间线的显式账。
+//!
+//! 分工（与 4.2 [`AssetInvalidations`] 同款资产身份粒度）：账本行是实体粒度
+//! （[`InstanceLedger`]），pending 是**资产身份粒度**的账（跨行共享身份只记
+//! 一份），两层各自键控。发现侧只有 flush_uploads 一个写入点——它是最先撞见
+//! "查无"与"到货"的地方；失败读侧（本模块系统）只记账不裁决，行是否出队由
+//! flush 盘点时结合整行状态统一判定（见 upload.rs 盘点段）。
+//!
+//! 就绪判定（立案计划 §5 钉明）：**`Assets::get` 命中即就绪，逐腿递归**——
+//! Mesh/Image 内容自包含；StandardMaterial 的依赖（五槽 Image）由 flush 逐槽
+//! 判（材质本体就绪而槽内贴图未到 = 贴图腿各自 pending）。`LoadedWithDependencies`
+//! 的"递归依赖全齐"是容器级语义（glTF/WorldAsset 整体），本宿主账本行只挂
+//! 叶级资产，不消费该事件（收到只走 4.2 的计数口径）。
+//!
+//! 失败语义（判定线"失败可见且不无限重试"）：加载失败（[`AssetLoadFailedEvent`]
+//! ，现行零读侧的缺口）与转换/规格拒绝（flush 内）都进 failed 集——该身份
+//! 不再进重试批；引用它的行在 flush 盘点时若无其余 pending 腿即出队（清脏标
+//! ，防僵尸重试）。`Added`/`Modified` 事件复活身份（文件修复后重载、mutate
+//! 修数据可重试），自动恢复的上限归 4.4 热重载。
+//!
+//! 取消语义（判定线"等待期间删除或换柄不错误复活"）：pending 身份当帧没有
+//! 任何脏行引用（despawn 清行 / 换柄改指）即出账计取消——到货后无行可服务
+//! ，天然不上传不错误复活（行驱动盘点是结构性保证，测试钉证据）。
+//!
+//! 零 Vulkan 代码：GPU 侧"上传完成才可使用"由 3.2.4 票据承担，本模块只补
+//! ECS 侧账面与计量。
+
+use std::collections::{HashMap, HashSet};
+
+use bevy::{asset::AssetLoadFailedEvent, image::Image, pbr::StandardMaterial, prelude::*};
+
+use ash_macros::system;
+
+use super::ledger::update_ledger;
+
+/// 异步就绪计量（判定线证据口径，与 [`super::ledger::IncrementStats`] 分列）：
+/// pending/等待/到货/失败/取消分开报，不把"零上传"说成"零账面成本"。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReadinessStats {
+    /// 当前 pending 的 mesh 身份数（资产未到货，脏行跨帧重试中）。
+    pub pending_meshes: usize,
+    /// 当前 pending 的贴图身份数。
+    pub pending_images: usize,
+    /// 等待帧数累计（每帧每 pending 身份 +1；平均口径 = total / arrivals）。
+    pub wait_frames_total: u64,
+    /// 最近一次到货身份的等待帧数（单资产口径）。
+    pub last_arrival_wait: u64,
+    /// 到货累计（pending 身份成功转换上传、驻留登记的次数）。
+    pub arrivals_total: u64,
+    /// 加载失败事件累计（[`AssetLoadFailedEvent`] 收到数，含无人等待的身份）。
+    pub failures_total: u64,
+    /// 本帧失败数（同 [`Self::failures_total`] 的帧窗口）。
+    pub failures_frame: usize,
+    /// 转换/规格拒绝身份累计（flush 内确定性拒绝，warn 一次后不再重试）。
+    pub rejects_total: u64,
+    /// 取消累计（pending 身份失去全部引用行：despawn / 换柄）。
+    pub cancelled_total: u64,
+    /// 因失败腿出队的账本行累计（清脏标，不复活）。
+    pub failed_rows_cleared_total: u64,
+}
+
+/// 异步就绪账面（4.3.1）：pending 身份集（身份 → 已等待帧数）+ failed 身份集
+/// （加载失败 ∪ 转换拒绝，不再重试）+ 失败读侧计量。flush_uploads 独占写
+/// pending 侧（mark/arrive/expel/reconcile），失败读侧系统独占写 failed 侧
+/// （note_failure/revive）——两侧不同系统不并发（Bevy 系统级互斥）。
+#[derive(Resource, Default)]
+pub struct AssetReadiness {
+    pending_meshes: HashMap<AssetId<Mesh>, u64>,
+    pending_images: HashMap<AssetId<Image>, u64>,
+    failed_meshes: HashSet<AssetId<Mesh>>,
+    failed_images: HashSet<AssetId<Image>>,
+    failed_materials: HashSet<AssetId<StandardMaterial>>,
+    pub stats: ReadinessStats,
+}
+
+impl AssetReadiness {
+    /// 该 mesh 身份是否已失败（加载失败或转换拒绝，flush 盘点跳过重试）。
+    #[must_use]
+    pub fn mesh_failed(&self, id: AssetId<Mesh>) -> bool {
+        self.failed_meshes.contains(&id)
+    }
+
+    /// 该贴图身份是否已失败（语义同 [`Self::mesh_failed`]）。
+    #[must_use]
+    pub fn image_failed(&self, id: AssetId<Image>) -> bool {
+        self.failed_images.contains(&id)
+    }
+
+    /// 该材质身份是否已失败（材质无驻留内容，失败只体现为行级出队）。
+    #[must_use]
+    pub fn material_failed(&self, id: AssetId<StandardMaterial>) -> bool {
+        self.failed_materials.contains(&id)
+    }
+
+    /// 加载失败记账（失败读侧调用）：进 failed 集（幂等），计量按事件数累计。
+    pub fn note_failure_mesh(&mut self, id: AssetId<Mesh>) {
+        self.failed_meshes.insert(id);
+        self.stats.failures_total += 1;
+        self.stats.failures_frame += 1;
+    }
+
+    /// 贴图加载失败记账（语义同 [`Self::note_failure_mesh`]）。
+    pub fn note_failure_image(&mut self, id: AssetId<Image>) {
+        self.failed_images.insert(id);
+        self.stats.failures_total += 1;
+        self.stats.failures_frame += 1;
+    }
+
+    /// 材质加载失败记账（语义同 [`Self::note_failure_mesh`]）。
+    pub fn note_failure_material(&mut self, id: AssetId<StandardMaterial>) {
+        self.failed_materials.insert(id);
+        self.stats.failures_total += 1;
+        self.stats.failures_frame += 1;
+    }
+
+    /// 身份复活（失败读侧收到 `Added`/`Modified` 时调用）：移出 failed 集，
+    /// 后续重试放行（文件修复后重载、mutate 修数据）。幂等。
+    pub fn revive_mesh(&mut self, id: AssetId<Mesh>) {
+        self.failed_meshes.remove(&id);
+    }
+
+    /// 贴图身份复活（语义同 [`Self::revive_mesh`]）。
+    pub fn revive_image(&mut self, id: AssetId<Image>) {
+        self.failed_images.remove(&id);
+    }
+
+    /// 材质身份复活（语义同 [`Self::revive_mesh`]）。
+    pub fn revive_material(&mut self, id: AssetId<StandardMaterial>) {
+        self.failed_materials.remove(&id);
+    }
+
+    /// pending 记账（flush 转换段查无时调用）：新身份入账等待 0 帧，旧身份
+    /// 保留已等待帧数（跨帧累计等待）。
+    pub fn mark_pending_mesh(&mut self, id: AssetId<Mesh>) {
+        self.pending_meshes.entry(id).or_insert(0);
+    }
+
+    /// 贴图 pending 记账（语义同 [`Self::mark_pending_mesh`]）。
+    pub fn mark_pending_image(&mut self, id: AssetId<Image>) {
+        self.pending_images.entry(id).or_insert(0);
+    }
+
+    /// 到货销账（flush 驻留登记成功后调用）：pending 身份离开账面，等待帧数
+    /// 计入到货计量。非 pending 身份（稳态重传等）无账可销，静默无动作。
+    pub fn arrive_mesh(&mut self, id: AssetId<Mesh>) {
+        if let Some(waited) = self.pending_meshes.remove(&id) {
+            self.stats.arrivals_total += 1;
+            self.stats.last_arrival_wait = waited;
+        }
+    }
+
+    /// 贴图到货销账（语义同 [`Self::arrive_mesh`]）。
+    pub fn arrive_image(&mut self, id: AssetId<Image>) {
+        if let Some(waited) = self.pending_images.remove(&id) {
+            self.stats.arrivals_total += 1;
+            self.stats.last_arrival_wait = waited;
+        }
+    }
+
+    /// 拒绝销账（flush 转换拒绝时调用）：pending 记录作废，身份进 failed 集
+    /// 不再重试。调用方按身份去重（warn 一次语义），计量按新身份累计。
+    pub fn expel_mesh(&mut self, id: AssetId<Mesh>) {
+        self.pending_meshes.remove(&id);
+        if self.failed_meshes.insert(id) {
+            self.stats.rejects_total += 1;
+        }
+    }
+
+    /// 贴图拒绝销账（语义同 [`Self::expel_mesh`]）。
+    pub fn expel_image(&mut self, id: AssetId<Image>) {
+        self.pending_images.remove(&id);
+        if self.failed_images.insert(id) {
+            self.stats.rejects_total += 1;
+        }
+    }
+
+    /// 失败腿出队的行数记账（flush 盘点裁决后调用，只累计不操作行）。
+    pub fn note_failed_rows_cleared(&mut self, rows: usize) {
+        self.stats.failed_rows_cleared_total += rows as u64;
+    }
+
+    /// 帧末对账（flush 收尾调用，含空批帧）：当帧仍被脏行引用的 pending 身份
+    /// 等待 +1；失去全部引用的身份出账计取消（despawn/换柄的"到货时人已不在"）。
+    pub fn reconcile(
+        &mut self,
+        marked_meshes: &HashSet<AssetId<Mesh>>,
+        marked_images: &HashSet<AssetId<Image>>,
+    ) {
+        self.pending_meshes.retain(|id, waited| {
+            if marked_meshes.contains(id) {
+                *waited += 1;
+                self.stats.wait_frames_total += 1;
+                true
+            } else {
+                self.stats.cancelled_total += 1;
+                false
+            }
+        });
+        self.pending_images.retain(|id, waited| {
+            if marked_images.contains(id) {
+                *waited += 1;
+                self.stats.wait_frames_total += 1;
+                true
+            } else {
+                self.stats.cancelled_total += 1;
+                false
+            }
+        });
+        self.stats.pending_meshes = self.pending_meshes.len();
+        self.stats.pending_images = self.pending_images.len();
+    }
+}
+
+/// 异步就绪读侧插件：初始化 [`AssetReadiness`]，把 [`track_asset_failures`]
+/// 挂 PostUpdate（账本对账之后，与 4.2 事件读侧同节拍）。接线收在本插件内。
+pub struct AshReadinessPlugin;
+
+impl Plugin for AshReadinessPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<AssetReadiness>().add_systems(
+            PostUpdate,
+            track_asset_failures.after(update_ledger),
+        );
+    }
+}
+
+/// 失败读侧本体（4.3.2）：三类资产 [`AssetLoadFailedEvent`] 进 failed 集 +
+/// 计量 + 一次可见告警（现行零读侧缺口的收口点）。**只记账不裁决**——行出队
+/// 由 flush 盘点结合整行状态判定（失败腿 + 无其余 pending 腿才清脏标），本
+/// 系统不碰账本。`Added`/`Modified` 事件复活身份（重载/修数据重试放行）。
+/// 无引用者的失败也计数（事件不误伤的镜像面：失败不因无人等待而失明）。
+#[system]
+pub(crate) fn track_asset_failures(
+    mut mesh_failures: MessageReader<AssetLoadFailedEvent<Mesh>>,
+    mut material_failures: MessageReader<AssetLoadFailedEvent<StandardMaterial>>,
+    mut image_failures: MessageReader<AssetLoadFailedEvent<Image>>,
+    // Added/Modified = "身份有新内容进场"：加载失败后重试成功 / mutate 修数据
+    // 的重试放行口。三类分开读（与 4.2 读侧同款，不并链）。
+    mut mesh_events: MessageReader<AssetEvent<Mesh>>,
+    mut material_events: MessageReader<AssetEvent<StandardMaterial>>,
+    mut image_events: MessageReader<AssetEvent<Image>>,
+    mut readiness: ResMut<AssetReadiness>,
+) {
+    readiness.stats.failures_frame = 0;
+    let mut failures = 0usize;
+    for event in mesh_failures.read() {
+        failures += 1;
+        readiness.note_failure_mesh(event.id);
+        warn!(
+            "资产加载失败 mesh {:?}（{}），出重试队列不再重试",
+            event.id,
+            event.error
+        );
+    }
+    for event in material_failures.read() {
+        failures += 1;
+        readiness.note_failure_material(event.id);
+        warn!(
+            "资产加载失败 材质 {:?}（{}），出重试队列不再重试",
+            event.id,
+            event.error
+        );
+    }
+    for event in image_failures.read() {
+        failures += 1;
+        readiness.note_failure_image(event.id);
+        warn!(
+            "资产加载失败贴图 {:?}（{}），出重试队列不再重试",
+            event.id,
+            event.error
+        );
+    }
+    // 复活：只清旗标不计量（重试是身份的自然权利，不是事件）
+    for event in mesh_events.read() {
+        if let AssetEvent::Added { id } | AssetEvent::Modified { id } = event {
+            readiness.revive_mesh(*id);
+        }
+    }
+    for event in material_events.read() {
+        if let AssetEvent::Added { id } | AssetEvent::Modified { id } = event {
+            readiness.revive_material(*id);
+        }
+    }
+    for event in image_events.read() {
+        if let AssetEvent::Added { id } | AssetEvent::Modified { id } = event {
+            readiness.revive_image(*id);
+        }
+    }
+    if failures > 0 {
+        info!("资产失败读侧:本帧 {failures} 个身份进 failed 集，行出队由 flush 盘点裁决");
+    }
+}

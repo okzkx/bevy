@@ -19,7 +19,9 @@
 //! (3.2.2.2)。贴图身份从脏行的 material 柄出发去 `Assets<StandardMaterial>`
 //! 解引用五槽,再按资产身份去重——FlightHelmet 实测:材质 6、贴图槽 24、
 //! 去重 15。资产未到货/被拒的行保持脏标下帧重试(与全量快照时代同语义,
-//! 只是重试队列从"全部在场行"收敛为"脏行")。
+//! 只是重试队列从"全部在场行"收敛为"脏行");4.3 起未到货有显式账面
+//! ([`AssetReadiness`]:pending 身份 → 等待帧数),加载失败/转换拒绝进
+//! failed 集不再重试,失败腿且无其余 pending 腿的行盘点时出队。
 //!
 //! 贴图上传形态(显存机制篇判定线):staging 字节 → `vkCmdCopyBufferToImage`
 //! (重排由 copy 引擎完成),前后置布局屏障与跨族 release 在 uploader 图像段;
@@ -41,7 +43,7 @@ use ash_macros::system;
 
 use crate::{
     common::syntax::{OnceLog, OptionTierExt, ResultTierExt},
-    scene::{AssetInvalidations, InstanceLedger},
+    scene::{AssetInvalidations, AssetReadiness, InstanceLedger},
     vulkan::{
         sampler_key, FramePool, GpuImage, ImageCache, MeshPool, StagingImageCopy, UploadBatch,
         Uploader,
@@ -73,6 +75,7 @@ impl Plugin for AshUploadPlugin {
                 .run_if(resource_exists::<ImageCache>)
                 .run_if(resource_exists::<crate::vulkan::BindlessTables>)
                 .run_if(resource_exists::<AssetInvalidations>)
+                .run_if(resource_exists::<AssetReadiness>)
                 .before(crate::driver::host::draw_frame)
                 .before(OnAppExitSystems),
         );
@@ -102,6 +105,9 @@ pub(crate) struct UploadData<'w> {
     /// 资产失效凭据(4.2.2 读侧产物:换内容成功的身份在此销账,未成功的保留
     /// 供行级重试)。
     invalidations: ResMut<'w, AssetInvalidations>,
+    /// 异步就绪账面(4.3.1):pending/failed 身份账,本系统独占写 pending 侧
+    /// (mark/arrive/expel/reconcile),失败读侧只写 failed 侧。
+    readiness: ResMut<'w, AssetReadiness>,
     ctx: Res<'w, crate::vulkan::Context>,
     /// 帧槽:池迁移销毁旧池前的"图形最后使用"等待经此接线(4.1.1)。
     frames: Res<'w, FramePool>,
@@ -128,6 +134,7 @@ pub(crate) fn flush_uploads(
         ref image_assets,
         mut ledger,
         mut invalidations,
+        mut readiness,
         ref ctx,
         ref frames,
     } = data;
@@ -150,6 +157,9 @@ pub(crate) fn flush_uploads(
     let mut fresh_images: Vec<(AssetId<Image>, Handle<Image>, bool)> = Vec::new();
     let mut materials_pending = 0usize;
     let mut settled_rows: Vec<Entity> = Vec::new();
+    // 4.3.2:失败腿出队的行数(失败且无其余 pending 腿的行清脏标,防僵尸重试;
+    // mesh 未驻留 = DrawList 本就暂缓该行,失败贴图 = fallback 白图照画)
+    let mut failed_settled_rows = 0usize;
     let dirty_entities: Vec<Entity> = ledger.dirty_entities().collect();
     for entity in dirty_entities {
         let Some(row) = ledger.row(entity) else {
@@ -157,11 +167,19 @@ pub(crate) fn flush_uploads(
             settled_rows.push(entity);
             continue;
         };
-        let mut complete = true;
+        // 4.3.1:每腿三态判定——完成(驻留且不待换)/失败(身份在 failed 集,
+        // 不再重试)/pending(未到货,保持脏标跨帧重试)。行级裁决:有 pending
+        // 腿就保持脏(mesh 可能还在到货路上),无 pending 腿且有失败腿才出队。
+        let mut pending_leg = false;
+        let mut failed_leg = false;
         let mesh_id = row.mesh.id();
         let mesh_replace = invalidations.mesh_pending(mesh_id);
-        if pool.resident(mesh_id).is_none() || mesh_replace {
-            complete = false;
+        if pool.resident(mesh_id).is_some() && !mesh_replace {
+            // 该腿完成
+        } else if readiness.mesh_failed(mesh_id) {
+            failed_leg = true;
+        } else {
+            pending_leg = true;
             if seen.insert(mesh_id) {
                 let had_old = pool.resident(mesh_id).is_some();
                 fresh.push((mesh_id, row.mesh.clone(), had_old));
@@ -172,8 +190,13 @@ pub(crate) fn flush_uploads(
                 for handle in TEXTURE_SLOTS(material).into_iter().flatten() {
                     let id = handle.id();
                     let img_replace = invalidations.image_pending(id);
-                    if image_cache.resident(id).is_none() || img_replace {
-                        complete = false;
+                    if image_cache.resident(id).is_some() && !img_replace {
+                        continue; // 该腿完成
+                    }
+                    if readiness.image_failed(id) {
+                        failed_leg = true;
+                    } else {
+                        pending_leg = true;
                         if img_seen.insert(id) {
                             let had_old = image_cache.resident(id).is_some();
                             fresh_images.push((id, handle.clone(), had_old));
@@ -182,19 +205,27 @@ pub(crate) fn flush_uploads(
                 }
             }
             None => {
-                // 材质未到货：整行保持脏标下帧重试
-                complete = false;
-                materials_pending += 1;
+                // 材质未到货:行保持脏标下帧重试(材质已失败则该腿记失败)
+                if readiness.material_failed(row.material.id()) {
+                    failed_leg = true;
+                } else {
+                    pending_leg = true;
+                    materials_pending += 1;
+                }
             }
         }
-        if complete {
+        if !pending_leg {
             settled_rows.push(entity);
+            if failed_leg {
+                failed_settled_rows += 1;
+            }
         }
     }
     // 清标不依赖后续步骤成败:行"全驻留"是账本事实,与提交无关
     for entity in settled_rows {
         ledger.clear_dirty(entity);
     }
+    readiness.note_failed_rows_cleared(failed_settled_rows);
     // —— 1.5) 收账:脏集清空且账本非空 = 全部资产驻留,报一次(稳态基准证据:
     // 之后每帧盘点 0 行、上传 0B,处理成本只剩 DrawList 读账本)。放空批
     // early-return 之前——清空脏集的那帧多半就是空批帧,放在后面永远打不出。
@@ -205,16 +236,24 @@ pub(crate) fn flush_uploads(
         ));
     }
     // —— 2) 转换/规格映射(Tier①:未到货跳过重试,拒绝 warn 一次)——
+    // 4.3.1:查无 → pending 记账(身份 → 等待帧数,跨帧累计);拒绝 → 进
+    // failed 集不再重试(4.3.2,僵尸行由盘点段出队)。
     let mut converted: Vec<(AssetId<Mesh>, crate::vulkan::ConvertedMesh, bool)> = Vec::new();
     let mut pending = 0usize;
+    let mut marked_meshes: HashSet<AssetId<Mesh>> = HashSet::new();
     for (id, handle, replace) in fresh {
         match meshes.get(&handle) {
-            None => pending += 1, // 异步加载未到货,下帧脏行重试
+            None => {
+                pending += 1; // 异步加载未到货,下帧脏行重试
+                readiness.mark_pending_mesh(id);
+                marked_meshes.insert(id);
+            }
             Some(mesh) => match crate::vulkan::convert_mesh(mesh) {
                 Ok(c) => converted.push((id, c, replace)),
                 Err(e) => {
                     if state.warned.insert(id) {
                         warn!("mesh {id:?} 转换拒绝({e}),本步不绘制该资产,帧循环照常");
+                        readiness.expel_mesh(id);
                     }
                 }
             },
@@ -223,21 +262,29 @@ pub(crate) fn flush_uploads(
     let mut image_specs: Vec<(AssetId<Image>, Handle<Image>, crate::vulkan::ImageSpec, bool)> =
         Vec::new();
     let mut pending_images = 0usize;
+    let mut marked_images: HashSet<AssetId<Image>> = HashSet::new();
     for (id, handle, replace) in fresh_images {
         match image_assets.get(&handle) {
-            None => pending_images += 1, // 异步加载未到货,下帧脏行重试
+            None => {
+                pending_images += 1; // 异步加载未到货,下帧脏行重试
+                readiness.mark_pending_image(id);
+                marked_images.insert(id);
+            }
             Some(image) => match crate::vulkan::image_spec(image) {
                 Ok(spec) => image_specs.push((id, handle, spec, replace)),
                 Err(e) => {
                     if state.warned_images.insert(id) {
                         warn!("贴图 {id:?} 规格拒绝({e}),本步不采样该资产,帧循环照常");
+                        readiness.expel_image(id);
                     }
                 }
             },
         }
     }
     if converted.is_empty() && image_specs.is_empty() {
-        return Ok(()); // 空批次不提交(3.2.4.1):未到货/全拒绝/全已驻留都走这里
+        // 空批不提交(3.2.4.1);pending 帧末对账照走——未到货的等待帧数照常累计
+        readiness.reconcile(&marked_meshes, &marked_images);
+        return Ok(());
     }
     // —— 3) 容量保证(初次懒建或维护迁移,等待/迁移在池内分账;迁移销毁旧池
     // 前经 frames.wait_all_inflight 等"图形最后使用",4.1.1)——
@@ -402,13 +449,19 @@ pub(crate) fn flush_uploads(
         committed_images.push(*id);
     }
     // 换内容成功的身份销账(4.2.2 凭据消费);未成功(未到货/被拒)的保留,
-    // 行保持脏标下帧重试
+    // 行保持脏标下帧重试。4.3.1:到货销账——pending 身份离开账面,等待帧数
+    // 计入到货计量(非 pending 身份的稳态重传无账可销,静默无动作)。
     for id in committed_meshes {
         invalidations.consume_mesh(id);
+        readiness.arrive_mesh(id);
     }
     for id in committed_images {
         invalidations.consume_image(id);
+        readiness.arrive_image(id);
     }
+    // 4.3.1 帧末对账:仍被引用的 pending 身份等待 +1,失去引用的出账计取消
+    //(despawn/换柄的"到货时人已不在",到货后无行可服务=不错误复活)
+    readiness.reconcile(&marked_meshes, &marked_images);
     let srgb_count = image_specs
         .iter()
         .filter(|(_, _, spec, _)| spec.srgb_role())
@@ -425,7 +478,7 @@ pub(crate) fn flush_uploads(
         "上传批次 #{ticket}:mesh {} 个(其中换内容 {replaced_meshes},顶点 {vertex_bytes}B / 索引 {index_bytes}B)\
          + 贴图 {} 张(其中换内容重传 {replaced_images},{image_bytes}B,sRGB 角色 {srgb_count} / 线性 {});\
          槽位发布:纹理槽 {}/{}(含 fallback 0 号)、采样器槽 {} 种(本批涉及 {new_sampler});\
-         未到货跳过 mesh {pending} / 贴图 {pending_images}(材质缺 {materials_pending});\
+         未到货跳过 mesh {pending} / 贴图 {pending_images}(材质缺 {materials_pending}),失败出队行 {failed_settled_rows};\
          已驻留 mesh {} / 贴图 {}",
         planned_count,
         image_specs.len(),
