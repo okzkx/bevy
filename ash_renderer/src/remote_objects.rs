@@ -16,9 +16,12 @@
 use bevy::{pbr::StandardMaterial, prelude::*, remote::{error_codes, BrpError, BrpResult}};
 use serde_json::{json, Value};
 
-use crate::scene::mechanism::{
-    replace_handles as apply_handle_swap, spawn_primitive_clone, AssetReadiness,
-    HandleSwapReadback, InstanceLedger, ObjectOpError,
+use crate::{
+    scene::mechanism::{
+        replace_handles as apply_handle_swap, spawn_primitive_clone, AssetReadiness,
+        AssetRetirements, HandleSwapReadback, InstanceLedger, ObjectOpError,
+    },
+    vulkan::{BindlessTables, ImageCache, MeshPool},
 };
 
 use super::remote::invalid_params;
@@ -118,15 +121,22 @@ pub(crate) fn replace_handles(In(params): In<Option<Value>>, world: &mut World) 
 
 /// `ash_renderer/increment_stats`：账本与增量计量读数（只读，判定线证据通道）。
 /// 处理数/扫描数分列——"零上传"不说成"零 CPU 每对象成本"。4.3：readiness 段
-/// 报异步就绪账（pending/等待/到货/失败/取消分列）。
+/// 报异步就绪账（pending/等待/到货/失败/取消分列）。4.4：recycle 段报卸载回收
+/// 账（事件/出账/驻留存量/停尸房/free list 分列——"存量回基线"的读数口）。
 #[system]
 pub(crate) fn increment_stats(
     In(_params): In<Option<Value>>,
     ledger: Res<InstanceLedger>,
     readiness: Res<AssetReadiness>,
+    retirements: Res<AssetRetirements>,
+    pool: Res<MeshPool>,
+    image_cache: Res<ImageCache>,
+    tables: Res<BindlessTables>,
 ) -> BrpResult {
     let s = ledger.stats;
     let r = readiness.stats;
+    let c = retirements.stats;
+    let p = pool.recycle_ledger();
     Ok(json!({
         "rows": ledger.len(),
         "discovery": {
@@ -164,6 +174,27 @@ pub(crate) fn increment_stats(
             "rejects_total": r.rejects_total,
             "cancelled_total": r.cancelled_total,
             "failed_rows_cleared_total": r.failed_rows_cleared_total,
+        },
+        "recycle": {
+            "removed_meshes_total": c.removed_meshes_total,
+            "removed_images_total": c.removed_images_total,
+            "unused_events_total": c.unused_events_total,
+            "resident_reclaimed_total": c.resident_reclaimed_total,
+            "slots_reclaimed_total": c.slots_reclaimed_total,
+            "pool_resident_count": pool.resident_count(),
+            "pool_resident_vertex_bytes": p.resident_vertex_bytes,
+            "pool_resident_index_bytes": p.resident_index_bytes,
+            "pool_used_peak_vertex": pool.usage().0 .0,
+            "pool_capacity_vertex": pool.usage().0 .1,
+            "pool_graveyard_groups": p.graveyard_groups,
+            "pool_free_ranges": p.free_ranges,
+            "pool_free_vertex_bytes": p.free_vertex_bytes,
+            "pool_free_index_bytes": p.free_index_bytes,
+            "image_resident_count": image_cache.resident_count(),
+            "image_graveyard": image_cache.graveyard_len(),
+            "texture_slots_used": tables.used_texture_slots(),
+            "sampler_slots_used": tables.used_sampler_slots(),
+            "tables_retired_slots": tables.retired_slot_count(),
         },
     }))
 }

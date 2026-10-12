@@ -430,6 +430,30 @@ impl ImageCache {
         Ok(())
     }
 
+    /// 卸载驻留条目（4.4.1）：旧图进停尸房（在飞安全）、描述符槽进待回收账
+    /// ——纹理槽直接请求回收；采样器槽仅当同键最后一张退场才请求（共享去重
+    /// 的反向操作，与 publish 的"同键共享"配对）。本条目出账后再查同键，检查
+    /// 针对剩余驻留条目。返回是否发生退场（幂等：未驻留身份 no-op）。
+    pub fn retire(
+        &mut self,
+        id: AssetId<BevyImage>,
+        tables: &mut super::descriptors::BindlessTables,
+    ) -> bool {
+        let Some((image, _, slots)) = self.resident.remove(&id) else {
+            return false;
+        };
+        self.graveyard.push(image);
+        tables.retire_texture(slots.texture);
+        if !self
+            .resident
+            .values()
+            .any(|(_, _, s)| s.sampler == slots.sampler)
+        {
+            tables.retire_sampler_by_slot(slots.sampler);
+        }
+        true
+    }
+
     /// 驻留登记:仅在对应批次提交成功后调用(失败路径不留账本行,与 pool.commit 同责)。
     /// 槽位绑定由 [`super::BindlessTables::publish`] 先行分配。
     pub fn commit(

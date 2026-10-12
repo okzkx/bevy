@@ -23,8 +23,15 @@
 //!
 //! 销毁纪律:本类型 Drop 不等 GPU——"最后一次使用完成"由两个上游负责:在飞
 //! 上传票据由容量维护在迁移前等待,进程级退出排空由 `host::teardown_vulkan` 的
-//! `device_wait_idle` 先于一切资源 Drop 完成(D4 定案)。M2 无资产淘汰,驻留
-//! 缓存条目与池同寿命;资产卸载/重载的失效语义留步骤 4。
+//! `device_wait_idle` 先于一切资源 Drop 完成(D4 定案)。
+//!
+//! 回收与复用(4.4.1/4.4.2):bump 游标之外立两条回收账——**停尸房**
+//! ([`Self::retire`]:卸载/替换换下的旧区间,在飞 draw 可能还在读,排空前
+//! 不得复用)与 **free list**([`Self::drain_graveyard`]:等"图形最后使用"
+//! 后归还的空洞,[`Self::alloc`] first-fit 优先复用)。排空点与贴图停尸房
+//! 同一节拍(flush 开头,`wait_draws` 收口),三条销毁路径(网格区间/旧图/
+//! 描述符槽)共用同一次等待——责任边界契约②的回收半边统一落点。碎片不合并
+//! (区间长度天然对齐倍数,first-fit 够用;合并/Slab 升级留显存压力出现再议)。
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -84,6 +91,27 @@ pub struct MaintenanceLedger {
     pub pause_ms_total: u128,
 }
 
+/// 回收账本(4.4):卸载/替换换下区间的累计退休量 + 停尸房/free list 当前态。
+/// 判定线"反复增删存量回基线"的读数口——resident 字节数随卸载回落,used 游标
+/// 是历史峰值只增不减(复用不推进游标),两者分列不混报。
+#[derive(Default, Clone, Copy)]
+pub struct RecycleLedger {
+    /// 卸载出账的驻留条目累计(含替换换下的旧条目)。
+    pub retired_slots_total: u64,
+    /// 退休区间字节累计(顶点/索引分列)。
+    pub retired_vertex_bytes_total: u64,
+    pub retired_index_bytes_total: u64,
+    /// 当前在房区间组数(排空判定读数)。
+    pub graveyard_groups: usize,
+    /// 当前可复用空洞数与字节(复用账面的"池内闲置"口径)。
+    pub free_ranges: usize,
+    pub free_vertex_bytes: u64,
+    pub free_index_bytes: u64,
+    /// 当前驻留条目实占字节(判定线"存量回基线"的主读数)。
+    pub resident_vertex_bytes: u64,
+    pub resident_index_bytes: u64,
+}
+
 /// 顶点/索引 DEVICE_LOCAL 大池 + 资产身份驻留缓存(3.2.2.2/3.2.2.3)。
 #[derive(bevy::prelude::Resource)]
 pub struct MeshPool {
@@ -100,7 +128,15 @@ pub struct MeshPool {
     used_vertex: u64,
     used_index: u64,
     residency: HashMap<AssetId<Mesh>, MeshSlot>,
+    /// 回收停尸房(4.4.2):卸载/替换换下的旧区间(顶点,索引),在飞 draw 可能
+    /// 还在读——排空(等"图形最后使用")前不得复用,防覆盖判定线违反。
+    graveyard: Vec<(PoolRange, PoolRange)>,
+    /// 回收就绪空洞(4.4.2):停尸房排空后归还的区间,alloc first-fit 优先
+    /// 复用;偏移/长度保持对齐倍数(进入前已对齐,分裂按对齐倍数切)。
+    free_vertex: Vec<PoolRange>,
+    free_index: Vec<PoolRange>,
     ledger: MaintenanceLedger,
+    recycled: RecycleLedger,
 }
 
 impl MeshPool {
@@ -119,7 +155,11 @@ impl MeshPool {
             used_vertex: 0,
             used_index: 0,
             residency: HashMap::new(),
+            graveyard: Vec::new(),
+            free_vertex: Vec::new(),
+            free_index: Vec::new(),
             ledger: MaintenanceLedger::default(),
+            recycled: RecycleLedger::default(),
         }
     }
 
@@ -153,13 +193,30 @@ impl MeshPool {
         self.ledger
     }
 
-    /// 两池当前用量/容量(验收统计口)。
+    /// 两池当前用量/容量(验收统计口;used 是历史峰值,复用不推进游标)。
     #[must_use]
     pub fn usage(&self) -> ((u64, u64), (u64, u64)) {
         (
             (self.used_vertex, self.capacity_vertex),
             (self.used_index, self.capacity_index),
         )
+    }
+
+    /// 回收账本(4.4 读数口;驻留字节现算 O(条目数),调用频率=读数与日志)。
+    #[must_use]
+    pub fn recycle_ledger(&self) -> RecycleLedger {
+        let mut r = self.recycled;
+        r.graveyard_groups = self.graveyard.len();
+        r.free_ranges = self.free_vertex.len() + self.free_index.len();
+        r.free_vertex_bytes = self.free_vertex.iter().map(|x| x.size).sum();
+        r.free_index_bytes = self.free_index.iter().map(|x| x.size).sum();
+        let (v, i) = self
+            .residency
+            .values()
+            .fold((0u64, 0u64), |(v, i), s| (v + s.vertex.size, i + s.index.size));
+        r.resident_vertex_bytes = v;
+        r.resident_index_bytes = i;
+        r
     }
 
     /// 保证"现有驻留 + 新增"放得下:够用直接返回;不够则走扩容路径
@@ -279,29 +336,84 @@ impl MeshPool {
         align_up(target, MIB)
     }
 
-    /// bump 划出一段区间(容量由 [`Self::ensure_capacity`])先行保证;调用方
+    /// bump 划出一段区间(容量由 [`Self::ensure_capacity`] 先行保证;调用方
     /// 必须先 ensure 再 alloc,否则 debug_assert(发布构建下按纪律也不越界:
-    /// 分配只在 ensure 之后发生是编排层的顺序契约)。
+    /// 分配只在 ensure 之后发生是编排层的顺序契约)。4.4 起优先复用 free
+    /// list 空洞(first-fit,整段用或对齐倍数切分),查无才从 bump 游标划新
+    /// ——free 区间必在 `[0, used)` 内且容量保证按 used+需量核算,复用天然
+    /// 越界安全。
     pub fn alloc(&mut self, vertex_size: u64, index_size: u64) -> (PoolRange, PoolRange) {
-        let vertex_offset = align_up(self.used_vertex, VERTEX_STRIDE);
-        let index_offset = align_up(self.used_index, 4);
+        let vertex = Self::take_range(&mut self.free_vertex, &mut self.used_vertex, vertex_size);
+        let index = Self::take_range(&mut self.free_index, &mut self.used_index, index_size);
         debug_assert!(
-            vertex_offset + vertex_size <= self.capacity_vertex
-                && index_offset + index_size <= self.capacity_index,
+            vertex.offset + vertex.size <= self.capacity_vertex
+                && index.offset + index.size <= self.capacity_index,
             "alloc 前必须先 ensure_capacity(bump 不做静默扩容)"
         );
-        self.used_vertex = vertex_offset + vertex_size;
-        self.used_index = index_offset + index_size;
-        (
-            PoolRange {
-                offset: vertex_offset,
-                size: vertex_size,
-            },
-            PoolRange {
-                offset: index_offset,
-                size: index_size,
-            },
-        )
+        (vertex, index)
+    }
+
+    /// first-fit 取一段区间:free list 首个放得下的空洞(整段用或切头留尾,
+    /// 余量回表);查无才 bump 划新。`size` 须为区间对齐的倍数(顶点 32B 条,
+    /// 索引 4B——转换器产出的字节长度天然满足),余量偏移才保持对齐。
+    fn take_range(free: &mut Vec<PoolRange>, used: &mut u64, size: u64) -> PoolRange {
+        debug_assert!(
+            size > 0,
+            "零长区间不进池(转换产物必有内容)"
+        );
+        if let Some(pos) = free.iter().position(|r| r.size >= size) {
+            let r = free.remove(pos);
+            if r.size > size {
+                free.push(PoolRange {
+                    offset: r.offset + size,
+                    size: r.size - size,
+                });
+            }
+            return PoolRange {
+                offset: r.offset,
+                size,
+            };
+        }
+        let offset = *used;
+        *used = offset + size;
+        PoolRange { offset, size }
+    }
+
+    /// 卸载驻留条目(4.4.1):区间进停尸房(**不复用**——在飞 draw 可能还在读
+    /// 旧内容,排空后才归还 free list),返回释放的字节 `(顶点, 索引)`;未驻留
+    /// = None 幂等(重复 Removed/无驻留身份不误动作)。
+    pub fn retire(&mut self, id: AssetId<Mesh>) -> Option<(u64, u64)> {
+        let slot = self.residency.remove(&id)?;
+        self.graveyard.push((slot.vertex, slot.index));
+        self.recycled.retired_slots_total += 1;
+        self.recycled.retired_vertex_bytes_total += slot.vertex.size;
+        self.recycled.retired_index_bytes_total += slot.index.size;
+        Some((slot.vertex.size, slot.index.size))
+    }
+
+    /// 排空回收停尸房(4.4.2):`wait_draws` 等"图形最后使用"后旧区间归还
+    /// free list 可复用——此刻无任何在飞 draw 再读旧区间,复用覆盖不再构成
+    /// 竞态。空房直接返回不等待(稳态零成本);失败保留停尸房下帧重试(区间
+    /// 多活一帧,无悬空)。池迁移([`Self::ensure_capacity`])与排空的先后由
+    /// 编排层保证:ensure 先等帧侧(4.1.1),排空在 flush 开头先于 ensure——
+    /// 迁移时停尸房必空,区间数据随 `[0, used)` 整段平移,偏移不变语义不变。
+    ///
+    /// # Errors
+    /// 帧侧等待失败(排空未发生,区间保留下帧重试)。
+    pub fn drain_graveyard(&mut self, wait_draws: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        if self.graveyard.is_empty() {
+            return Ok(());
+        }
+        wait_draws()?;
+        let count = self.graveyard.len();
+        for (vertex, index) in self.graveyard.drain(..) {
+            self.free_vertex.push(vertex);
+            self.free_index.push(index);
+        }
+        info!(
+            "网格回收停尸房排空:归还 {count} 组区间(等待图形最后使用后,4.4 卸载/替换收尾)"
+        );
+        Ok(())
     }
 
     /// 登记驻留:提交成功拿到票据后调用;同身份重复登记是编排层 bug,报错。
@@ -332,11 +444,11 @@ impl MeshPool {
         Ok(())
     }
 
-    /// 同身份内容替换登记(4.2):条目已在 = 换新槽位、返回旧槽位。旧区间的
-    /// bump 空间**不回收**(孤儿化——池从不写旧区间,在飞 draw 读它天然安全;
-    /// 空间回收归 4.4 池维护,与 3.2.2.2"不回收空洞"同一笔账)。与 [`Self::commit`]
-    /// 的分工:编排层持失效凭据(AssetInvalidations)才允许走 replace,
-    /// 纪律边界在编排层,vulkan 层只提供换条目的能力。
+    /// 同身份内容替换登记(4.2):条目已在 = 换新槽位、返回旧槽位。旧区间进
+    /// 停尸房(4.4.2)——在飞 draw 可能还在读旧内容,排空(等"图形最后使用")
+    /// 后归还 free list 可复用;4.2 时代的"孤儿化"已由回收账取代。与
+    /// [`Self::commit`] 的分工:编排层持失效凭据(AssetInvalidations)才允许
+    /// 走 replace,纪律边界在编排层,vulkan 层只提供换条目的能力。
     #[must_use]
     pub fn replace(
         &mut self,
@@ -354,7 +466,14 @@ impl MeshPool {
             index_count,
             ticket,
         };
-        self.residency.insert(id, slot)
+        let old = self.residency.insert(id, slot);
+        if let Some(old) = &old {
+            self.graveyard.push((old.vertex, old.index));
+            self.recycled.retired_slots_total += 1;
+            self.recycled.retired_vertex_bytes_total += old.vertex.size;
+            self.recycled.retired_index_bytes_total += old.index.size;
+        }
+        old
     }
 }
 

@@ -129,6 +129,23 @@ impl AssetReadiness {
         self.failed_materials.remove(&id);
     }
 
+    /// 失败记录出清（4.4.1 资产卸载联动）：身份随资产卸载出账——与 revive 的
+    /// 区别 = 不是"重试放行"而是账面出清（资产已不在容器，旧失败记录是僵尸
+    /// 账；同路径重载若再失败会重新进集，`Added` 事件 revive 双保险）。幂等。
+    pub fn clear_failure_mesh(&mut self, id: AssetId<Mesh>) {
+        self.failed_meshes.remove(&id);
+    }
+
+    /// 贴图失败记录出清（语义同 [`Self::clear_failure_mesh`]）。
+    pub fn clear_failure_image(&mut self, id: AssetId<Image>) {
+        self.failed_images.remove(&id);
+    }
+
+    /// 材质失败记录出清（语义同 [`Self::clear_failure_mesh`]）。
+    pub fn clear_failure_material(&mut self, id: AssetId<StandardMaterial>) {
+        self.failed_materials.remove(&id);
+    }
+
     /// pending 记账（flush 转换段查无时调用）：新身份入账等待 0 帧，旧身份
     /// 保留已等待帧数（跨帧累计等待）。
     pub fn mark_pending_mesh(&mut self, id: AssetId<Mesh>) {
