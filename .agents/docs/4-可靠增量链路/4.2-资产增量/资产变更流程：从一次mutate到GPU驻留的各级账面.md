@@ -65,3 +65,21 @@ image 的差别在第 4 步后半：旧 `GpuImage` 不能随条目覆盖而 Drop
 - **无引用的失效资产**：失效集条目保留（无人消费它），重传不发生——微小且无害，随凭据生命周期自然收口。
 
 > 对照相邻通道：**换柄**（4.1）动实体行不动资产内容；**改内容**（本流程）动资产条目不动实体行。两条通道并轨进同一份脏行队列。
+
+## 4. 代码改动简要解析（feat 92a017942：14 文件 +763/−35）
+
+**新增三件（发现侧与协议面，零 Vulkan 代码）**：
+
+- `scene/mechanism/asset_events.rs`（180 行）——本段的"发现"：三个类型化 `MessageReader` 分开读 `AssetEvent`，`Modified` 进失效集、引用行重挂脏标（重扫账本行），其余变体只计数；稳态零事件早退。`AssetInvalidations` 是读侧与写侧之间的全部接口——一个带 mesh/image 两个 HashSet 的凭据资源。
+- `scene/mechanism/asset_ops.rs`（215 行）——写入封装：`mutate_asset` 按实体锚定取柄，四驱动全落成 `Assets::get_mut`（Modified 由容器自动发出）；格式不支持/资产查无明确拒绝不硬做。
+- `remote_assets.rs`（105 行）——BRP 薄壳：JSON → `MutateAsset` 结构 → 调本体；错误翻译到协议码。协议与实现分层，将来 egui 面板直调 `mutate_asset` 不经这里。
+
+**既有五件扩展（写侧与 GPU 执行，每处都是"一小块"）**：
+
+- `driver/upload.rs`（+80 净）——编排核心改动：盘点判定放宽为"查无**或失效**"；提交成功后按凭据分流 `pool.commit`/`pool.replace` 与 `publish`/`rebind`；开头排停尸房；成功后凭据销账。其余转换/排批/合批逻辑一字未动。
+- `vulkan/pool.rs`（+25）——`MeshPool::replace`：换条目返回旧槽。旧区间孤儿化是关键取舍——不写旧区间，在飞读天然安全，零新增同步。
+- `vulkan/images.rs`（+40）——`ImageCache::take`（旧图进停尸房而非 Drop）+ `drain_graveyard`（等帧侧后销毁）。旧图在飞被采样的唯一风险点就地封死。
+- `vulkan/descriptors.rs`（+57）——`BindlessTables::rebind`：既有纹理槽重写描述符（UAB 在飞可写），槽位占用不随内容变化增长。
+- `scene/mechanism/ledger.rs`（+14）——`mark_dirty` 第二发现入口 + 事件计量四字段；行结构与 4.1 发现系统不动。
+
+**接线零头**：`main.rs`/`lib.rs`/`remote.rs`/`scene/mod.rs` 插件与模块注册（~20 行）；`remote_objects.rs` 的 stats 读数补 `asset_events` 块；`tools/brp.py` +25 行 `mutate` 子命令。
