@@ -33,7 +33,8 @@ use bevy::{
 use super::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
 use super::debug_window::{DebugWindow, FpsMeter, RenderMode, RendererStats};
 use super::entity_tree_window::{
-    EntityTreeData, EntityTreeWindow, SelectedDetails, SelectedEntity, collect_selected_details,
+    EntityTreeData, EntityTreeWindow, SelectedDetails, SelectedEntity, TransformDragCache,
+    collect_selected_details,
 };
 use super::input::{egui_raw_input, EguiInput};
 use super::paint::{AtlasGpu, AtlasMirror};
@@ -102,6 +103,8 @@ fn init_egui(mut commands: Commands) {
     commands.insert_resource(SelectedEntity::default());
     // 属性快照：采集系统每帧重写，Startup 先落空壳
     commands.insert_resource(SelectedDetails::default());
+    // 旋转拖拽缓存：拖拽期内冻结欧拉表示分支（防跨分支混写闪烁）
+    commands.insert_resource(TransformDragCache::default());
     // Transform 编辑队列：pass 产、清账系统消费
     commands.insert_resource(TransformEditQueue::default());
     // 帧率显示平滑：0.5s 出一次平均快照
@@ -155,6 +158,8 @@ struct DebugUiParams<'w, 's> {
     tree: EntityTreeData<'w, 's>,
     /// 属性快照（采集系统产，只读消费）
     details: Res<'w, SelectedDetails>,
+    /// 旋转拖拽缓存（拖拽期内冻结欧拉表示分支）
+    drag_cache: ResMut<'w, TransformDragCache>,
     /// Transform 编辑排队（pass 产，清账系统消费）
     edit_queue: ResMut<'w, TransformEditQueue>,
 }
@@ -241,6 +246,7 @@ fn run_egui_pass(
             selected: &mut ui.selected,
             data: &ui.tree,
             details: &ui.details,
+            drag: &mut ui.drag_cache,
         }
         .show();
         if let Some(edit) = edit {

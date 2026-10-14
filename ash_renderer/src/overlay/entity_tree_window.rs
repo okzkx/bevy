@@ -74,13 +74,15 @@ pub(super) struct EntityTreeWindow<'a> {
     pub(super) data: &'a EntityTreeData<'a, 'a>,
     /// 属性区快照（采集系统产）。
     pub(super) details: &'a SelectedDetails,
+    /// 旋转拖拽缓存（拖拽期内冻结欧拉表示分支）。
+    pub(super) drag: &'a mut TransformDragCache,
 }
 
 impl EntityTreeWindow<'_> {
     /// 面板本体：递归层级树（滚动区）+ 属性区。返回一次 Transform 编辑
     /// （有拖改时），由 pass 落进编辑队列——本函数不碰写路径。
     pub(super) fn show(self) -> Option<(Entity, TransformEdit)> {
-        let Self { ctx, open, selected, data, details } = self;
+        let Self { ctx, open, selected, data, details, mut drag } = self;
         let mut edit = None;
         egui::Window::new("实体层级树")
             .open(open)
@@ -111,7 +113,7 @@ impl EntityTreeWindow<'_> {
                         draw_entity(ui, root, data, &mut selected.0, 0);
                     }
                 });
-                edit = show_details(ui, details, selected);
+                edit = show_details(ui, details, selected, &mut drag);
             });
         edit
     }
@@ -256,6 +258,13 @@ pub(super) struct TransformVals {
     pub(super) euler_yxz_deg: [f32; 3],
     pub(super) scale: [f32; 3],
 }
+
+/// 旋转拖拽缓存：按住的整段拖拽期内欧拉三元组冻结在按下帧的表示分支，
+/// 拖拽框只改被拖的那位。若每帧从快照重建，拖拽分量跨欧拉分解分支边界
+/// （±90°/±180°）时 to_euler 会翻转另两位（±180°），与拖拽框的累加值
+/// 混分支合成出错误旋转——物体姿态逐帧跳变（闪烁）。松手即作废。
+#[derive(Resource, Default)]
+pub(super) struct TransformDragCache(Option<(Entity, [f32; 3])>);
 
 /// 组件清单一行：短名 + 已注册反射组件的字段只读行（None = 名字-only）。
 pub(super) struct ComponentRow {
@@ -405,6 +414,7 @@ fn show_details(
     ui: &mut egui::Ui,
     details: &SelectedDetails,
     selected: &mut SelectedEntity,
+    drag: &mut TransformDragCache,
 ) -> Option<(Entity, TransformEdit)> {
     ui.separator();
     let Some(entity) = details.entity else {
@@ -433,27 +443,46 @@ fn show_details(
         ui.monospace(format!("贴图   {label}  {image:?}"));
     }
     // Transform 编辑：读快照值进副本，任一量被拖改即整组回写（未动
-    // 的组发原值，覆盖等价于原地）
+    // 的组发原值，覆盖等价于原地——旋转组例外，见下方缓存接管）。
+    // 平移/缩放分量相互独立，快照原值回写恒等价；旋转是"三元组表达一个
+    // 四元数"，三元必须同分支（见 TransformDragCache）。
     let mut edit = None;
     if let Some(t) = details.local {
-        let (mut translation, mut euler, mut scale) = (t.translation, t.euler_yxz_deg, t.scale);
-        egui::Grid::new("transform_edit").num_columns(4).show(ui, |ui| {
-            ui.monospace("平移");
-            drag_vec3(ui, &mut translation, 0.05, "");
-            ui.end_row();
-            ui.monospace("旋转");
-            drag_vec3(ui, &mut euler, 1.0, "°");
-            ui.end_row();
-            ui.monospace("缩放");
-            drag_vec3(ui, &mut scale, 0.02, "");
-            ui.end_row();
-        });
-        if translation != t.translation || euler != t.euler_yxz_deg || scale != t.scale {
+        // 缓存按实体挂靠：换选中即作废；无进行中拖拽则对齐快照（当前表示分支）
+        if drag.0.as_ref().is_some_and(|(e, _)| *e != entity) {
+            drag.0 = None;
+        }
+        if drag.0.is_none() {
+            drag.0 = Some((entity, t.euler_yxz_deg));
+        }
+        let (mut translation, mut scale) = (t.translation, t.scale);
+        let mut rot_dragged = [false; 3];
+        {
+            let drag_euler: &mut [f32; 3] = &mut drag.0.as_mut().expect("上方已保证有缓存").1;
+            egui::Grid::new("transform_edit").num_columns(4).show(ui, |ui| {
+                ui.monospace("平移");
+                drag_vec3(ui, &mut translation, 0.05, "");
+                ui.end_row();
+                ui.monospace("旋转");
+                rot_dragged = drag_vec3(ui, drag_euler, 1.0, "°");
+                ui.end_row();
+                ui.monospace("缩放");
+                drag_vec3(ui, &mut scale, 0.02, "");
+                ui.end_row();
+            });
+        }
+        // 回写取拖拽框落在本帧的值（缓存内持续累加）；本帧无人按住旋转 =
+        // 拖拽结束，缓存作废，下帧从快照重建（显示回落当前表示分支）
+        let euler_written = drag.0.as_ref().map_or(t.euler_yxz_deg, |(_, e)| *e);
+        if !rot_dragged.iter().any(|&d| d) {
+            drag.0 = None;
+        }
+        if translation != t.translation || euler_written != t.euler_yxz_deg || scale != t.scale {
             edit = Some((
                 entity,
                 TransformEdit {
                     translation: Some(Vec3::from_array(translation)),
-                    rotation_euler_deg: Some(Vec3::from_array(euler)),
+                    rotation_euler_deg: Some(Vec3::from_array(euler_written)),
                     scale: Some(Vec3::from_array(scale)),
                 },
             ));
@@ -496,16 +525,19 @@ fn show_details(
 }
 
 /// 三分量 DragValue 行（平移/旋转/缩放共用）：speed 为拖拽灵敏度，suffix 为
-/// 角度标。
-fn drag_vec3(ui: &mut egui::Ui, v: &mut [f32; 3], speed: f32, suffix: &str) {
+/// 角度标。返回逐位"本帧被按住拖拽"（旋转缓存据此判定拖拽期起止）。
+fn drag_vec3(ui: &mut egui::Ui, v: &mut [f32; 3], speed: f32, suffix: &str) -> [bool; 3] {
+    let mut dragged = [false; 3];
     ui.horizontal(|ui| {
-        for x in v {
-            ui.add(
+        for (i, x) in v.iter_mut().enumerate() {
+            let resp = ui.add(
                 egui::DragValue::new(x)
                     .speed(speed)
                     .suffix(suffix)
                     .max_decimals(if suffix.is_empty() { 3 } else { 1 }),
             );
+            dragged[i] = resp.dragged() || resp.is_pointer_button_down_on();
         }
     });
+    dragged
 }
