@@ -1,35 +1,35 @@
-//! 异步就绪账面与失败取消（4.3.1/4.3.2）：资产"还没到货"这条时间线的显式账。
+//! 异步就绪账面与失败取消：资产"还没到货"这条时间线的显式账。
 //!
-//! 分工（与 4.2 [`AssetInvalidations`] 同款资产身份粒度）：账本行是实体粒度
+//! 分工（与 [`AssetInvalidations`] 同款资产身份粒度）：账本行是实体粒度
 //! （[`InstanceLedger`]），pending 是**资产身份粒度**的账（跨行共享身份只记
 //! 一份），两层各自键控。发现侧只有 flush_uploads 一个写入点——它是最先撞见
 //! "查无"与"到货"的地方；失败记账不裁决，行是否出队由 flush 盘点时结合整行
 //! 状态统一判定（见 upload.rs 盘点段）。
 //!
-//! 就绪判定（立案计划 §5 钉明）：**`Assets::get` 命中即就绪，逐腿递归**——
+//! 就绪判定：**`Assets::get` 命中即就绪，逐腿递归**——
 //! Mesh/Image 内容自包含；StandardMaterial 的依赖（五槽 Image）由 flush 逐槽
 //! 判（材质本体就绪而槽内贴图未到 = 贴图腿各自 pending）。`LoadedWithDependencies`
 //! 的"递归依赖全齐"是容器级语义（glTF/WorldAsset 整体），本宿主账本行只挂
-//! 叶级资产，不消费该事件（收到只走 4.2 的计数口径）。
+//! 叶级资产，不消费该事件（收到只计入资产事件计数）。
 //!
 //! 失败语义（判定线"失败可见且不无限重试"）：加载失败（`AssetLoadFailedEvent`
 //! ）与转换/规格拒绝（flush 内）都进 failed 集——该身份不再进重试批；引用它
 //! 的行在 flush 盘点时若无其余 pending 腿即出队（清脏标，防僵尸重试）。
 //! `Added`/`Modified` 事件复活身份（文件修复后重载、mutate 修数据可重试），
-//! 自动恢复的上限归 4.4 热重载。
+//! 自动恢复的上限归热重载联动。
 //!
 //! 取消语义（判定线"等待期间删除或换柄不错误复活"）：pending 身份当帧没有
 //! 任何脏行引用（despawn 清行 / 换柄改指）即出账计取消——到货后无行可服务
 //! ，天然不上传不错误复活（行驱动盘点是结构性保证，测试钉证据）。
 //!
-//! 失败记账入口（4.5 F4 修订）：failed 侧的 note_failure/revive/clear 全部
-//! 并入 [`super::asset_events::propagate_asset_changes`] 单一系统——原先
-//! "失败读侧"独立系统与事件读侧无排序约束，复活（Added 清旗标）与重挂
+//! 失败记账入口：failed 侧的 note_failure/revive/clear 全部
+//! 并入 [`super::asset_events::propagate_asset_changes`] 单一系统——失败记账
+//! 与事件读侧若无排序约束，复活（Added 清旗标）与重挂
 //! （读旗标重挂行）分属两系统，调度顺序不同结果不同（CPU 复现 dirty=1/0）。
 //! 单入口后同帧"失败+复活"对由系统内固定次序裁决。本模块只定义账面结构与
 //! 计量，写入点全在 flush_uploads（pending 侧）与统一事件读侧（failed 侧）。
 //!
-//! 零 Vulkan 代码：GPU 侧"上传完成才可使用"由 3.2.4 票据承担，本模块只补
+//! 零 Vulkan 代码：GPU 侧"上传完成才可使用"由上传票据承担，本模块只补
 //! ECS 侧账面与计量。
 
 use std::collections::{HashMap, HashSet};
@@ -62,10 +62,10 @@ pub struct ReadinessStats {
     pub failed_rows_cleared_total: u64,
 }
 
-/// 异步就绪账面（4.3.1）：pending 身份集（身份 → 已等待帧数）+ failed 身份集
+/// 异步就绪账面：pending 身份集（身份 → 已等待帧数）+ failed 身份集
 /// （加载失败 ∪ 转换拒绝，不再重试）+ 失败读侧计量。flush_uploads 独占写
 /// pending 侧（mark/arrive/expel/reconcile），failed 侧（note_failure/revive/
-/// clear）由统一事件读侧单点写（4.5 F4：原独立失败读侧系统并入事件读侧）。
+/// clear）由统一事件读侧单点写（单入口，无跨系统排序问题）。
 #[derive(Resource, Default)]
 pub struct AssetReadiness {
     pending_meshes: HashMap<AssetId<Mesh>, u64>,
@@ -132,7 +132,7 @@ impl AssetReadiness {
         self.failed_materials.remove(&id);
     }
 
-    /// 失败记录出清（4.4.1 资产卸载联动）：身份随资产卸载出账——与 revive 的
+    /// 失败记录出清（资产卸载联动）：身份随资产卸载出账——与 revive 的
     /// 区别 = 不是"重试放行"而是账面出清（资产已不在容器，旧失败记录是僵尸
     /// 账；同路径重载若再失败会重新进集，`Added` 事件 revive 双保险）。幂等。
     pub fn clear_failure_mesh(&mut self, id: AssetId<Mesh>) {
@@ -231,8 +231,8 @@ impl AssetReadiness {
     }
 }
 
-/// 异步就绪读侧插件：初始化 [`AssetReadiness`]。failed 侧记账并入 4.2 的
-/// 统一事件读侧（4.5 F4 单入口），本插件不再挂系统；接线收在
+/// 异步就绪读侧插件：初始化 [`AssetReadiness`]。failed 侧记账并入统一
+/// 事件读侧（单入口），本插件只初始化资源、不挂系统；接线收在
 /// [`super::asset_events::AshAssetEventPlugin`]。
 pub struct AshReadinessPlugin;
 

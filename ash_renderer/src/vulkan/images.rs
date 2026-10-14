@@ -1,11 +1,11 @@
-//! 图像资源层（施工 3.3.1）：bevy `Image` → VkImage/view/sampler，资产身份驻留缓存。
+//! 图像资源层：bevy `Image` → VkImage/view/sampler，资产身份驻留缓存。
 //!
 //! 三条机制约束来自显存机制篇判定线（.agents/docs/3-静态取数链路/3.3-贴图与bindless描述符/
 //! 显存机制：Buffer与Image之别、swizzle不透明与访问路径特化.md §0）：
 //! 1. OPTIMAL tiling image 的内容不能按字节读写——上传走 `vkCmdCopyBufferToImage`
 //!    （uploader.rs 的图像拷贝段），读回走 `vkCmdCopyImageToBuffer`；swizzle 重排由
 //!    copy 引擎完成，应用永不参与。
-//! 2. image 分配独立于 MeshPool：每张图一块 dedicated `VkDeviceMemory`（M2 张数少，
+//! 2. image 分配独立于 MeshPool：每张图一块 dedicated `VkDeviceMemory`（贴图张数少，
 //!    `maxMemoryAllocationCount`（本机 4096）余量充足；memory 层子分配等显存压力出现再立）。
 //! 3. layout 转换与 buffer 读写次序是两类问题——图像屏障携带 old/new layout 与子资源
 //!    范围，uploader 里图像段独立录制，不套 buffer barrier 模板。
@@ -13,12 +13,12 @@
 //! 格式与角色：glTF loader 已按 texture 语义决定 sRGB/线性
 //!（bevy_gltf/src/loader/mod.rs:1210 `is_srgb = !linear_textures.contains(..)`），
 //! 落在 `Image.texture_descriptor.format` 的 Srgb 后缀上——本层只做格式核对与映射，
-//! 不再二次推断角色。`ImageSampler::Default` 的解析：官方由 ImagePlugin 全局默认承接
+//! 不二次推断角色。`ImageSampler::Default` 的解析：官方由 ImagePlugin 全局默认承接
 //!（bevy_image/src/image.rs:181 `ImagePlugin::default()` = `ImageSamplerDescriptor::linear()`），
 //! 禁渲染宿主里照该常量解析，不发明新默认。
 //!
 //! mip 策略：静态 mip0——只收单级贴图、只传 level 0，采样端以 `max_lod = 0` 钉死
-//! 可采样 LOD（3.3.1 面板口径）；mip 链生成归步骤 5 之前。
+//! 可采样 LOD；mip 链生成不归本层。
 
 use std::collections::HashMap;
 
@@ -41,15 +41,15 @@ use crate::common::error::{Result, VulkanError};
 #[derive(Debug, Error)]
 pub enum ImageConvertError {
     /// 只收 RGBA8（线性/sRGB）——FlightHelmet 全部 PNG 落在这两档；其余格式出现时
-    /// 按 3.3.1"核对格式与使用角色"的口径显式拒绝，不静默猜。
-    #[error("不支持的贴图格式 {0:?}（本步只收 Rgba8Unorm[Srgb]）")]
+    /// 按"核对格式与使用角色"的口径显式拒绝，不静默猜。
+    #[error("不支持的贴图格式 {0:?}（只收 Rgba8Unorm[Srgb]）")]
     UnsupportedFormat(TextureFormat),
     /// 没有 2D 网格就无法进采样路径。
-    #[error("不支持的维度 {0:?}（本步只收 2D）")]
+    #[error("不支持的维度 {0:?}（只收 2D）")]
     UnsupportedDimension(TextureDimension),
-    /// 静态 mip0 形状：mip 链生成归后续步骤，带链数据进来先拒绝（避免只取 mip0
+    /// 静态 mip0 形状：mip 链生成不归本层，带链数据进来先拒绝（避免只取 mip0
     /// 还要解析 TextureDataOrder 排布的复杂度）。
-    #[error("mip 链 {0} 级（本步静态 mip0，只收单级）")]
+    #[error("mip 链 {0} 级（静态 mip0，只收单级）")]
     UnsupportedMipLevels(u32),
     /// 未初始化的存储贴图没有可上传内容。
     #[error("贴图无像素数据（data 为 None）")]
@@ -126,14 +126,13 @@ pub struct GpuImage {
 impl GpuImage {
     /// 按契约创建:image(usage 按读回条款三用途)→ requirements → 选型(必需
     /// DEVICE_LOCAL)→ 恰量分配 → offset 0 绑定 → view。**采样器不在此建**
-    ///（4.5 F2 订正:本体归 [`super::descriptors::BindlessTables`] 按功能键
+    ///（本体归 [`super::descriptors::BindlessTables`] 按功能键
     /// 持有——同键贴图共享一个描述符槽,槽内句柄若随某张图生灭,共享方先卸载
     /// "最后发布者"即悬空;键即完整配方,表侧 [`SamplerKey::create_sampler`] 建本体）。
-    /// `sharing_families`:≥2 个不同族时按 CONCURRENT 创建(3.4 定案,与
+    /// `sharing_families`:≥2 个不同族时按 CONCURRENT 创建(与
     /// `GpuBuffer::create_with_families` 同一取舍——EXCLUSIVE 的 release/acquire
     /// 成对语义下,验证层对"已写入但未被 draw 访问的 UAB 数组元素"的布局账本
-    /// 不随 release 更新,Draw-09600 保守断言污染目标路径(3.4 三轮 bisect 实证,
-    /// 见施工记录);内存可见性由票据信号量收口,与池同款)。
+    /// 不随 release 更新,Draw-09600 保守断言污染目标路径;内存可见性由票据信号量收口,与池同款)。
     /// 任何失败回收已建对象(全有或全无)。
     ///
     /// # Errors
@@ -162,7 +161,7 @@ impl GpuImage {
         .optimal_tiling_features;
         if !features.contains(required_features) {
             return Err(VulkanError::Init(format!(
-                "格式 {0:?} 的 optimal tiling features {features:?} 不含所需 {required_features:?},贴图无法按本步角色使用",
+                "格式 {0:?} 的 optimal tiling features {features:?} 不含所需 {required_features:?},贴图无法按该使用角色使用",
                 spec.format
             )));
         }
@@ -182,7 +181,7 @@ impl GpuImage {
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
                     .usage(usage)
-                    // 跨族设备:CONCURRENT 双族(transfer 写 + graphics 读,3.4 定案
+                    // 跨族设备:CONCURRENT 双族(transfer 写 + graphics 读,定案
                     // 见上);同族设备 EXCLUSIVE 无所有权语义
                     .sharing_mode(if sharing_families.len() >= 2 {
                         vk::SharingMode::CONCURRENT
@@ -217,7 +216,7 @@ impl GpuImage {
     ) -> Result<Self> {
         unsafe {
             // 绑定三条款的证据来源:requirements 三元组,一次查询全用上。
-            // dedicated 分配(显存机制篇 §6:M2 形态;子分配等显存压力出现再立)。
+            // dedicated 分配(显存机制篇 §6:张数少,子分配等显存压力出现再立)。
             let reqs = device.get_image_memory_requirements(image);
             let memory_type = contract.find_type(
                 reqs.memory_type_bits,
@@ -287,13 +286,13 @@ impl GpuImage {
         self.image
     }
 
-    /// 全量 view 句柄(3.3.3 描述符表从这里取)。
+    /// 全量 view 句柄(描述符表从这里取)。
     #[must_use]
     pub fn view(&self) -> vk::ImageView {
         self.view
     }
 
-    /// 绑定的格式(证据查询口;3.3.3 描述符布局与此一致)。
+    /// 绑定的格式(证据查询口;描述符布局与此一致)。
     #[must_use]
     pub fn format(&self) -> vk::Format {
         self.format
@@ -314,9 +313,9 @@ unsafe impl Sync for GpuImage {}
 impl Drop for GpuImage {
     fn drop(&mut self) {
         // 契约边界(与 GpuBuffer/Uploader 同款):不等 GPU;退出排空由 teardown_vulkan
-        // 的 device_wait_idle 先于一切资源 Drop(D4 定案)。销毁序:view 先于
+        // 的 device_wait_idle 先于一切资源 Drop。销毁序:view 先于
         // image,memory 最后(image 销毁后再释放其绑定)。采样器本体归
-        // BindlessTables(4.5 F2),不在此销毁。
+        // BindlessTables,不在此销毁。
         unsafe {
             self.device.destroy_image_view(self.view, None);
             self.device.destroy_image(self.image, None);
@@ -328,11 +327,11 @@ impl Drop for GpuImage {
 /// `bevy::image::Image` 资产身份 → 驻留票据。与 [`super::MeshPool`] 的驻留缓存同责:
 /// 每帧快照带着同一批柄来,只有"查无此身份"的才创建上传(重复快照零重复上传);
 /// 票据记录"这份数据何时可用"。槽位绑定由 [`super::BindlessTables`] 分配、随
-/// commit 一并登记(3.3.4)。
+/// commit 一并登记。
 #[derive(bevy::prelude::Resource, Default)]
 pub struct ImageCache {
     resident: HashMap<AssetId<BevyImage>, (GpuImage, Ticket, super::descriptors::SlotBinding)>,
-    /// 内容替换/卸载的旧图停尸房（4.2.3/4.4.1，4.5 F3 起票据随行）：旧 `GpuImage`
+    /// 内容替换/卸载的旧图停尸房：旧 `GpuImage`
     /// 移入此处而非就地 Drop——描述符槽改指后，在飞 draw 仍可能经旧描述符或已
     /// 取的引用读旧图，销毁必须等双条件：图形最后使用（帧槽 fence）+ 上传完成
     ///（票据——最小化期间 flush 仍可提交 transfer 而无图形提交，帧 fence 完成
@@ -353,18 +352,18 @@ impl ImageCache {
         self.resident.len()
     }
 
-    /// 停尸房当前张数(4.2.3 排空判定的统计口)。
+    /// 停尸房当前张数(排空判定的统计口)。
     #[must_use]
     pub fn graveyard_len(&self) -> usize {
         self.graveyard.len()
     }
 
-    /// 同身份内容替换登记（4.5 F1/F2 改版，取代原 `take` + 原槽重写）：旧条目
+    /// 同身份内容替换登记：旧条目
     /// 原子退场、新条目随即入账。旧图进停尸房（票据随行，双条件排空见
-    /// [`Self::drain_graveyard`]）；旧纹理槽进待回收账（F1 订正：原槽重写对在飞
+    /// [`Self::drain_graveyard`]）；旧纹理槽进待回收账（原槽重写对在飞
     /// draw 不安全——UAB 不授权覆盖仍被未完成命令消费的描述符，改走"新槽
     /// 发布 + 旧槽延迟回收"）；旧采样器槽仅当新条目不同槽且无其余驻留共享方
-    /// 才请求回收（F2：本体归表，槽退场 = 本体在排空点销毁）。未驻留身份 =
+    /// 才请求回收（采样器本体归表，槽退场 = 本体在排空点销毁）。未驻留身份 =
     /// 纯新登记。**必须在 [`super::descriptors::BindlessTables::publish`] 之后
     /// 调用**——新槽已定，退场判定才能对照新槽去重（同键共享则新旧同采样器
     /// 槽，不回收）。
@@ -391,8 +390,8 @@ impl ImageCache {
         self.resident.insert(id, (image, ticket, slots));
     }
 
-    /// 排空停尸房（4.2.3，4.5 F3 凭据补全）：双条件齐备后才销毁旧图——
-    /// `wait_draws` 等"图形最后使用"（全部帧槽 fence，4.1.1 闸门），
+    /// 排空停尸房：双条件齐备后才销毁旧图——
+    /// `wait_draws` 等"图形最后使用"（全部帧槽 fence），
     /// `uploader.wait_until` 等"上传完成"（停尸房票据的时间线信号量）。空房
     /// 直接返回不等待（稳态零成本）。
     ///
@@ -416,11 +415,11 @@ impl ImageCache {
         uploader.wait_until(max_ticket)?;
         let count = self.graveyard.len();
         self.graveyard.clear(); // Drop 序：view 先于 image，memory 最后
-        info!("贴图停尸房排空:销毁 {count} 张旧图（双条件齐备:图形最后使用 + 上传票据,4.2/4.4/4.5 F3）");
+        info!("贴图停尸房排空:销毁 {count} 张旧图（双条件齐备:图形最后使用 + 上传票据）");
         Ok(())
     }
 
-    /// 卸载驻留条目（4.4.1）：旧图进停尸房（票据随行）、描述符槽进待回收账
+    /// 卸载驻留条目：旧图进停尸房（票据随行）、描述符槽进待回收账
     /// ——纹理槽直接请求回收；采样器槽仅当同键最后一张退场才请求（共享去重
     /// 的反向操作，与 publish 的"同键共享"配对）。本条目出账后再查同键，检查
     /// 针对剩余驻留条目。返回是否发生退场（幂等：未驻留身份 no-op）。
@@ -456,13 +455,13 @@ impl ImageCache {
         self.resident.insert(id, (image, ticket, slots));
     }
 
-    /// 按身份取驻留贴图(3.4 DrawList 的取数口)。
+    /// 按身份取驻留贴图(绘制参数组装的取数口)。
     #[must_use]
     pub fn image(&self, id: AssetId<BevyImage>) -> Option<&GpuImage> {
         self.resident.get(&id).map(|(image, _, _)| image)
     }
 
-    /// 按身份取槽位绑定(3.4 DrawList 组装 per-draw 参数的取数口;缺资源时
+    /// 按身份取槽位绑定(组装 per-draw 参数的取数口;缺资源时
     /// 消费方走 fallback 槽或暂缓 draw——`BindlessTables::fallback_slots`)。
     #[must_use]
     pub fn slots(&self, id: AssetId<BevyImage>) -> Option<super::descriptors::SlotBinding> {
@@ -477,11 +476,11 @@ fn filter(f: ImageFilterMode) -> vk::Filter {
     }
 }
 
-/// 采样器功能参数键(3.3.4 去重定案):VkSampler 的全部功能入参——滤波两轴 +
+/// 采样器功能参数键(去重定案):VkSampler 的全部功能入参——滤波两轴 +
 /// mip 模式、寻址三轴、比较、边框色。两个钉号背景:
-/// - **格式解释挂 image view,VkSampler 无格式参数**(订正 e61781d2c),所以
+/// - **格式解释挂 image view,VkSampler 无格式参数**,所以
 ///   sRGB/线性色彩角色不进键——同键贴图共享采样器槽,与色彩角色无关;
-/// - lod clamp 与 anisotropy 在 [`GpuImage::create_sampler`] 里被本步全局策略
+/// - lod clamp 与 anisotropy 在 [`GpuImage::create_sampler`] 里按全局策略
 ///   钉死(max_lod=0、aniso off、bias 0),对全部采样器同值,不进键。
 ///
 /// 同键 ⇒ 同一 VkSampler 配方 ⇒ 可共享描述符槽位。
@@ -518,10 +517,10 @@ pub fn sampler_key(d: &ImageSamplerDescriptor) -> SamplerKey {
 }
 
 impl SamplerKey {
-    /// 从功能键创建 VkSampler 本体（4.5 F2：采样器归描述符表所有，键即完整
-    /// 配方——raw 值即 vk 枚举，与历史 `GpuImage::create_sampler` 的映射同源）。
-    /// lod 上限钉 0（静态 mip0 模式，3.3.1 口径）、anisotropy 不启用（需独立
-    /// feature，本步不开）——两条全局策略随键固化。
+    /// 从功能键创建 VkSampler 本体（采样器归描述符表所有，键即完整
+    /// 配方——raw 值即 vk 枚举）。
+    /// lod 上限钉 0（静态 mip0 模式）、anisotropy 不启用（需独立
+    /// feature，不开启）——两条全局策略随键固化。
     ///
     /// # Errors
     /// `vkCreateSampler` 失败。

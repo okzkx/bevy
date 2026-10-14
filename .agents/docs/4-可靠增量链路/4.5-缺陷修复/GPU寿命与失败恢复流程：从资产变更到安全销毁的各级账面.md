@@ -13,7 +13,7 @@
 | `BindlessTables.retired_*`（槽待回收账） | `vulkan/descriptors.rs` | 语义升级：retire_texture 成为内容重传的常规路径（F1），采样器本体随槽进待销毁账 |
 | `ImageCache.resident / graveyard` | `vulkan/images.rs` | 停尸房条目 `(GpuImage, Ticket)`——票据随行（F3）；`swap_commit` 取代 `take`+rebind（F1） |
 | `MeshPool.graveyard` | `vulkan/pool.rs` | 条目三元组化 `(+ticket)`，排空双条件（F3） |
-| `AtlasGpu.current / graveyard` | `overlay/paint.rs` | 旧代接 retire 账 + 票据随行，排空挂 flush 统一排空点（F15） |
+| `AtlasGpu.current / graveyard` | `overlay/framework/paint.rs` | 旧代接 retire 账 + 票据随行，排空挂 flush 统一排空点（F15） |
 | `InitDrainGuard`（**新护栏**） | `driver/host/init.rs` | 初始化失败路径的 device_wait_idle 先于一切 Drop（F12） |
 
 ## 二、逐时刻走读

@@ -1,25 +1,25 @@
-//! 图形管线（施工 3.4.2）：dynamic rendering 图形管线 + pipeline layout（set0/set1 + push）。
+//! 图形管线：dynamic rendering 图形管线 + pipeline layout（set0/set1 + push）。
 //!
-//! 管线吃的是 3.3 冻结的三方契约：set0/set1 layout 来自 [`super::BindlessTables`]
+//! 管线吃的是三方契约：set0/set1 layout 来自 [`super::BindlessTables`]
 //!（"集与布局同源，不可另建"），push constant range 按 96B 冻结表（偏移
 //! 0/64/68/80，与 `debug_draw.wgsl` 的 PushParams 及下方 [`PushLayout`] 镜像
 //! `offset_of!` 静态互证——"repr(C) 或低于 128B 都不能独立证明对齐"，断言在
 //! 编译期执法）。
 //!
-//! 状态选型（3.4 面板定案）：
+//! 状态选型（面板定案）：
 //! - **顶点输入**：交错 32B（pos12+normal12+uv8，[`super::VERTEX_STRIDE`]），与
-//!   3.2 mesh_convert 是同一份契约；vertex-input 布局不默认等同 storage 布局。
+//!   mesh_convert 是同一份契约；vertex-input 布局不默认等同 storage 布局。
 //! - **reverse-Z 成套**：bevy 透视投影是无限反向 Z（`get_clip_from_view`），
 //!   深度清值 0 + `GREATER` 比较成套使用，不混正向 Z 的 LESS 模板。
-//! - **viewport 直出**（3.4 朝向定案）：bevy 投影走 glam 的 directx 变体（Y-up
-//!   NDC、Z ∈ [0,1]，`bevy_math` 重出口）；E5 光栅级实验（顶点直出已知 clip 坐
+//! - **viewport 直出**（朝向定案）：bevy 投影走 glam 的 directx 变体（Y-up
+//!   NDC、Z ∈ [0,1]，`bevy_math` 重出口）；光栅级实验（顶点直出已知 clip 坐
 //!   标）与官方 color_grading 示例同相机对照截图共同实证：本机 Vulkan **正高度
 //!   viewport 直出即与官方 wgpu 渲染同向**，负高度翻转反而上下颠倒——"教科书式
-//!   Vulkan 需要翻转"的直觉在此不成立，以实测为准（证据链见施工记录 §viewport）。
-//!   正高度下屏幕绕向未被镜像，M2 仍先关背面剔除（面板：HoseMat 双面、镜片按
+//!   Vulkan 需要翻转"的直觉在此不成立，以实测为准。
+//!   正高度下屏幕绕向未被镜像，仍先关背面剔除（HoseMat 双面、镜片按
 //!   不透明覆盖），开剔除前的绕向核验另立判定。
 //! - **混合关闭**：不透明调试绘制，alpha 写出不参与混合（LensesMat 的 BLEND
-//!   按 opaque 覆盖，材质覆盖策略记录在施工记录）。
+//!   按 opaque 覆盖）。
 //! - **动态 viewport/scissor**：随 swapchain 尺寸逐帧设置，重建不重建管线。
 
 use ash::{vk, Device};
@@ -199,7 +199,7 @@ impl GraphicsPipeline {
                     .module(module)
                     .name(fs_main),
             ];
-            // 顶点输入 = 3.2 mesh_convert 的同一份 32B 交错契约（三属性偏移 0/12/24）
+            // 顶点输入 = mesh_convert 的同一份 32B 交错契约（三属性偏移 0/12/24）
             let vertex_binding = [vk::VertexInputBindingDescription::default()
                 .binding(0)
                 .stride(super::VERTEX_STRIDE as u32)
@@ -232,7 +232,7 @@ impl GraphicsPipeline {
                 .scissor_count(1);
             let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
                 .polygon_mode(vk::PolygonMode::FILL)
-                // M2 关剔除：HoseMat 双面 + 镜片按不透明覆盖；正高度直出未镜像
+                // 关剔除：HoseMat 双面 + 镜片按不透明覆盖；正高度直出未镜像
                 // 绕向，开剔除前的绕向核验另立判定（面板定案）
                 .cull_mode(vk::CullModeFlags::NONE)
                 .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
@@ -276,9 +276,9 @@ impl GraphicsPipeline {
                 .map_err(|(_, e)| e)?
                 .remove(0);
             // module 用毕即拆：管线创建完成即编译收口，规范允许此刻销毁 shader
-            // module（vkDestroyShaderModule 与管线无生命周期耦合）。3.4 首版漏了
-            // 这一步（句柄是纯整数，没人存没人拆），每次启动泄漏 1 个 VkShaderModule
-            //——3.5 回归由验证层 VUID-vkDestroyDevice-device-05137 抓获（D7）。
+            // module（vkDestroyShaderModule 与管线无生命周期耦合）。句柄是纯整数，
+            // 不拆即每次启动泄漏 1 个 VkShaderModule（验证层
+            // VUID-vkDestroyDevice-device-05137 可抓获此类泄漏）。
             device.destroy_shader_module(module, None);
             info!(
                 "图形管线就绪: dynamic rendering（color {color_format:?} / depth {depth_format:?}），\
@@ -312,7 +312,7 @@ unsafe impl Sync for GraphicsPipeline {}
 
 impl Drop for GraphicsPipeline {
     fn drop(&mut self) {
-        // 契约边界:不等 GPU,退出排空由 teardown 的 device_wait_idle 先行(D4);
+        // 契约边界:不等 GPU,退出排空由 teardown 的 device_wait_idle 先行;
         // pipeline 先于 layout(引用方向),layout 先于它借用的 set layouts(在
         // BindlessTables 里,拆除序由 host 的 remove_resource 顺序保证)
         unsafe {

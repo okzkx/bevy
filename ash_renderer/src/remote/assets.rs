@@ -1,13 +1,13 @@
-//! BRP 资产内容变更方法族（4.2.4）+ 运行期动态加载（4.3.3）：测试驱动与
+//! BRP 资产内容变更方法族 + 运行期动态加载：测试驱动与
 //! AI 通道的资产级变更入口。
 //!
-//! 分工（与 4.1.5 objects 同款钉子）：**官方 BRP 没有资产内容写通道**
+//! 分工（与 objects 同款钉子）：**官方 BRP 没有资产内容写通道**
 //! ——反射 mutate 走 `world.mutate_component` 是组件值反射，够不着
 //! `Assets<T>` 容器里的资产本体，本方法族自研；操作本体在
 //! [`crate::scene::mechanism::mutate_asset`] 与 [`object_ops`] 的加载封装
 //! （与将来 egui 面板共用的可复用实现），本模块只是协议薄壳。
 //!
-//! 动态加载语义（4.3.3）：`load_mesh`/`load_image` 受理即返回加载中柄——
+//! 动态加载语义：`load_mesh`/`load_image` 受理即返回加载中柄——
 //! 路径失败经 [`AssetLoadFailedEvent`] 读侧收账（失败可见、行出队），到货经
 //! flush 转换上传、readiness 计量对账；加载是异步链，本方法族不等到货。
 //!
@@ -94,7 +94,7 @@ struct LoadMeshParams {
     name_suffix: Option<String>,
 }
 
-/// `ash_renderer/load_mesh`：运行期异步加载新 mesh（4.3.3 动态加载驱动）。
+/// `ash_renderer/load_mesh`：运行期异步加载新 mesh（动态加载驱动）。
 /// 受理即返回加载中柄的身份读回——pending/到货/失败经 `increment_stats` 的
 /// readiness 段与失败日志对账（加载是异步链，本方法不等到货）。
 #[system]
@@ -139,8 +139,8 @@ struct LoadImageParams {
     entity: Entity,
 }
 
-/// `ash_renderer/load_image`：运行期异步加载新贴图并换 base_color 槽（4.3.3
-/// 贴图腿驱动）。共享材质语义：目标材质被原位改写，全部引用者同变。
+/// `ash_renderer/load_image`：运行期异步加载新贴图并换 base_color 槽
+/// （贴图腿驱动）。共享材质语义：目标材质被原位改写，全部引用者同变。
 #[system]
 pub(crate) fn load_image_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let value = params.ok_or_else(|| invalid_params("params 缺失：需要 path 与 entity"))?;
@@ -161,7 +161,7 @@ struct ReloadAssetParams {
     path: String,
 }
 
-/// `ash_renderer/reload_asset`：手动触发重载（4.4.3 热重载链的可复现驱动）。
+/// `ash_renderer/reload_asset`：手动触发重载（热重载链的可复现驱动）。
 /// `AssetServer::reload` 重走加载链——失败过的资产修复后由此复活（`Added`/
 /// `Modified` 事件 → revive → flush 重试），文件监听是自动通道、本方法是
 /// 测试与 AI 的确定性对照（不依赖 watcher 时序，受理即返回）。加载是异步链，
@@ -172,7 +172,7 @@ pub(crate) fn reload_asset_cmd(In(params): In<Option<Value>>, world: &mut World)
     let p: ReloadAssetParams =
         serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
     // reload 收 `impl Into<AssetPath>`，String → AssetPath 的 From 走 panic
-    // 解析器——统一 try_parse 预校验，非法路径回协议错误（4.5 F5）
+    // 解析器——统一 try_parse 预校验，非法路径回协议错误
     let path = bevy::asset::AssetPath::try_parse(&p.path)
         .map_err(|e| invalid_params(format!("资产路径解析失败：{}: {e}", p.path)))?
         .into_owned();

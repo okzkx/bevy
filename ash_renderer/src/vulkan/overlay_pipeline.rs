@@ -1,4 +1,4 @@
-//! overlay 图形管线（施工 3.7.3）：egui 镶嵌顶点的第二 GraphicsPipeline。
+//! overlay 图形管线：egui 镶嵌顶点的第二 GraphicsPipeline。
 //!
 //! 与场景管线（[`super::pipeline`]）的关系是"**布局共享、状态各管**"：
 //! - **set0 共享**：layout 只声明常驻表 set0（UI 无 UBO，不声明 set1），表在飞
@@ -20,7 +20,7 @@
 //! - **剔除 NONE**：epaint 明言 UI 顶点绕向不保证一致（官方同款）。
 //!
 //! UI 录制契约 [`UiPaint`]/[`UiDrawCall`] 也住本模块：录制层 [`super::frames`]
-//! 与生产方 `overlay::paint` 同层消费，vulkan 不引上层类型。
+//! 与生产方 `overlay::framework::paint` 同层消费，vulkan 不引上层类型。
 
 use ash::{vk, Device};
 use bevy::log::info;
@@ -53,7 +53,7 @@ const _: () = {
 /// overlay push constant 总长（pipeline layout 声明 + 排布 + WGSL 三方同源）。
 pub const UI_PUSH_CONSTANTS_SIZE: u32 = 16;
 
-/// UI 顶点步长 20B（epaint 顶点镜像 `overlay::paint::UiVertex` 的 pos8+uv8+color4；
+/// UI 顶点步长 20B（epaint 顶点镜像 `overlay::framework::paint::UiVertex` 的 pos8+uv8+color4；
 /// 写入侧的 `size_of` 断言与本常量互证）。
 pub const UI_VERTEX_STRIDE: u32 = 20;
 
@@ -85,7 +85,7 @@ pub struct UiDrawCall {
     pub scissor: [u32; 4],
 }
 
-/// 一次 UI 绘制的全部产物（`overlay::paint` 组装，[`super::frames`] 消费）：
+/// 一次 UI 绘制的全部产物（`overlay::framework::paint` 组装，[`super::frames`] 消费）：
 /// 图集槽位 + 屏幕 points 尺寸 + 逐 clip draw 列表；顶点/索引已由生产方写入 UI 环
 /// 本帧槽 buffer，draw 用环内引脚定位。
 pub struct UiPaint {
@@ -224,7 +224,7 @@ impl OverlayPipeline {
             let multisample = vk::PipelineMultisampleStateCreateInfo::default()
                 .rasterization_samples(vk::SampleCountFlags::TYPE_1);
             // depth-stencil 全关（UI 不读不写深度）；深度格式仍须随渲染实例声明
-            //（VUID-08914，4.5 订正：管线声明面 = 实例附件全集的形状声明）
+            //（VUID-08914，管线声明面 = 实例附件全集的形状声明）
             let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(false)
                 .depth_write_enable(false);
@@ -268,7 +268,7 @@ impl OverlayPipeline {
                 .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
                 .map_err(|(_, e)| e)?
                 .remove(0);
-            // module 用毕即拆（与场景管线同 D7 纪律：创建收口即销毁，拆 Device 零泄漏）
+            // module 用毕即拆（与场景管线同纪律：创建收口即销毁，拆 Device 零泄漏）
             device.destroy_shader_module(module, None);
             info!(
                 "overlay 管线就绪: dynamic rendering（color {color_format:?}，depth {depth_format:?}\
@@ -303,7 +303,7 @@ unsafe impl Sync for OverlayPipeline {}
 
 impl Drop for OverlayPipeline {
     fn drop(&mut self) {
-        // 契约边界:不等 GPU,退出排空由 teardown 的 device_wait_idle 先行(D4);
+        // 契约边界:不等 GPU,退出排空由 teardown 的 device_wait_idle 先行;
         // pipeline 先于 layout(引用方向),layout 先于它借用的 set0 layout(在
         // BindlessTables 里,拆除序由 host 的 remove_resource 顺序保证)
         unsafe {

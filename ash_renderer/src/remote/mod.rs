@@ -1,4 +1,4 @@
-//! BRP 远程直控通道（3.12 起）：宿主 World 经 HTTP JSON-RPC 暴露在
+//! BRP 远程直控通道：宿主 World 经 HTTP JSON-RPC 暴露在
 //! 127.0.0.1:15702（bevy_remote 默认端口），AI/脚本不开 UI 即可"查询 → 改
 //! Transform → 相机环绕推拉"。读侧零自研——官方 inspection 方法族
 //!（`world.query`/`world.inspect`/`world.summarize` 等）与内置 CRUD 随
@@ -8,9 +8,9 @@
 //!
 //! | 子模块 | 职责 |
 //! |---|---|
-//! | [`mouse`] | 虚拟鼠标（3.13）：窗口无关鼠标输入源，注入 `Messages<WindowEvent>` 与 bevy_winit 同层 |
-//! | [`objects`] | 对象生命周期方法族（4.1）：spawn 克隆/换柄写方法 + increment_stats 统计读数 |
-//! | [`assets`] | 资产内容变更（4.2）+ 运行期动态加载（4.3）：mutate/load_mesh/load_image/reload |
+//! | [`mouse`] | 虚拟鼠标：窗口无关鼠标输入源，注入 `Messages<WindowEvent>` 与 bevy_winit 同层 |
+//! | [`objects`] | 对象生命周期方法族：spawn 克隆/换柄写方法 + increment_stats 统计读数 |
+//! | [`assets`] | 资产内容变更 + 运行期动态加载：mutate/load_mesh/load_image/reload |
 //!
 //! 机制与边界（侦察笔记《bevy_remote：BRP远程协议与自定义方法》）：handler 本身
 //! 就是一个 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍执行——写值下一帧
@@ -43,7 +43,7 @@ use crate::{
 
 use ash_macros::system;
 
-/// BRP 远程通道插件（3.12/3.13/4.1/4.2/4.3）：装协议 + HTTP 传输 + 场景语义
+/// BRP 远程通道插件：装协议 + HTTP 传输 + 场景语义
 /// 方法族（本模块三个 + mouse 虚拟鼠标四个 + objects 对象生命周期与统计 +
 /// assets 资产变更与动态加载）。宿主 main 照插件清单惯例只 `add_plugins`，
 /// 方法注册收在本插件内。
@@ -124,7 +124,7 @@ fn scene_tree(In(_params): In<Option<Value>>, rows: Query<EntityRow>) -> BrpResu
     }))
 }
 
-/// 递归深度上限（4.5 F16）：病态深树在栈溢出前显式拒绝——栈溢出走 abort 是
+/// 递归深度上限：病态深树在栈溢出前显式拒绝——栈溢出走 abort 是
 /// "禁 panic"规则下唯一不可兜底路径，深度越限回协议错误。上限 1024 远超真实
 /// 场景层级，同时远低于典型线程栈的溢出深度。
 const TREE_MAX_DEPTH: usize = 1024;
@@ -170,7 +170,7 @@ struct SetTransformParams {
 }
 
 /// `ash_renderer/set_transform`：写一个实体的 Transform（独占 &mut World 直调
-/// [`apply_transform_edit`]，不排队不走 UI——3.11 定案的"唯一实现"复用点）。
+/// [`apply_transform_edit`]，不排队不走 UI——Transform 编辑"唯一实现"复用点）。
 /// 至少一组量必须出现；成功返回写后的读回值（客户端可拿它做写后读对账）。
 #[system]
 fn set_transform(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
@@ -229,7 +229,7 @@ struct SetCameraParams {
     zoom: Option<f32>,
 }
 
-/// `ash_renderer/set_camera`：相机给值（3.9 轨道控制的 CLI 输入源，独占
+/// `ash_renderer/set_camera`：相机给值（轨道控制的 CLI 输入源，独占
 /// &mut World 直调 [`apply_camera_command`]）。环绕（yaw/pitch）与推拉
 ///（radius/zoom）绝对值或系数覆盖，限位与鼠标输入共用；成功返回命令后的
 /// 轨道参数读回值。

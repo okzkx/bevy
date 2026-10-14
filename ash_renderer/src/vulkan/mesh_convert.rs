@@ -1,8 +1,8 @@
-//! 网格转换(3.2.3):`bevy::mesh::Mesh` → 3.2/3.4 定案的交错 32B vertex-input 布局 +
+//! 网格转换:`bevy::mesh::Mesh` → 交错 32B vertex-input 布局 +
 //! 统一 U32 索引。纯 CPU 侧字节整形,零 Vulkan 调用——Vulkan 只在 [`super::pool`] /
 //! [`super::uploader`] 消费产出的字节。
 //!
-//! **定案**(施工计划 §2 关键决策表:这是我们的布局选择,不是 Vulkan 禁止 SoA):
+//! **定案**(这是我们的布局选择,不是 Vulkan 禁止 SoA):
 //!
 //! | 字段 | offset | 尺寸 | 来源 |
 //! |---|---|---|---|
@@ -10,37 +10,37 @@
 //! | NORMAL | 12 | 12B(`[f32;3]`) | `Mesh::ATTRIBUTE_NORMAL`,缺则全 0 |
 //! | UV_0 | 24 | 8B(`[f32;2]`) | `Mesh::ATTRIBUTE_UV_0`,缺则全 0 |
 //!
-//! stride 32B,与 3.4 的 vertex-input 状态是同一份契约(本模块是唯一生产点)。
-//! "交错 32B 不得未经验证复用为 WGSL storage struct"——M2 的 vertex 数据只走
-//! vertex-input 路径,不进描述符( Bindless 表只装贴图/采样器,见施工计划 §2)。
+//! stride 32B,与图形管线的 vertex-input 状态是同一份契约(本模块是唯一生产点)。
+//! "交错 32B 不得未经验证复用为 WGSL storage struct"——vertex 数据只走
+//! vertex-input 路径,不进描述符(Bindless 表只装贴图/采样器)。
 //!
 //! **索引**:bevy 的 `Indices::U16/U32` 均收,统一输出 U32(`vk::IndexType::UINT32`)。
 //! 放弃"U16 输入保 U16 输出"的省内存分支:一字节序/firstIndex 步长/绑定对齐三处
 //! 都只留一条路,验收面减半;FlightHelmet 284166 索引按 U32 = 1.1MB,容量余量覆盖。
 //! 无索引网格输出顺序索引 0..n(显式策略,不跳过)。
 //!
-//! **缺字段/拓扑策略**(任务口径:明确处理,不静默):POSITION 缺失或格式不是
-//! Float32x3 → 拒绝该资产(没有位置的网格无法构成 3.4 的绘制);NORMAL/UV_0
-//! 缺失 → 0 填充继续(3.4 调试着色允许无光/无贴图,信息缺口记录在日志);拓扑非
-//! TriangleList → 拒绝(M2 管线只配 TriangleList,strip/line 的绕向与索引语义另议)。
+//! **缺字段/拓扑策略**(明确处理,不静默):POSITION 缺失或格式不是
+//! Float32x3 → 拒绝该资产(没有位置的网格无法构成绘制);NORMAL/UV_0
+//! 缺失 → 0 填充继续(调试着色允许无光/无贴图,信息缺口记录在日志);拓扑非
+//! TriangleList → 拒绝(管线只配 TriangleList,strip/line 的绕向与索引语义另议)。
 //! 拒绝是 [`MeshConvertError`],由上传编排层按 Tier① warn 后跳过,帧循环继续。
 
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 
-/// 交错顶点布局的 stride,3.2 上传与 3.4 vertex-input 共用(字节)。
+/// 交错顶点布局的 stride,上传与 vertex-input 共用(字节)。
 pub const VERTEX_STRIDE: u64 = 32;
 
 /// 转换拒绝的原因(编排层按它分类 warn,一次一资产,不刷屏)。
 #[derive(Debug, thiserror::Error)]
 pub enum MeshConvertError {
-    /// 拓扑不在本步支持范围(只收 TriangleList)。
-    #[error("不支持的拓扑 {0:?}(本步只收 TriangleList)")]
+    /// 拓扑不在支持范围(只收 TriangleList)。
+    #[error("不支持的拓扑 {0:?}(只收 TriangleList)")]
     UnsupportedTopology(PrimitiveTopology),
     /// POSITION 缺失或不是 Float32x3——没有位置就无法绘制,拒绝。
     #[error("POSITION 缺失或不是 Float32x3")]
     MissingPosition,
-    /// POSITION 属性长度与顶点数不符(畸形资产;4.5 F17 由 debug_assert 升运行
-    /// 时检查——release 下索引越界 panic 绕过统一错误通道)。
+    /// POSITION 属性长度与顶点数不符(畸形资产;运行时检查而非 debug_assert
+    /// ——release 下索引越界 panic 绕过统一错误通道)。
     #[error("POSITION 长度 {0} 与顶点数 {1} 不符")]
     PositionLengthMismatch(usize, usize),
     /// 空网格(0 顶点):没有可上传的内容。
@@ -78,7 +78,7 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
     else {
         return Err(MeshConvertError::MissingPosition);
     };
-    // 4.5 F17:长度核对升运行时检查——畸形资产拒收入通道,不以越界 panic 出局
+    // 长度核对是运行时检查——畸形资产拒收入通道,不以越界 panic 出局
     if positions.len() != vertex_count {
         return Err(MeshConvertError::PositionLengthMismatch(
             positions.len(),

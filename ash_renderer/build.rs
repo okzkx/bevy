@@ -14,6 +14,10 @@
 //!   声明性插词（capability 只收紧设备要求不放松合法性），合法性最终由运行期
 //!   验证层在 `vkCreateShaderModule` 内嵌执法（VUID-04680/08740）兜底；但"缺
 //!   官方工具的静默不冒充证据"红线不变——此分支下构建日志会明示证据链降级。
+//!
+//! 输出纪律：`cargo:warning` 只承载真正异常（缺 spirv-val 降级）；验证轨迹
+//! （原生通过/预期被拒/补丁后通过）走 stderr——cargo 捕获下平时静默，仅在脚本
+//! 失败时随错误展示（或 `cargo build -vv` 全量可见），不污染 rustc 警告流。
 
 use std::path::{Path, PathBuf};
 
@@ -92,18 +96,18 @@ fn gate_and_patch(words: Vec<u32>, stem: &str, val_exe: Option<&Path>) -> Vec<u3
     match val_exe {
         Some(val_exe) => match run_spirv_val(val_exe, &words) {
             Ok(()) => {
-                println!("cargo:warning=[{stem}] spirv-val 原生输出通过（零补丁）");
+                eprintln!("[{stem}] spirv-val 原生输出通过（零补丁）");
                 words
             }
             Err(native_error) => {
-                println!("cargo:warning=[{stem}] 原生输出被 spirv-val 拒（预期缺口：RuntimeDescriptorArray capability 不发射）——打补丁重验");
+                eprintln!("[{stem}] 原生输出被 spirv-val 拒（预期缺口：RuntimeDescriptorArray capability 不发射）——打补丁重验");
                 let patched = patch_descriptor_indexing(&words);
                 if let Err(patch_error) = run_spirv_val(val_exe, &patched) {
                     panic!(
                         "[{stem}] 补丁后仍被 spirv-val 拒——模块无合法形态\n-- 原生错误 --\n{native_error}\n-- 补丁后错误 --\n{patch_error}"
                     );
                 }
-                println!("cargo:warning=[{stem}] 补丁后通过 spirv-val（runtime+补丁器定案流程）");
+                eprintln!("[{stem}] 补丁后通过 spirv-val（runtime+补丁器定案流程）");
                 patched
             }
         },

@@ -8,7 +8,7 @@
 
 ## 任务面板
 
-- [x] **3.10.1 实体层级树窗口**：`overlay/entity_tree_window.rs`（`SelectedEntity` 点选资源 + `EntityRow` 查询 + `EntityTreeData` SystemParam 束 + `EntityTreeWindow` struct）；`overlay/debug_hub_window.rs`（`DebugWindowsOpen` 显隐资源 + 总控面板）；`ui.rs` 接线（init 资源 + `DebugUiParams` 参数束 + 三窗口显隐门）；`debug_window.rs` 加 `open` 字段（[×] 与总控写同字段）。实录见[施工记录](3.10.1-实体层级树施工记录：独立窗口struct、总控窗口与相关实体过滤.md)。
+- [x] **3.10.1 实体层级树窗口**：`overlay/windows/entity_tree_window.rs`（`SelectedEntity` 点选资源 + `EntityRow` 查询 + `EntityTreeData` SystemParam 束 + `EntityTreeWindow` struct）；`overlay/windows/debug_hub_window.rs`（`DebugWindowsOpen` 显隐资源 + 总控面板）；`overlay/framework/ui.rs` 接线（init 资源 + `DebugUiParams` 参数束 + 三窗口显隐门）；`windows/debug_window.rs` 加 `open` 字段（[×] 与总控写同字段）。实录见[施工记录](3.10.1-实体层级树施工记录：独立窗口struct、总控窗口与相关实体过滤.md)。
 
 ## 判定线（对照立案独立验收）
 

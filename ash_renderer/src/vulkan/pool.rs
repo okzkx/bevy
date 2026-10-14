@@ -1,4 +1,4 @@
-//! 资产大池(3.2.2.2 池与缓存 + 3.2.2.3 容量与销毁):顶点/索引两条
+//! 资产大池:顶点/索引两条
 //! DEVICE_LOCAL 池 + bump 偏移分配 + 按资产身份去重的驻留缓存。
 //!
 //! 内存类型/usage/绑定/对齐的规则全部引用 [`super::resources`] 的契约
@@ -7,26 +7,24 @@
 //! 1. **bump 分配**:`used` 游标单调推进,顶点区间按 [`VERTEX_STRIDE`](32B)对齐、
 //!    索引区间按 4B(U32)对齐——前者让每个顶点槽恰好一整条 stride,后者满足
 //!    `vkCmdCopyBuffer` 偏移 4 倍数条款(VUID-00114)与 `vkCmdBindIndexBuffer`
-//!    偏移按索引类型大小对齐条款(VUID-08783)。(4.5 订正:下方第 3 条的
-//!    停尸房/free list 回收账是步骤 4 建的,原"不回收空洞"说明只描述 3.x
-//!    时代的 bump-only 形态,保留为历史口径不再覆盖现状。)
-//! 2. **驻留缓存**:`HashMap<AssetId<Mesh>, MeshSlot>` 按资产身份去重——同一柄
-//!    不因每帧快照重复上传(施工计划 §2"已驻留资源不因每帧快照而重复上传")。
-//!    槽位同时记录 3.4 画侧要的引脚:`vertex_base`(vertexOffset =
+//!    偏移按索引类型大小对齐条款(VUID-08783)。
+//! 2. **驻留缓存**:`HashMap<AssetId<Mesh>, MeshSlot>` 按资产身份去重——已驻留
+//!    资源不因每帧快照重复上传。
+//!    槽位同时记录画侧要的引脚:`vertex_base`(vertexOffset =
 //!    字节偏移 ÷ 32)、`first_index`(字节偏移 ÷ 4)与完成票据。
-//! 3. **容量维护**(3.2.2.3):放不下时走显式维护路径——**不写越界**:先按
+//! 3. **容量维护**:放不下时走显式维护路径——**不写越界**:先按
 //!    "需量与现有驻留加余量"算新容量;等待全部在飞上传票据完成(迁移拷贝的
 //!    源不再被 GPU 读)→ 分配新池 → 已驻留内容整段迁移(old→new 设备拷贝)
-//!    → 等迁移票据 → **等图形侧最后使用**(`wait_draws` 回调,4.1.1 补齐:
+//!    → 等迁移票据 → **等图形侧最后使用**(`wait_draws` 回调:
 //!    等全部帧槽 fence ⇒ 无在飞 draw 再读旧池)→ 才销毁旧池。迁移与销毁的
-//!    等待全部记账,与正常上传分账(施工计划 §0 判定线 6:维护等待单列,
+//!    等待全部记账,与正常上传分账(维护等待单列,
 //!    不冒充"正常上传零 idle")。
 //!
 //! 销毁纪律:本类型 Drop 不等 GPU——"最后一次使用完成"由两个上游负责:在飞
 //! 上传票据由容量维护在迁移前等待,进程级退出排空由 `host::teardown_vulkan` 的
-//! `device_wait_idle` 先于一切资源 Drop 完成(D4 定案)。
+//! `device_wait_idle` 先于一切资源 Drop 完成。
 //!
-//! 回收与复用(4.4.1/4.4.2):bump 游标之外立两条回收账——**停尸房**
+//! 回收与复用:bump 游标之外立两条回收账——**停尸房**
 //! ([`Self::retire`]:卸载/替换换下的旧区间,在飞 draw 可能还在读,排空前
 //! 不得复用)与 **free list**([`Self::drain_graveyard`]:等"图形最后使用"
 //! 后归还的空洞,[`Self::alloc`] first-fit 优先复用)。排空点与贴图停尸房
@@ -92,7 +90,7 @@ pub struct MaintenanceLedger {
     pub pause_ms_total: u128,
 }
 
-/// 回收账本(4.4):卸载/替换换下区间的累计退休量 + 停尸房/free list 当前态。
+/// 回收账本:卸载/替换换下区间的累计退休量 + 停尸房/free list 当前态。
 /// 判定线"反复增删存量回基线"的读数口——resident 字节数随卸载回落,used 游标
 /// 是历史峰值只增不减(复用不推进游标),两者分列不混报。
 #[derive(Default, Clone, Copy)]
@@ -113,12 +111,12 @@ pub struct RecycleLedger {
     pub resident_index_bytes: u64,
 }
 
-/// 顶点/索引 DEVICE_LOCAL 大池 + 资产身份驻留缓存(3.2.2.2/3.2.2.3)。
+/// 顶点/索引 DEVICE_LOCAL 大池 + 资产身份驻留缓存。
 #[derive(bevy::prelude::Resource)]
 pub struct MeshPool {
     device: Device,
     contract: MemoryContract,
-    /// 池 buffer 的共享族集合(3.4 定案:有专用 transfer 族时 = [transfer, graphics]
+    /// 池 buffer 的共享族集合(定案:有专用 transfer 族时 = [transfer, graphics]
     /// 两族 CONCURRENT,所有权乒乓不值得;同族设备 = 空 = EXCLUSIVE。取数见
     /// `GpuBuffer::create_with_families` 的定案注释)。
     sharing_families: Vec<u32>,
@@ -129,10 +127,10 @@ pub struct MeshPool {
     used_vertex: u64,
     used_index: u64,
     residency: HashMap<AssetId<Mesh>, MeshSlot>,
-    /// 回收停尸房(4.4.2):卸载/替换换下的旧区间(顶点,索引),在飞 draw 可能
+    /// 回收停尸房:卸载/替换换下的旧区间(顶点,索引),在飞 draw 可能
     /// 还在读——排空(等"图形最后使用")前不得复用,防覆盖判定线违反。
     graveyard: Vec<(PoolRange, PoolRange, u64)>,
-    /// 回收就绪空洞(4.4.2):停尸房排空后归还的区间,alloc first-fit 优先
+    /// 回收就绪空洞:停尸房排空后归还的区间,alloc first-fit 优先
     /// 复用;偏移/长度保持对齐倍数(进入前已对齐,分裂按对齐倍数切)。
     free_vertex: Vec<PoolRange>,
     free_index: Vec<PoolRange>,
@@ -203,7 +201,7 @@ impl MeshPool {
         )
     }
 
-    /// 回收账本(4.4 读数口;驻留字节现算 O(条目数),调用频率=读数与日志)。
+    /// 回收账本(读数口;驻留字节现算 O(条目数),调用频率=读数与日志)。
     #[must_use]
     pub fn recycle_ledger(&self) -> RecycleLedger {
         let mut r = self.recycled;
@@ -224,7 +222,7 @@ impl MeshPool {
     /// (初次懒建或显式维护迁移)。任何路径失败报错,调用方不得在未保证
     /// 容量的情况下 [`Self::alloc`]——那才可能写越界。
     ///
-    /// `wait_draws`:销毁旧池前的"图形最后使用"等待(4.1.1,责任边界契约②的
+    /// `wait_draws`:销毁旧池前的"图形最后使用"等待(责任边界契约②的
     /// 图形半边)——调用方经它等全部帧槽 fence,保证没有在飞 draw 还在读旧池。
     /// 池不认识帧资源,以回调接线保持依赖单向(vulkan 层内 pool 不依赖 frames)。
     ///
@@ -272,7 +270,7 @@ impl MeshPool {
         if migrating {
             // 已驻留内容整段迁移:bump 布局保证 [0, used) 就是全部有效数据。
             // 迁移批自己的票据在销毁旧池前等完——覆盖上传侧;图形侧在下面
-            // wait_draws 里收口(4.1.1)
+            // wait_draws 里收口
             let ticket = uploader
                 .submit_batch(UploadBatch {
                     device_copies: vec![
@@ -339,7 +337,7 @@ impl MeshPool {
 
     /// bump 划出一段区间(容量由 [`Self::ensure_capacity`] 先行保证;调用方
     /// 必须先 ensure 再 alloc,否则 debug_assert(发布构建下按纪律也不越界:
-    /// 分配只在 ensure 之后发生是编排层的顺序契约)。4.4 起优先复用 free
+    /// 分配只在 ensure 之后发生是编排层的顺序契约)。alloc 优先复用 free
     /// list 空洞(first-fit,整段用或对齐倍数切分),查无才从 bump 游标划新
     /// ——free 区间必在 `[0, used)` 内且容量保证按 used+需量核算,复用天然
     /// 越界安全。
@@ -380,10 +378,10 @@ impl MeshPool {
         PoolRange { offset, size }
     }
 
-    /// 卸载驻留条目(4.4.1):区间进停尸房(**不复用**——在飞 draw 可能还在读
+    /// 卸载驻留条目:区间进停尸房(**不复用**——在飞 draw 可能还在读
     /// 旧内容,排空后才归还 free list),返回释放的字节 `(顶点, 索引)`;未驻留
-    /// = None 幂等(重复 Removed/无驻留身份不误动作)。上传票据随行(4.5 F3:
-    /// 排空双条件之一)。
+    /// = None 幂等(重复 Removed/无驻留身份不误动作)。上传票据随行
+    /// (排空双条件之一)。
     pub fn retire(&mut self, id: AssetId<Mesh>) -> Option<(u64, u64)> {
         let slot = self.residency.remove(&id)?;
         self.graveyard.push((slot.vertex, slot.index, slot.ticket));
@@ -393,13 +391,13 @@ impl MeshPool {
         Some((slot.vertex.size, slot.index.size))
     }
 
-    /// 排空回收停尸房(4.4.2,4.5 F3 凭据补全):双条件齐备后旧区间归还 free
+    /// 排空回收停尸房:双条件齐备后旧区间归还 free
     /// list 可复用——`wait_draws` 等"图形最后使用"(帧槽 fence),`uploader`
     /// 等"上传完成"(停尸房票据的时间线信号量;最小化期间 flush 仍可提交
     /// transfer 而无图形提交,帧 fence 完成不蕴含上传完成)。空房直接返回不
     /// 等待(稳态零成本);失败保留停尸房下帧重试(区间多活一帧,无悬空)。池
     /// 迁移([`Self::ensure_capacity`])与排空的先后由编排层保证:ensure 先等
-    /// 帧侧(4.1.1),排空在 flush 开头先于 ensure——迁移时停尸房必空,区间数据
+    /// 帧侧,排空在 flush 开头先于 ensure——迁移时停尸房必空,区间数据
     /// 随 `[0, used)` 整段平移,偏移不变语义不变。
     ///
     /// # Errors
@@ -426,7 +424,7 @@ impl MeshPool {
             self.free_index.push(index);
         }
         info!(
-            "网格回收停尸房排空:归还 {count} 组区间(双条件齐备:图形最后使用 + 上传票据,4.4/4.5 F3)"
+            "网格回收停尸房排空:归还 {count} 组区间(双条件齐备:图形最后使用 + 上传票据)"
         );
         Ok(())
     }
@@ -459,9 +457,9 @@ impl MeshPool {
         Ok(())
     }
 
-    /// 同身份内容替换登记(4.2):条目已在 = 换新槽位、返回旧槽位。旧区间进
-    /// 停尸房(4.4.2)——在飞 draw 可能还在读旧内容,排空(等"图形最后使用")
-    /// 后归还 free list 可复用;4.2 时代的"孤儿化"已由回收账取代。与
+    /// 同身份内容替换登记:条目已在 = 换新槽位、返回旧槽位。旧区间进
+    /// 停尸房——在飞 draw 可能还在读旧内容,排空(等"图形最后使用")
+    /// 后归还 free list 可复用。与
     /// [`Self::commit`] 的分工:编排层持失效凭据(AssetInvalidations)才允许
     /// 走 replace,纪律边界在编排层,vulkan 层只提供换条目的能力。
     #[must_use]
@@ -495,7 +493,7 @@ impl MeshPool {
 impl Drop for MeshPool {
     fn drop(&mut self) {
         // 契约边界(与 GpuBuffer::Drop 同款):不等 GPU。在飞上传票据与图形侧
-        // 最后使用由容量维护在销毁旧池前等待(4.1.1 起双条件齐);退出排空由
+        // 最后使用由容量维护在销毁旧池前等待(双条件);退出排空由
         // teardown_vulkan 的 device_wait_idle 先于一切 Drop 完成(D4)。
         self.vertex = None;
         self.index = None;

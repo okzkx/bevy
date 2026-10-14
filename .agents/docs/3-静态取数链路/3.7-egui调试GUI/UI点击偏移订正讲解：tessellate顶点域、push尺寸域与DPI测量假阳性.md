@@ -62,7 +62,7 @@ UI 点击链上其实有三个尺寸域在同时工作，谁都不许替谁换�
 
 ## §6 修复与回归收账
 
-- 代码：`UiPaint::screen_px` → `screen_pt`（`vulkan/overlay_pipeline.rs` 契约 + `overlay/paint.rs` 组装 extent÷ppp + `frames.rs` pack 点 + `overlay_draw.wgsl` 注释），feat d90f14369；scissor 保持 clip×ppp 物理域（该半边本来就对）。
+- 代码：`UiPaint::screen_px` → `screen_pt`（`vulkan/overlay_pipeline.rs` 契约 + `overlay/framework/paint.rs` 组装 extent÷ppp + `frames.rs` pack 点 + `overlay_draw.wgsl` 注释），feat d90f14369；scissor 保持 clip×ppp 物理域（该半边本来就对）。
 - 回归全绿：clippy 全净、零 VUID（含拆 Device）、3.5 判定线零回退、resize×3 域对账跟随新 extent、最小化/还原闸门、WM_CLOSE exit 0；视觉验证（当前模型读图，探针色块清零后）通过。
 - 证据截图：[egui-ppp-fix-probe-green.png](../_assets/egui-ppp-fix-probe-green.png)（探针 build：色块落 (875,375) 尺寸 125×62.5）、[egui-ppp-fix-final.png](../_assets/egui-ppp-fix-final.png)（干净 build 最终界面，面板尺寸/位置正常）。
 - 边界：修复时加装的四类临时探针（色块/点击三域/域对账/模式变化打点）已全部撤除，证据数值以本文与 3.7.4 §7 表格为准。

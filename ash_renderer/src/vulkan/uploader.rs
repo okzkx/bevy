@@ -1,26 +1,26 @@
-//! 上传编排(3.2.4):staging 环 + transfer 提交 + 单调 timeline 票据。
+//! 上传编排:staging 环 + transfer 提交 + 单调 timeline 票据。
 //!
 //! 一次合批 = 一个 staging 范围 + 一次 transfer 提交(多段 `vkCmdCopyBuffer`
 //! regions + 单 signal),**不逐批新建 staging 对象**——staging 与 transfer 命令
-//! 缓冲按 2 槽位轮转复用(3.2.4.3)。复用安全由票据证明:每槽记住最后提交的
+//! 缓冲按 2 槽位轮转复用。复用安全由票据证明:每槽记住最后提交的
 //! 票据值,复用前查 timeline 计数,未完成则 CPU 等待——"按完成票据复用资源
-//! 所需的 fence/timeline 等待是正常同步"(施工计划 §0 判定线 6),不冒充
+//! 所需的 fence/timeline 等待是正常同步",不冒充
 //! "正常上传零 idle",每次等待都有日志。
 //!
-//! **票据语义**(3.2.4.1):提交成功后 signal `ticket_semaphore` 的新值
+//! **票据语义**:提交成功后 signal `ticket_semaphore` 的新值
 //! `next_ticket`(从 1 起单调 +1,满足 VUID-VkSubmitInfo-pSignalSemaphores-03242
 //! "signal 值须大于当前值")。提交挂 fence(null)——完成只由 timeline 表达,
 //! CPU 等待只发生在复用/维护/退出路径,不在逐批路径上。空批次(无 staging 写、
 //! 无拷贝)不提交、不发票据(返回 `None`);任何失败(重置/录制/提交)在改写
-//! `next_ticket` 之前早退,不发布票据——"失败不发布虚假完成票据"(3.2.4.4)
-//! 从结构上成立(4.5 订正:"不占槽"删去——staging 槽位游标在等待/复用判定
+//! `next_ticket` 之前早退,不发布票据——"失败不发布虚假完成票据"
+//! 从结构上成立(staging 槽位游标在等待/复用判定
 //! 时已先行推进,失败帧的槽位占用是复用纪律内部消化的事,与票据无关)。
 //!
 //! **timeline 提交接口定案**(面板口径):保留旧式 SubmitInfo,timeline 信号量
 //! 进提交时按 VUID-VkSubmitInfo-pNext-03239 挂 `TimelineSemaphoreSubmitInfo`;
 //! 不启用 synchronization2(设备创建也从未开它),两套同步接口不混用。
 //!
-//! **跨族所有权**(3.2.4.2,EXCLUSIVE 资源):本机有纯 transfer 族,拷贝提交在
+//! **跨族所有权**(EXCLUSIVE 资源):本机有纯 transfer 族,拷贝提交在
 //! transfer 队列、图形消费在 graphics 队列——拷贝写完后在**同一提交**末尾记录
 //! **release**(src=transfer 族,dst=graphics 族;规范明言 release 的 dst 阶段/
 //! 访问掩码被忽略,填 BOTTOM_OF_PIPE/空只满足旧式屏障非零前提,依据
@@ -71,12 +71,12 @@ pub struct StagingCopy {
 #[derive(Clone, Copy, Debug)]
 pub struct Release {
     pub buffer: vk::Buffer,
-    /// 接收所有权的队列族(3.4 起 = graphics 族)。
+    /// 接收所有权的队列族(graphics 族)。
     pub to_family: u32,
 }
 
-/// 一段 staging → image 的拷贝:src 恒为本批 staging,dst 是 2D mip0 单层(3.3.1
-/// 静态 mip0 形状)。字节排布按紧 packing(`bufferRowLength/bufferImageHeight = 0`,
+/// 一段 staging → image 的拷贝:src 恒为本批 staging,dst 是 2D mip0 单层
+/// (静态 mip0 形状)。字节排布按紧 packing(`bufferRowLength/bufferImageHeight = 0`,
 /// 行距由驱动按格式推导),与 bevy `Image.data` 的 mip0 布局一致。
 #[derive(Clone, Copy, Debug)]
 pub struct StagingImageCopy {
@@ -96,7 +96,7 @@ pub struct StagingImageCopy {
 #[derive(Clone, Copy, Debug)]
 pub struct ImageRelease {
     pub image: vk::Image,
-    /// 接收所有权的队列族(3.3.3 起 = graphics 族)。
+    /// 接收所有权的队列族(graphics 族)。
     pub to_family: u32,
 }
 
@@ -163,7 +163,7 @@ impl Uploader {
             device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
                     // 槽位命令缓冲逐个重置重录,RESET_COMMAND_BUFFER 足够;族必须
-                    // 是提交目标族(3.2.4.1:transfer 命令池归正确队列族)
+                    // 是提交目标族(transfer 命令池归正确队列族)
                     .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
                     .queue_family_index(queue_family),
                 None,
@@ -259,7 +259,7 @@ impl Uploader {
         .map_err(VulkanError::from)
     }
 
-    /// 票据信号量本体:3.4 图形提交把它挂进 wait 列表(值 = 数据对应票据)实现
+    /// 票据信号量本体:图形提交把它挂进 wait 列表(值 = 数据对应票据)实现
     /// "上传完成才可使用"的 GPU 侧等待;探针按同一形状做跨族预演。
     #[must_use]
     pub fn ticket_semaphore(&self) -> vk::Semaphore {
@@ -343,7 +343,6 @@ impl Uploader {
         // 这一步必须在录制/提交之前——拷贝的源是 staging 映射内存
         let Some(staging_buffer) = slot.staging.as_mut() else {
             // 上一分支已保证扩容或既有槽在场;违反即内部矛盾,按 Tier② 冒泡不 panic
-            // (4.5 小账:expect 字面退役)
             return Err(VulkanError::Upload(
                 "内部矛盾:扩容判定后 staging 槽位仍缺席".into(),
             ));
@@ -373,15 +372,15 @@ impl Uploader {
                 );
             }
             if !batch.image_uploads.is_empty() {
-                // 图像段(3.3.1):布局迁移与 buffer 读写次序是两类问题(显存机制篇
+                // 图像段:布局迁移与 buffer 读写次序是两类问题(显存机制篇
                 // 判定线 3),独立录制,不套 buffer barrier 模板。
                 //
                 // 前置:UNDEFINED → TRANSFER_DST。首用自持——src/dst 族号用 IGNORED:
-                // 3.4 定案后生产图像是 CONCURRENT 双族(显式族号会被 VUID 拒,必须
+                // 生产图像是 CONCURRENT 双族(显式族号会被 VUID 拒,必须
                 // IGNORED),探针的 EXCLUSIVE 图像无让渡场景时 IGNORED 同样合法;
                 // "把归谁写成代码"的显式族号只保留在 release 屏障(下方)。UNDEFINED
                 // 起点无先前访问要罩,src 作用域为空(TOP_OF_PIPE 只满足非零前提);
-                // 对比 D6 的进场屏障:那里 UNDEFINED 迁移前有 acquire 读要罩,srcStage
+                // 对比进场屏障的颜色段:那里 UNDEFINED 迁移前有 acquire 读要罩,srcStage
                 // 必须提到 COLOR_ATTACHMENT_OUTPUT——两处形状不同是语义不同,不是模板。
                 for image in distinct_images(&batch.image_uploads) {
                     let into_transfer = vk::ImageMemoryBarrier::default()
@@ -541,7 +540,7 @@ impl Uploader {
             )?;
         }
         // 提交已成功:占槽、发新票据。上方任何 ? 早退都到不了这里——
-        // 虚假完成票据不存在(3.2.4.1/3.2.4.4)
+        // 虚假完成票据不存在
         slot.in_flight = Some(ticket);
         self.next_ticket += 1;
         Ok(Some(ticket))
@@ -581,7 +580,7 @@ fn color_mip0() -> vk::ImageSubresourceRange {
 impl Drop for Uploader {
     fn drop(&mut self) {
         // 契约边界(与 GpuBuffer/MeshPool 同款):不等 GPU;退出排空由
-        // teardown_vulkan 的 device_wait_idle 先于一切资源 Drop(D4 定案)。
+        // teardown_vulkan 的 device_wait_idle 先于一切资源 Drop。
         // staging 随槽位一起 Drop。
         unsafe {
             self.device.destroy_semaphore(self.ticket_semaphore, None);

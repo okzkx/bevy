@@ -1,8 +1,8 @@
-//! 实体层级树窗口（业务面板，3.10/3.11）：World 全部实体按 [`Children`]/[`ChildOf`]
+//! 实体层级树窗口（业务面板）：World 全部实体按 [`Children`]/[`ChildOf`]
 //! 关系递归展示，节点带 Name（无名按组件角色命名）+ 组件标签；点选节点落
-//! [`SelectedEntity`] 资源，面板下部是属性区（3.11）——组件全清单、渲染语义
-//! 行（Mesh/材质/贴图槽）与 Transform 编辑（3.11.2 DragValue，写经
-//! [`super::transform_edit`] 封装）。
+//! [`SelectedEntity`] 资源，面板下部是属性区——组件全清单、渲染语义
+//! 行（Mesh/材质/贴图槽）与 Transform 编辑（DragValue，写经
+//! [`crate::overlay::transform_edit`] 封装）。
 //!
 //! 取数分两层：树本身走 SystemParam 直查 World（参数束样式照 [`super::debug_window`]
 //! 的 `RendererStats`），不另造快照通道；属性区走 [`SelectedDetails`] 纯数据
@@ -30,16 +30,16 @@ use bevy::{
 
 use ash_macros::system;
 
-use super::transform_edit::TransformEdit;
+use crate::overlay::transform_edit::TransformEdit;
 
-/// 树内点选的实体（3.10 落账）。选中实体 despawn 后由详情区检空清账，
-/// 不残留死引用；3.11 的 Transform 编辑以它为目标。
+/// 树内点选的实体。选中实体 despawn 后由详情区检空清账，
+/// 不残留死引用；Transform 编辑以它为目标。
 #[derive(Resource, Default)]
-pub(super) struct SelectedEntity(pub(super) Option<Entity>);
+pub(in crate::overlay) struct SelectedEntity(pub(in crate::overlay) Option<Entity>);
 
 /// 层级树一行的查询数据（11 项组合体抽型，免 clippy type_complexity）：
 /// 层级关系（Children/ChildOf）+ 角色标记（相机/光/资产根）+ 呈现要素
-/// （Name/Mesh/Material/两 Transform），逐项可缺。3.12 的 BRP `scene_tree`
+/// （Name/Mesh/Material/两 Transform），逐项可缺。BRP `scene_tree`
 /// 复用同一行形状——两侧看到同一棵树。
 pub(crate) type EntityRow = (
     Entity,
@@ -59,28 +59,30 @@ pub(crate) type EntityRow = (
 /// 逐项 Option/Has——非场景实体（窗口/相机/灯光/资产根）也进树，缺什么降级什么；
 /// 单查询即可完成根定位（`Has<ChildOf>`）与按实体号取行（`.get`），无需第二查询。
 #[derive(SystemParam)]
-pub(super) struct EntityTreeData<'w, 's> {
+pub(in crate::overlay) struct EntityTreeData<'w, 's> {
     entities: Query<'w, 's, EntityRow>,
 }
 
 /// 层级树窗口的一次构建输入：框架 pass 每帧组好（借用样式照 [`super::debug_window`]）。
-pub(super) struct EntityTreeWindow<'a> {
-    pub(super) ctx: &'a egui::Context,
+pub(in crate::overlay) struct EntityTreeWindow<'a> {
+    pub(in crate::overlay) ctx: &'a egui::Context,
     /// 显隐开关：总控 checkbox 与窗口 [×] 写同一字段（egui `Window::open` 借用）。
-    pub(super) open: &'a mut bool,
+    pub(in crate::overlay) open: &'a mut bool,
     /// 点选状态（资源借用，点选就地落账）。
-    pub(super) selected: &'a mut SelectedEntity,
+    pub(in crate::overlay) selected: &'a mut SelectedEntity,
     /// 本帧 World 查询束。
-    pub(super) data: &'a EntityTreeData<'a, 'a>,
-    /// 属性区快照（3.11，采集系统产）。
-    pub(super) details: &'a SelectedDetails,
+    pub(in crate::overlay) data: &'a EntityTreeData<'a, 'a>,
+    /// 属性区快照（采集系统产）。
+    pub(in crate::overlay) details: &'a SelectedDetails,
+    /// 旋转拖拽缓存（拖拽期内冻结欧拉表示分支）。
+    pub(in crate::overlay) drag: &'a mut TransformDragCache,
 }
 
 impl EntityTreeWindow<'_> {
     /// 面板本体：递归层级树（滚动区）+ 属性区。返回一次 Transform 编辑
-    /// （3.11.2，有拖改时），由 pass 落进编辑队列——本函数不碰写路径。
-    pub(super) fn show(self) -> Option<(Entity, TransformEdit)> {
-        let Self { ctx, open, selected, data, details } = self;
+    /// （有拖改时），由 pass 落进编辑队列——本函数不碰写路径。
+    pub(in crate::overlay) fn show(self) -> Option<(Entity, TransformEdit)> {
+        let Self { ctx, open, selected, data, details, mut drag } = self;
         let mut edit = None;
         egui::Window::new("实体层级树")
             .open(open)
@@ -111,7 +113,7 @@ impl EntityTreeWindow<'_> {
                         draw_entity(ui, root, data, &mut selected.0, 0);
                     }
                 });
-                edit = show_details(ui, details, selected);
+                edit = show_details(ui, details, selected, &mut drag);
             });
         edit
     }
@@ -186,7 +188,7 @@ fn draw_entity(
 }
 
 /// 节点行文本：Name 优先，无名按组件角色命名（相机/方向光/资产根），实体号
-/// 恒显（glTF 同名节点可区分），尾缀组件标签。3.12 的 BRP `scene_tree`
+/// 恒显（glTF 同名节点可区分），尾缀组件标签。BRP `scene_tree`
 /// 复用——CLI 树的行文本与 egui 树一致。
 pub(crate) fn node_label(
     entity: Entity,
@@ -227,11 +229,11 @@ fn header_text(label: &str, is_selected: bool) -> egui::RichText {
     }
 }
 
-/// 选中实体属性快照（3.11.1）：采集系统每帧对选中实体产一份纯数据，属性区
+/// 选中实体属性快照：采集系统每帧对选中实体产一份纯数据，属性区
 /// 只渲染快照（官方"后端收集/前端展示"分工：bevy_inspector 数据层同形）。
 /// 选中实体 despawn 后 `exists = false`，属性区借它清账。
 #[derive(Resource, Default)]
-pub(super) struct SelectedDetails {
+pub(in crate::overlay) struct SelectedDetails {
     /// 当前选中（None = 无选中，快照为空壳）。
     entity: Option<Entity>,
     /// false = 已选中但实体不在 World（despawn 过）。
@@ -250,15 +252,22 @@ pub(super) struct SelectedDetails {
 
 /// Transform 三组量的纯数值形态：编辑控件直接喂快照副本。
 #[derive(Clone, Copy)]
-pub(super) struct TransformVals {
-    pub(super) translation: [f32; 3],
+pub(in crate::overlay) struct TransformVals {
+    pub(in crate::overlay) translation: [f32; 3],
     /// YXZ 欧拉角（度），与展示同口径。
-    pub(super) euler_yxz_deg: [f32; 3],
-    pub(super) scale: [f32; 3],
+    pub(in crate::overlay) euler_yxz_deg: [f32; 3],
+    pub(in crate::overlay) scale: [f32; 3],
 }
 
+/// 旋转拖拽缓存：按住的整段拖拽期内欧拉三元组冻结在按下帧的表示分支，
+/// 拖拽框只改被拖的那位。若每帧从快照重建，拖拽分量跨欧拉分解分支边界
+/// （±90°/±180°）时 to_euler 会翻转另两位（±180°），与拖拽框的累加值
+/// 混分支合成出错误旋转——物体姿态逐帧跳变（闪烁）。松手即作废。
+#[derive(Resource, Default)]
+pub(in crate::overlay) struct TransformDragCache(Option<(Entity, [f32; 3])>);
+
 /// 组件清单一行：短名 + 已注册反射组件的字段只读行（None = 名字-only）。
-pub(super) struct ComponentRow {
+pub(in crate::overlay) struct ComponentRow {
     name: String,
     fields: Option<Vec<(String, String)>>,
 }
@@ -288,12 +297,12 @@ const SKIP_REFLECT: &[TypeId] = &[
     TypeId::of::<ChildOf>(),
 ];
 
-/// 属性快照采集（3.11.1）：每帧对选中实体产一份纯数据（单实体量级，全帧
-/// 成本可忽略）。**独占系统（&mut World）直接写资源**——首版用只读 &World +
-/// Commands 落账，实跑发现 deferred 命令在本链上从不生效（快照恒为默认值，
-/// 无人验证轮日志实抓），改独占后直接写、零不确定性；链在 egui pass 之前。
+/// 属性快照采集：每帧对选中实体产一份纯数据（单实体量级，全帧
+/// 成本可忽略）。**必须独占系统（&mut World）直接写资源**——只读 &World +
+/// Commands 落账的 deferred 命令在本链上从不生效（快照恒为默认值），
+/// 直接写零不确定性；链在 egui pass 之前。
 #[system]
-pub(super) fn collect_selected_details(world: &mut World) {
+pub(in crate::overlay) fn collect_selected_details(world: &mut World) {
     let Some(entity) = world.resource::<SelectedEntity>().0 else {
         world.insert_resource(SelectedDetails::default());
         return;
@@ -398,13 +407,14 @@ fn reflect_field_rows(v: &dyn PartialReflect) -> Vec<(String, String)> {
     }
 }
 
-/// 属性区（3.11）：快照渲染（头部/渲染语义/全局平移/组件清单）+ Transform
-/// 编辑（3.11.2 DragValue 读快照副本）。返回一次编辑（有拖改时），写路径归
-/// [`super::transform_edit`]——本函数零 World 访问，纯渲染。
+/// 属性区：快照渲染（头部/渲染语义/全局平移/组件清单）+ Transform
+/// 编辑（DragValue 读快照副本）。返回一次编辑（有拖改时），写路径归
+/// [`crate::overlay::transform_edit`]——本函数零 World 访问，纯渲染。
 fn show_details(
     ui: &mut egui::Ui,
     details: &SelectedDetails,
     selected: &mut SelectedEntity,
+    drag: &mut TransformDragCache,
 ) -> Option<(Entity, TransformEdit)> {
     ui.separator();
     let Some(entity) = details.entity else {
@@ -432,28 +442,47 @@ fn show_details(
     for (label, image) in &details.textures {
         ui.monospace(format!("贴图   {label}  {image:?}"));
     }
-    // Transform 编辑（3.11.2）：读快照值进副本，任一量被拖改即整组回写（未动
-    // 的组发原值，覆盖等价于原地）
+    // Transform 编辑：读快照值进副本，任一量被拖改即整组回写（未动
+    // 的组发原值，覆盖等价于原地——旋转组例外，见下方缓存接管）。
+    // 平移/缩放分量相互独立，快照原值回写恒等价；旋转是"三元组表达一个
+    // 四元数"，三元必须同分支（见 TransformDragCache）。
     let mut edit = None;
     if let Some(t) = details.local {
-        let (mut translation, mut euler, mut scale) = (t.translation, t.euler_yxz_deg, t.scale);
-        egui::Grid::new("transform_edit").num_columns(4).show(ui, |ui| {
-            ui.monospace("平移");
-            drag_vec3(ui, &mut translation, 0.05, "");
-            ui.end_row();
-            ui.monospace("旋转");
-            drag_vec3(ui, &mut euler, 1.0, "°");
-            ui.end_row();
-            ui.monospace("缩放");
-            drag_vec3(ui, &mut scale, 0.02, "");
-            ui.end_row();
-        });
-        if translation != t.translation || euler != t.euler_yxz_deg || scale != t.scale {
+        // 缓存按实体挂靠：换选中即作废；无进行中拖拽则对齐快照（当前表示分支）
+        if drag.0.as_ref().is_some_and(|(e, _)| *e != entity) {
+            drag.0 = None;
+        }
+        if drag.0.is_none() {
+            drag.0 = Some((entity, t.euler_yxz_deg));
+        }
+        let (mut translation, mut scale) = (t.translation, t.scale);
+        let mut rot_dragged = [false; 3];
+        {
+            let drag_euler: &mut [f32; 3] = &mut drag.0.as_mut().expect("上方已保证有缓存").1;
+            egui::Grid::new("transform_edit").num_columns(4).show(ui, |ui| {
+                ui.monospace("平移");
+                drag_vec3(ui, &mut translation, 0.05, "");
+                ui.end_row();
+                ui.monospace("旋转");
+                rot_dragged = drag_vec3(ui, drag_euler, 1.0, "°");
+                ui.end_row();
+                ui.monospace("缩放");
+                drag_vec3(ui, &mut scale, 0.02, "");
+                ui.end_row();
+            });
+        }
+        // 回写取拖拽框落在本帧的值（缓存内持续累加）；本帧无人按住旋转 =
+        // 拖拽结束，缓存作废，下帧从快照重建（显示回落当前表示分支）
+        let euler_written = drag.0.as_ref().map_or(t.euler_yxz_deg, |(_, e)| *e);
+        if !rot_dragged.iter().any(|&d| d) {
+            drag.0 = None;
+        }
+        if translation != t.translation || euler_written != t.euler_yxz_deg || scale != t.scale {
             edit = Some((
                 entity,
                 TransformEdit {
                     translation: Some(Vec3::from_array(translation)),
-                    rotation_euler_deg: Some(Vec3::from_array(euler)),
+                    rotation_euler_deg: Some(Vec3::from_array(euler_written)),
                     scale: Some(Vec3::from_array(scale)),
                 },
             ));
@@ -462,7 +491,7 @@ fn show_details(
     if let Some(g) = details.global_translation {
         ui.monospace(format!("全局  平移 ({:+.3}, {:+.3}, {:+.3})", g.x, g.y, g.z));
     }
-    // 组件全清单（3.11.1）：archetype 口径；注册的折叠出字段行，未注册只报名字
+    // 组件全清单：archetype 口径；注册的折叠出字段行，未注册只报名字
     ui.separator();
     ui.strong(format!("组件 {}", details.component_rows.len()));
     egui::ScrollArea::vertical()
@@ -473,8 +502,8 @@ fn show_details(
             match &row.fields {
                 Some(fields) => {
                     egui::CollapsingHeader::new(egui::RichText::new(&row.name).monospace())
-                        // 4.5 小账:id_salt 混实体号——同短名组件(如多个 Transform 行)
-                        // 的折叠状态不再跨实体互串
+                        // id_salt 混实体号:同短名组件(如多个 Transform 行)
+                        // 的折叠状态不跨实体互串
                         .id_salt(format!("{}/{}", entity.index(), row.name))
                         .default_open(false)
                         .show(ui, |ui| {
@@ -496,16 +525,19 @@ fn show_details(
 }
 
 /// 三分量 DragValue 行（平移/旋转/缩放共用）：speed 为拖拽灵敏度，suffix 为
-/// 角度标。
-fn drag_vec3(ui: &mut egui::Ui, v: &mut [f32; 3], speed: f32, suffix: &str) {
+/// 角度标。返回逐位"本帧被按住拖拽"（旋转缓存据此判定拖拽期起止）。
+fn drag_vec3(ui: &mut egui::Ui, v: &mut [f32; 3], speed: f32, suffix: &str) -> [bool; 3] {
+    let mut dragged = [false; 3];
     ui.horizontal(|ui| {
-        for x in v {
-            ui.add(
+        for (i, x) in v.iter_mut().enumerate() {
+            let resp = ui.add(
                 egui::DragValue::new(x)
                     .speed(speed)
                     .suffix(suffix)
                     .max_decimals(if suffix.is_empty() { 3 } else { 1 }),
             );
+            dragged[i] = resp.dragged() || resp.is_pointer_button_down_on();
         }
     });
+    dragged
 }

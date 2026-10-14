@@ -10,7 +10,7 @@
 
 - **注入层 = `Messages<WindowEvent>`**（与 bevy_winit 喂引擎的同一层）：官方拆分系统 `send_typed_window_events`（bevy_window/src/system.rs:20，PreUpdate `WindowEventSystems`，`.before(InputSystems)`）把事件拆成类型化消息，其中 `CursorMoved` 分支同步更新 `Window.internal.physical_cursor_position`（system.rs:45-62）——光标位走官方通路自管，`window.cursor_position()` 直接可见。
 - **刻意不走 `Window::set_cursor_position`**：它在写入光标位的同时还写 `cursor_position_request`，bevy_winit 会拿去真实挪动 OS 光标（违反[输入注入纪律](../../../rules/鼠标操作与输入注入纪律.md)）。虚拟鼠标只进引擎事件缓冲，不经 OS 输入队列。
-- **下游零改动**：`ButtonInput<MouseButton>`/`AccumulatedMouseScroll`（bevy_input PreUpdate）、egui 输入桥（overlay/input.rs 读 `CursorMoved`/`MouseButtonInput`/`MouseWheel`）、相机轨道控制（scene/mechanism/camera_control.rs 读按键 + `cursor_position()`）全部现成。
+- **下游零改动**：`ButtonInput<MouseButton>`/`AccumulatedMouseScroll`（bevy_input PreUpdate）、egui 输入桥（overlay/framework/input.rs 读 `CursorMoved`/`MouseButtonInput`/`MouseWheel`）、相机轨道控制（scene/mechanism/camera_control.rs 读按键 + `cursor_position()`）全部现成。
 - **时序**：handler 在 RemoteLast 写消息 → 次帧 First 换缓冲 → PreUpdate 拆分+输入系统更新 → Update 消费。写值下一帧生效，与 `set_transform`/`set_camera` 同口径。
 - **3.12 底座**：`AshRemotePlugin`（方法注册单点）+ `tools/brp.py` 薄客户端（本段加 mouse 子命令族）。
 

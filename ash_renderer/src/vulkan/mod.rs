@@ -5,14 +5,14 @@
 //! | `context` | 进程级 | Entry/Instance/Surface/Device/Queue,随进程活 |
 //! | `swapchain` | resize 级 | swapchain + images/views,随窗口尺寸整体重建 |
 //! | `frames` | 帧级 | 命令缓冲 + 双信号量 + fence + 深度附件,`MAX_FRAMES_IN_FLIGHT` 组轮转复用 |
-//! | `pipeline` | 进程级 | 3.4 图形管线(dynamic rendering)+ pipeline layout(双 set + push) |
-//! | `overlay_pipeline` | 进程级 | 3.7 overlay 管线(set0 共享 + 16B push + 深度声明对齐读写关 + blend)+ UI 录制契约 |
-//! | `resources` | 资产级 | 内存契约(3.2.2.1):类型选择/绑定/对齐/coherent 分支 |
-//! | `pool` | 资产级 | 顶点/索引大池:bump 分配 + 资产身份驻留缓存(3.2.2.2/3.2.2.3) |
-//! | `uploader` | 批次级 | staging 环 + timeline 票据 + transfer 合批提交(3.2.4) |
-//! | `mesh_convert` | 纯函数 | `Assets<Mesh>` → 32B 交错顶点 + U32 索引(3.2.3) |
-//! | `images` | 资产级 | 贴图:bevy `Image` → VkImage/view/sampler + 驻留缓存(3.3.1) |
-//! | `descriptors` | 资产级 | 常驻描述符表(set0 双表/set1 每帧 UBO)+ 槽位发布(3.3.2~3.3.4) |
+//! | `pipeline` | 进程级 | 图形管线(dynamic rendering)+ pipeline layout(双 set + push) |
+//! | `overlay_pipeline` | 进程级 | overlay 管线(set0 共享 + 16B push + 深度声明对齐读写关 + blend)+ UI 录制契约 |
+//! | `resources` | 资产级 | 内存契约:类型选择/绑定/对齐/coherent 分支 |
+//! | `pool` | 资产级 | 顶点/索引大池:bump 分配 + 资产身份驻留缓存 |
+//! | `uploader` | 批次级 | staging 环 + timeline 票据 + transfer 合批提交 |
+//! | `mesh_convert` | 纯函数 | `Assets<Mesh>` → 32B 交错顶点 + U32 索引 |
+//! | `images` | 资产级 | 贴图:bevy `Image` → VkImage/view/sampler + 驻留缓存 |
+//! | `descriptors` | 资产级 | 常驻描述符表(set0 双表/set1 每帧 UBO)+ 槽位发布 |
 //!
 //! 拆分点：同步对象不挂任何一张 swapchain image 上——重建 swapchain 时原地不动；
 //! 编排方 [`crate::driver::host`] 只消费本层重出口的类型，不进子模块内部。

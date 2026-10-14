@@ -20,7 +20,7 @@ const FLIGHT_HELMET: &str = "models/FlightHelmet/FlightHelmet.gltf";
 
 /// 场景进场请求（Startup）：`load` 立即返回占位 Handle、数据异步到货；
 /// [`WorldAssetRoot`] 组件到货后由 bevy_world_serialization 的
-/// `world_instance_spawner` 轮询系统（Changed 触发，4.5 订正：非组件 Add hook）
+/// `world_instance_spawner` 轮询系统（Changed 触发，非组件 Add hook）
 /// 把整棵实体树反射展开进主 World——这里只发"进场请求"，不等数据。
 #[system]
 pub(super) fn load_flight_helmet(mut commands: Commands, server: Res<AssetServer>) {

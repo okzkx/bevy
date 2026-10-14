@@ -2,15 +2,15 @@
 //! [`EguiFrame`] 交绘制半边。
 //!
 //! overlay 按内容分两半：本文件是框架半边——"怎么跑"（Context/字体、pass、
-//! 纹理增量折叠、帧产出）；窗口内容"画什么"是业务，住 [`super::debug_window`]、
-//! [`super::debug_hub_window`] 与 [`super::entity_tree_window`]（本文件的 pass
+//! 纹理增量折叠、帧产出）；窗口内容"画什么"是业务，住
+//! [`crate::overlay::windows`]（本文件的 pass
 //! 只负责按总控开关在 begin/end 之间调它们）。
 //!
-//! pass 四件（egui 0.36，源码钉死见施工计划 §2.1）：`begin_pass(RawInput)` →
+//! pass 四件（egui 0.36）：`begin_pass(RawInput)` →
 //! 插件逐帧账本（on_begin_pass/on_end_pass，本文件下方注释）→ 建窗口 UI →
 //! `end_pass() -> FullOutput`。`FullOutput.shapes` 是**未镶嵌**的
 //! 原始形状——镶嵌（`ctx.tessellate`）归绘制半边在 `draw_frame` 内做（写顶点环
-//! 须过 `wait_for_slot` 的 fence，见施工计划 §3.2）。
+//! 须过 `wait_for_slot` 的 fence）。
 //!
 //! 字体：egui `default_fonts`（拉丁字形）+ Windows 系统微软雅黑
 //! （`C:\Windows\Fonts\msyh.ttc`，face index 0）插进 Proportional 回退位——拉丁
@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use bevy::{
+    camera::Camera,
     ecs::system::SystemParam,
     input::{
         keyboard::{KeyCode, KeyboardInput},
@@ -30,14 +31,16 @@ use bevy::{
     window::{CursorLeft, CursorMoved, PrimaryWindow, Window, WindowFocused},
 };
 
-use super::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
-use super::debug_window::{DebugWindow, FpsMeter, RenderMode, RendererStats};
-use super::entity_tree_window::{
-    EntityTreeData, EntityTreeWindow, SelectedDetails, SelectedEntity, collect_selected_details,
-};
 use super::input::{egui_raw_input, EguiInput};
 use super::paint::{AtlasGpu, AtlasMirror};
-use super::transform_edit::{TransformEditQueue, apply_transform_edits};
+use crate::overlay::transform_edit::{TransformEditQueue, apply_transform_edits};
+use crate::overlay::widgets::axis_gizmo::AxisGizmo;
+use crate::overlay::windows::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
+use crate::overlay::windows::debug_window::{DebugWindow, FpsMeter, RenderMode, RendererStats};
+use crate::overlay::windows::entity_tree_window::{
+    EntityTreeData, EntityTreeWindow, SelectedDetails, SelectedEntity, TransformDragCache,
+    collect_selected_details,
+};
 
 use ash_macros::system;
 
@@ -49,7 +52,7 @@ impl Plugin for OverlayPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, init_egui)
             .init_resource::<EguiInput>()
-            // 3.11 属性链：采集（产快照）→ egui pass（显示 + 组编辑）→ 编辑清账，
+            // 属性链：采集（产快照）→ egui pass（显示 + 组编辑）→ 编辑清账，
             // 链式定序；清账完 PostUpdate 传播才读 Transform，同帧 relay 保画面跟随
             .add_systems(
                 Update,
@@ -88,7 +91,7 @@ fn init_egui(mut commands: Commands) {
     };
     state.ctx.set_fonts(load_fonts());
     // 跨标签文字选区（egui 0.36 默认开）允许选区端点在标签间迁移——拖选扫过多个
-    // 标签时杂染面更大（3.10.1 §8）：调试面板选区限制在单标签内。单标签内的无按键
+    // 标签时杂染面更大：调试面板选区限制在单标签内。单标签内的无按键
     // 悬停重投影由 pass 内补跑的插件生命周期收口（run_egui_pass）。
     let mut style = (*state.ctx.style_of(egui::Theme::Dark)).clone();
     style.interaction.multi_widget_text_select = false;
@@ -96,15 +99,17 @@ fn init_egui(mut commands: Commands) {
     commands.insert_resource(state);
     commands.insert_resource(EguiFrame::default());
     commands.insert_resource(RenderMode::from_env());
-    // 各调试窗口显隐总控（3.10）：总控面板写、pass 显示门读，默认全开
+    // 各调试窗口显隐总控：总控面板写、pass 显示门读，默认全开
     commands.insert_resource(DebugWindowsOpen::default());
-    // 层级树点选（3.10）：属性面板的编辑目标来源
+    // 层级树点选：属性面板的编辑目标来源
     commands.insert_resource(SelectedEntity::default());
-    // 属性快照（3.11.1）：采集系统每帧重写，Startup 先落空壳
+    // 属性快照：采集系统每帧重写，Startup 先落空壳
     commands.insert_resource(SelectedDetails::default());
-    // Transform 编辑队列（3.11.2）：pass 产、清账系统消费
+    // 旋转拖拽缓存：拖拽期内冻结欧拉表示分支（防跨分支混写闪烁）
+    commands.insert_resource(TransformDragCache::default());
+    // Transform 编辑队列：pass 产、清账系统消费
     commands.insert_resource(TransformEditQueue::default());
-    // 帧率显示平滑（3.10 收官后追记）：0.5s 出一次平均快照
+    // 帧率显示平滑：0.5s 出一次平均快照
     commands.insert_resource(FpsMeter::default());
     // 图集镜像（Update 折入）与 GPU 代（Last 整传；空建——首帧有整图增量才落图）。
     // AtlasGpu 的拆除在 teardown_vulkan（graveyard 与表同寿的拆除序）
@@ -144,7 +149,7 @@ fn load_fonts() -> egui::FontDefinitions {
 
 /// 各调试窗口面板的一次性参数束（ui.rs 接线层）：统计、着色模式、显隐总控、
 /// 点选与层级树查询合成一个 SystemParam——系统参数上限 16（FrameInput 同款式
-/// 的束打法），3.10 新增件全走这里，不再撑大 pass 签名。
+/// 的束打法），新增面板件全走这里，不撑大 pass 签名。
 #[derive(SystemParam)]
 struct DebugUiParams<'w, 's> {
     stats: RendererStats<'w>,
@@ -153,9 +158,13 @@ struct DebugUiParams<'w, 's> {
     selected: ResMut<'w, SelectedEntity>,
     fps: ResMut<'w, FpsMeter>,
     tree: EntityTreeData<'w, 's>,
-    /// 属性快照（3.11.1，采集系统产，只读消费）
+    /// 属性快照（采集系统产，只读消费）
     details: Res<'w, SelectedDetails>,
-    /// Transform 编辑排队（3.11.2，pass 产，清账系统消费）
+    /// 旋转拖拽缓存（拖拽期内冻结欧拉表示分支）
+    drag_cache: ResMut<'w, TransformDragCache>,
+    /// 主相机姿态（坐标轴指示器读旋转；本工程单相机，取任一）
+    cameras: Query<'w, 's, &'static GlobalTransform, With<Camera>>,
+    /// Transform 编辑排队（pass 产，清账系统消费）
     edit_queue: ResMut<'w, TransformEditQueue>,
 }
 
@@ -198,9 +207,9 @@ fn run_egui_pass(
     // 插件逐帧账本补跑：egui 默认插件的 on_begin_pass/on_end_pass 只在 run_ui 闭包
     // API（run_ui_dyn）里被驱动，begin_pass/end_pass 裸集成必须自己补——否则
     // LabelSelectionState 的 is_dragging 首次拖选后永不清零，选区随无按键悬停逐帧
-    // 重投影（3.10.1 §8 "选区跟随"残留的单标签形态；multi_widget_text_select=false
-    // 只封跨标签半边）。空 root Ui 仅作钩子宿主（同 run_ui_dyn 形状）；run_ui 的
-    // root_ui_available_rect 副产物不补（仲裁门定案走 layer_id_at）。其余默认插件
+    // 重投影（multi_widget_text_select=false
+    // 只封跨标签半边，单标签内的悬停重投影由此补跑收口）。空 root Ui 仅作钩子宿主（同 run_ui_dyn 形状）；run_ui 的
+    // root_ui_available_rect 副产物不补（layer_id_at 已够用）。其余默认插件
     // 不补：CallbackPlugin 零注册即 no-op（且类型不可名）、DragAndDrop/DebugText-
     // Plugin 钩子在本宿主零负载（无 DnD payload/无 debug text），将来用到时照此
     // 各加一段。
@@ -241,11 +250,19 @@ fn run_egui_pass(
             selected: &mut ui.selected,
             data: &ui.tree,
             details: &ui.details,
+            drag: &mut ui.drag_cache,
         }
         .show();
         if let Some(edit) = edit {
             ui.edit_queue.0.push(edit);
         }
+    }
+    if ui.windows_open.axis_gizmo {
+        AxisGizmo {
+            ctx: &state.ctx,
+            cam_rotation: ui.cameras.iter().next().map(|g| g.rotation()),
+        }
+        .show();
     }
     if let Some(label_selection) = state
         .ctx

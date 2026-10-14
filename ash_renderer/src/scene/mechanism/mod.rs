@@ -4,11 +4,11 @@
 //! | 子模块 | 职责 |
 //! |---|---|
 //! | [`material_hook`] | 材质缝补位：补 `Assets<StandardMaterial>` 容器 + 自写三钩子 |
-//! | [`ledger`] | 稳定槽账本：Entity→实例数据跨帧账本 + Changed/Removed 变更发现（4.1，取代 M2 每帧全量快照） |
-//! | [`asset_events`] | 资产事件读侧（4.2）：`Modified` → 失效凭据 + 引用行重挂脏标；`Removed` → 卸载回收账（4.4.1）——发现侧第二条入口 |
-//! | [`asset_readiness`] | 异步就绪账面（4.3）：pending 身份账 + 加载失败读侧 + 失败/取消计量，"还没到货"这条时间线 |
-//! | [`object_ops`] | 对象写操作封装（4.1.5）：spawn 克隆/换柄，BRP 与将来 egui 面板共用（despawn/摘组件走官方 BRP） |
-//! | [`asset_ops`] | 资产写操作封装（4.2.4）：mutate 材质参数/贴图槽/mesh 顶点/image 像素，BRP 薄壳的可复用实现 |
+//! | [`ledger`] | 稳定槽账本：Entity→实例数据跨帧账本 + Changed/Removed 增量变更发现 |
+//! | [`asset_events`] | 资产事件读侧：`Modified` → 失效凭据 + 引用行重挂脏标；`Removed` → 卸载回收账——发现侧第二条入口 |
+//! | [`asset_readiness`] | 异步就绪账面：pending 身份账 + 加载失败读侧 + 失败/取消计量，"还没到货"这条时间线 |
+//! | [`object_ops`] | 对象写操作封装：spawn 克隆/换柄，BRP 与将来 egui 面板共用（despawn/摘组件走官方 BRP） |
+//! | [`asset_ops`] | 资产写操作封装：mutate 材质参数/贴图槽/mesh 顶点/image 像素，BRP 薄壳的可复用实现 |
 //! | [`camera_aspect`] | 宽高比补位：随窗口 resize 修正任意相机的 aspect_ratio |
 //! | [`camera_control`] | 相机轨道控制：左键拖拽环绕 + 滚轮推拉，目标点由组件携带 |
 //!

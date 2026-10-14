@@ -56,9 +56,8 @@ pub fn tier_handler(mut err: BevyError, ctx: ErrorContext) {
     }
     match err.severity() {
         Severity::Warning => warn!("{ctx}: {err}"),
-        // 低档（Ignore/Trace/Debug/Info）= 携带方明示可忽略,按告警记录不升级
-        //（4.5 小账:原实现全部落致命,当前触发面为零,方向保守——精确分流后
-        // 低档错误不再伪造致命退出）
+        // 低档（Ignore/Trace/Debug/Info）= 携带方明示可忽略,按告警记录不升级,
+        // 不伪造致命退出
         Severity::Ignore | Severity::Trace | Severity::Debug | Severity::Info => {
             info!("{ctx}: {err}");
         }
@@ -75,8 +74,8 @@ pub(crate) fn request_graceful_exit() {
     FATAL.store(true, Ordering::Release);
 }
 
-/// 看门 system（main 锚定 `First` 集，4.5 小账订正：原 Update 无序插入早位在
-/// 多线程执行器下不保证）：`FATAL` 置位 → 写 `AppExit` 优雅退出。
+/// 看门 system（锚定 `First` 集——多线程执行器下无序系统插入序不保证，早位收益
+/// 须显式锚定）：`FATAL` 置位 → 写 `AppExit` 优雅退出。
 ///
 /// swap 清位：连续多个 Tier② 只退一次。置位到生效有半帧延迟——本帧剩余 system
 /// 照跑、runner 帧末查 `AppExit` 才停，与壳模式等价（壳 return 也只跳过本 system），

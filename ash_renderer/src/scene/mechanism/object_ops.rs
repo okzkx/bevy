@@ -1,6 +1,6 @@
-//! 对象写操作封装（4.1.5）：spawn 克隆/换柄两类实体级变更的可复用实现——
+//! 对象写操作封装：spawn 克隆/换柄两类实体级变更的可复用实现——
 //! BRP 方法族（[`crate::remote::objects`]）与将来的 egui 面板共用这一层，
-//! 不养两份逻辑（3.11.2 的 apply_transform_edit 同款惯例）。despawn/摘组件
+//! 不养两份逻辑（apply_transform_edit 同款惯例）。despawn/摘组件
 //! 不在此层：官方 BRP 内置 `world.despawn_entity`/`world.remove_components`
 //! 已覆盖该通道，且当前无 egui 消费者——不为"将来可能"预写零调用代码。
 //!
@@ -29,8 +29,8 @@ pub enum ObjectOpError {
 
 /// 路径预校验：`AssetServer::load/reload` 收 `impl Into<AssetPath>`，而
 /// `String → AssetPath` 的 From 实现走 panic 解析器（bevy_asset path.rs
-/// `parse`），非法标签在进异步链之前就 panic、绕过失败事件与 BRP 错误通道
-///（4.5 F5）。全部动态加载入口统一先过 `try_parse`，非法输入回协议错误。
+/// `parse`），非法标签在进异步链之前就 panic、绕过失败事件与 BRP 错误通道。
+/// 全部动态加载入口统一先过 `try_parse`，非法输入回协议错误。
 ///
 /// # Errors
 /// 路径解析失败（含空标签、坏 source 段）。
@@ -81,7 +81,7 @@ pub struct HandleSwapReadback {
 
 /// 换柄：把 `mesh_from`/`material_from`（源实体）身上的柄拷到 `target`。柄是
 /// 引用语义——目标与源共享同一资产身份；账本行换绑走 Changed 通道，GPU 侧
-/// 旧资产是否回收归 4.4。至少一项给值，两项都缺 = [`ObjectOpError::NothingToDo`]。
+/// 旧资产是否回收归资产卸载回收账。至少一项给值，两项都缺 = [`ObjectOpError::NothingToDo`]。
 ///
 /// # Errors
 /// 目标/源实体缺席、源非 primitive、目标缺对应组件。
@@ -127,7 +127,7 @@ pub fn replace_handles(
     Ok(readback)
 }
 
-/// 动态加载换柄读回（4.3.3）：受理的资产身份（加载中柄的 id，到货前后不变
+/// 动态加载换柄读回：受理的资产身份（加载中柄的 id，到货前后不变
 /// ——AssetId 锚身份非内容，pending 期间即定型）。
 #[derive(Debug)]
 pub struct LoadedMeshReadback {
@@ -135,11 +135,11 @@ pub struct LoadedMeshReadback {
     pub mesh: AssetId<Mesh>,
 }
 
-/// 异步加载 mesh 并换到既有实体上（4.3.3）：`server.load(path)` 立即返回
+/// 异步加载 mesh 并换到既有实体上：`server.load(path)` 立即返回
 /// **加载中柄**，换绑走 [`Mesh3d`] 组件改写（Changed 通道账本自动换行）。
 /// 资产未到货期间行保持脏标（pending 账面），到货帧 flush 转换上传、画面
 /// 换上新内容；路径失败的失败读侧收账（出重试队列，行出队）。路径先过
-/// [`parse_asset_path`] 预校验（4.5 F5：panic 解析器不外泄），加载是异步链，
+/// [`parse_asset_path`] 预校验（panic 解析器不外泄），加载是异步链，
 /// 本函数只负责"发请求 + 换柄"。
 ///
 /// # Errors
@@ -165,10 +165,10 @@ pub fn load_mesh_rebind(
     })
 }
 
-/// 异步加载 mesh 并挂到新实体上（4.3.3）：克隆 `source` 的结构（材质柄/
+/// 异步加载 mesh 并挂到新实体上：克隆 `source` 的结构（材质柄/
 /// 变换/Name，语义同 [`spawn_primitive_clone`]），`Mesh3d` 换成加载中柄——
-/// 账本立即入行、画面在到货帧出现新对象（"动态加载新资产"的驱动面，
-/// 3.11 范围修订并回 4.3 的落点）。失败语义同 [`load_mesh_rebind`]。
+/// 账本立即入行、画面在到货帧出现新对象（"动态加载新资产"的驱动面）。
+/// 失败语义同 [`load_mesh_rebind`]。
 ///
 /// # Errors
 /// 源实体缺席、非 primitive 或缺 `Transform`（经克隆封装上抛）。
@@ -193,10 +193,10 @@ pub fn spawn_with_loaded_mesh(
     })
 }
 
-/// 异步加载贴图并换到目标实体的材质 base_color 槽上（4.3.3）：加载中柄直接
-/// 写进 `Assets<StandardMaterial>` 的槽字段（`Modified` 事件 → 4.2 失效联动
+/// 异步加载贴图并换到目标实体的材质 base_color 槽上：加载中柄直接
+/// 写进 `Assets<StandardMaterial>` 的槽字段（`Modified` 事件 → 资产失效联动
 /// 把引用行重挂脏标），贴图本体未到货期间槽腿 pending，到货帧重传换指。
-/// **共享材质语义**：目标实体的材质被原位改写，全部引用者同变（与 4.2
+/// **共享材质语义**：目标实体的材质被原位改写，全部引用者同变（与
 /// mutate 贴图槽同语义）。
 ///
 /// # Errors

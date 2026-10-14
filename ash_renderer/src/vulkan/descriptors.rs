@@ -1,16 +1,15 @@
-//! 描述符对象与槽位发布（施工 3.3.2 限额对账 + 3.3.3 描述符对象 + 3.3.4 槽位分配）。
+//! 描述符对象与槽位发布。
 //!
 //! 职责三件：
-//! 1. **限额对账（3.3.2）**：UAB 轨五项限额与候选容量 1024 的显式对账。UAB 轨与
-//!    普通轨分开记账（特性族篇 §4），普通轨实测素材（maxPerStageDescriptorSampledImages
-//!    = 1048576）不作数；容量不够 = `Init` 冒泡出局，不静默截断（施工计划 §2
-//!    "容量不足：不写越界、不静默截断"）。
-//! 2. **描述符对象（3.3.3）**：set0 常驻双表（b0 SAMPLED_IMAGE×容量 / b1
+//! 1. **限额对账**：UAB 轨五项限额与候选容量 1024 的显式对账。UAB 轨与
+//!    普通轨分开记账（特性族篇 §4），普通轨素材（maxPerStageDescriptorSampledImages
+//!    = 1048576）不作数；容量不够 = `Init` 冒泡出局，不静默截断、不写越界。
+//! 2. **描述符对象**：set0 常驻双表（b0 SAMPLED_IMAGE×容量 / b1
 //!    SAMPLER×容量，UAB+PARTIALLY_BOUND）+ set1 每帧 UBO。三层配套（特性族篇 §3）
 //!    在此收齐后两层：binding 旗标 + layout 创建旗标（`UPDATE_AFTER_BIND_POOL`，
 //!    VUID-03000）+ pool 旗标（`UPDATE_AFTER_BIND`）；feature 位第一层在
-//!    [`super::context`]（3.3.2 已启用）。
-//! 3. **槽位分配与发布（3.3.4）**：free list 分槽、采样器按 [`sampler_key`]
+//!    [`super::context`]。
+//! 3. **槽位分配与发布**：free list 分槽、采样器按 [`sampler_key`]
 //!    功能参数去重、fallback 槽 0（白 1×1 + 线性采样器）、发布接上传票据。
 //!
 //! set/binding 表（前置闸门冻结，本模块是 CPU 侧真身）：set0 b0 = `texture_2d`
@@ -18,11 +17,11 @@
 //! 扩容，见 [`FRAME_UBO_SIZE`] 冻结表）。push 96B 偏移 0/64/68/80 与 pipeline
 //! layout 在 [`super::pipeline`]。
 //!
-//! stage flags 取 `COMPUTE|VERTEX|FRAGMENT` 超集：3.3 探针走 compute、3.4 走
+//! stage flags 取 `COMPUTE|VERTEX|FRAGMENT` 超集：探针走 compute、主渲染走
 //! graphics，超集声明只影响驱动的描述符优化面，不改变合法性。
 //!
-//! **覆盖安全**（4.5 F1 订正）：[`Self::publish`] 只写排空点归还过的**新槽**
-//! （"图形最后使用"已过），改写已发布槽位的 `rebind` 已退役——UAB 只授权
+//! **覆盖安全**：[`Self::publish`] 只写排空点归还过的**新槽**
+//! （"图形最后使用"已过）——UAB 只授权
 //! "提交前后可更新可观察"，不授权覆盖仍被未完成命令消费的描述符；内容重传
 //! 改走"新槽发布 + 旧槽延迟回收"（编排层 upload.rs）。回收侧
 //! [`Self::retire_texture`]/[`Self::retire_sampler`] 的安全契约写在各自 doc 里，
@@ -41,13 +40,13 @@ use super::resources::{BufferRole, GpuBuffer, MemoryContract};
 use super::uploader::{StagingImageCopy, Ticket, UploadBatch, Uploader};
 use super::MAX_FRAMES_IN_FLIGHT;
 
-/// 常驻表容量（3.3.2 候选定案值）。`BindlessTables::new` 按设备 UAB 轨五项限额
+/// 常驻表容量（候选定案值）。`BindlessTables::new` 按设备 UAB 轨五项限额
 /// 核对，不够即报错——不静默降容量。纹理表与采样器表同容量（闸门冻结的双数组
 /// 布局事实上排除了各自异容的必要；异容需求出现时拆两个常量再改）。
 pub const TABLE_CAPACITY: u32 = 1024;
 
-/// 每帧 UBO 字节数（set1 b0）。前置闸门冻结的 64B（mat4 view_proj）在 3.5.1 扩为
-/// 128B 灯光版——扩容已随 3.5 定案登记进冻结记录；binding 形状（b0
+/// 每帧 UBO 字节数（set1 b0）。128B 灯光版（mat4 view_proj + 灯光参数）；
+/// binding 形状（b0
 /// UNIFORM_BUFFER）与 pipeline layout 不变，range 在写入时的
 /// `DescriptorBufferInfo`，扩容不动 ABI。
 pub const FRAME_UBO_SIZE: u64 = 128;
@@ -120,7 +119,7 @@ pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usiz
     out
 }
 
-/// 一张贴图的描述符槽位绑定（3.4 per-draw 参数 `tex_index/sampler_index` 的取值）。
+/// 一张贴图的描述符槽位绑定（per-draw 参数 `tex_index/sampler_index` 的取值）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlotBinding {
     /// set0 b0（SAMPLED_IMAGE 数组）的下标。
@@ -131,7 +130,7 @@ pub struct SlotBinding {
 
 /// 单表槽位分配器：bump 游标 + 回收栈（free list）。分配取回收栈顶，栈空取
 /// bump；`capacity` 用尽报错不越界。回收仅在 [`BindlessTables::retire_*`] 发生，
-/// M2 主路径是纯 bump（静态资产一次收齐）。
+/// 静态资产的主路径是纯 bump（一次收齐）。
 struct SlotAllocator {
     capacity: u32,
     used: u32,
@@ -158,7 +157,7 @@ impl SlotAllocator {
         } else {
             Err(VulkanError::Upload(format!(
                 "描述符表容量耗尽：已用 {used}/{capacity}（容量由 TABLE_CAPACITY 与设备限额对账定，\
-                 静态资产超容按施工计划走显式受控扩容，不写越界不截断）",
+                 静态资产超容走显式受控扩容，不写越界不截断）",
                 used = self.used,
                 capacity = self.capacity,
             )))
@@ -181,9 +180,9 @@ pub struct BindlessTables {
     pool: vk::DescriptorPool,
     /// set0 常驻集：全期绑定一次，槽位运行中更新（UAB 的存在意义）。
     resident_set: vk::DescriptorSet,
-    /// set1 每帧集：按帧槽各一套，3.4 按帧槽绑定。
+    /// set1 每帧集：按帧槽各一套，按帧槽绑定。
     frame_sets: Vec<vk::DescriptorSet>,
-    /// 每帧 UBO 本体（与 frame_sets 一一对应；3.5 接相机/灯光数据）。
+    /// 每帧 UBO 本体（与 frame_sets 一一对应；写相机/灯光数据的载体）。
     frame_ubos: Vec<GpuBuffer>,
     /// 建表容量(对账定案的冻结值)。
     capacity: u32,
@@ -193,11 +192,11 @@ pub struct BindlessTables {
     samplers: SlotAllocator,
     /// 功能参数键 → 采样器槽（去重账本）。
     sampler_slots: HashMap<super::images::SamplerKey, u32>,
-    /// 采样器本体（4.5 F2：槽号 → 本表创建并持有的 VkSampler）。槽内描述符
+    /// 采样器本体：槽号 → 本表创建并持有的 VkSampler。槽内描述符
     /// 引用的句柄与本槽同寿，不随任何一张贴图的卸载悬空——同键共享方全部
     /// 退场后槽进待回收账，本体在排空点销毁。
     sampler_bodies: HashMap<u32, vk::Sampler>,
-    /// 卸载请求的待回收槽账（4.4.1）：retire_* 只把槽记进此账、**不进**
+    /// 卸载请求的待回收槽账：retire_* 只把槽记进此账、**不进**
     /// free list——在飞 draw 仍可能正采样这些槽的描述符，槽复用必须等
     /// "图形最后使用"（排空点=[`Self::drain_retired_slots`]，由 flush 停尸房
     /// 段在帧侧等待后调用，与 GpuImage/池区间共用同一次等待）。采样器槽的
@@ -205,11 +204,11 @@ pub struct BindlessTables {
     /// 槽交叠（前置条件③由排空点+此移除共同保证）。
     retired_textures: Vec<u32>,
     retired_samplers: Vec<u32>,
-    /// 待销毁的采样器本体（已从 sampler_bodies 摘出，等排空点；4.5 F2）。
+    /// 待销毁的采样器本体（已从 sampler_bodies 摘出，等排空点）。
     retired_sampler_bodies: Vec<vk::Sampler>,
     /// fallback 贴图本体（白 1×1；槽 0 的 view 来源，随表同寿）。
     fallback: GpuImage,
-    /// fallback 上传批次票据（M2 只留账；销毁前的等待由退出排空统一覆盖）。
+    /// fallback 上传批次票据（仅留账；销毁前的等待由退出排空统一覆盖）。
     fallback_ticket: Ticket,
 }
 
@@ -228,7 +227,7 @@ impl BindlessTables {
         uploader: &mut Uploader,
         graphics_family: u32,
         capacity: u32,
-    ) -> Result<Self> {        // ---- 1) 限额对账（3.3.2）：UAB 轨五项,逐项落日志留证据。注意这组限额
+    ) -> Result<Self> {        // ---- 1) 限额对账：UAB 轨五项,逐项落日志留证据。注意这组限额
         //不在普通 Limits 里——它们是 descriptorIndexing 的 properties2 扩展
         //（PhysicalDeviceDescriptorIndexingProperties,经 Properties2 push_next 查询,
         //与 Features2 查支持同一形状）----
@@ -257,7 +256,7 @@ impl BindlessTables {
         if let Some((name, have, need)) = checks.iter().find(|(_, have, need)| have < need) {
             return Err(VulkanError::Init(format!(
                 "UAB 轨限额不够容量 {capacity}:{name} 实测 {have} < 需要 {need}——\
-                 按施工计划显式报错,不静默截断;调容量须回 set/binding 表文档对账"
+                 显式报错,不静默截断;调容量须回 set/binding 表文档对账"
             )));
         }
         info!(
@@ -391,7 +390,7 @@ impl BindlessTables {
         let resident_set = frame_sets.remove(0);
         // ---- 5) 每帧 UBO(帧槽一一对应)+ set1 描述符写入(初值 = identity view_proj
         // + 灯光占位(方向留非零防 NaN,直射/环境/灯色全零) + Lambert 模式;
-        // 3.5.1 起运行期每帧重写)----
+        // 运行期每帧重写)----
         let mut frame_ubos = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let mut ubo = GpuBuffer::create(device, contract, FRAME_UBO_SIZE, BufferRole::FrameUniform)?;
@@ -422,7 +421,7 @@ impl BindlessTables {
         unsafe { device.update_descriptor_sets(&writes, &[]) };
         // ---- 6) fallback:白 1×1(UNORM 线性白 = 任意色彩域的安全缺省)走普通
         // 上传链进 GPU,占 0 号双槽;真实贴图从 1 号起分槽。跨族设备 CONCURRENT
-        // 双族(3.4 定案,与生产贴图同款) ----
+        // 双族(与生产贴图同款) ----
         let fallback_sharing: Vec<u32> = if uploader.queue_family() != graphics_family {
             vec![uploader.queue_family(), graphics_family]
         } else {
@@ -450,7 +449,7 @@ impl BindlessTables {
                 width: 1,
                 height: 1,
             }],
-            // 3.4 定案:图像 CONCURRENT 双族共享,不再随批次 release
+            // 图像 CONCURRENT 双族共享,不随批次 release
             ..Default::default()
         }) {
             Ok(Some(ticket)) => ticket,
@@ -480,8 +479,8 @@ impl BindlessTables {
             fallback,
             fallback_ticket,
         };
-        // fallback 占双表 0 号槽(采样器去重账本同步登记 linear 键;4.5 F2 起本体
-        // 由表按键创建持有,不再取 GpuImage 的采样器——GpuImage 已不建采样器)
+        // fallback 占双表 0 号槽(采样器去重账本同步登记 linear 键;本体
+        // 由表按键创建持有,不取 GpuImage 的采样器——GpuImage 不建采样器)
         let slots = tables.publish(
             tables.fallback.view(),
             &sampler_key(&ImageSamplerDescriptor::linear()),
@@ -497,13 +496,13 @@ impl BindlessTables {
         Ok(tables)
     }
 
-    /// set0 常驻集句柄(3.4 帧录制绑定)。
+    /// set0 常驻集句柄(帧录制绑定)。
     #[must_use]
     pub fn resident_set(&self) -> vk::DescriptorSet {
         self.resident_set
     }
 
-    /// set0 布局(3.4 建 pipeline layout 的素材;集与布局同源,不可另建)。
+    /// set0 布局(建 pipeline layout 的素材;集与布局同源,不可另建)。
     #[must_use]
     pub fn set0_layout(&self) -> vk::DescriptorSetLayout {
         self.set0_layout
@@ -515,13 +514,13 @@ impl BindlessTables {
         self.set1_layout
     }
 
-    /// 第 `frame` 帧槽的 set1(3.4 按帧槽绑定;M2 内容为 identity)。
+    /// 第 `frame` 帧槽的 set1(按帧槽绑定)。
     #[must_use]
     pub fn frame_set(&self, frame: usize) -> vk::DescriptorSet {
         self.frame_sets[frame]
     }
 
-    /// 第 `frame` 帧槽的 UBO 本体(3.5 写相机/灯光数据的入口)。
+    /// 第 `frame` 帧槽的 UBO 本体(写相机/灯光数据的入口)。
     #[must_use]
     pub fn frame_ubo(&mut self, frame: usize) -> &mut GpuBuffer {
         &mut self.frame_ubos[frame]
@@ -537,7 +536,7 @@ impl BindlessTables {
         }
     }
 
-    /// 常驻表容量(对账与 3.4 容量判断的证据口)。
+    /// 常驻表容量(对账与容量判断的证据口)。
     #[must_use]
     pub fn capacity(&self) -> u32 {
         self.capacity
@@ -558,7 +557,7 @@ impl BindlessTables {
     /// 发布一张贴图:纹理槽 free list 分配 + 采样器按功能键去重 → 两条描述符
     /// 写入(set0 b0/b1 各一条,dst_array_element 定位槽)。**只写新槽**——
     /// free list 给出的槽必先经排空点归还（"图形最后使用"已过），覆盖竞态
-    /// 在结构上不存在；采样器本体由本表按键创建持有（4.5 F2：槽内句柄与本槽
+    /// 在结构上不存在；采样器本体由本表按键创建持有（槽内句柄与本槽
     /// 同寿，不随任何一张贴图的卸载悬空）。
     ///
     /// 句柄寿命契约(与 [`GpuImage::create` 接受裸参数同款纪律]):`view`
@@ -623,12 +622,12 @@ impl BindlessTables {
         })
     }
 
-    /// 槽回收请求（4.4.1）：把槽记进待回收账，**不立即进 free list**——在飞
+    /// 槽回收请求：把槽记进待回收账，**不立即进 free list**——在飞
     /// draw 仍可能正采样这些槽（描述符在 draw 执行时被 GPU 读），立即复用 =
     /// 在飞 draw 看到新贴图（覆盖）或悬空。前置条件（编排层保证）：
     /// ① 槽内 view 本体已同步进停尸房（GpuImage 销毁由同一排空点
     /// 收口，"本体先于槽复用消失"不成立的方向被停尸房挡住）；采样器本体归
-    /// 本表（4.5 F2），随槽账同进退；
+    /// 本表，随槽账同进退；
     /// ② 采样器槽仅当同键共享方全部退场才请求（请求时移除去重账目，见
     /// [`Self::retire_sampler`]）；
     /// ③ 槽真正回 free list 在 [`Self::drain_retired_slots`]（"图形最后使用"
@@ -638,7 +637,7 @@ impl BindlessTables {
     }
 
     /// 采样器槽回收请求（前置条件②见 [`Self::retire_texture`]；去重账目在
-    /// 此移除——新发布者拿新槽，不与待回收槽交叠）。本体（4.5 F2）随槽进
+    /// 此移除——新发布者拿新槽，不与待回收槽交叠）。本体随槽进
     /// 待销毁账，排空点统一 vkDestroySampler。
     pub fn retire_sampler(&mut self, key: &super::images::SamplerKey, sampler: u32) {
         self.sampler_slots.remove(key);
@@ -647,7 +646,7 @@ impl BindlessTables {
         }
     }
 
-    /// 按槽号回收采样器槽（4.4.1）：反查功能键后走 [`Self::retire_sampler`]
+    /// 按槽号回收采样器槽：反查功能键后走 [`Self::retire_sampler`]
     /// ——调用方（ImageCache）持驻留条目的槽位绑定，功能键在表内；查无 =
     /// 静默 no-op（fallback 槽 0 之外不该发生，发生即账目漂移的可见信号）。
     pub fn retire_sampler_by_slot(&mut self, sampler: u32) {
@@ -661,9 +660,9 @@ impl BindlessTables {
         }
     }
 
-    /// 排空待回收槽（4.4.2）：调用点 = flush 停尸房段（帧侧等待"图形最后
+    /// 排空待回收槽：调用点 = flush 停尸房段（帧侧等待"图形最后
     /// 使用"通过后）——此刻无在飞 draw 再采样这些槽，归还 free list 可复用；
-    /// 采样器本体（4.5 F2）同点销毁。返回归还的槽总数（读数口）。
+    /// 采样器本体同点销毁。返回归还的槽总数（读数口）。
     pub fn drain_retired_slots(&mut self) -> usize {
         let count =
             self.retired_textures.len() + self.retired_samplers.len();
@@ -692,8 +691,8 @@ unsafe impl Sync for BindlessTables {}
 impl Drop for BindlessTables {
     fn drop(&mut self) {
         // 契约边界(与 Uploader/GpuBuffer 同款):不等 GPU;退出排空由
-        // teardown_vulkan 的 device_wait_idle 先于一切资源 Drop(D4 定案)。
-        // pool 先拆(frees 全部 sets),layout 次拆;采样器本体(4.5 F2,含待销毁
+        // teardown_vulkan 的 device_wait_idle 先于一切资源 Drop。
+        // pool 先拆(frees 全部 sets),layout 次拆;采样器本体(含待销毁
         // 账里未排空的)随后;UBO/fallback 随字段自动 Drop。
         unsafe {
             self.device.destroy_descriptor_pool(self.pool, None);
@@ -712,12 +711,12 @@ impl Drop for BindlessTables {
 }
 
 /// 无灯帧的方向光占位（xyz 单位化合法方向，防归一化 NaN；直射/环境/灯色全零）。
-/// descriptors.rs 的 identity 初值与 frame.rs 的无灯分支双点共用（4.5 订正拆重）。
+/// descriptors.rs 的 identity 初值与 frame.rs 的无灯分支双点共用此常量。
 pub const PLACEHOLDER_DIR_TO_LIGHT: [f32; 4] = [0.5, 1.0, 0.3, 0.0];
 
 /// identity 初值的帧数据（view_proj = identity、灯光占位、Lambert 模式）：
-/// 表建好到首帧写入之间若被采样（理论不发生，帧循环首帧即重写），画面同
-/// 3.4 之前的 identity 形状而非悬空值。
+/// 表建好到首帧写入之间若被采样（理论不发生，帧循环首帧即重写），画面是
+/// identity 形状而非悬空值。
 fn identity_frame_uniforms() -> FrameUniformsData {
     FrameUniformsData {
         view_proj: bevy::math::Mat4::IDENTITY,
