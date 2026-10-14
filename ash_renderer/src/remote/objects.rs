@@ -1,4 +1,4 @@
-//! BRP 对象生命周期方法族（4.1.5）：测试驱动与 AI 通道的实体级变更入口。
+//! BRP 对象生命周期方法族：测试驱动与 AI 通道的实体级变更入口。
 //!
 //! 分工（按"不重复造官方已有"的钉子）：**despawn/摘组件走官方内置**
 //! `world.despawn_entity` / `world.remove_components`（反射通道按组件名摘除，
@@ -43,7 +43,7 @@ struct SpawnPrimitiveParams {
 
 /// 把操作层错误映射到协议错误码（ObjectOpError 是 Tier② 语义的载体，这里
 /// 只做翻译，不吞——原 message 原样带出）。`pub(crate)` 给 assets 的加载方法
-/// 族复用（4.3.3）。
+/// 族复用。
 pub(crate) fn object_op_error(err: ObjectOpError) -> BrpError {
     match err {
         ObjectOpError::EntityMissing(e) => BrpError::entity_not_found(e),
@@ -106,8 +106,8 @@ struct ReplaceHandlesParams {
 }
 
 /// `ash_renderer/replace_handles`：换柄——把源实体的 mesh/material 柄拷到目标。
-/// 账本经 Changed 通道换绑，旧资产引用计数下降（CPU 容器自动），GPU 侧回收
-/// 时机归 4.4，本段只主张"不再画旧对象"。返回换后柄身份读回。
+/// 账本经 Changed 通道换绑，旧资产引用计数下降（CPU 容器自动），GPU 侧
+/// 回收由回收链另管，本方法只保证"不画旧对象"。返回换后柄身份读回。
 #[system]
 pub(crate) fn replace_handles(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let value = params.ok_or_else(|| invalid_params("params 缺失：需要 entity 与至少一项 from"))?;
@@ -123,8 +123,8 @@ pub(crate) fn replace_handles(In(params): In<Option<Value>>, world: &mut World) 
 }
 
 /// `ash_renderer/increment_stats`：账本与增量计量读数（只读，判定线证据通道）。
-/// 处理数/扫描数分列——"零上传"不说成"零 CPU 每对象成本"。4.3：readiness 段
-/// 报异步就绪账（pending/等待/到货/失败/取消分列）。4.4：recycle 段报卸载回收
+/// 处理数/扫描数分列——"零上传"不说成"零 CPU 每对象成本"。readiness 段
+/// 报异步就绪账（pending/等待/到货/失败/取消分列）；recycle 段报卸载回收
 /// 账（事件/出账/驻留存量/停尸房/free list 分列——"存量回基线"的读数口）。
 #[system]
 pub(crate) fn increment_stats(

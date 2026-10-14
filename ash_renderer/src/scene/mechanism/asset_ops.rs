@@ -1,15 +1,15 @@
-//! 资产写操作封装（4.2.4）："改资产内容"四类驱动的可复用实现——BRP 方法族
+//! 资产写操作封装："改资产内容"四类驱动的可复用实现——BRP 方法族
 //! （[`crate::remote::assets`]）与将来 egui 面板共用这一层，不养两份逻辑
-//! （3.11.2 apply_transform_edit / 4.1.5 object_ops 同款惯例）。
+//! （apply_transform_edit / object_ops 同款惯例）。
 //!
 //! 定位锚定实体（与换柄同口径）：BRP 参数给 entity，取它身上的
 //! `Mesh3d`/`MeshMaterial3d` 柄再去资产容器 `get_mut`——**get_mut 即触发
-//! `AssetEvent::Modified`**（bevy_asset/src/assets.rs:376/391），4.2 读侧
+//! `AssetEvent::Modified`**（bevy_asset/src/assets.rs:376/391），读侧
 //! （asset_events）自动收到，下游失效→重传全链不用任何写入方配合。这是
 //! "发现与写入解耦"的验收面：任何路径（BRP/egui/游戏代码）改资产内容，
 //! 走的都是同一个 `Assets` 容器语义。
 //!
-//! 四驱动与判定线的对应（计划 §4）：
+//! 四驱动与判定线的对应：
 //! | 驱动 | 参数 | 验证面 |
 //! |---|---|---|
 //! | 改材质参数 | `base_color` | Modified 收到（材质参数每帧 UBO 自动生效，作事件读侧观测锚） |
@@ -18,7 +18,7 @@
 //! | 改 Image 内容 | `image_tint` | graveyard + 原槽重写 |
 //!
 //! 边界：本模块只做 `Assets` 容器写路径，**不碰账本与失效集**——变更经
-//! AssetEvent 通道进读侧，与 4.1"发现与写入解耦"同一验收面。像素级 tint
+//! AssetEvent 通道进读侧，与"发现与写入解耦"同一验收面。像素级 tint
 //! 只收 4 字节 RGBA 族格式（逐字节乘系数），其余格式明确拒绝不硬做。
 
 use bevy::{
@@ -70,9 +70,9 @@ pub struct AssetOpReadback {
     pub image: Option<AssetId<Image>>,
 }
 
-/// mutate 总入口：**先全量预校验、再逐项执行**（4.5 F11 订正：原实现边校验
-/// 边修改，组合请求单项失败时前面的项已落改——与"整体拒绝，不留半完成"的
-/// 承诺不符）。校验段只读（`Assets::get`），不触发 `Modified` 事件——被拒
+/// mutate 总入口：**先全量预校验、再逐项执行**——边校验边修改会让组合
+/// 请求单项失败时前面的项已落改，与"整体拒绝，不留半完成"的
+/// 承诺不符。校验段只读（`Assets::get`），不触发 `Modified` 事件——被拒
 /// 请求零副作用；执行段全部校验通过后才 `get_mut` 落改。**每项动用
 /// `Assets::get_mut`，Modified 事件由容器自动发出**。
 ///
@@ -224,7 +224,7 @@ pub fn mutate_asset(
     Ok(readback)
 }
 
-/// tint 前置校验（4.5 F11 预校验段用）：格式与像素数据在场判定，零副作用。
+/// tint 前置校验（mutate 预校验段用）：格式与像素数据在场判定，零副作用。
 ///
 /// # Errors
 /// 格式不在 4 字节 RGBA 族，或像素数据缺席。

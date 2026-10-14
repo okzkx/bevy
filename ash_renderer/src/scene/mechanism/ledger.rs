@@ -1,5 +1,5 @@
-//! 稳定槽账本与变更发现（4.1.2/4.1.3）：Entity→GPU 实例槽关联的跨帧账本，
-//! 取代 M2 的每帧全量快照重建（[`crate::scene::mechanism::collect`] 退役）。
+//! 稳定槽账本与变更发现：Entity→GPU 实例槽关联的跨帧账本，
+//! 增量维护，不做每帧全量快照重建。
 //!
 //! 三线分工里的枢纽：变更发现的输出落进账本（删除处理的信息来源），增量写入
 //! （上传链）的输入来自账本脏行。机制：
@@ -7,9 +7,9 @@
 //! - **账本**（[`InstanceLedger`]）：在场可渲染 primitive 每实体一行（两柄 +
 //!   传播后终值矩阵），BTreeMap 按 Entity 有序迭代（DrawList 顺序确定）。行随
 //!   实体生命周期增删换绑，跨帧存活——`RemovedComponents<T>` 不带旧组件内容，
-//!   删除处理全靠账本自己存的那行（路线图步骤 4 边界）。
+//!   删除处理全靠账本自己存的那行。
 //! - **发现**（[`update_ledger`]，PostUpdate 排 [`TransformSystems::Propagate`]
-//!   之后，同 3.1.4 的采集时机）：三条入口各接一类变更——
+//!   之后）：三条入口各接一类变更——
 //!   ① 移除：`RemovedComponents<Mesh3d>` / `RemovedComponents<MeshMaterial3d>`
 //!   清行。despawn 递归删子树走组件移除路径（bundle/remove.rs 写
 //!   `removed_components`），每个 primitive 各发一次，**整树清账免费拿到**；
@@ -35,8 +35,7 @@ use bevy::{
 use ash_macros::system;
 
 /// 账本一行：一个可渲染 primitive 的跨帧实例数据。柄去资产容器取内容，
-/// `model` 直进 push constant（与 3.1.4 CollectedPrimitive 同形，只是寿命
-/// 从"每帧重建"变为"跨帧维护"）。
+/// `model` 直进 push constant（行内容即实例数据终值，跨帧维护而非每帧重建）。
 #[derive(Clone)]
 pub struct InstanceRow {
     pub mesh: Handle<Mesh>,
@@ -76,16 +75,16 @@ pub struct IncrementStats {
     pub upload_bytes_total: u64,
     /// 最近一批字节。
     pub last_batch_bytes: u64,
-    /// 本帧收到的资产事件数（4.2 读侧，按收到计含忽略变体）。
+    /// 本帧收到的资产事件数（资产事件读侧，按收到计含忽略变体）。
     pub asset_events: usize,
-    /// 本帧因资产内容变化重挂脏标的行数（4.2 失效联动）。
+    /// 本帧因资产内容变化重挂脏标的行数（资产失效联动）。
     pub asset_dirty_rows: usize,
     /// 资产事件累计。
     pub asset_events_total: u64,
-    /// 资产失效累计（mesh+image 的 Modified 事件累计，只增；4.5 F10 订正：
-    /// 原实现误赋当前集合长度——累计与存量混记）。
+    /// 资产失效累计（mesh+image 的 Modified 事件累计，只增；勿赋当前集合
+    /// 长度——累计与存量混记会互相污染口径）。
     pub asset_invalidations_total: u64,
-    /// 当前待换内容身份集规模（存量口径，mesh+image 失效集现值；4.5 F10 另列）。
+    /// 当前待换内容身份集规模（存量口径，mesh+image 失效集现值，与累计分列）。
     pub asset_invalidations_current: usize,
 }
 
@@ -140,7 +139,7 @@ impl InstanceLedger {
         self.dirty.remove(&entity);
     }
 
-    /// 重挂一行脏标（4.2 失效联动：资产内容变化波及的引用者重新进盘点；
+    /// 重挂一行脏标（资产失效联动：资产内容变化波及的引用者重新进盘点；
     /// 发现侧第二条入口，与 update_ledger 的 Changed/Removed 通道并轨同一脏集）。
     pub(crate) fn mark_dirty(&mut self, entity: Entity) {
         self.dirty.insert(entity);
@@ -161,7 +160,7 @@ impl Plugin for AshLedgerPlugin {
     }
 }
 
-/// 新增/换柄入口的查询（type alias 免 clippy type_complexity，3.10 惯例）：
+/// 新增/换柄入口的查询（type alias 免 clippy type_complexity）：
 /// 插入也置 changed tick，故新增不需要 Added。
 type ChangedAssets<'w, 's> = Query<
     'w,

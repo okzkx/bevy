@@ -58,8 +58,8 @@ pub(super) struct RendererStats<'w> {
     gpu: Res<'w, AtlasGpu>,
 }
 
-/// 帧率显示平滑：累计一个更新间隔的帧数与时长，到点出一次平均快照。
-/// 逐帧 delta 抖动大，直接显示 fps 数字每帧都在跳（3.10 收官后用户反馈）。
+/// 逐帧 delta 抖动大，直接显示 fps 数字每帧都在跳——累计一个更新间隔的帧数
+/// 与时长，到点出一次平均快照。
 #[derive(Resource)]
 pub(super) struct FpsMeter {
     acc_secs: f32,

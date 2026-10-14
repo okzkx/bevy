@@ -1,6 +1,6 @@
 //! 输入桥：bevy 输入事件 → egui `RawInput`。
 //!
-//! egui 0.36 的输入面（源码钉死，见施工计划 §2.1）：`RawInput` 没有
+//! egui 0.36 的输入面：`RawInput` 没有
 //! pixels_per_point 字段（走 `Context::set_pixels_per_point`）、没有顶层 modifiers
 //! 字段——修饰键只随 `Key`/`PointerButton`/`MouseWheel` 事件携带，另有独立
 //! `Event::ModifiersChanged` 可发状态变化。本桥的做法：每事件附加当前修饰键

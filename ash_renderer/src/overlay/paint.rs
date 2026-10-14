@@ -1,14 +1,14 @@
-//! overlay 绘制半边（3.7.2）：图集 CPU 镜像 → 整图重传新槽、UI 顶点环、
+//! overlay 绘制半边：图集 CPU 镜像 → 整图重传新槽、UI 顶点环、
 //! `paint_overlay` 把 [`EguiFrame`] 变成 [`UiPaint`]。
 //!
-//! 图集路线（施工计划 §3.1）：epaint 图集增量是 dirty-rect 局部补丁，而 uploader
+//! 图集路线：epaint 图集增量是 dirty-rect 局部补丁，而 uploader
 //! 图像段只支持整图 (0,0) 拷贝；扩局部区要引入 graphics→transfer 的新同步方向
 //! （现有票据单向），故走"**折进 CPU 镜像 → 整图重传全新 GpuImage → publish 新槽
 //! → 旧代入 graveyard（与表同寿）**"。镜像折入在 Update 的 pass 出口（`AtlasMirror::fold`），
 //! 不随 EguiFrame 跨系统存放——`TexturesDelta` 的 Drop 审查要求增量被消费，且
 //! 最小化帧 Update 照跑而 draw_frame 整帧让路，跨系统携带会被下帧覆写丢失。
 //!
-//! 顶点环（施工计划 §3.2）：UI 顶点/索引每帧整换、宿主直写 HOST_VISIBLE
+//! 顶点环：UI 顶点/索引每帧整换、宿主直写 HOST_VISIBLE
 //! （`BufferRole::DynamicDraw`），不走 MeshPool（池是 DEVICE_LOCAL 资产级 bump，
 //! 写入走 staging+transfer——每帧整换的 UI 数据直写更诚实）。复用安全与帧 UBO
 //! 同一条 fence 纪律：写入发生在 `wait_for_slot` 之后 = 本槽上一轮提交完成之后。
@@ -33,7 +33,7 @@ use super::ui::{EguiFrame, EguiState};
 /// 单槽 UI 顶点容量（个数；×20B = 1.25MB/槽）。调试 UI 单帧数百万顶点不可能，
 /// 超容 = Tier① 丢当帧 UI（可交互性损失不拦帧循环）。
 const UI_VERTEX_CAPACITY: usize = 64 * 1024;
-/// 单槽 UI 索引容量（个数；×4B = 384KB/槽；4.5 订正：原注释 256KB 系误写）。
+/// 单槽 UI 索引容量（个数；×4B = 384KB/槽）。
 const UI_INDEX_CAPACITY: usize = 96 * 1024;
 
 /// epaint 顶点的 Rust 镜像：与 overlay_draw.wgsl 的顶点输入同一契约
@@ -59,7 +59,7 @@ pub struct AtlasMirror {
     generation: u64,
     /// 非图集纹理（用户贴图）告警去重：显式边界，出现时跳过。
     warned_foreign: bool,
-    /// 局部补丁先于首个整图的告警去重（理论不发生，施工计划 §7）。
+    /// 局部补丁先于首个整图的告警去重（理论不发生）。
     warned_orphan: bool,
 }
 
@@ -77,7 +77,7 @@ impl AtlasMirror {
                 continue;
             }
             for d in deltas {
-                // ImageData 0.36 仅 Color 一变体（施工计划 §2.1）
+                // ImageData 0.36 仅 Color 一变体
                 let egui::epaint::ImageData::Color(patch) = &d.image;
                 match d.pos {
                     None => {
@@ -133,15 +133,14 @@ fn blit(
     }
 }
 
-/// 图集 GPU 侧：当前代资源 + 退役代 graveyard（4.5 F15 起接统一排空点）。
+/// 图集 GPU 侧：当前代资源 + 退役代 graveyard（接统一排空点）。
 #[derive(Resource, Default)]
 pub struct AtlasGpu {
     /// 当前在用的图集代（最近一次整传）。
     current: Option<AtlasSlot>,
     /// 退役代：整传换下的旧 GpuImage（上传票据随行）——由 flush_uploads 的
-    /// 统一排空点在"图形最后使用 + 上传完成"双条件后销毁（4.5 F15 订正：
-    /// 原实现与 BindlessTables 同寿不排空，逐 dirty-rect 代数增长下停尸房与
-    /// 纹理槽无界积聚）。
+    /// 统一排空点在"图形最后使用 + 上传完成"双条件后销毁（否则随 dirty-rect
+    /// 代数增长，停尸房与纹理槽无界积聚）。
     graveyard: Vec<(GpuImage, Ticket)>,
     /// 已整传的镜像代数。
     uploaded_generation: u64,
@@ -166,7 +165,7 @@ impl AtlasGpu {
         self.graveyard.len()
     }
 
-    /// 排空旧代停尸房（4.5 F15）：与 ImageCache/MeshPool 同款双条件——
+    /// 排空旧代停尸房：与 ImageCache/MeshPool 同款双条件——
     /// `wait_draws` 等"图形最后使用"（帧槽 fence），`uploader` 等"上传完成"
     ///（旧代整传票据）。空房直接返回不等待（稳态零成本）。
     ///
@@ -189,7 +188,7 @@ impl AtlasGpu {
         uploader.wait_until(max_ticket)?;
         let count = self.graveyard.len();
         self.graveyard.clear(); // Drop 序：view 先于 image，memory 最后
-        info!("图集停尸房排空:销毁 {count} 张旧代（双条件齐备后,4.5 F15）");
+        info!("图集停尸房排空:销毁 {count} 张旧代（双条件齐备后）");
         Ok(())
     }
 }
@@ -323,7 +322,7 @@ pub(crate) fn paint_overlay(
                 "图集镜像代数领先但本体缺席（内部矛盾）".into(),
             ));
         };
-        // 图集是 gamma 域 RGBA8、LINEAR 滤波（egui-wgpu 同款判据，施工计划 §2.2）；
+        // 图集是 gamma 域 RGBA8、LINEAR 滤波（egui-wgpu 同款判据）；
         // 非 sRGB 格式 = 采样不解码，色彩约定见 overlay_draw.wgsl
         let spec = ImageSpec {
             width: image.size[0] as u32,
@@ -331,7 +330,7 @@ pub(crate) fn paint_overlay(
             format: vk::Format::R8G8B8A8_UNORM,
             sampler: ImageSamplerDescriptor::linear(),
         };
-        // 图像与池同款 CONCURRENT 双族（transfer 写 + graphics 读，3.4 定案）
+        // 图像与池同款 CONCURRENT 双族（transfer 写 + graphics 读）
         let sharing: Vec<u32> = if ctx.transfer_queue_family_index != ctx.queue_family_index {
             vec![ctx.transfer_queue_family_index, ctx.queue_family_index]
         } else {
@@ -364,7 +363,7 @@ pub(crate) fn paint_overlay(
         match uploader.submit_batch(batch)? {
             Some(ticket) => {
                 // 槽位发布在提交成功后（失败不留指向未上传数据的槽，与 flush_uploads
-                // 同纪律）；只写新槽（4.5 F1 同款：不覆盖在飞消费的旧槽）
+                // 同纪律）；只写新槽（不覆盖在飞消费的旧槽）
                 let slots = tables.publish(gpu_image.view(), &sampler_key(&spec.sampler))?;
                 if let Some(old) = gpu.current.replace(AtlasSlot {
                     image: gpu_image,
@@ -373,14 +372,14 @@ pub(crate) fn paint_overlay(
                 }) {
                     // 旧代退场：本体进停尸房（票据随行，排空点销毁）、纹理槽进
                     // 待回收账（采样器槽不退——图集用 LINEAR 键与真实贴图共享，
-                    // 本体归表后槽内句柄不随旧代消失，4.5 F2/F15）
+                    // 本体归表后槽内句柄不随旧代消失）
                     tables.retire_texture(old.slots.texture);
                     gpu.graveyard.push((old.image, old.ticket));
                 }
                 gpu.uploaded_generation = mirror_generation;
                 info!(
                     "图集整传 #{ticket}：{}×{}（第 {mirror_generation} 代），纹理槽 {}/{}；\
-                     旧代入 graveyard（当前 {} 张待排空,4.5 F15）",
+                     旧代入 graveyard（当前 {} 张待排空）",
                     spec.width,
                     spec.height,
                     slots.texture,

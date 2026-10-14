@@ -1,14 +1,14 @@
 //! 相机轨道控制（机制半边）：左键拖动绕目标点环绕、滚轮沿视线推拉缩放，
 //! 零 Vulkan 代码，也不含写死的场景参数——环绕目标由组件携带，进场时由
 //! 业务半边（[`crate::scene::content::camera`]）按取景参数给出。
-//! 输入源有两个：鼠标（左键 + 滚轮，逐帧增量）与 CLI 给值（3.12 BRP
+//! 输入源有两个：鼠标（左键 + 滚轮，逐帧增量）与 CLI 给值（BRP
 //! `set_camera`，[`apply_camera_command`] 绝对值/系数覆盖，共用同一套球坐标
 //! 状态与 Transform 写路径）。
 //!
 //! 取舍：官方 0.21 新增的 `bevy_camera_controller::pan_orbit_camera` 是完整版
 //!（bevy_picking 命中测试决定旋转中心、动量/平滑可调、bevy_render 不可选依赖），
 //! 禁渲染宿主挂不上也用不着——我们只要"固定中心点的检视轨道"这一档，球坐标
-//! 参数化（yaw/pitch/radius）自写，语义取 three.js OrbitControls 同款：拖动按
+//! 参数化（yaw/pitch/radius）自写：拖动按
 //! 窗口高度归一（拖满一屏高 = 转一整圈）、滚轮每格 ×0.95 指数缩放。
 //!
 //! 帧内时序：Update 改 [`Transform`] → PostUpdate 传播（TransformSystems::Propagate）
@@ -38,12 +38,11 @@ use crate::overlay::EguiState;
 
 use ash_macros::system;
 
-/// 环绕转速：拖满一个窗口高度 = 转一整圈（three.js OrbitControls 的
-/// `2π·Δ/height` 同款归一，窗口 resize 后手感不漂移；位移用 points 域，
-/// DPI 无关）。
+/// 环绕转速：拖满一个窗口高度 = 转一整圈（`2π·Δ/height` 归一，窗口 resize
+/// 后手感不漂移；位移用 points 域，DPI 无关）。
 const FULL_TURN_PER_HEIGHT: f32 = std::f32::consts::TAU;
 
-/// 每格滚轮的缩放系数：滚近 ×0.95、滚远 ×1/0.95（three.js 默认 zoomSpeed 同款），
+/// 每格滚轮的缩放系数：滚近 ×0.95、滚远 ×1/0.95，
 /// 指数缩放保证远近手感一致。
 const ZOOM_PER_LINE: f32 = 0.95;
 
@@ -100,7 +99,7 @@ struct DragSession {
     last_cursor: Option<Vec2>,
 }
 
-/// CLI 相机给值命令（3.12）：逐项可选（None = 不动该量）。角度用度数（与
+/// CLI 相机给值命令：逐项可选（None = 不动该量）。角度用度数（与
 /// [`crate::overlay::transform_edit::TransformEdit`] 的欧拉口径一致），zoom
 /// 与滚轮的指数缩放同语义（<1 推近、>1 拉远）。
 #[derive(Debug, Clone, Copy, Default)]
@@ -117,7 +116,7 @@ pub struct CameraOrbitCommand {
     pub zoom: Option<f32>,
 }
 
-/// 相机命令被拒的原因（4.5 小账：多相机与无相机混报拆开）。
+/// 相机命令被拒的原因（多相机与无相机分开报，机位目标不明确与无机位可区分）。
 #[derive(Debug)]
 pub enum CameraCommandError {
     /// World 里没有带 [`CameraOrbit`] 的相机。
@@ -126,7 +125,7 @@ pub enum CameraCommandError {
     AmbiguousCamera,
 }
 
-/// 应用一次 CLI 相机给值（3.12）：3.9 的鼠标输入与 3.12 的 BRP 输入汇入同一
+/// 应用一次 CLI 相机给值：鼠标输入与 BRP 输入汇入同一
 /// 套球坐标状态——限位常量、target+offset 加 look_at 的 Transform 写路径全部
 /// 复用，无两套机位。命令在 RemoteLast（帧尾）执行，写值下一帧渲染。
 /// 返回命令后的轨道参数（读回值，供 BRP 响应回显）。
@@ -231,7 +230,7 @@ fn orbit_camera_control(
     }
 
     let mut dirty = false;
-    // 滚轮推拉（3.9.2）：悬在 egui 区上滚轮让给调试窗口（该帧半径不动，扫出
+    // 滚轮推拉：悬在 egui 区上滚轮让给调试窗口（该帧半径不动，扫出
     // 后恢复）；拖拽中指针扫过面板同理，推拉与环绕正交。
     let lines = scroll.to_lines(&pixels_per_line).delta.y;
     if lines != 0.0 && !egui_wants {
@@ -241,8 +240,7 @@ fn orbit_camera_control(
             dirty = true;
         }
     }
-    // 左键拖拽环绕（3.9.1）：屏幕位移 → 球角。方向取"拖动世界"约定
-    //（three.js 同款）：右拖 = 相机绕左、物体呈顺时针转；下拖 = 相机升、露头顶。
+    // 左键拖拽环绕：屏幕位移 → 球角。方向取"拖动世界"约定：右拖 = 相机绕左、物体呈顺时针转；下拖 = 相机升、露头顶。
     if session.dragging
         && mouse.pressed(MouseButton::Left)
         && let Some(pos) = cursor

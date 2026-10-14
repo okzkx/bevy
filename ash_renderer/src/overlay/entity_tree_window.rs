@@ -1,7 +1,7 @@
-//! 实体层级树窗口（业务面板，3.10/3.11）：World 全部实体按 [`Children`]/[`ChildOf`]
+//! 实体层级树窗口（业务面板）：World 全部实体按 [`Children`]/[`ChildOf`]
 //! 关系递归展示，节点带 Name（无名按组件角色命名）+ 组件标签；点选节点落
-//! [`SelectedEntity`] 资源，面板下部是属性区（3.11）——组件全清单、渲染语义
-//! 行（Mesh/材质/贴图槽）与 Transform 编辑（3.11.2 DragValue，写经
+//! [`SelectedEntity`] 资源，面板下部是属性区——组件全清单、渲染语义
+//! 行（Mesh/材质/贴图槽）与 Transform 编辑（DragValue，写经
 //! [`super::transform_edit`] 封装）。
 //!
 //! 取数分两层：树本身走 SystemParam 直查 World（参数束样式照 [`super::debug_window`]
@@ -32,14 +32,14 @@ use ash_macros::system;
 
 use super::transform_edit::TransformEdit;
 
-/// 树内点选的实体（3.10 落账）。选中实体 despawn 后由详情区检空清账，
-/// 不残留死引用；3.11 的 Transform 编辑以它为目标。
+/// 树内点选的实体。选中实体 despawn 后由详情区检空清账，
+/// 不残留死引用；Transform 编辑以它为目标。
 #[derive(Resource, Default)]
 pub(super) struct SelectedEntity(pub(super) Option<Entity>);
 
 /// 层级树一行的查询数据（11 项组合体抽型，免 clippy type_complexity）：
 /// 层级关系（Children/ChildOf）+ 角色标记（相机/光/资产根）+ 呈现要素
-/// （Name/Mesh/Material/两 Transform），逐项可缺。3.12 的 BRP `scene_tree`
+/// （Name/Mesh/Material/两 Transform），逐项可缺。BRP `scene_tree`
 /// 复用同一行形状——两侧看到同一棵树。
 pub(crate) type EntityRow = (
     Entity,
@@ -72,13 +72,13 @@ pub(super) struct EntityTreeWindow<'a> {
     pub(super) selected: &'a mut SelectedEntity,
     /// 本帧 World 查询束。
     pub(super) data: &'a EntityTreeData<'a, 'a>,
-    /// 属性区快照（3.11，采集系统产）。
+    /// 属性区快照（采集系统产）。
     pub(super) details: &'a SelectedDetails,
 }
 
 impl EntityTreeWindow<'_> {
     /// 面板本体：递归层级树（滚动区）+ 属性区。返回一次 Transform 编辑
-    /// （3.11.2，有拖改时），由 pass 落进编辑队列——本函数不碰写路径。
+    /// （有拖改时），由 pass 落进编辑队列——本函数不碰写路径。
     pub(super) fn show(self) -> Option<(Entity, TransformEdit)> {
         let Self { ctx, open, selected, data, details } = self;
         let mut edit = None;
@@ -186,7 +186,7 @@ fn draw_entity(
 }
 
 /// 节点行文本：Name 优先，无名按组件角色命名（相机/方向光/资产根），实体号
-/// 恒显（glTF 同名节点可区分），尾缀组件标签。3.12 的 BRP `scene_tree`
+/// 恒显（glTF 同名节点可区分），尾缀组件标签。BRP `scene_tree`
 /// 复用——CLI 树的行文本与 egui 树一致。
 pub(crate) fn node_label(
     entity: Entity,
@@ -227,7 +227,7 @@ fn header_text(label: &str, is_selected: bool) -> egui::RichText {
     }
 }
 
-/// 选中实体属性快照（3.11.1）：采集系统每帧对选中实体产一份纯数据，属性区
+/// 选中实体属性快照：采集系统每帧对选中实体产一份纯数据，属性区
 /// 只渲染快照（官方"后端收集/前端展示"分工：bevy_inspector 数据层同形）。
 /// 选中实体 despawn 后 `exists = false`，属性区借它清账。
 #[derive(Resource, Default)]
@@ -288,10 +288,10 @@ const SKIP_REFLECT: &[TypeId] = &[
     TypeId::of::<ChildOf>(),
 ];
 
-/// 属性快照采集（3.11.1）：每帧对选中实体产一份纯数据（单实体量级，全帧
-/// 成本可忽略）。**独占系统（&mut World）直接写资源**——首版用只读 &World +
-/// Commands 落账，实跑发现 deferred 命令在本链上从不生效（快照恒为默认值，
-/// 无人验证轮日志实抓），改独占后直接写、零不确定性；链在 egui pass 之前。
+/// 属性快照采集：每帧对选中实体产一份纯数据（单实体量级，全帧
+/// 成本可忽略）。**必须独占系统（&mut World）直接写资源**——只读 &World +
+/// Commands 落账的 deferred 命令在本链上从不生效（快照恒为默认值），
+/// 直接写零不确定性；链在 egui pass 之前。
 #[system]
 pub(super) fn collect_selected_details(world: &mut World) {
     let Some(entity) = world.resource::<SelectedEntity>().0 else {
@@ -398,8 +398,8 @@ fn reflect_field_rows(v: &dyn PartialReflect) -> Vec<(String, String)> {
     }
 }
 
-/// 属性区（3.11）：快照渲染（头部/渲染语义/全局平移/组件清单）+ Transform
-/// 编辑（3.11.2 DragValue 读快照副本）。返回一次编辑（有拖改时），写路径归
+/// 属性区：快照渲染（头部/渲染语义/全局平移/组件清单）+ Transform
+/// 编辑（DragValue 读快照副本）。返回一次编辑（有拖改时），写路径归
 /// [`super::transform_edit`]——本函数零 World 访问，纯渲染。
 fn show_details(
     ui: &mut egui::Ui,
@@ -432,7 +432,7 @@ fn show_details(
     for (label, image) in &details.textures {
         ui.monospace(format!("贴图   {label}  {image:?}"));
     }
-    // Transform 编辑（3.11.2）：读快照值进副本，任一量被拖改即整组回写（未动
+    // Transform 编辑：读快照值进副本，任一量被拖改即整组回写（未动
     // 的组发原值，覆盖等价于原地）
     let mut edit = None;
     if let Some(t) = details.local {
@@ -462,7 +462,7 @@ fn show_details(
     if let Some(g) = details.global_translation {
         ui.monospace(format!("全局  平移 ({:+.3}, {:+.3}, {:+.3})", g.x, g.y, g.z));
     }
-    // 组件全清单（3.11.1）：archetype 口径；注册的折叠出字段行，未注册只报名字
+    // 组件全清单：archetype 口径；注册的折叠出字段行，未注册只报名字
     ui.separator();
     ui.strong(format!("组件 {}", details.component_rows.len()));
     egui::ScrollArea::vertical()
@@ -473,8 +473,8 @@ fn show_details(
             match &row.fields {
                 Some(fields) => {
                     egui::CollapsingHeader::new(egui::RichText::new(&row.name).monospace())
-                        // 4.5 小账:id_salt 混实体号——同短名组件(如多个 Transform 行)
-                        // 的折叠状态不再跨实体互串
+                        // id_salt 混实体号:同短名组件(如多个 Transform 行)
+                        // 的折叠状态不跨实体互串
                         .id_salt(format!("{}/{}", entity.index(), row.name))
                         .default_open(false)
                         .show(ui, |ui| {

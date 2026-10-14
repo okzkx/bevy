@@ -6,12 +6,12 @@
 //! - 本结构 = 进程级（随进程活）+ Surface（窗口级，单窗宿主壳中并入）；
 //! - resize 级的 Swapchain 与帧级的命令缓冲/fence/信号量在同层 `swapchain` / `frames` 子模块。
 //!
-//! 其余约束来源（step2《窗口链路侦察》）：
+//! 其余约束来源：
 //! - 句柄取自 `RawHandleWrapper::get_window_handle()`（bevy 的安全方法），Win32 路径
 //!   手写 `vkCreateWin32SurfaceKHR`；hinstance 可能为 None，`GetModuleHandleW(None)` 兜底；
 //! - ash 0.38.0 对 Instance/Device/loader 均无 Drop 实现（extensions_generated.rs 零
 //!   `impl Drop`）——销毁全部手动、按 Device ← Surface ← Messenger ← Instance 反序
-//!   （4.5 订正：Drop 实序 Surface 先于 Messenger，两者无依赖均合法，与 teardown
+//!   （Drop 实序 Surface 先于 Messenger，两者无依赖均合法，与 teardown
 //!   的手动反序不逐字一致但同满足依赖约束）；
 //! - `Entry` 内持 libloading 句柄，提前丢它会卸载 vulkan-1.dll，必须与 Instance 同寿命；
 //! - bevy 退出时 runner `exiting` 回调会清场（清场序对 Resource 是任意的），正常退出
@@ -65,7 +65,7 @@ unsafe extern "system" fn debug_callback(
 /// 进程级 Vulkan 上下文。字段顺序即声明层级；`Drop` 手动反序（ash 无自动 Drop）。
 #[derive(bevy::prelude::Resource)]
 pub struct Context {
-    /// 持 libloading 句柄防 vulkan-1.dll 提前卸载（所有 fn 指针已在 new 时拷走，字段本身不再读）
+    /// 持 libloading 句柄防 vulkan-1.dll 提前卸载（所有 fn 指针已在 new 时拷走，字段本身不被读）
     #[expect(dead_code, reason = "entry 仅作生命周期锚：Library 在即 Vulkan 可用")]
     entry: Entry,
     pub instance: Instance,
@@ -77,13 +77,13 @@ pub struct Context {
     /// graphics 与 present 同族（桌面 GPU 普适；异族需求出现时再拆）
     pub queue_family_index: u32,
     pub queue: vk::Queue,
-    /// transfer 队列族与队列：3.2 起拷贝提交走这里，与图形提交互不排队。
+    /// transfer 队列族与队列：拷贝提交走这里，与图形提交互不排队。
     /// 没有"TRANSFER 且无 GRAPHICS"的专用族时与 graphics 同族同队列（合批退回，
-    /// 取舍记录见 3.2.1 施工记录）；下游比对两个族号即可分辨。
+    /// 下游比对两个族号即可分辨）。
     pub transfer_queue_family_index: u32,
     pub transfer_queue: vk::Queue,
     /// 内存契约（设备侧事实一次查询冻结：类型/堆表 + nonCoherentAtomSize），
-    /// 3.2.2.1 定案的选型唯一裁判。池/上传按引用取用，不各自重查。
+    /// 选型唯一裁判。池/上传按引用取用，不各自重查。
     memory_contract: crate::vulkan::MemoryContract,
 }
 
@@ -136,9 +136,9 @@ impl Context {
             .application_name(app_name)
             .api_version(vk::API_VERSION_1_3);
         // 同步验证（VkValidationFeaturesEXT）：核心检查不覆盖跨对象同步时序——
-        // fence/信号量的 signal-wait 配对、present 复用、在飞销毁，这正是缺陷
-        // D2/D3/D4 的执法面（V1 前置闸门的裁判本体）。同步验证有帧时间开销，
-        // 3.4 真实绘制后若受限，把 enables 换成空数组即降回核心检查。
+        // fence/信号量的 signal-wait 配对、present 复用、在飞销毁，这正是
+        // 同步验证的执法面。同步验证有帧时间开销，
+        // 若受限，把 enables 换成空数组即降回核心检查。
         let sync_enables = if validation {
             Some([vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION])
         } else {
@@ -242,8 +242,8 @@ impl Context {
             ));
         };
 
-        // ---- transfer 专用队列族：拷贝提交与图形提交分流（3.2 合批上传的载体）----
-        // 条件照施工计划：有 TRANSFER 且无 GRAPHICS 的独立族（纯 DMA 引擎，不与图形
+        // ---- transfer 专用队列族：拷贝提交与图形提交分流（合批上传的载体）----
+        // 条件：有 TRANSFER 且无 GRAPHICS 的独立族（纯 DMA 引擎，不与图形
         // 抢占）；不要求 present/compute——拷贝队列只做拷贝。找不到是桌面 GPU 常态
         // （多数驱动的 transfer 能力就长在 graphics 族上），退回 graphics 合批并记日志，
         // 不为凑专用族改变设备选择。
@@ -260,7 +260,7 @@ impl Context {
             .unwrap_or(queue_family_index);
 
         // ---- Device：图形队列族（+ 独立 transfer 族若有）+ swapchain 扩展 + 1.3 features ----
-        // 支持与启用是两件事（缺陷 D1 定案）：features2 查询回答"驱动支持吗"，
+        // 支持与启用是两件事：features2 查询回答"驱动支持吗"，
         // vkCreateDevice 的 feature 结构声明"本逻辑设备要用哪些"——1.2 收编核心起
         // timeline 支持即 mandatory，但"默认启用"从不存在（features.adoc L105-106：
         // 用到的细粒度 feature 必须在设备创建时启用；VUID-VkSemaphoreTypeCreateInfo-
@@ -279,9 +279,9 @@ impl Context {
                 vk12_query.timeline_semaphore, vk13_query.dynamic_rendering
             )));
         }
-        // 3.3.2 硬校验：bindless 路线的五个必需位（总开关不解锁任何行为，具体位
-        // 缺哪个都走不通）。施工计划 §1 定案"缺少必要能力时明确报错，不建传统
-        // bound 回退渲染器"——缺一即出局，与 1.3 基线同款待遇。
+        // 硬校验：bindless 路线的五个必需位（总开关不解锁任何行为，具体位
+        // 缺哪个都走不通）。缺少必要能力时明确报错，不建传统
+        // bound 回退渲染器——缺一即出局，与 1.3 基线同款待遇。
         let required_di: [(&str, u32); 5] = [
             ("descriptor_indexing", vk12_query.descriptor_indexing),
             (
@@ -306,7 +306,7 @@ impl Context {
                 "物理设备 descriptor indexing 特性不足：{name} 不支持（bindless 路线无传统回退，该设备出局）"
             )));
         }
-        // D1 惯例：20 个分位的支持值全量落日志——"不启用≠不查"，后续段要用
+        // 惯例：20 个分位的支持值全量落日志——"不启用≠不查"，后续段要用
         // 哪位（SSBO 表/variable count…）的证据都在这行里，不重新侦察
         let di_all: [(&str, u32); 20] = [
             ("inAttArrDynIdx", vk12_query.shader_input_attachment_array_dynamic_indexing),
@@ -354,7 +354,7 @@ impl Context {
                     .queue_priorities(&queue_priority),
             );
         }
-        // 输出编码定案（3.4，纹理格式与Gamma篇 §6 待决翻面）：swapchain 保持
+        // 输出编码定案（纹理格式与Gamma篇 §6 待决翻面）：swapchain 保持
         // B8G8R8A8_UNORM 底板（DWM 母语），渲染附件用同图 B8G8R8A8_SRGB view 别名
         // （wgpu/bevy_render 同构：非 SRGB surface 套 sRGB view）。view 换格式需要
         // image 带 MUTABLE_FORMAT——swapchain image 上它由本扩展 + 格式清单兑现
@@ -434,7 +434,7 @@ impl Context {
         })
     }
 
-    /// 冻结的内存契约(类型选择/atom 舍入的唯一裁判,3.2.2.1 定案)。
+    /// 冻结的内存契约(类型选择/atom 舍入的唯一裁判)。
     #[must_use]
     pub fn memory_contract(&self) -> &crate::vulkan::MemoryContract {
         &self.memory_contract
@@ -444,7 +444,7 @@ impl Context {
 impl Drop for Context {
     fn drop(&mut self) {
         // 手动反序拆除（ash 0.38 无自动 Drop）。device_wait_idle 在正常退出里只是
-        // 兜底——teardown_vulkan 已在销毁任何 GPU 资源前排空过队列（D4：等待必须
+        // 兜底——teardown_vulkan 已在销毁任何 GPU 资源前排空过队列（等待必须
         // 先于销毁，本 Drop 的等待保护不了早已拆掉的兄弟资源）；它真正服务的是
         // panic 清场这类拆毁顺序不定、无人排空的路径。swapchain/image view 在
         // Swapchain 的 Drop 里，不归本结构管。

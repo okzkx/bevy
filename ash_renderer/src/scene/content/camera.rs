@@ -51,7 +51,7 @@ pub(super) fn spawn_camera(
         projection,
         Transform::from_xyz(CAMERA_POS.x, CAMERA_POS.y, CAMERA_POS.z)
             .looking_at(CAMERA_TARGET, Vec3::Y),
-        // 轨道控制状态随相机进场（3.9）：环绕目标 = 取景注视点，机位零跳变
+        // 轨道控制状态随相机进场：环绕目标 = 取景注视点，机位零跳变
         // 反解为球坐标（机制半边 AshCameraControlPlugin 逐帧驱动）。
         CameraOrbit::from_pose(CAMERA_POS, CAMERA_TARGET),
     ));
@@ -65,7 +65,7 @@ pub(super) fn spawn_camera(
 /// 相机就位核验（Update，报一次即歇）：相机 1 台且 GlobalTransform 前向
 /// 精确指向 [`CAMERA_TARGET`]——相机是根实体、无父链，Transform require 的
 /// GlobalTransform 种子值即终值，looking_at 语义逐字成立。带父链的传播验证
-/// 与逐帧采集归机制侧采集（crate::scene::mechanism::collect）。
+/// 与逐帧矩阵更新归机制侧账本（update_ledger 的 Changed<GlobalTransform> 通道）。
 #[derive(Default)]
 pub(super) struct CameraSetupState {
     done: bool,
@@ -93,7 +93,7 @@ pub(super) fn report_camera_setup(
         "非透视投影（意外）".to_string()
     };
     // 判定线：前向与"位置→注视点"夹角应近 0（浮点级）；超 1° 说明朝向语义被破坏
-    //（4.5 F19:越线升 warn 对齐同文件另两处核验的 Tier① 口径,不再静默 info）
+    //（越线升 warn：对齐同文件另两处核验的 Tier① 口径，不静默 info）
     let expected = (CAMERA_TARGET - CAMERA_POS).normalize_or_zero();
     let deviation = (*cam_tf.forward()).angle_between(expected).to_degrees();
     if deviation > 1.0 {

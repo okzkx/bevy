@@ -2,14 +2,14 @@
 //!
 //! 生命周期四层里的"resize 级"（VulkanContext字段释义：从Entry到Swapchain.md §12）：窗口尺寸一变整体重建，
 //! images/views/format/extent 全换。帧槽对象（fence / image_available / 命令缓冲）跨重建
-//! 复用；而 render_finished（present-wait 信号量）D3 修复后**按 image 分配**、挂在本结构
+//! 复用；而 render_finished（present-wait 信号量）**按 image 分配**、挂在本结构
 //! 下随重建换血——同一 image 再次被 acquire 即证明上一轮 present 已被消费完，这是
 //! 唯一有依据的复用闸门，帧槽轮转给不了这个保证（详见 frames.rs 模块注释）。
 //!
-//! `pre_transform`/`composite_alpha`/`present_mode` 等选型与创建链（施工③）一致：
+//! `pre_transform`/`composite_alpha`/`present_mode` 等选型与创建链一致：
 //! MAILBOX 优先（FIFO 兜底）、BGRA8_UNORM 优先、EXCLUSIVE 共享、clipped。
 //!
-//! 3.4 输出编码定案：image 保持 UNORM 底板，view 套 SRGB 别名当渲染附件（needs
+//! 输出编码定案：image 保持 UNORM 底板，view 套 SRGB 别名当渲染附件（needs
 //! `VK_KHR_swapchain_mutable_format` + VkImageFormatListCreateInfo，见 `new` 内定案
 //! 注释）——本结构新增 `view_format` 字段承载"底板 vs 渲染 view"两个格式。
 
@@ -42,13 +42,13 @@ pub struct Swapchain {
     pub swapchain: vk::SwapchainKHR,
     pub images: Vec<vk::Image>,
     pub views: Vec<vk::ImageView>,
-    /// D3：按 image index 分配的 present-wait 信号量（render_finished）。
+    /// 按 image index 分配的 present-wait 信号量（render_finished）。
     /// host.rs 按 acquire 返回的 index 取用，**不是**按帧槽轮转；生命周期与
     /// swapchain 绑定，重建时随旧 image 集合一起销毁。
     pub render_finished: Vec<vk::Semaphore>,
-    /// swapchain 底板格式（present engine 的母语；D3 定案的 present 路径不碰 view）。
+    /// swapchain 底板格式（present engine 的母语；present 路径不碰 view）。
     pub format: vk::Format,
-    /// 渲染附件 view 的格式：底板 UNORM 时的 SRGB 别名（输出编码定案，3.4）——
+    /// 渲染附件 view 的格式：底板 UNORM 时的 SRGB 别名（输出编码定案）——
     /// 写入时 ROP 自动编码；别名不可用时 == `format`（缺位形态，重建日志有 warn）。
     pub view_format: vk::Format,
     pub extent: vk::Extent2D,
@@ -56,7 +56,7 @@ pub struct Swapchain {
 
 impl Swapchain {
     /// UNORM 底板 → SRGB 别名候选：color attachment 支持查过才用（支持与启用
-    /// 分开，3.3.2 口径），不满足回退 None（调用方回退 UNORM 直出并 warn）。
+    /// 分开），不满足回退 None（调用方回退 UNORM 直出并 warn）。
     fn srgb_alias_if_supported(ctx: &Context, srgb: vk::Format) -> Option<vk::Format> {
         let features = unsafe {
             ctx.instance
@@ -88,7 +88,7 @@ impl Swapchain {
             .find(|f| f.format == vk::Format::B8G8R8A8_UNORM)
             .copied()
             .unwrap_or(formats[0]);
-        // 输出编码定案（3.4，与 context.rs 的 swapchain_mutable_format 扩展配套）：
+        // 输出编码定案（与 context.rs 的 swapchain_mutable_format 扩展配套）：
         // swapchain image 保持 UNORM 底板，view 用 SRGB 别名当渲染附件——写入时由
         // ROP 自动做线性→sRGB 编码（blend 在编码前，仍是线性域），present 直接读
         // image 本体不经 view，编码结果原样上屏。别名合法性三件套：
@@ -96,8 +96,8 @@ impl Swapchain {
         // 声明双格式（swapchain image 由此按 MUTABLE_FORMAT 形态创建）；③ SRGB 变体
         // 的 color attachment 支持查过才用（支持与启用分开），不满足回退 UNORM 直出
         // 并响亮记日志——输出编码缺位会在受光中间调上显形（偏暗），不能静默。
-        // 4.5 F21:R8G8B8A8_UNORM 底板（移动/部分平台常见）同享 SRGB 别名分支——
-        // 此前只有 B8G8R8A8 一条路,R8G8B8A8 平台的输出编码契约静默降级
+        // R8G8B8A8_UNORM 底板（移动/部分平台常见）同享 SRGB 别名分支——
+        // 缺此分支则该平台的输出编码契约静默降级
         let srgb_alias = match surface_format.format {
             vk::Format::B8G8R8A8_UNORM => {
                 Self::srgb_alias_if_supported(ctx, vk::Format::B8G8R8A8_SRGB)
@@ -111,7 +111,7 @@ impl Swapchain {
         if srgb_alias.is_some() {
             info!("输出编码：UNORM 底板 + SRGB view 别名（ROP 写出自动编码，着色器全程线性）");
         } else {
-            bevy::log::warn!("输出编码缺位：swapchain {:?} 无 SRGB view 别名（扩展/格式支持不足），受光几何中间调将偏暗——3.4 输出编码定案未生效", surface_format.format);
+            bevy::log::warn!("输出编码缺位：swapchain {:?} 无 SRGB view 别名（扩展/格式支持不足），受光几何中间调将偏暗——输出编码定案未生效", surface_format.format);
         }
         // 格式清单必须含 swapchain 自身格式（VUID-VkSwapchainCreateInfoKHR-pNext-07781
         // 族的声明要求：viewFormats 覆盖创建格式）；pNext 结构须活到 create 返回
@@ -122,9 +122,9 @@ impl Swapchain {
         let mut format_list_info =
             vk::ImageFormatListCreateInfo::default().view_formats(&format_list);
         if caps.current_extent.width == u32::MAX {
-            return Err(VulkanError::Init("current_extent 未定义（窗口尚未定型），本步不做显式尺寸回退".into()));
+            return Err(VulkanError::Init("current_extent 未定义（窗口尚未定型），不做显式尺寸回退".into()));
         }
-        // present mode：MAILBOX 优先（frenderer 同款选型，2026-09-22 定案）。FIFO 的
+        // present mode：MAILBOX 优先。FIFO 的
         // acquire 会在显示队列满/表面失配时阻塞（最小化死锁、拖拽冻结的根源）；
         // MAILBOX 的 present 直接替换未上屏的帧、acquire 永不排队——拖拽中帧循环
         // 持续流动。MAILBOX 不保证恒可用，FIFO 兜底（规范唯一保证）。
@@ -186,7 +186,7 @@ impl Swapchain {
 
         // view：渲染（含清屏）吃 view 不吃裸 image；格式用 SRGB 别名（输出编码，
         // 见上方定案注释）——生命周期与 swapchain 绑定。
-        // 4.5 F13:半建失败全有或全无——views/semaphores 任一环失败,已建句柄
+        // 半建失败全有或全无——views/semaphores 任一环失败,已建句柄
         // 与 swapchain 本体就地回收,否则泄漏者占着 hwnd,重建恒报
         // ERROR_NATIVE_WINDOW_IN_USE,渲染永久失效(对照 images 段同款纪律)
         let views = match images
@@ -218,7 +218,7 @@ impl Swapchain {
             }
         };
 
-        // D3：每张 image 一个 present-wait 信号量，数量与 image 集合一一对应，
+        // 每张 image 一个 present-wait 信号量，数量与 image 集合一一对应，
         // 不与帧槽数挂钩——两帧在飞对三张 image 的错峰复用由"同 image 重 acquire"
         // 背书，不靠帧 fence 越权担保 present engine 的消费进度。
         let render_finished = match images
@@ -267,7 +267,7 @@ impl Swapchain {
     /// - 最小化时 current_extent=0，建 0 尺寸 swapchain 非法——保留旧的，恢复后靠下一次 resize 消息重建；
     /// - 尺寸没变就不动。
     ///
-    /// 单次真重建 ≈ 60ms（wait_idle+destroy+create，2026-09-22 实测）——调用方必须
+    /// 单次真重建 ≈ 60ms（wait_idle+destroy+create）——调用方必须
     /// 去抖（host::draw_frame 的 `ResizeGate`），不要在拖拽的每个尺寸步进上调用。
     pub fn rebuild(&mut self, ctx: &Context) -> Result<()> {
         let caps = unsafe {
@@ -281,11 +281,10 @@ impl Swapchain {
         if caps.current_extent == self.extent {
             return Ok(());
         }
-        // 在飞帧还在引用旧 image，必须先等全部完成再拆。WSI 边界（缺陷文档 §4）：
+        // 在飞帧还在引用旧 image，必须先等全部完成再拆。WSI 边界：
         // wait_idle 只保证队列操作完成，不担保 presentation engine 消费完
         // render_finished；Win32 同一 hwnd 只容一个 swapchain，"先拆旧再建新"是
-        // 强制时序，旧件延迟回收在本平台不可行——余量论证与严格方案
-        //（present_wait / present_fence，待 V1 验证环境建立后评估）记录在缺陷文档。
+        // 强制时序，旧件延迟回收在本平台不可行。
         unsafe { ctx.device.device_wait_idle() }?;
         // Win32 的 WSI 限制：同一个 hwnd 同时只能挂一个 swapchain——
         // 必须先拆旧再建新（`*self = Self::new(ctx)` 的 RHS 先求值，是"先建后拆"，必炸）

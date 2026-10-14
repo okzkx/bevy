@@ -10,15 +10,15 @@ use bevy::prelude::*;
 /// 经 egui `Window::open` 借用同字段写回）。bool = 显示中。
 #[derive(Resource)]
 pub(super) struct DebugWindowsOpen {
-    /// 帧统计/着色模式/渲染器统计窗口（3.7，[`super::debug_window`]）
+    /// 帧统计/着色模式/渲染器统计窗口（[`super::debug_window`]）
     pub(super) stats: bool,
-    /// 实体层级树窗口（3.10，[`super::entity_tree_window`]）
+    /// 实体层级树窗口（[`super::entity_tree_window`]）
     pub(super) entity_tree: bool,
 }
 
 impl Default for DebugWindowsOpen {
     fn default() -> Self {
-        // 默认全开：3.7 既有行为不变，3.10 新窗直接可见可验；关了从总控再开
+        // 默认全开：新窗直接可见可验；关了从总控再开
         Self { stats: true, entity_tree: true }
     }
 }

@@ -1,12 +1,10 @@
-//! 宿主壳入口（step2 施工项②③④）：禁渲染 Bevy 宿主 + ash 清屏帧循环。
+//! 宿主壳入口：禁渲染 Bevy 宿主 + ash 清屏帧循环。
 //!
 //! main 只做统筹：决定装哪些插件、禁哪些插件，然后交出调度——**不执行任何
 //! Vulkan 调用**。Vulkan 侧的编排（init / draw_frame / teardown）住在
-//! [`ash_renderer::host`]（步骤 3 开工前的结构整理：五段施工都要长帧循环，
-//! 装配与编排一次分家）；ECS 侧材质缝在 [`ash_renderer::scene`]。
+//! [`ash_renderer::host`]（装配与编排分家）；ECS 侧材质缝在 [`ash_renderer::scene`]。
 //!
-//! 禁用名单 = step1《DefaultPlugins分类.md》§1 的渲染族 8 件
-//! （0.20.0-dev 下路径逐一复核未变，见 .agents/docs/2-宿主壳/2-宿主壳搭建记录.md §2）。
+//! 禁用名单 = 渲染族 8 件（0.20.0-dev 下路径逐一复核未变）。
 //! 帧循环住在 bevy runner 里（侦察篇 §4）：winit `about_to_wait` 驱动 `app.update()`。
 //! 失败策略（两 Tier，非必要不 panic）见 host 模块文档与《错误处理体系：两Tier思想与优雅退出》篇。
 
@@ -39,7 +37,7 @@ fn main() -> AppExit {
         // 统一错误通道（正本：错误处理专题《代码结构优化：统一错误通道定案》篇）：system/
         // observer/command 的 Err 全走 tier_handler 按 Severity 分流（Warning→warn，
         // 其余→error + 置位），fatal_gate 看门写 AppExit 优雅退出。fatal_gate 锚定
-        // `First` 集首注册（4.5 小账订正：依赖无序系统插入序不保证，多线程执行器
+        // `First` 集首注册（依赖无序系统插入序不保证，多线程执行器
         // 下无正确性收益但有早位收益——显式锚定后收益有保证）。
         .set_error_handler(tier_handler)
         .add_systems(First, fatal_gate)
@@ -68,30 +66,30 @@ fn main() -> AppExit {
                 // 与 glTF 材质接入缝已由 AshMaterialHookPlugin 手动接线（scene 模块）。
                 .disable::<PbrPlugin>(),
         )
-        // 材质缝接线（step3 任务 3.1.1，机制半边）：init_asset + AshMaterialHook 三钩子进 GltfExtensionHandlers
+        // 材质缝接线（机制半边）：init_asset + AshMaterialHook 三钩子进 GltfExtensionHandlers
         .add_plugins(AshMaterialHookPlugin)
-        // 宽高比补位（3.1.3 第四补位，机制半边）：随窗口 resize 修正相机 aspect_ratio
+        // 宽高比补位（机制半边）：随窗口 resize 修正相机 aspect_ratio
         .add_plugins(AshCameraAspectPlugin)
-        // 相机轨道控制（3.9，机制半边）：左键拖拽环绕 + 滚轮推拉，驱动带 CameraOrbit 的相机
+        // 相机轨道控制（机制半边）：左键拖拽环绕 + 滚轮推拉，驱动带 CameraOrbit 的相机
         .add_plugins(AshCameraControlPlugin)
-        // 场景进场（step3 任务 3.1.2，业务半边）：load FlightHelmet + spawn WorldAssetRoot + 到货统计
+        // 场景进场（业务半边）：load FlightHelmet + spawn WorldAssetRoot + 到货统计
         .add_plugins(SceneEntryPlugin)
-        // 稳定槽账本（4.1，机制半边）：PostUpdate 传播后对账——Changed/Removed
-        // 增量维护 Entity→实例数据账本，取代 3.1.4 的每帧全量快照重建
+        // 稳定槽账本（机制半边）：PostUpdate 传播后对账——Changed/Removed
+        // 增量维护 Entity→实例数据账本（不做每帧全量快照重建）
         .add_plugins(AshLedgerPlugin)
-        // 资产事件读侧（4.2，机制半边）：AssetEvent::Modified → 失效凭据 +
+        // 资产事件读侧（机制半边）：AssetEvent::Modified → 失效凭据 +
         // 关联行重挂脏标（发现侧第二条入口，与对象五类变更并轨同一脏集）
         .add_plugins(AshAssetEventPlugin)
-        // 异步就绪读侧（4.3，机制半边）：pending 身份账 + AssetLoadFailedEvent
+        // 异步就绪读侧（机制半边）：pending 身份账 + AssetLoadFailedEvent
         // 读侧（失败进 failed 集不再重试，行出队由 flush 盘点裁决）
         .add_plugins(AshReadinessPlugin)
-        // BRP 远程直控（3.12）：World 经 HTTP JSON-RPC 暴露在 127.0.0.1:15702，
+        // BRP 远程直控：World 经 HTTP JSON-RPC 暴露在 127.0.0.1:15702，
         // 官方 inspection 方法族 + 场景语义自定义方法（查询/改 Transform/相机给值）
         .add_plugins(AshRemotePlugin)
-        // egui 调试 UI 的 ECS 半边（3.7，裸接 ash）：Update 里输入桥 + pass + 调试窗口，
+        // egui 调试 UI 的 ECS 半边（裸接 ash）：Update 里输入桥 + pass + 调试窗口，
         // 产 EguiFrame/RenderMode 给帧循环
         .add_plugins(OverlayPlugin)
-        // buffer 侧上传（3.2.4）：Last 里快照去重 → 合批进 GPU 池,先于帧循环
+        // buffer 侧上传：Last 里快照去重 → 合批进 GPU 池,先于帧循环
         .add_plugins(AshUploadPlugin)
         // 宿主桥：禁渲染补位 + init/draw_frame/teardown 三系统进调度
         .add_plugins(AshHostPlugin)

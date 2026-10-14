@@ -1,4 +1,4 @@
-//! 内存契约(3.2.2 资源模块第一件,任务号 3.2.2.1):memory type、usage、绑定
+//! 内存契约:memory type、usage、绑定
 //! 要求与对齐在一处定案,池/缓存/维护只引用不另立规则。
 //!
 //! 契约的设备侧事实一次查询冻结([`MemoryContract`]):内存类型/堆表 +
@@ -16,8 +16,8 @@
 //!    选类型 → 恰按 `requirements.size` 分配 → offset 0 绑定。四条绑定条款全部被
 //!    该流程满足:memoryOffset(=0)小于 memory 大小(VUID-01031)、类型在
 //!    memoryTypeBits 内(VUID-01035)、offset 是 alignment 整数倍(VUID-01036)、
-//!    requirements.size ≤ memory 大小(VUID-01037)。子分配(bump 偏移)归 3.2.2.2
-//!    的池,那里复用本模块的 [`align_up`]。
+//!    requirements.size ≤ memory 大小(VUID-01037)。子分配(bump 偏移)归池
+//!    模块,那里复用本模块的 [`align_up`]。
 //!
 //! **coherent 分支**(staging/readback 是否需要 flush/invalidate 的定案):
 //! - 类型带 `HOST_COHERENT`:宿主读写设备侧立即可见,**不 flush**——规范明言此时
@@ -32,12 +32,11 @@
 //!   "忘记 flush"的入口。
 //!
 //! 持久映射:host-visible 分配在创建时 map 一次、Drop 时 unmap——map/unmap 次数
-//! 与 buffer 寿命一致,3.2.4 的 staging 复用不逐批重映射。
+//! 与 buffer 寿命一致,staging 复用不逐批重映射。
 //!
-//! 本模块**不做**的事与归属:池/去重缓存(3.2.2.2)、容量维护与销毁等待(3.2.2.3)、
-//! transfer 提交与票据(3.2.4)。`vkMapMemory` 不检查在用即返回指针——host 写与
-//! GPU 读的竞争防护是提交侧的内存依赖/票据纪律,不在读写 API 里设防(边界见
-//! 施工记录 §边界)。
+//! 本模块**不做**的事与归属:池/去重缓存、容量维护与销毁等待、
+//! transfer 提交与票据。`vkMapMemory` 不检查在用即返回指针——host 写与
+//! GPU 读的竞争防护是提交侧的内存依赖/票据纪律,不在读写 API 里设防。
 
 use std::slice;
 
@@ -58,20 +57,20 @@ use crate::common::error::{Result, VulkanError};
 /// | `DynamicDraw` | VERTEX_BUFFER+INDEX_BUFFER | HOST_VISIBLE | HOST_CACHED+HOST_COHERENT |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufferRole {
-    /// 顶点/索引大池本体:图形阶段读,3.2.4 的 transfer 提交写(TRANSFER_DST)。
-    /// DEVICE_LOCAL 是定案(施工计划 §2 池策略),不给 host-visible 降级路径。
+    /// 顶点/索引大池本体:图形阶段读,transfer 提交写(TRANSFER_DST)。
+    /// DEVICE_LOCAL 是定案,不给 host-visible 降级路径。
     DevicePool,
     /// 上传暂存:宿主写 + transfer 读。HOST_VISIBLE 硬契约(HOST_COHERENT 优先)。
     Staging,
     /// 回读验证:transfer 写 + 宿主读(HOST_CACHED 优先,加速宿主读侧)。
     Readback,
-    /// 每帧 UBO(3.3.3 set1 的载体):着色器读,宿主按帧写(在飞安全由帧槽
+    /// 每帧 UBO(set1 的载体):着色器读,宿主按帧写(在飞安全由帧槽
     /// 轮转保证——每帧一个 buffer,复用前等对应帧完成,wait_for_slot 已生效)。
     FrameUniform,
-    /// 宿主可见 storage(3.3.3 探针 I/O;未来 GPU 可索引参数表的宿主侧形态):
+    /// 宿主可见 storage(探针 I/O;未来 GPU 可索引参数表的宿主侧形态):
     /// 设备读写 + 宿主写(staging 直写)/读(回读)。
     Storage,
-    /// UI 顶点/索引(3.7.2):每帧整换、宿主直写、着色器读本帧内容——不经
+    /// UI 顶点/索引:每帧整换、宿主直写、着色器读本帧内容——不经
     /// staging/transfer(写频率是帧级,直写少一跳)。容量固定,超容 = 帧槽不变
     /// 之下当场判断丢弃(调用方 Tier① 分流);复用安全与 FrameUniform 同一条
     /// fence 纪律(wait_for_slot 先行,写发生在本槽上一轮提交完成之后)。
@@ -87,8 +86,8 @@ impl BufferRole {
                 vk::BufferUsageFlags::VERTEX_BUFFER
                     | vk::BufferUsageFlags::INDEX_BUFFER
                     | vk::BufferUsageFlags::TRANSFER_DST
-                    // 迁移/扩容与回读校验要把池内容拷出去:3.2.2.3 的维护路径与
-                    // 3.2 的内容抽查验证都以池为拷贝源,TRANSFER_SRC 一并冻结
+                    // 迁移/扩容与回读校验要把池内容拷出去:维护路径与内容抽查验证
+                    // 都以池为拷贝源,TRANSFER_SRC 一并冻结
                     | vk::BufferUsageFlags::TRANSFER_SRC
             }
             Self::Staging => vk::BufferUsageFlags::TRANSFER_SRC,
@@ -228,7 +227,7 @@ impl MemoryContract {
 }
 
 /// 一个按契约创建并绑定的 buffer:恰按 `requirements.size` 分配、offset 0 绑定、
-/// host-visible 则持久映射。pool/bump/缓存是 3.2.2.2 的事,不以本类型扩池。
+/// host-visible 则持久映射。pool/bump/缓存是池模块的事,不以本类型扩池。
 pub struct GpuBuffer {
     device: Device,
     buffer: vk::Buffer,
@@ -258,7 +257,7 @@ impl GpuBuffer {
     }
 
     /// 共享模式变体:`families` 含两个及以上队列族时按 CONCURRENT 创建(两族都
-    /// 声明为可访问集合),否则 EXCLUSIVE。3.4 定案:顶点/索引大池在"有专用
+    /// 声明为可访问集合),否则 EXCLUSIVE。定案:顶点/索引大池在"有专用
     /// transfer 族"的设备上走 CONCURRENT——池被 transfer 反复写、graphics 长期读,
     /// EXCLUSIVE 的所有权乒乓需要跨队列排序链(下一批 transfer 的 acquire 必须排在
     /// 上一帧 graphics 的 acquire 之后,只能用信号量串起来,上传延迟 +1 帧加状态机);
@@ -569,7 +568,7 @@ unsafe impl Sync for GpuBuffer {}
 impl Drop for GpuBuffer {
     fn drop(&mut self) {
         // 契约边界:本 Drop 不等 GPU 在飞使用——"等待最后使用完成再销毁"是
-        // 3.2.2.3 的容量/销毁账本与 3.2.4.4 的退出排空纪律;调用方(含探针)
+        // 池的容量/销毁账本与退出排空纪律;调用方(含探针)
         // 必须在销毁前自证最后一次使用已完成。unmap 显式先行(vkFreeMemory
         // 虽会隐式 unmap,写出顺序让依赖一目了然),再拆 buffer、还 memory。
         unsafe {

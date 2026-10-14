@@ -6,7 +6,7 @@
 //! [`super::init`]。
 //!
 //! 住址：`Last`，与采集同帧闭环——Update 变更 → PostUpdate 传播+采集
-//!（`scene::ledger` 账本对账，4.1 起增量维护）→ Last 消费账本：查驻留账本
+//!（`scene::ledger` 账本对账）→ Last 消费账本：查驻留账本
 //!（MeshPool/ImageCache）
 //! 与材质容器组装 DrawList（账本跨帧存活，读侧零扫描；GPU 执行异步——上传票据在
 //! GPU 侧等待，CPU 不阻塞）；材质按不透明调试策略覆盖（详见 draw_frame 收账日志）。
@@ -69,7 +69,7 @@ pub(crate) struct ResizeGate {
 #[derive(SystemParam)]
 pub(crate) struct FrameInput<'w, 's> {
     ctx: Res<'w, Context>,
-    /// 稳定槽账本（4.1 起取代每帧全量快照：跨帧维护，读侧零扫描）。
+    /// 稳定槽账本（跨帧增量维护，读侧零扫描）。
     ledger: Res<'w, InstanceLedger>,
     std_materials: Res<'w, Assets<StandardMaterial>>,
     pool: Res<'w, MeshPool>,
@@ -90,7 +90,7 @@ pub(crate) struct FrameInput<'w, 's> {
         ),
         With<Camera>,
     >,
-    /// 方向光（取第一盏，方向 = 实体 `back()`，bevy GPU 同款）。
+    /// 方向光（取第一盏，方向 = 实体 `back()`）。
     lights: Query<'w, 's, (&'static GlobalTransform, &'static DirectionalLight)>,
     ambient: Option<Res<'w, GlobalAmbientLight>>,
     /// 着色模式（overlay 单选钮写；None = overlay 未装，按 lambert 兜底并告警一次）。
@@ -214,7 +214,7 @@ pub(crate) fn draw_frame(
         }
         Err(VulkanError::SwapchainOutOfDate) => {
             // 无论重建成败，本帧作废（acquire 没拿到图）；重建失败 warn 后让路，
-            // 下帧 acquire 再过时就地重试重建。4.5 F14:重建后置 pending——
+            // 下帧 acquire 再过时就地重试重建。重建后必须置 pending——
             // rebuild 对"尺寸没变"的表面失配（显示器模式切换/热插拔类）幂等
             // 早退，不置位则本分支每帧空转重试、渲染不自愈；置位后帧首闸门③
             // 接管（rebuild 幂等，重复调用无成本）
@@ -309,7 +309,7 @@ pub(crate) fn draw_frame(
             .log(|| warn!("相机缺席：view_proj 用 identity 兜底（画面不可读属预期，查相机装配）")),
     }
     // —— 方向光：取第一盏（多灯告警一次，多灯支持未实现）。
-    // 数值约定与 bevy prepare_lights 同款：dir_to_light = 实体 back()（forward 取
+    // 数值约定：dir_to_light = 实体 back()（forward 取
     // 负，"N·L 就绪"），light_color = linear × illuminance。
     let light_count = lights.iter().count();
     let (dir_to_light, light_color) = match lights.iter().next() {
@@ -332,7 +332,7 @@ pub(crate) fn draw_frame(
         });
     }
     // —— 环境光：相机组件 AmbientLight（若挂）压过全局 GlobalAmbientLight 资源；
-    // 数值 = linear × brightness（bevy prepare_lights 同款）。
+    // 数值 = linear × brightness。
     let ambient_color = match per_camera_ambient {
         Some(a) => LinearRgba::from(a.color).to_f32_array().map(|c| c * a.brightness),
         None => match ambient.as_deref() {
@@ -375,7 +375,7 @@ pub(crate) fn draw_frame(
         )
         .or_fatal("帧 UBO 写失败，渲染链无法继续")?;
 
-    // 4.5) overlay 绘制半边（3.7）：图集整传（可能多出一张 transfer 票据——本帧
+    // 4b) overlay 绘制半边：图集整传（可能多出一张 transfer 票据——本帧
     // 图形提交的 wait_ticket 在此后快照，flush_uploads 批与图集批都被等待）→
     // 镶嵌 → 顶点环写入 → UiPaint + 本帧槽 buffer 句柄（record_frame 的 UI 段
     // 接画）。资源束缺席 = overlay 未装，整段跳过（收账日志在 paint_overlay 内）。

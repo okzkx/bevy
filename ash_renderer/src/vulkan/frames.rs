@@ -1,17 +1,17 @@
 //! 帧级资源：命令池/命令缓冲 + 每帧"image_available + fence + 深度附件"。
 //!
 //! 生命周期四层里的"帧级"（VulkanContext字段释义：从Entry到Swapchain.md §12）：MAX_FRAMES_IN_FLIGHT 组
-//! 轮转复用，CPU 最多领先 GPU 这么多帧。与 swapchain 解耦的是帧槽对象，修复后各归其位：
+//! 轮转复用，CPU 最多领先 GPU 这么多帧。与 swapchain 解耦的是帧槽对象，各归其位：
 //! - in_flight fence：GPU → CPU 重录闸门，按帧槽轮转；
 //! - image_available：present engine → GPU 渲染，按帧槽轮转（复用安全前提：同槽两次
 //!   acquire 隔 MAX_FRAMES_IN_FLIGHT 帧，且 fence 保证上一轮提交真的执行完了——
 //!   提交失败路径一律 Tier② 退出，不留"signal 无人等"的残局）；
 //! - render_finished（GPU → present engine）：**按 swapchain image 分配**，住在
-//!   [`super::swapchain::Swapchain`]（D3）。同一 image 再次被 acquire 即证明其上一轮
+//!   [`super::swapchain::Swapchain`]。同一 image 再次被 acquire 即证明其上一轮
 //!   present 已被 present engine 消费完——这是帧 fence 给不了的保证（fence 只证提交
 //!   完成，不证 present engine 的消费进度；依据 Khronos Vulkan Guide "Swapchain
 //!   semaphore reuse"；同一队列上提交有序，下一次 signal 排在前一个 present 消费之后）。
-//! - **深度附件（3.4.3）按帧槽分配**（面板待决定案）：数量 = MAX_FRAMES_IN_FLIGHT，
+//! - **深度附件按帧槽分配**：数量 = MAX_FRAMES_IN_FLIGHT，
 //!   不挂 swapchain image。两份同步证据：① 在飞的两帧各用各的槽位深度，并发写
 //!   不可能撞同一张图；② 同槽深度的两次使用之间隔着 `wait_for_slot` 的 fence
 //!   等待（录制前 CPU 已确认上一轮提交完成）——不把"归帧级"当无冲突证明，冲突
@@ -39,12 +39,12 @@ use crate::vulkan::Context;
 /// CPU 领先 GPU 的最大帧数：第 N 帧要等第 N-2 帧的组资源空出来才能重录。
 pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
-/// 深度附件格式（3.4.3 定案：D32_SFLOAT，reverse-Z 深度链的载体）。支持查询在
+/// 深度附件格式（D32_SFLOAT，reverse-Z 深度链的载体）。支持查询在
 /// [`DepthTarget::new`]（支持与启用分开，证据落日志）；管线的深度附件格式声明与
 /// 这里同一常量（pipeline.rs 只消费不另立）。
 pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
-/// 一个 draw 的绘制参数（3.4.5 DrawList 的一行）：push 数据 + 池内引脚。
+/// 一个 draw 的绘制参数：push 数据 + 池内引脚。
 /// push 字节排布契约在 [`crate::vulkan::pipeline`]（pack_push），本结构是宿主侧
 /// 的取数形态——host 从快照/驻留账本/资产容器组出来，录制层只消费。
 #[derive(Clone, Copy, Debug)]
@@ -63,7 +63,7 @@ pub struct FrameDraw<'a> {
     pub layout: vk::PipelineLayout,
     /// set0 常驻表（bindless 双表，整帧绑一次）。
     pub set0: vk::DescriptorSet,
-    /// set1 本帧槽的 UBO 集（内容 = 相机 view_proj，3.5 扩灯光）。
+    /// set1 本帧槽的 UBO 集（内容 = 相机 view_proj，后续扩灯光）。
     pub set1: vk::DescriptorSet,
     pub vertex_buffer: Option<vk::Buffer>,
     pub index_buffer: Option<vk::Buffer>,
@@ -79,7 +79,7 @@ pub struct FrameDraw<'a> {
     pub ui_buffers: (vk::Buffer, vk::Buffer),
     /// 上传票据等待值：图形提交在 GPU 侧等 timeline ≥ 此值——"上传完成才可使用"
     /// 的执法点（0 = 无上传过，跳过等待）。该等待同时收口 transfer 写的跨队列
-    /// 内存可见性（池/贴图 CONCURRENT 双族共享，无所有权屏障，3.4 定案）。
+    /// 内存可见性（池/贴图 CONCURRENT 双族共享，无所有权屏障，定案）。
     pub wait_ticket: u64,
     pub ticket_semaphore: vk::Semaphore,
     /// 清屏颜色（线性域；SRGB view 的 ROP 编码在写出时做）。
@@ -87,8 +87,8 @@ pub struct FrameDraw<'a> {
 }
 
 /// 一组在飞资源。image_available 桥接 present engine → GPU 渲染，in_flight 桥接
-/// GPU → CPU（重录闸门）；present 方向的 render_finished 按 image 住在 Swapchain（D3）。
-/// 深度附件按帧槽各一份（3.4.3，见模块注释的同步证据）。
+/// GPU → CPU（重录闸门）；present 方向的 render_finished 按 image 住在 Swapchain。
+/// 深度附件按帧槽各一份（见模块注释的同步证据）。
 pub struct Frame {
     pub command_buffer: vk::CommandBuffer,
     pub image_available: vk::Semaphore,
@@ -212,7 +212,7 @@ impl DepthTarget {
 
 impl Drop for DepthTarget {
     fn drop(&mut self) {
-        // 契约边界:不等 GPU(重建路径的等待在 rebuild_depth,退出排空在 teardown D4)。
+        // 契约边界:不等 GPU(重建路径的等待在 rebuild_depth,退出排空在 teardown)。
         // view 先于 image,memory 最后。
         unsafe {
             self.device.destroy_image_view(self.view, None);
@@ -290,7 +290,7 @@ impl FramePool {
         })
     }
 
-    /// 当前帧槽位。与 `wait_for_slot`（D2 改名后的等待+重置入口）之间不得 `advance`。
+    /// 当前帧槽位。与 `wait_for_slot`（等待+重置入口）之间不得 `advance`。
     pub fn current(&self) -> &Frame {
         &self.frames[self.current]
     }
@@ -330,7 +330,7 @@ impl FramePool {
         Ok(())
     }
 
-    /// 等待全部帧槽的在飞提交完成（4.1.1 池迁移的"图形最后使用"等待）。fence
+    /// 等待全部帧槽的在飞提交完成（池迁移的"图形最后使用"等待）。fence
     /// 只证提交完成：全部槽位 fence 皆 signaled ⇒ 没有任何命令缓冲还在 GPU 上
     /// 执行 ⇒ 在飞 draw 对旧池的读取已全部收口。已完成的槽立即通过，正常路径
     /// 至多等 MAX_FRAMES_IN_FLIGHT-1 个在飞尾帧；等待不重置 fence，与
@@ -346,7 +346,7 @@ impl FramePool {
 
     /// 帧首：等本槽位上一轮提交完成（GPU 侧 fence），重置命令缓冲。
     ///
-    /// D2 定案：这里**只等不重置 fence**。fence 的重置挪到
+    /// 这里**只等不重置 fence**。fence 的重置挪到
     /// [`Self::record_frame`] 提交前一刻——若在帧首重置，其后任何提前
     /// return（acquire OUT_OF_DATE / acquire 失败 / 重建失败）都会留下一个永远
     /// 无人 signal 的 unsignaled fence，下一帧 `wait_for_fences(u64::MAX)`
@@ -368,7 +368,7 @@ impl FramePool {
     /// dynamic rendering（清屏 + DrawList 逐 draw + overlay UI 接画，同实例）→
     /// 出场屏障（颜色）→ queue_submit。提交等 acquire 的 image_available + 上传
     /// 票据（GPU 侧），完成时发 render_finished + fence。
-    /// `render_finished` 按 acquire 的 image index 从 Swapchain 取（D3），不按帧槽轮转。
+    /// `render_finished` 按 acquire 的 image index 从 Swapchain 取，不按帧槽轮转。
     ///
     /// # Errors
     /// 命令缓冲重置/录制/提交任一失败（调用方按 Tier② 退出，见
@@ -391,7 +391,7 @@ impl FramePool {
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
 
-            // —— 进场 ①：颜色布局迁移（D6 定案形状）。布局迁移是一次写访问，必须
+            // —— 进场 ①：颜色布局迁移。布局迁移是一次写访问，必须
             // 排在 acquire 对 image 的读之后——提交在 COLOR_ATTACHMENT_OUTPUT 阶段等
             // image_available（等待点语义见下方提交段），屏障 srcStage 就提到这里；
             // dst_access 带上 COLOR_ATTACHMENT_WRITE，与后续 loadOp 清屏写收口。
@@ -421,7 +421,7 @@ impl FramePool {
             // —— 进场 ②：深度 UNDEFINED→附件布局（UNDEFINED = 旧内容不要，与
             // loadOp CLEAR 配套；storeOp DON'T CARE，故无出场屏障）。src 作用域为空
             // 的合法性：本槽深度图的上一轮使用已被 wait_for_slot 的 fence 等完
-            //（3.4.3 的同步证据②），录制时不存在并发引用。
+            //（模块注释的同步证据②），录制时不存在并发引用。
             let to_depth_attachment = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
@@ -447,7 +447,7 @@ impl FramePool {
                 &[to_depth_attachment],
             );
 
-            // —— 进场 ③：无（3.4 定案）——跨族贴图不再走 release/acquire 让渡
+            // —— 进场 ③：无——跨族贴图不走 release/acquire 让渡
             //（图像 CONCURRENT 双族共享，与池同款）；上传批次的图像布局收尾
             // （TRANSFER_DST→SHADER_READ_ONLY，IGNORED 族）由 uploader 图像段
             // 在 transfer 提交内完成，跨队列可见性由下方票据等待收口。
@@ -515,8 +515,8 @@ impl FramePool {
                     &sets,
                     &[],
                 );
-                // 动态 viewport/scissor：正高度直出（3.4 朝向定案，见 pipeline.rs 模块
-                // 注释与施工记录 §viewport——E5 光栅级实验 + 官方示例对照截图实证；
+                // 动态 viewport/scissor：正高度直出（朝向定案，见 pipeline.rs 模块
+                // 注释——光栅级实验 + 官方示例对照截图实证；
                 // 负高度翻转反而上下颠倒，与"教科书式 Vulkan 翻转"的直觉相反）
                 device.cmd_set_viewport(
                     frame.command_buffer,
@@ -568,7 +568,7 @@ impl FramePool {
                 }
             }
 
-            // —— UI 半边（3.7）：同一 dynamic rendering 实例内接画——raster order
+            // —— UI 半边：同一 dynamic rendering 实例内接画——raster order
             // 保证 UI 盖在场景之上，混合走 ROP（SRGB view 写出时编码，blend 在
             // 线性域进行）。overlay 管线只声明 set0（UI 无 UBO），管线切换后 set0
             // 须按 overlay 自己的 layout 对象重绑——描述符绑定随 layout，不随句柄。
@@ -671,7 +671,7 @@ impl FramePool {
             );
             device.end_command_buffer(frame.command_buffer)?;
 
-            // D2：fence 在提交前一刻才重置。此处到 queue_submit 之间没有任何提前
+            // fence 在提交前一刻才重置。此处到 queue_submit 之间没有任何提前
             // return：reset 失败 → fence 保持 signaled，下帧等待照常通过；
             // submit 失败 → 无任何提交负责 signal 这个 fence，帧循环按 Tier② 退出
             //（host.rs），不会带着残局回来等待——"等无人 signal 的 fence"死锁面关闭。
@@ -681,8 +681,8 @@ impl FramePool {
             // ① COLOR_ATTACHMENT_OUTPUT 起才真正需要 image 已到手——之前的顶点处理等
             //    可以和 acquire 重叠；
             // ② ALL_COMMANDS 起等上传票据（timeline，值 = 已发出最高票据）——"上传
-            //    完成才可使用"的等待发生在 GPU 执行依赖处，CPU 不先阻塞（施工计划
-            //    §2；探针组 D 同款形状）。该内存依赖同时把 transfer 写对池/贴图的
+            //    完成才可使用"的等待发生在 GPU 执行依赖处，CPU 不先阻塞（探针组 D
+            //    同款形状）。该内存依赖同时把 transfer 写对池/贴图的
             //    可见性收口（CONCURRENT 池不设所有权屏障，可见性全靠这里）。
             // 票据值 0（从未有上传提交，VUID-03242 族禁止等待 0 值）只在等待列表里
             // 留 acquire——fallback 批在 init 就提交，实际到达不了这个分支，留作

@@ -1,4 +1,4 @@
-//! BRP 虚拟鼠标（3.13）：Remote 操作者的窗口无关鼠标输入源——移动/按下/抬起/
+//! BRP 虚拟鼠标：Remote 操作者的窗口无关鼠标输入源——移动/按下/抬起/
 //! 滚轮经 BRP handler 注入 [`Messages<WindowEvent>`]，与 bevy_winit 喂引擎的
 //! 同一层。下游全部零改动吃到虚拟事件：官方拆分系统 `send_typed_window_events`
 //! （PreUpdate `WindowEventSystems`，`.before(InputSystems)`）把事件拆成类型化
