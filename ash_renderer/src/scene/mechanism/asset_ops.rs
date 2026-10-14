@@ -1,5 +1,5 @@
 //! 资产写操作封装（4.2.4）："改资产内容"四类驱动的可复用实现——BRP 方法族
-//! （[`crate::remote_assets`]）与将来 egui 面板共用这一层，不养两份逻辑
+//! （[`crate::remote::assets`]）与将来 egui 面板共用这一层，不养两份逻辑
 //! （3.11.2 apply_transform_edit / 4.1.5 object_ops 同款惯例）。
 //!
 //! 定位锚定实体（与换柄同口径）：BRP 参数给 entity，取它身上的

@@ -1,16 +1,25 @@
-//! BRP 远程直控通道（3.12）：宿主 World 经 HTTP JSON-RPC 暴露在 127.0.0.1:15702
-//! （bevy_remote 默认端口），AI/脚本不开 UI 即可"查询 → 改 Transform → 相机环绕
-//! 推拉"。读侧零自研——官方 inspection 方法族（`world.query`/`world.inspect`/
-//! `world.summarize` 等）与内置 CRUD 随 [`RemotePlugin`] 默认注册，`rpc.discover`
-//! 可列全量；本模块只补三个场景语义方法，写侧全部复用既有封装（[`TransformEdit`]
-//! 的 [`apply_transform_edit`]、[`apply_camera_command`]），与 egui 面板同款实现、
-//! 不养两份逻辑。3.13 的虚拟鼠标方法族（[`crate::remote_mouse`]）同样注册在本
-//! 插件——协议面注册单点在 [`AshRemotePlugin`]，实现按域分模块。
+//! BRP 远程直控通道（3.12 起）：宿主 World 经 HTTP JSON-RPC 暴露在
+//! 127.0.0.1:15702（bevy_remote 默认端口），AI/脚本不开 UI 即可"查询 → 改
+//! Transform → 相机环绕推拉"。读侧零自研——官方 inspection 方法族
+//!（`world.query`/`world.inspect`/`world.summarize` 等）与内置 CRUD 随
+//! [`RemotePlugin`] 默认注册，`rpc.discover` 可列全量；写侧全部复用既有封装
+//!（[`TransformEdit`] 的 [`apply_transform_edit`]、[`apply_camera_command`]），
+//! 与 egui 面板同款实现、不养两份逻辑。
+//!
+//! | 子模块 | 职责 |
+//! |---|---|
+//! | [`mouse`] | 虚拟鼠标（3.13）：窗口无关鼠标输入源，注入 `Messages<WindowEvent>` 与 bevy_winit 同层 |
+//! | [`objects`] | 对象生命周期方法族（4.1）：spawn 克隆/换柄写方法 + increment_stats 统计读数 |
+//! | [`assets`] | 资产内容变更（4.2）+ 运行期动态加载（4.3）：mutate/load_mesh/load_image/reload |
 //!
 //! 机制与边界（侦察笔记《bevy_remote：BRP远程协议与自定义方法》）：handler 本身
 //! 就是一个 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍执行——写值下一帧
 //! 生效（BRP 天然以帧为单位量化延迟），参数即请求 `params` 的 JSON、返回值即响应。
 //! 安全边界：默认只绑 loopback、完全无鉴权，仅限本机调试使用，不改绑对外地址。
+
+pub mod assets;
+pub mod mouse;
+pub mod objects;
 
 use std::collections::HashMap;
 
@@ -21,20 +30,23 @@ use bevy::{
 };
 use serde_json::{json, Value};
 
+use self::{
+    assets::{load_image_cmd, load_mesh_cmd, mutate_asset_cmd, reload_asset_cmd},
+    mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
+    objects::{increment_stats, replace_handles, spawn_primitive},
+};
+
 use crate::{
     overlay::{transform_edit::{apply_transform_edit, TransformEdit, TransformEditError}, EntityRow, is_relevant, node_label},
-    remote_assets::{load_image_cmd, load_mesh_cmd, mutate_asset_cmd, reload_asset_cmd},
-    remote_mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
-    remote_objects::{increment_stats, replace_handles, spawn_primitive},
     scene::mechanism::{apply_camera_command, CameraCommandError, CameraOrbitCommand},
 };
 
 use ash_macros::system;
 
 /// BRP 远程通道插件（3.12/3.13/4.1/4.2/4.3）：装协议 + HTTP 传输 + 场景语义
-/// 方法族（本模块三个 + remote_mouse 虚拟鼠标四个 + remote_objects 对象生命周期
-/// 与统计 + remote_assets 资产变更与动态加载）。宿主 main 照插件清单惯例只
-/// `add_plugins`，方法注册收在本插件内。
+/// 方法族（本模块三个 + mouse 虚拟鼠标四个 + objects 对象生命周期与统计 +
+/// assets 资产变更与动态加载）。宿主 main 照插件清单惯例只 `add_plugins`，
+/// 方法注册收在本插件内。
 pub struct AshRemotePlugin;
 
 impl Plugin for AshRemotePlugin {
@@ -61,7 +73,7 @@ impl Plugin for AshRemotePlugin {
 }
 
 /// 参数缺失/不合法的统一错误（JSON-RPC 标准段 -32602）。mouse 族方法
-/// （[`crate::remote_mouse`]）复用同款，协议面错误口径只有一处。
+/// （[`mouse`]）复用同款，协议面错误口径只有一处。
 pub(crate) fn invalid_params(message: impl Into<String>) -> BrpError {
     BrpError {
         code: error_codes::INVALID_PARAMS,

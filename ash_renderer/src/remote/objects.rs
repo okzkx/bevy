@@ -24,7 +24,7 @@ use crate::{
     vulkan::{BindlessTables, ImageCache, MeshPool},
 };
 
-use super::remote::invalid_params;
+use super::invalid_params;
 
 use ash_macros::system;
 
@@ -42,8 +42,8 @@ struct SpawnPrimitiveParams {
 }
 
 /// 把操作层错误映射到协议错误码（ObjectOpError 是 Tier② 语义的载体，这里
-/// 只做翻译，不吞——原 message 原样带出）。`pub(crate)` 给 remote_assets 的
-/// 加载方法族复用（4.3.3）。
+/// 只做翻译，不吞——原 message 原样带出）。`pub(crate)` 给 assets 的加载方法
+/// 族复用（4.3.3）。
 pub(crate) fn object_op_error(err: ObjectOpError) -> BrpError {
     match err {
         ObjectOpError::EntityMissing(e) => BrpError::entity_not_found(e),
