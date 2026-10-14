@@ -20,7 +20,7 @@
 //! - **剔除 NONE**：epaint 明言 UI 顶点绕向不保证一致（官方同款）。
 //!
 //! UI 录制契约 [`UiPaint`]/[`UiDrawCall`] 也住本模块：录制层 [`super::frames`]
-//! 与生产方 `overlay::paint` 同层消费，vulkan 不引上层类型。
+//! 与生产方 `overlay::framework::paint` 同层消费，vulkan 不引上层类型。
 
 use ash::{vk, Device};
 use bevy::log::info;
@@ -53,7 +53,7 @@ const _: () = {
 /// overlay push constant 总长（pipeline layout 声明 + 排布 + WGSL 三方同源）。
 pub const UI_PUSH_CONSTANTS_SIZE: u32 = 16;
 
-/// UI 顶点步长 20B（epaint 顶点镜像 `overlay::paint::UiVertex` 的 pos8+uv8+color4；
+/// UI 顶点步长 20B（epaint 顶点镜像 `overlay::framework::paint::UiVertex` 的 pos8+uv8+color4；
 /// 写入侧的 `size_of` 断言与本常量互证）。
 pub const UI_VERTEX_STRIDE: u32 = 20;
 
@@ -85,7 +85,7 @@ pub struct UiDrawCall {
     pub scissor: [u32; 4],
 }
 
-/// 一次 UI 绘制的全部产物（`overlay::paint` 组装，[`super::frames`] 消费）：
+/// 一次 UI 绘制的全部产物（`overlay::framework::paint` 组装，[`super::frames`] 消费）：
 /// 图集槽位 + 屏幕 points 尺寸 + 逐 clip draw 列表；顶点/索引已由生产方写入 UI 环
 /// 本帧槽 buffer，draw 用环内引脚定位。
 pub struct UiPaint {

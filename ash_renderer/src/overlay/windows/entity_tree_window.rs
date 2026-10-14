@@ -2,7 +2,7 @@
 //! 关系递归展示，节点带 Name（无名按组件角色命名）+ 组件标签；点选节点落
 //! [`SelectedEntity`] 资源，面板下部是属性区——组件全清单、渲染语义
 //! 行（Mesh/材质/贴图槽）与 Transform 编辑（DragValue，写经
-//! [`super::transform_edit`] 封装）。
+//! [`crate::overlay::transform_edit`] 封装）。
 //!
 //! 取数分两层：树本身走 SystemParam 直查 World（参数束样式照 [`super::debug_window`]
 //! 的 `RendererStats`），不另造快照通道；属性区走 [`SelectedDetails`] 纯数据
@@ -30,12 +30,12 @@ use bevy::{
 
 use ash_macros::system;
 
-use super::transform_edit::TransformEdit;
+use crate::overlay::transform_edit::TransformEdit;
 
 /// 树内点选的实体。选中实体 despawn 后由详情区检空清账，
 /// 不残留死引用；Transform 编辑以它为目标。
 #[derive(Resource, Default)]
-pub(super) struct SelectedEntity(pub(super) Option<Entity>);
+pub(in crate::overlay) struct SelectedEntity(pub(in crate::overlay) Option<Entity>);
 
 /// 层级树一行的查询数据（11 项组合体抽型，免 clippy type_complexity）：
 /// 层级关系（Children/ChildOf）+ 角色标记（相机/光/资产根）+ 呈现要素
@@ -59,29 +59,29 @@ pub(crate) type EntityRow = (
 /// 逐项 Option/Has——非场景实体（窗口/相机/灯光/资产根）也进树，缺什么降级什么；
 /// 单查询即可完成根定位（`Has<ChildOf>`）与按实体号取行（`.get`），无需第二查询。
 #[derive(SystemParam)]
-pub(super) struct EntityTreeData<'w, 's> {
+pub(in crate::overlay) struct EntityTreeData<'w, 's> {
     entities: Query<'w, 's, EntityRow>,
 }
 
 /// 层级树窗口的一次构建输入：框架 pass 每帧组好（借用样式照 [`super::debug_window`]）。
-pub(super) struct EntityTreeWindow<'a> {
-    pub(super) ctx: &'a egui::Context,
+pub(in crate::overlay) struct EntityTreeWindow<'a> {
+    pub(in crate::overlay) ctx: &'a egui::Context,
     /// 显隐开关：总控 checkbox 与窗口 [×] 写同一字段（egui `Window::open` 借用）。
-    pub(super) open: &'a mut bool,
+    pub(in crate::overlay) open: &'a mut bool,
     /// 点选状态（资源借用，点选就地落账）。
-    pub(super) selected: &'a mut SelectedEntity,
+    pub(in crate::overlay) selected: &'a mut SelectedEntity,
     /// 本帧 World 查询束。
-    pub(super) data: &'a EntityTreeData<'a, 'a>,
+    pub(in crate::overlay) data: &'a EntityTreeData<'a, 'a>,
     /// 属性区快照（采集系统产）。
-    pub(super) details: &'a SelectedDetails,
+    pub(in crate::overlay) details: &'a SelectedDetails,
     /// 旋转拖拽缓存（拖拽期内冻结欧拉表示分支）。
-    pub(super) drag: &'a mut TransformDragCache,
+    pub(in crate::overlay) drag: &'a mut TransformDragCache,
 }
 
 impl EntityTreeWindow<'_> {
     /// 面板本体：递归层级树（滚动区）+ 属性区。返回一次 Transform 编辑
     /// （有拖改时），由 pass 落进编辑队列——本函数不碰写路径。
-    pub(super) fn show(self) -> Option<(Entity, TransformEdit)> {
+    pub(in crate::overlay) fn show(self) -> Option<(Entity, TransformEdit)> {
         let Self { ctx, open, selected, data, details, mut drag } = self;
         let mut edit = None;
         egui::Window::new("实体层级树")
@@ -233,7 +233,7 @@ fn header_text(label: &str, is_selected: bool) -> egui::RichText {
 /// 只渲染快照（官方"后端收集/前端展示"分工：bevy_inspector 数据层同形）。
 /// 选中实体 despawn 后 `exists = false`，属性区借它清账。
 #[derive(Resource, Default)]
-pub(super) struct SelectedDetails {
+pub(in crate::overlay) struct SelectedDetails {
     /// 当前选中（None = 无选中，快照为空壳）。
     entity: Option<Entity>,
     /// false = 已选中但实体不在 World（despawn 过）。
@@ -252,11 +252,11 @@ pub(super) struct SelectedDetails {
 
 /// Transform 三组量的纯数值形态：编辑控件直接喂快照副本。
 #[derive(Clone, Copy)]
-pub(super) struct TransformVals {
-    pub(super) translation: [f32; 3],
+pub(in crate::overlay) struct TransformVals {
+    pub(in crate::overlay) translation: [f32; 3],
     /// YXZ 欧拉角（度），与展示同口径。
-    pub(super) euler_yxz_deg: [f32; 3],
-    pub(super) scale: [f32; 3],
+    pub(in crate::overlay) euler_yxz_deg: [f32; 3],
+    pub(in crate::overlay) scale: [f32; 3],
 }
 
 /// 旋转拖拽缓存：按住的整段拖拽期内欧拉三元组冻结在按下帧的表示分支，
@@ -264,10 +264,10 @@ pub(super) struct TransformVals {
 /// （±90°/±180°）时 to_euler 会翻转另两位（±180°），与拖拽框的累加值
 /// 混分支合成出错误旋转——物体姿态逐帧跳变（闪烁）。松手即作废。
 #[derive(Resource, Default)]
-pub(super) struct TransformDragCache(Option<(Entity, [f32; 3])>);
+pub(in crate::overlay) struct TransformDragCache(Option<(Entity, [f32; 3])>);
 
 /// 组件清单一行：短名 + 已注册反射组件的字段只读行（None = 名字-only）。
-pub(super) struct ComponentRow {
+pub(in crate::overlay) struct ComponentRow {
     name: String,
     fields: Option<Vec<(String, String)>>,
 }
@@ -302,7 +302,7 @@ const SKIP_REFLECT: &[TypeId] = &[
 /// Commands 落账的 deferred 命令在本链上从不生效（快照恒为默认值），
 /// 直接写零不确定性；链在 egui pass 之前。
 #[system]
-pub(super) fn collect_selected_details(world: &mut World) {
+pub(in crate::overlay) fn collect_selected_details(world: &mut World) {
     let Some(entity) = world.resource::<SelectedEntity>().0 else {
         world.insert_resource(SelectedDetails::default());
         return;
@@ -409,7 +409,7 @@ fn reflect_field_rows(v: &dyn PartialReflect) -> Vec<(String, String)> {
 
 /// 属性区：快照渲染（头部/渲染语义/全局平移/组件清单）+ Transform
 /// 编辑（DragValue 读快照副本）。返回一次编辑（有拖改时），写路径归
-/// [`super::transform_edit`]——本函数零 World 访问，纯渲染。
+/// [`crate::overlay::transform_edit`]——本函数零 World 访问，纯渲染。
 fn show_details(
     ui: &mut egui::Ui,
     details: &SelectedDetails,

@@ -1,7 +1,8 @@
 //! Transform 编辑操作封装：egui 拖值与 BRP `set_transform`
 //! 共用的唯一实现，不养两份逻辑。
 //!
-//! 显示读 [`super::entity_tree_window::SelectedDetails`] 的同帧快照；写值走
+//! 显示读
+//! [`crate::overlay::windows::entity_tree_window::SelectedDetails`] 的同帧快照；写值走
 //! [`TransformEditQueue`]——egui pass 里组好编辑，[`apply_transform_edits`]
 //! 在 Update 内紧随 pass 清账（链式排程），PostUpdate 传播 → 账本对账
 //!（update_ledger 增量维护）→ Last 绘制，画面当帧跟随。写值直接改

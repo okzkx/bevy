@@ -4,7 +4,7 @@
 //! （PreUpdate `WindowEventSystems`，`.before(InputSystems)`）把事件拆成类型化
 //! 消息，其中 `CursorMoved` 分支同步更新 `Window` 内部光标位（bevy_window/src/
 //! system.rs:45-62），于是 `Window::cursor_position()`、`ButtonInput<MouseButton>`、
-//! [`AccumulatedMouseScroll`]、egui 输入桥（`overlay::input`）与相机轨道控制
+//! [`AccumulatedMouseScroll`]、egui 输入桥（`overlay::framework::input`）与相机轨道控制
 //! （`scene::mechanism::camera_control`）各自照常工作。
 //!
 //! 刻意不走 [`Window::set_cursor_position`]：它在写入光标位的同时还写

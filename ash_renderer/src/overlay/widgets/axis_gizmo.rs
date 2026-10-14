@@ -5,10 +5,10 @@
 use bevy::prelude::*;
 
 /// 指示器一次构建输入：框架 pass 每帧组好。
-pub(super) struct AxisGizmo<'a> {
-    pub(super) ctx: &'a egui::Context,
+pub(in crate::overlay) struct AxisGizmo<'a> {
+    pub(in crate::overlay) ctx: &'a egui::Context,
     /// 主相机世界旋转；`None`（相机缺席/主窗未建）时整帧不画。
-    pub(super) cam_rotation: Option<Quat>,
+    pub(in crate::overlay) cam_rotation: Option<Quat>,
 }
 
 /// 盘半径与到窗边的余量（points 域，视觉参数一次定死）。
@@ -16,7 +16,7 @@ const RADIUS: f32 = 34.0;
 const MARGIN: f32 = 24.0;
 
 impl AxisGizmo<'_> {
-    pub(super) fn show(self) {
+    pub(in crate::overlay) fn show(self) {
         let Self { ctx, cam_rotation } = self;
         let Some(cam_rot) = cam_rotation else {
             return;

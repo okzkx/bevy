@@ -2,8 +2,8 @@
 //! [`EguiFrame`] 交绘制半边。
 //!
 //! overlay 按内容分两半：本文件是框架半边——"怎么跑"（Context/字体、pass、
-//! 纹理增量折叠、帧产出）；窗口内容"画什么"是业务，住 [`super::debug_window`]、
-//! [`super::debug_hub_window`] 与 [`super::entity_tree_window`]（本文件的 pass
+//! 纹理增量折叠、帧产出）；窗口内容"画什么"是业务，住
+//! [`crate::overlay::windows`]（本文件的 pass
 //! 只负责按总控开关在 begin/end 之间调它们）。
 //!
 //! pass 四件（egui 0.36）：`begin_pass(RawInput)` →
@@ -31,16 +31,16 @@ use bevy::{
     window::{CursorLeft, CursorMoved, PrimaryWindow, Window, WindowFocused},
 };
 
-use super::axis_gizmo::AxisGizmo;
-use super::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
-use super::debug_window::{DebugWindow, FpsMeter, RenderMode, RendererStats};
-use super::entity_tree_window::{
+use super::input::{egui_raw_input, EguiInput};
+use super::paint::{AtlasGpu, AtlasMirror};
+use crate::overlay::transform_edit::{TransformEditQueue, apply_transform_edits};
+use crate::overlay::widgets::axis_gizmo::AxisGizmo;
+use crate::overlay::windows::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
+use crate::overlay::windows::debug_window::{DebugWindow, FpsMeter, RenderMode, RendererStats};
+use crate::overlay::windows::entity_tree_window::{
     EntityTreeData, EntityTreeWindow, SelectedDetails, SelectedEntity, TransformDragCache,
     collect_selected_details,
 };
-use super::input::{egui_raw_input, EguiInput};
-use super::paint::{AtlasGpu, AtlasMirror};
-use super::transform_edit::{TransformEditQueue, apply_transform_edits};
 
 use ash_macros::system;
 
