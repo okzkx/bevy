@@ -14,12 +14,14 @@ pub(super) struct DebugWindowsOpen {
     pub(super) stats: bool,
     /// 实体层级树窗口（[`super::entity_tree_window`]）
     pub(super) entity_tree: bool,
+    /// 右上角坐标轴指示器（[`super::axis_gizmo`]，纯显示不可交互）
+    pub(super) axis_gizmo: bool,
 }
 
 impl Default for DebugWindowsOpen {
     fn default() -> Self {
         // 默认全开：新窗直接可见可验；关了从总控再开
-        Self { stats: true, entity_tree: true }
+        Self { stats: true, entity_tree: true, axis_gizmo: true }
     }
 }
 
@@ -40,6 +42,7 @@ impl DebugHubWindow<'_> {
             .show(ctx, |ui| {
                 ui.checkbox(&mut open.stats, "帧统计（ash 调试）");
                 ui.checkbox(&mut open.entity_tree, "实体层级树");
+                ui.checkbox(&mut open.axis_gizmo, "坐标轴指示器");
             });
     }
 }

@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use bevy::{
+    camera::Camera,
     ecs::system::SystemParam,
     input::{
         keyboard::{KeyCode, KeyboardInput},
@@ -30,6 +31,7 @@ use bevy::{
     window::{CursorLeft, CursorMoved, PrimaryWindow, Window, WindowFocused},
 };
 
+use super::axis_gizmo::AxisGizmo;
 use super::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
 use super::debug_window::{DebugWindow, FpsMeter, RenderMode, RendererStats};
 use super::entity_tree_window::{
@@ -160,6 +162,8 @@ struct DebugUiParams<'w, 's> {
     details: Res<'w, SelectedDetails>,
     /// 旋转拖拽缓存（拖拽期内冻结欧拉表示分支）
     drag_cache: ResMut<'w, TransformDragCache>,
+    /// 主相机姿态（坐标轴指示器读旋转；本工程单相机，取任一）
+    cameras: Query<'w, 's, &'static GlobalTransform, With<Camera>>,
     /// Transform 编辑排队（pass 产，清账系统消费）
     edit_queue: ResMut<'w, TransformEditQueue>,
 }
@@ -252,6 +256,13 @@ fn run_egui_pass(
         if let Some(edit) = edit {
             ui.edit_queue.0.push(edit);
         }
+    }
+    if ui.windows_open.axis_gizmo {
+        AxisGizmo {
+            ctx: &state.ctx,
+            cam_rotation: ui.cameras.iter().next().map(|g| g.rotation()),
+        }
+        .show();
     }
     if let Some(label_selection) = state
         .ctx

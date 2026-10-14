@@ -12,6 +12,7 @@
 //! | [`debug_window`] | 业务半边：帧统计窗口（fps/着色模式单选/渲染器统计）+ [`RenderMode`] 资源 |
 //! | [`debug_hub_window`] | 业务半边：调试窗口总控——各窗口显隐开关 [`DebugWindowsOpen`] |
 //! | [`entity_tree_window`] | 业务半边：实体层级树 + 属性快照采集 + 属性区（[`SelectedEntity`] 点选） |
+//! | [`axis_gizmo`] | 业务半边：右上角坐标轴指示器（世界三轴视空间投影，纯显示） |
 //! | [`transform_edit`] | Transform 编辑封装：编辑队列 + 唯一实现，BRP 写方法复用 |
 //! | [`input`] | 输入桥：bevy 输入事件 → egui `RawInput`（含 KeyCode→egui Key 映射） |
 //! | [`paint`] | 绘制半边：图集 CPU 镜像/整传新槽/graveyard + 顶点环 + `paint_overlay` 产 `UiPaint` |
@@ -20,6 +21,7 @@
 //! `.agents/docs/3-静态取数链路/3.10-egui实体层级树/`、
 //! `.agents/docs/3-静态取数链路/3.11-egui实体编辑/`。
 
+mod axis_gizmo;
 mod debug_hub_window;
 mod debug_window;
 mod entity_tree_window;
