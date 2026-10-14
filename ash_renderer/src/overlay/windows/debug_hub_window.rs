@@ -1,9 +1,9 @@
 //! 调试窗口总控（业务面板）：各调试 UI 窗口的显隐开关住 [`DebugWindowsOpen`]，
 //! 本窗口逐项 checkbox——"总有一个能再开别的"的总闸，自身不可关。
 //!
-//! 加新调试窗口 = 独立 rs 文件 struct（照 [`super::entity_tree_window`] 样式）
-//! + 本资源加一个开关字段 + 这里加一行 checkbox + [`crate::overlay::framework::ui`]
-//! pass 里加显示门。
+//! 加新调试窗口 = 独立 rs 文件 struct（照 [`super::entity_tree_window`] 样式），
+//! 加本资源一个开关字段 + 这里一行 checkbox +
+//! [`crate::overlay::framework::ui`] pass 一个显示门。
 
 use bevy::prelude::*;
 

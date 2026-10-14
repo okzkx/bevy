@@ -82,7 +82,7 @@ impl EntityTreeWindow<'_> {
     /// 面板本体：递归层级树（滚动区）+ 属性区。返回一次 Transform 编辑
     /// （有拖改时），由 pass 落进编辑队列——本函数不碰写路径。
     pub(in crate::overlay) fn show(self) -> Option<(Entity, TransformEdit)> {
-        let Self { ctx, open, selected, data, details, mut drag } = self;
+        let Self { ctx, open, selected, data, details, drag } = self;
         let mut edit = None;
         egui::Window::new("实体层级树")
             .open(open)
@@ -113,7 +113,7 @@ impl EntityTreeWindow<'_> {
                         draw_entity(ui, root, data, &mut selected.0, 0);
                     }
                 });
-                edit = show_details(ui, details, selected, &mut drag);
+                edit = show_details(ui, details, selected, drag);
             });
         edit
     }
