@@ -15,9 +15,9 @@ egui 官方生态把"显示一个 egui 窗口"拆成三件：**输入桥**（egu
 
 | 官方件 | 本项目对应 |
 |---|---|
-| egui-winit | `overlay/input.rs`（输入桥） |
-| egui 本体驱动 | `overlay/ui.rs`（状态/字体/pass/调试窗口） |
-| egui-wgpu | `overlay/paint.rs`（图集/顶点/UiPaint）+ `vulkan/overlay_pipeline.rs`（管线）+ `vulkan/frames.rs` UI 段（录制） |
+| egui-winit | `overlay/framework/input.rs`（输入桥） |
+| egui 本体驱动 | `overlay/framework/ui.rs`（状态/字体/pass/调试窗口） |
+| egui-wgpu | `overlay/framework/paint.rs`（图集/顶点/UiPaint）+ `vulkan/overlay_pipeline.rs`（管线）+ `vulkan/frames.rs` UI 段（录制） |
 
 跨帧数据流一行：**Update 里 `run_egui_pass`（纯 CPU、零 Vulkan）产 `EguiFrame`（未镶嵌 shapes + ppp + 屏幕尺寸）→ Last 的 `draw_frame` 里 `paint_overlay` 消费它产 `UiPaint` → `record_frame` 的 UI 段接画**。CPU 半边与 GPU 半边只在 `EguiFrame` 这个资源上交接。
 
@@ -91,7 +91,7 @@ frenderer 与本项目做的是同一道题：**把一个立即模式 GUI 亲手
 
 | 维度 | frenderer × Dear ImGui | ash_renderer × egui |
 |---|---|---|
-| 输入桥 | 现成：vendored `imgui-winit-support` | 自己写：`overlay/input.rs` |
+| 输入桥 | 现成：vendored `imgui-winit-support` | 自己写：`overlay/framework/input.rs` |
 | 输入源 | winit 事件直通，全局序天然保全 | bevy 消息缓冲，跨类无序，按类近似排序 |
 | 每帧 pass | `new_frame()` → 闭包 → `render()` | `begin_pass` → 闭包 → `end_pass` |
 | 镶嵌落点 | core 内部做完，`render()` 直接给 DrawData（已镶嵌） | `end_pass` 给 shapes，`tessellate` 后端自己做 |
