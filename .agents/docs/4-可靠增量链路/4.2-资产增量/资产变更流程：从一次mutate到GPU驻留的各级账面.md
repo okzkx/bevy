@@ -35,7 +35,7 @@ DrawList（frame.rs）：每行按 row.mesh.id() **现查** pool/image_cache
 
 | 文件 | 层 | 职责 |
 |---|---|---|
-| `remote_assets.rs` | 协议薄壳 | BRP `ash_renderer/mutate_asset` 收 JSON → 调 `mutate_asset`；错误码翻译 |
+| `remote/assets.rs` | 协议薄壳 | BRP `ash_renderer/mutate_asset` 收 JSON → 调 `mutate_asset`；错误码翻译 |
 | `scene/mechanism/asset_ops.rs` | 写入封装 | 四驱动（材质参数/贴图槽/mesh 顶点/image 像素）落成 `Assets::get_mut`——**get_mut 即触发 Modified，写入方零配合** |
 | `scene/mechanism/asset_events.rs` | 读侧发现 | 收 `AssetEvent` → 失效凭据 + 关联行重挂脏标 + 事件计量；`Removed/Unused` 只计数不动作 |
 | `ledger.rs`（扩展） | 实体账本 | 加 `mark_dirty` 第二发现入口与 `asset_events` 计量字段，行结构不动 |
@@ -44,7 +44,7 @@ DrawList（frame.rs）：每行按 row.mesh.id() **现查** pool/image_cache
 | `images.rs`（扩展） | image 驻留 | `ImageCache::take` 旧图移停尸房 + `drain_graveyard` 等帧侧等待后销毁 |
 | `descriptors.rs`（扩展） | 描述符表 | `BindlessTables::rebind` 原槽重写——UAB 在飞可写，纹理槽占用不增长 |
 
-一层一句话：**remote_assets 翻译协议、asset_ops 写容器、asset_events 发现、upload 编排、pool/images/descriptors 执行 GPU 侧动作**。依赖单向：协议层 → 场景层 → vulkan 层。
+一层一句话：**remote::assets 翻译协议、asset_ops 写容器、asset_events 发现、upload 编排、pool/images/descriptors 执行 GPU 侧动作**。依赖单向：协议层 → 场景层 → vulkan 层。
 
 ## 2. 逐时刻走一遍（以改 mesh 内容为例）
 
