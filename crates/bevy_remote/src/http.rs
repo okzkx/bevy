@@ -59,6 +59,11 @@ pub const DEFAULT_RENDER_PORT: u16 = 15703;
 /// The default host address that Bevy will use for its server.
 pub const DEFAULT_ADDR: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
+/// Maximum accepted request body size (4.5 F20：此前 HTTP 层对请求体无大小上限——
+/// 无鉴权端点上无界读取可被单请求耗尽内存。收集 body 前先核对 Content-Length，
+/// 超限拒绝；无 Content-Length 头的请求维持上游原行为放行，由分块读取路径兜底）。
+const MAX_REQUEST_BODY_BYTES: u64 = 16 * 1024 * 1024;
+
 /// A struct that holds a collection of HTTP headers.
 ///
 /// This struct is used to store a set of HTTP headers as key-value pairs, where the keys are
@@ -310,6 +315,21 @@ async fn process_request_batch(
     request_sender: &Sender<BrpMessage>,
     headers: &Headers,
 ) -> AnyhowResult<Response<BrpHttpBody>> {
+    // 4.5 F20：请求体大小上限——超限直接 413，不进无界 collect
+    if request
+        .headers()
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|len| len > MAX_REQUEST_BODY_BYTES)
+    {
+        return Response::builder()
+            .status(hyper::StatusCode::PAYLOAD_TOO_LARGE)
+            .body(BrpHttpBody::Complete(Full::new(Bytes::from(
+                "{\"error\":{\"code\":-32600,\"message\":\"request body too large\"}}",
+            ))))
+            .map_err(anyhow::Error::from);
+    }
     let batch_bytes = request.into_body().collect().await?.to_bytes();
     let batch: Result<BrpBatch, _> = serde_json::from_slice(&batch_bytes);
 

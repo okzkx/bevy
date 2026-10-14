@@ -223,8 +223,8 @@ impl OverlayPipeline {
                 .line_width(1.0);
             let multisample = vk::PipelineMultisampleStateCreateInfo::default()
                 .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-            // depth-stencil 全关：管线渲染信息不含深度附件，UI 不读不写深度
-            // depth-stencil 全关（UI 不读不写深度）；深度格式见下方渲染信息
+            // depth-stencil 全关（UI 不读不写深度）；深度格式仍须随渲染实例声明
+            //（VUID-08914，4.5 订正：管线声明面 = 实例附件全集的形状声明）
             let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(false)
                 .depth_write_enable(false);

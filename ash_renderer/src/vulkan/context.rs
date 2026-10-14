@@ -10,7 +10,9 @@
 //! - 句柄取自 `RawHandleWrapper::get_window_handle()`（bevy 的安全方法），Win32 路径
 //!   手写 `vkCreateWin32SurfaceKHR`；hinstance 可能为 None，`GetModuleHandleW(None)` 兜底；
 //! - ash 0.38.0 对 Instance/Device/loader 均无 Drop 实现（extensions_generated.rs 零
-//!   `impl Drop`）——销毁全部手动、按 Messenger ← Surface ← Device ← Instance 反序；
+//!   `impl Drop`）——销毁全部手动、按 Device ← Surface ← Messenger ← Instance 反序
+//!   （4.5 订正：Drop 实序 Surface 先于 Messenger，两者无依赖均合法，与 teardown
+//!   的手动反序不逐字一致但同满足依赖约束）；
 //! - `Entry` 内持 libloading 句柄，提前丢它会卸载 vulkan-1.dll，必须与 Instance 同寿命；
 //! - bevy 退出时 runner `exiting` 回调会清场（清场序对 Resource 是任意的），正常退出
 //!   走 `driver::host` 的 `teardown_vulkan`（OnAppExitSystems）反序拆除，本 Drop 只是兜底。

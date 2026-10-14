@@ -24,7 +24,7 @@ use crate::{
     vulkan::{BindlessTables, ImageCache, MeshPool},
 };
 
-use super::remote::invalid_params;
+use super::invalid_params;
 
 use ash_macros::system;
 
@@ -42,8 +42,8 @@ struct SpawnPrimitiveParams {
 }
 
 /// 把操作层错误映射到协议错误码（ObjectOpError 是 Tier② 语义的载体，这里
-/// 只做翻译，不吞——原 message 原样带出）。`pub(crate)` 给 remote_assets 的
-/// 加载方法族复用（4.3.3）。
+/// 只做翻译，不吞——原 message 原样带出）。`pub(crate)` 给 assets 的加载方法
+/// 族复用（4.3.3）。
 pub(crate) fn object_op_error(err: ObjectOpError) -> BrpError {
     match err {
         ObjectOpError::EntityMissing(e) => BrpError::entity_not_found(e),
@@ -61,6 +61,9 @@ pub(crate) fn object_op_error(err: ObjectOpError) -> BrpError {
             message: format!("实体 {e:?} 的材质资产不在容器中，槽写拒绝"),
             data: None,
         },
+        ObjectOpError::InvalidAssetPath(what) => invalid_params(format!(
+            "资产路径解析失败（坏标签/坏 source 语法）：{what}"
+        )),
     }
 }
 
@@ -162,6 +165,7 @@ pub(crate) fn increment_stats(
             "frame_dirty_rows": s.asset_dirty_rows,
             "total": s.asset_events_total,
             "invalidations_total": s.asset_invalidations_total,
+            "invalidations_current": s.asset_invalidations_current,
         },
         "readiness": {
             "pending_meshes": r.pending_meshes,

@@ -72,7 +72,7 @@ python tools/brp.py raw --method world.list_components
 
 ### 2.3 宿主侧扩展方法（改协议面时）
 
-方法注册收在 `ash_renderer/src/remote.rs` 的 `AshRemotePlugin::build`（`with_method_main` 链；3.13 起实现按域分模块——场景语义方法住 `remote.rs`，虚拟鼠标住 `remote_mouse.rs`，注册单点不变）；handler 就是一个 Bevy system（入参 `In<Option<Value>>`、返回 `BrpResult`），写侧惯例=独占 `&mut World` 直调既有封装函数（`apply_transform_edit`/`apply_camera_command` 形状），不排队不走 UI、不养两份逻辑。新方法注册后 `discover` 自动列出，无需客户端改代码。
+方法注册收在 `ash_renderer/src/remote/mod.rs` 的 `AshRemotePlugin::build`（`with_method_main` 链；实现按域分模块——场景语义方法住 mod 根，方法族子模块住 `remote/` 旁（`mouse.rs` 虚拟鼠标、`objects.rs` 对象生命周期、`assets.rs` 资产变更与动态加载），注册单点不变）；handler 就是一个 Bevy system（入参 `In<Option<Value>>`、返回 `BrpResult`），写侧惯例=独占 `&mut World` 直调既有封装函数（`apply_transform_edit`/`apply_camera_command` 形状），不排队不走 UI、不养两份逻辑。新方法注册后 `discover` 自动列出，无需客户端改代码。
 
 ## 3. 与 MCP 的区别
 

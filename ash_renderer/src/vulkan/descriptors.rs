@@ -21,11 +21,12 @@
 //! stage flags 取 `COMPUTE|VERTEX|FRAGMENT` 超集：3.3 探针走 compute、3.4 走
 //! graphics，超集声明只影响驱动的描述符优化面，不改变合法性。
 //!
-//! **覆盖安全**（3.3.4 钉号"不覆盖 pending draw 仍可能读取的槽"）：[`Self::publish`]
-//! 只写 free list 给出的**从未在飞**的新槽，M2 不改写已发布槽位，结构上不存在
-//! 覆盖竞态；真正的覆盖风险在槽回收——[`Self::retire_texture`]/[`Self::retire_sampler`]
-//! 是 M2 不调用的释放入口，前置条件（安全契约）写在各自 doc 里，运行时淘汰归
-//! 步骤 4（施工计划 §3"M2 可不做运行时淘汰，但必须明确释放入口的安全条件"）。
+//! **覆盖安全**（4.5 F1 订正）：[`Self::publish`] 只写排空点归还过的**新槽**
+//! （"图形最后使用"已过），改写已发布槽位的 `rebind` 已退役——UAB 只授权
+//! "提交前后可更新可观察"，不授权覆盖仍被未完成命令消费的描述符；内容重传
+//! 改走"新槽发布 + 旧槽延迟回收"（编排层 upload.rs）。回收侧
+//! [`Self::retire_texture`]/[`Self::retire_sampler`] 的安全契约写在各自 doc 里，
+//! 排空点统一收口。
 
 use std::collections::HashMap;
 
@@ -192,6 +193,10 @@ pub struct BindlessTables {
     samplers: SlotAllocator,
     /// 功能参数键 → 采样器槽（去重账本）。
     sampler_slots: HashMap<super::images::SamplerKey, u32>,
+    /// 采样器本体（4.5 F2：槽号 → 本表创建并持有的 VkSampler）。槽内描述符
+    /// 引用的句柄与本槽同寿，不随任何一张贴图的卸载悬空——同键共享方全部
+    /// 退场后槽进待回收账，本体在排空点销毁。
+    sampler_bodies: HashMap<u32, vk::Sampler>,
     /// 卸载请求的待回收槽账（4.4.1）：retire_* 只把槽记进此账、**不进**
     /// free list——在飞 draw 仍可能正采样这些槽的描述符，槽复用必须等
     /// "图形最后使用"（排空点=[`Self::drain_retired_slots`]，由 flush 停尸房
@@ -200,7 +205,9 @@ pub struct BindlessTables {
     /// 槽交叠（前置条件③由排空点+此移除共同保证）。
     retired_textures: Vec<u32>,
     retired_samplers: Vec<u32>,
-    /// fallback 贴图本体（白 1×1；槽 0 的 view/sampler 来源，随表同寿）。
+    /// 待销毁的采样器本体（已从 sampler_bodies 摘出，等排空点；4.5 F2）。
+    retired_sampler_bodies: Vec<vk::Sampler>,
+    /// fallback 贴图本体（白 1×1；槽 0 的 view 来源，随表同寿）。
     fallback: GpuImage,
     /// fallback 上传批次票据（M2 只留账；销毁前的等待由退出排空统一覆盖）。
     fallback_ticket: Ticket,
@@ -383,7 +390,8 @@ impl BindlessTables {
         let mut frame_sets = sets;
         let resident_set = frame_sets.remove(0);
         // ---- 5) 每帧 UBO(帧槽一一对应)+ set1 描述符写入(初值 = identity view_proj
-        // + 灯光归零 + Lambert 模式;3.5.1 起运行期每帧重写)----
+        // + 灯光占位(方向留非零防 NaN,直射/环境/灯色全零) + Lambert 模式;
+        // 3.5.1 起运行期每帧重写)----
         let mut frame_ubos = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let mut ubo = GpuBuffer::create(device, contract, FRAME_UBO_SIZE, BufferRole::FrameUniform)?;
@@ -465,15 +473,17 @@ impl BindlessTables {
             textures: SlotAllocator::new(capacity),
             samplers: SlotAllocator::new(capacity),
             sampler_slots: HashMap::new(),
+            sampler_bodies: HashMap::new(),
             retired_textures: Vec::new(),
             retired_samplers: Vec::new(),
+            retired_sampler_bodies: Vec::new(),
             fallback,
             fallback_ticket,
         };
-        // fallback 占双表 0 号槽(采样器去重账本同步登记 linear 键)
+        // fallback 占双表 0 号槽(采样器去重账本同步登记 linear 键;4.5 F2 起本体
+        // 由表按键创建持有,不再取 GpuImage 的采样器——GpuImage 已不建采样器)
         let slots = tables.publish(
             tables.fallback.view(),
-            tables.fallback.sampler(),
             &sampler_key(&ImageSamplerDescriptor::linear()),
         )?;
         debug_assert_eq!(slots.texture, 0, "fallback 必占纹理槽 0");
@@ -547,19 +557,19 @@ impl BindlessTables {
 
     /// 发布一张贴图:纹理槽 free list 分配 + 采样器按功能键去重 → 两条描述符
     /// 写入(set0 b0/b1 各一条,dst_array_element 定位槽)。**只写新槽**——
-    /// free list 给出的槽在 M2 从未进过任何在飞提交,覆盖竞态在结构上不存在。
+    /// free list 给出的槽必先经排空点归还（"图形最后使用"已过），覆盖竞态
+    /// 在结构上不存在；采样器本体由本表按键创建持有（4.5 F2：槽内句柄与本槽
+    /// 同寿，不随任何一张贴图的卸载悬空）。
     ///
-    /// 句柄寿命契约(与 [`GpuImage::create` 接受裸参数同款纪律]):`view`/
-    /// `sampler` 须为合法句柄,且其本体寿命覆盖本表——槽位持有的是句柄借用,
-    /// 本体先行销毁而槽位仍被采样 = 悬空描述符,M2 靠"驻留资产与表同寿"成立,
-    /// 运行时淘汰的完整账本归步骤 4(见 retire 前置条件)。
+    /// 句柄寿命契约(与 [`GpuImage::create` 接受裸参数同款纪律]):`view`
+    /// 须为合法句柄,且其本体寿命覆盖本表——槽位持有的是句柄借用,
+    /// 本体先行销毁而槽位仍被采样 = 悬空描述符,由驻留条目/停尸房双账兜住。
     ///
     /// # Errors
-    /// 纹理/采样器槽容量耗尽(不静默截断,冒泡由调用方分流)。
+    /// 纹理/采样器槽容量耗尽、采样器创建失败（半建槽回滚，账目不漂移）。
     pub fn publish(
         &mut self,
         view: vk::ImageView,
-        sampler: vk::Sampler,
         key: &super::images::SamplerKey,
     ) -> Result<SlotBinding> {
         let texture = self.textures.alloc()?;
@@ -567,14 +577,26 @@ impl BindlessTables {
             Some(&slot) => slot,
             None => {
                 let slot = self.samplers.alloc()?;
-                self.sampler_slots.insert(*key, slot);
+                match key.create_sampler(&self.device) {
+                    Ok(sampler) => {
+                        self.sampler_bodies.insert(slot, sampler);
+                        self.sampler_slots.insert(*key, slot);
+                    }
+                    // 半建回滚:纹理/采样器两槽归还,本体不落账
+                    Err(e) => {
+                        self.samplers.free.push(slot);
+                        self.textures.free.push(texture);
+                        return Err(e);
+                    }
+                }
                 slot
             }
         };
         let image_info = vk::DescriptorImageInfo::default()
             .image_view(view)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-        let sampler_info = vk::DescriptorImageInfo::default().sampler(sampler);
+        let sampler_info = vk::DescriptorImageInfo::default()
+            .sampler(self.sampler_bodies[&sampler_slot]);
         // # Safety:set 常驻、binding 0/1 带 UAB 旗标,写入经 update_descriptor_sets 合法
         unsafe {
             self.device.update_descriptor_sets(
@@ -601,68 +623,12 @@ impl BindlessTables {
         })
     }
 
-    /// 原槽重写（4.2.3 内容重传）：把既有纹理槽的描述符指到新 `view`，纹理槽
-    /// 占用不因内容变化增长。UAB 旗标（3.3.2 契约类开关）保证"set 已提交仍在
-    /// 飞时改写槽位"合法——在飞 draw 竞态读到的要么是旧图要么是新图，两个
-    /// 本体都活着（旧图在 [`super::images::ImageCache`] 停尸房），无悬空。
-    /// 采样器仍按功能键解析（同键共享槽；内容变化若连采样参数一起变了，
-    /// 老键的采样器槽孤儿化——罕见路径，与池孤儿区间同一笔 4.4 账）。
-    ///
-    /// 前置条件（编排层保证，vulkan 层只管写入）：新图的"上传完成才可采样"
-    /// 由新票据承担，与本表无关。
-    ///
-    /// # Errors
-    /// 新采样键首次出现且采样器槽容量耗尽。
-    pub fn rebind(
-        &mut self,
-        texture_slot: u32,
-        view: vk::ImageView,
-        sampler: vk::Sampler,
-        key: &super::images::SamplerKey,
-    ) -> Result<SlotBinding> {
-        let sampler_slot = match self.sampler_slots.get(key) {
-            Some(&slot) => slot,
-            None => {
-                let slot = self.samplers.alloc()?;
-                self.sampler_slots.insert(*key, slot);
-                slot
-            }
-        };
-        let image_info = vk::DescriptorImageInfo::default()
-            .image_view(view)
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-        let sampler_info = vk::DescriptorImageInfo::default().sampler(sampler);
-        // # Safety:set 常驻、binding 0/1 带 UAB 旗标,在飞改写合法(特性族篇契约)
-        unsafe {
-            self.device.update_descriptor_sets(
-                &[
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(self.resident_set)
-                        .dst_binding(0)
-                        .dst_array_element(texture_slot)
-                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                        .image_info(std::slice::from_ref(&image_info)),
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(self.resident_set)
-                        .dst_binding(1)
-                        .dst_array_element(sampler_slot)
-                        .descriptor_type(vk::DescriptorType::SAMPLER)
-                        .image_info(std::slice::from_ref(&sampler_info)),
-                ],
-                &[],
-            );
-        }
-        Ok(SlotBinding {
-            texture: texture_slot,
-            sampler: sampler_slot,
-        })
-    }
-
     /// 槽回收请求（4.4.1）：把槽记进待回收账，**不立即进 free list**——在飞
     /// draw 仍可能正采样这些槽（描述符在 draw 执行时被 GPU 读），立即复用 =
     /// 在飞 draw 看到新贴图（覆盖）或悬空。前置条件（编排层保证）：
-    /// ① 槽内 view/sampler 本体已同步进停尸房（GpuImage 销毁由同一排空点
-    /// 收口，"本体先于槽复用消失"不成立的方向被停尸房挡住）；
+    /// ① 槽内 view 本体已同步进停尸房（GpuImage 销毁由同一排空点
+    /// 收口，"本体先于槽复用消失"不成立的方向被停尸房挡住）；采样器本体归
+    /// 本表（4.5 F2），随槽账同进退；
     /// ② 采样器槽仅当同键共享方全部退场才请求（请求时移除去重账目，见
     /// [`Self::retire_sampler`]）；
     /// ③ 槽真正回 free list 在 [`Self::drain_retired_slots`]（"图形最后使用"
@@ -672,10 +638,13 @@ impl BindlessTables {
     }
 
     /// 采样器槽回收请求（前置条件②见 [`Self::retire_texture`]；去重账目在
-    /// 此移除——新发布者拿新槽，不与待回收槽交叠）。
+    /// 此移除——新发布者拿新槽，不与待回收槽交叠）。本体（4.5 F2）随槽进
+    /// 待销毁账，排空点统一 vkDestroySampler。
     pub fn retire_sampler(&mut self, key: &super::images::SamplerKey, sampler: u32) {
         self.sampler_slots.remove(key);
-        self.retired_samplers.push(sampler);
+        if let Some(body) = self.sampler_bodies.remove(&sampler) {
+            self.retired_sampler_bodies.push(body);
+        }
     }
 
     /// 按槽号回收采样器槽（4.4.1）：反查功能键后走 [`Self::retire_sampler`]
@@ -693,10 +662,14 @@ impl BindlessTables {
     }
 
     /// 排空待回收槽（4.4.2）：调用点 = flush 停尸房段（帧侧等待"图形最后
-    /// 使用"通过后）——此刻无在飞 draw 再采样这些槽，归还 free list 可复用。
-    /// 返回归还的槽总数（读数口）。
+    /// 使用"通过后）——此刻无在飞 draw 再采样这些槽，归还 free list 可复用；
+    /// 采样器本体（4.5 F2）同点销毁。返回归还的槽总数（读数口）。
     pub fn drain_retired_slots(&mut self) -> usize {
-        let count = self.retired_textures.len() + self.retired_samplers.len();
+        let count =
+            self.retired_textures.len() + self.retired_samplers.len();
+        for sampler in self.retired_sampler_bodies.drain(..) {
+            unsafe { self.device.destroy_sampler(sampler, None) };
+        }
         self.textures.free.append(&mut self.retired_textures);
         self.samplers.free.append(&mut self.retired_samplers);
         count
@@ -720,24 +693,35 @@ impl Drop for BindlessTables {
     fn drop(&mut self) {
         // 契约边界(与 Uploader/GpuBuffer 同款):不等 GPU;退出排空由
         // teardown_vulkan 的 device_wait_idle 先于一切资源 Drop(D4 定案)。
-        // pool 先拆(frees 全部 sets),layout 后拆;UBO/fallback 随字段自动 Drop。
+        // pool 先拆(frees 全部 sets),layout 次拆;采样器本体(4.5 F2,含待销毁
+        // 账里未排空的)随后;UBO/fallback 随字段自动 Drop。
         unsafe {
             self.device.destroy_descriptor_pool(self.pool, None);
             self.device
                 .destroy_descriptor_set_layout(self.set1_layout, None);
             self.device
                 .destroy_descriptor_set_layout(self.set0_layout, None);
+            for sampler in self.sampler_bodies.values() {
+                self.device.destroy_sampler(*sampler, None);
+            }
+            for sampler in self.retired_sampler_bodies.drain(..) {
+                self.device.destroy_sampler(sampler, None);
+            }
         }
     }
 }
 
-/// identity 初值的帧数据（view_proj = identity、灯光归零、Lambert 模式）：
+/// 无灯帧的方向光占位（xyz 单位化合法方向，防归一化 NaN；直射/环境/灯色全零）。
+/// descriptors.rs 的 identity 初值与 frame.rs 的无灯分支双点共用（4.5 订正拆重）。
+pub const PLACEHOLDER_DIR_TO_LIGHT: [f32; 4] = [0.5, 1.0, 0.3, 0.0];
+
+/// identity 初值的帧数据（view_proj = identity、灯光占位、Lambert 模式）：
 /// 表建好到首帧写入之间若被采样（理论不发生，帧循环首帧即重写），画面同
 /// 3.4 之前的 identity 形状而非悬空值。
 fn identity_frame_uniforms() -> FrameUniformsData {
     FrameUniformsData {
         view_proj: bevy::math::Mat4::IDENTITY,
-        dir_to_light: [0.5, 1.0, 0.3, 0.0],
+        dir_to_light: PLACEHOLDER_DIR_TO_LIGHT,
         ambient_color: [0.0; 4],
         light_color: [0.0; 4],
         mode: FRAME_MODE_LAMBERT,

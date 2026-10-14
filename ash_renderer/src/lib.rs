@@ -11,9 +11,10 @@
 //! main ──► driver（渲染驱动）──┬─► scene（ECS 取数：账本 + 变更发现，4.1 起增量维护）
 //!                              ├─► overlay（egui 调试 UI，ECS 侧）
 //!                              └─► vulkan（Vulkan 资源）──► common（工具层）
+//!     ──► remote（BRP 远程通道，3.12 起）──► scene / overlay（语义复用）
 //! ```
 //!
-//! 模块按职责分四层：
+//! 模块按职责分层：
 //! - [`common`]:工具层(横切,零业务依赖)——[`common::error`](类型化错误:OUT_OF_DATE
 //!   是控制流不是失败)、[`common::syntax`](错误处理语法糖,frenderer syntax crate
 //!   移植,warn + 早退哲学);
@@ -38,17 +39,15 @@
 //!   图集 CPU 镜像/整传新槽/顶点环,paint_overlay→UiPaint);
 //!   overlay 管线与 UI 录制契约住 `vulkan::overlay_pipeline`(`OverlayPipeline`
 //!   共享 set0、`UiPaint`/`UiDrawCall` 供 `frames` 接画);
-//! - [`remote`]:BRP 远程直控通道(3.12,HTTP JSON-RPC @ 127.0.0.1:15702)——AI
-//!   免开 UI 查询/改值/推拉相机;读侧官方 inspection 方法族随 RemotePlugin 默认
-//!   注册,写侧复用 overlay 的 Transform 编辑封装与 scene 机制层的相机给值封装;
-//! - [`remote_mouse`]:BRP 虚拟鼠标(3.13)——窗口无关的鼠标输入源:移动/按下/
-//!   抬起/滚轮经 handler 注入 `Messages<WindowEvent>`(与 bevy_winit 同层,官方
-//!   拆分系统顺带维护 Window 光标位),下游输入资源/egui 桥/相机轨道零改动;
-//!   注册收在 remote::AshRemotePlugin;
-//! - [`remote_objects`]:BRP 对象生命周期方法族(4.1)——spawn 克隆/换柄两个
-//!   写方法(官方反射通道表达不了"引用既有资产的柄")+ increment_stats 增量
-//!   计量读数;despawn/摘组件复用官方内置(world.despawn_entity/
-//!   world.remove_components),操作本体在 scene::mechanism::object_ops;
+//! - [`remote`]:BRP 远程直控通道(3.12 起,HTTP JSON-RPC @ 127.0.0.1:15702)——AI
+//!   免开 UI 查询/改值/推拉相机。框架半边在 mod 根:[`remote::AshRemotePlugin`]
+//!   是协议面注册单点(装 [`bevy::remote::RemotePlugin`]+HTTP 传输+全方法族),
+//!   外加 scene_tree/set_transform/set_camera 三个场景语义方法;方法族按域分子
+//!   模块:[`remote::mouse`](3.13 虚拟鼠标:窗口无关输入源,注入
+//!   `Messages<WindowEvent>` 与 bevy_winit 同层)、[`remote::objects`](4.1 对象
+//!   生命周期方法族)、[`remote::assets`](4.2 资产内容变更 + 4.3 动态加载);
+//!   读侧官方 inspection 方法族随 RemotePlugin 默认注册,写侧复用 overlay 的
+//!   Transform 编辑封装与 scene 机制层的相机给值/操作封装,不养两份逻辑;
 //! - [`driver`]:渲染驱动(3.6.1 自 src 根收拢)——bevy 调度侧编排,横跨 scene 与 vulkan:
 //!   `host`(宿主桥插件:禁渲染补位 + 系统进调度)、`init`(Vulkan 初始化链与反序拆除)、
 //!   `frame`(帧循环 draw_frame)、`upload`(上传编排:flush_uploads,Last 里 before
@@ -59,8 +58,5 @@ pub mod common;
 pub mod driver;
 pub mod overlay;
 pub mod remote;
-pub mod remote_mouse;
-pub mod remote_assets;
-pub mod remote_objects;
 pub mod scene;
 pub mod vulkan;

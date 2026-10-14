@@ -214,8 +214,12 @@ pub(crate) fn draw_frame(
         }
         Err(VulkanError::SwapchainOutOfDate) => {
             // 无论重建成败，本帧作废（acquire 没拿到图）；重建失败 warn 后让路，
-            // 下帧 acquire 再过时就地重试重建
+            // 下帧 acquire 再过时就地重试重建。4.5 F14:重建后置 pending——
+            // rebuild 对"尺寸没变"的表面失配（显示器模式切换/热插拔类）幂等
+            // 早退，不置位则本分支每帧空转重试、渲染不自愈；置位后帧首闸门③
+            // 接管（rebuild 幂等，重复调用无成本）
             swapchain.rebuild(ctx).or_warn("acquire 过时后重建失败")?;
+            gate.pending = true;
             return Ok(());
         }
         Err(e) => return Err(fatal("acquire 失败，渲染链无法继续", e)),
@@ -317,7 +321,10 @@ pub(crate) fn draw_frame(
                 [r * light.illuminance, g * light.illuminance, b * light.illuminance, a],
             )
         }
-        None => ([0.5, 1.0, 0.3, 0.0], [0.0; 4]), // 无灯：直射项归零，方向留合法占位
+        None => (
+            crate::vulkan::PLACEHOLDER_DIR_TO_LIGHT,
+            [0.0; 4],
+        ), // 无灯：直射项归零，方向留合法占位（共享常量见 descriptors.rs）
     };
     if light_count != 1 && !ledger.is_empty() {
         draw_state.warned_light_count.log(|| {
@@ -408,7 +415,6 @@ pub(crate) fn draw_frame(
         set1: tables.frame_set(frames.current_index()),
         vertex_buffer: pool.vertex_buffer(),
         index_buffer: pool.index_buffer(),
-        depth_view: frames.current().depth.view,
         draws: &draws,
         overlay_pipeline: overlay_pipeline.pipeline(),
         overlay_layout: overlay_pipeline.layout(),

@@ -32,7 +32,8 @@ use ash_macros::system;
 /// 官方对应动作在 PbrPlugin::build 里，禁用后由本插件补位。`init_resource` 是
 /// 防御性幂等调用：正常路径 GltfPlugin::build（DefaultPlugins 内，不依赖渲染）
 /// 已建好 `GltfExtensionHandlers`，此处是空操作；万一 GltfPlugin 被移除，缺的
-/// 是资产 loader——失败会在资产加载时以"无 loader"冒泡（Tier②），而不是这里 panic。
+/// 是资产 loader——失败走 `AssetLoadFailedEvent`（4.3 失败读侧收账，不经统一
+/// 错误通道；4.5 订正：原"冒泡 Tier②"表述失真）。
 pub struct AshMaterialHookPlugin;
 
 impl Plugin for AshMaterialHookPlugin {
@@ -120,7 +121,9 @@ impl GltfExtensionHandler for AshMaterialHook {
 
 /// 材质缝自检（Startup）：缝的两侧各报一句——容器在不在、hook 挂了几个。
 /// 运行时 `GltfExtensionHandlers` 应恰好含 1 个 handler（本 hook；KHR 扩展
-/// 不走 handler 注册，是 loader 在 load_material 里内联解析的）。
+/// 不走 handler 注册，是 loader 在 load_material 里内联解析的）。4.5 F18:
+/// 异常形态升 warn——误开 PbrPlugin 会双注册材质加工路径，静默劣化的缺口
+/// 由可见告警堵住（对齐 Tier① 口径）。
 #[system]
 fn report_material_seam(
     handlers: Option<Res<GltfExtensionHandlers>>,
@@ -132,5 +135,12 @@ fn report_material_seam(
         .map(|list| list.len())
         .unwrap_or(0);
     let container = if materials.is_some() { "已注册" } else { "未注册" };
-    info!("材质缝自检：Assets<StandardMaterial> {container}；GltfExtensionHandlers 挂载 {hook_count} 个 handler（期望 1 = AshMaterialHook）");
+    if hook_count != 1 {
+        warn!(
+            "材质缝自检异常：GltfExtensionHandlers 挂载 {hook_count} 个 handler（期望 1 = \
+             AshMaterialHook；0 = 材质缝断裂，>1 = 双注册劣化），Assets<StandardMaterial> {container}"
+        );
+    } else {
+        info!("材质缝自检：Assets<StandardMaterial> {container}；GltfExtensionHandlers 挂载 {hook_count} 个 handler（期望 1 = AshMaterialHook）");
+    }
 }

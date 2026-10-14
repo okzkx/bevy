@@ -1,5 +1,5 @@
 //! 对象写操作封装（4.1.5）：spawn 克隆/换柄两类实体级变更的可复用实现——
-//! BRP 方法族（[`crate::remote_objects`]）与将来的 egui 面板共用这一层，
+//! BRP 方法族（[`crate::remote::objects`]）与将来的 egui 面板共用这一层，
 //! 不养两份逻辑（3.11.2 的 apply_transform_edit 同款惯例）。despawn/摘组件
 //! 不在此层：官方 BRP 内置 `world.despawn_entity`/`world.remove_components`
 //! 已覆盖该通道，且当前无 egui 消费者——不为"将来可能"预写零调用代码。
@@ -8,7 +8,7 @@
 //! [`crate::scene::mechanism::update_ledger`] 的 Changed/Removed 通道，任何
 //! 写入方（BRP/UI/代码）自动被账本看见，这是"发现与写入解耦"的验收面。
 
-use bevy::{asset::AssetServer, pbr::StandardMaterial, prelude::*};
+use bevy::{asset::AssetPath, asset::AssetServer, pbr::StandardMaterial, prelude::*};
 
 /// 对象操作被拒的原因（Tier②外泄给调用方分级：BRP 映射协议错误码）。
 #[derive(Debug)]
@@ -23,6 +23,21 @@ pub enum ObjectOpError {
     NothingToDo,
     /// 目标实体的材质资产不在容器里（槽写操作无处可写）。
     MaterialAssetMissing(Entity),
+    /// 资产路径解析失败（坏标签/坏 source 语法，如 `file.gltf#`）。
+    InvalidAssetPath(String),
+}
+
+/// 路径预校验：`AssetServer::load/reload` 收 `impl Into<AssetPath>`，而
+/// `String → AssetPath` 的 From 实现走 panic 解析器（bevy_asset path.rs
+/// `parse`），非法标签在进异步链之前就 panic、绕过失败事件与 BRP 错误通道
+///（4.5 F5）。全部动态加载入口统一先过 `try_parse`，非法输入回协议错误。
+///
+/// # Errors
+/// 路径解析失败（含空标签、坏 source 段）。
+pub fn parse_asset_path(path: &str) -> Result<AssetPath<'static>, ObjectOpError> {
+    AssetPath::try_parse(path)
+        .map(AssetPath::into_owned)
+        .map_err(|e| ObjectOpError::InvalidAssetPath(format!("{path}: {e}")))
 }
 
 /// 克隆一个可渲染 primitive：复制源的 Mesh3d/MeshMaterial3d 柄与 Transform
@@ -123,11 +138,12 @@ pub struct LoadedMeshReadback {
 /// 异步加载 mesh 并换到既有实体上（4.3.3）：`server.load(path)` 立即返回
 /// **加载中柄**，换绑走 [`Mesh3d`] 组件改写（Changed 通道账本自动换行）。
 /// 资产未到货期间行保持脏标（pending 账面），到货帧 flush 转换上传、画面
-/// 换上新内容；路径失败的失败读侧收账（出重试队列，行出队）。同步不判路径
-/// 合法性——加载是异步链，本函数只负责"发请求 + 换柄"。
+/// 换上新内容；路径失败的失败读侧收账（出重试队列，行出队）。路径先过
+/// [`parse_asset_path`] 预校验（4.5 F5：panic 解析器不外泄），加载是异步链，
+/// 本函数只负责"发请求 + 换柄"。
 ///
 /// # Errors
-/// 目标实体缺席或缺 `Mesh3d`。
+/// 目标实体缺席、路径非法或缺 `Mesh3d`。
 pub fn load_mesh_rebind(
     world: &mut World,
     target: Entity,
@@ -136,8 +152,9 @@ pub fn load_mesh_rebind(
     if world.get_entity(target).is_err() {
         return Err(ObjectOpError::EntityMissing(target));
     }
+    let path = parse_asset_path(path)?;
     // load 收 AssetPath<'static>（柄内保存），&str 须转 owned
-    let handle = world.resource::<AssetServer>().load::<Mesh>(path.to_owned());
+    let handle = world.resource::<AssetServer>().load(path);
     let Some(mut slot) = world.get_mut::<Mesh3d>(target) else {
         return Err(ObjectOpError::ComponentMissing("Mesh3d", target));
     };
@@ -163,8 +180,9 @@ pub fn spawn_with_loaded_mesh(
     name_suffix: &str,
 ) -> Result<LoadedMeshReadback, ObjectOpError> {
     let entity = spawn_primitive_clone(world, source, offset, name_suffix)?;
-    // load 收 AssetPath<'static>（柄内保存），&str 转 owned
-    let handle = world.resource::<AssetServer>().load::<Mesh>(path.to_owned());
+    let path = parse_asset_path(path)?;
+    // load 收 AssetPath<'static>（柄内保存）
+    let handle = world.resource::<AssetServer>().load(path);
     let Some(mut slot) = world.get_mut::<Mesh3d>(entity) else {
         return Err(ObjectOpError::ComponentMissing("Mesh3d", entity));
     };
@@ -182,7 +200,7 @@ pub fn spawn_with_loaded_mesh(
 /// mutate 贴图槽同语义）。
 ///
 /// # Errors
-/// 目标实体缺席、非 primitive、缺 `MeshMaterial3d`，或材质资产不在容器。
+/// 目标实体缺席、路径非法、非 primitive、缺 `MeshMaterial3d`，或材质资产不在容器。
 pub fn load_image_slot(
     world: &mut World,
     target: Entity,
@@ -197,7 +215,8 @@ pub fn load_image_slot(
     else {
         return Err(ObjectOpError::ComponentMissing("MeshMaterial3d", target));
     };
-    let handle = world.resource::<AssetServer>().load::<Image>(path.to_owned());
+    let path = parse_asset_path(path)?;
+    let handle = world.resource::<AssetServer>().load(path);
     let mut assets = world.resource_mut::<Assets<StandardMaterial>>();
     let Some(mut asset) = assets.get_mut(&material) else {
         return Err(ObjectOpError::MaterialAssetMissing(target));

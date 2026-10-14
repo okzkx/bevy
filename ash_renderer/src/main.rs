@@ -38,11 +38,11 @@ fn main() -> AppExit {
     App::new()
         // 统一错误通道（正本：错误处理专题《代码结构优化：统一错误通道定案》篇）：system/
         // observer/command 的 Err 全走 tier_handler 按 Severity 分流（Warning→warn，
-        // 其余→error + 置位），fatal_gate 看门写 AppExit 优雅退出。fatal_gate 是
-        // Update 里首个注册的系统 = 早位；语义上任意位置都正确，早位只是让致命帧
-        // 少跑剩余业务系统。
+        // 其余→error + 置位），fatal_gate 看门写 AppExit 优雅退出。fatal_gate 锚定
+        // `First` 集首注册（4.5 小账订正：依赖无序系统插入序不保证，多线程执行器
+        // 下无正确性收益但有早位收益——显式锚定后收益有保证）。
         .set_error_handler(tier_handler)
-        .add_systems(Update, fatal_gate)
+        .add_systems(First, fatal_gate)
         .add_plugins(
             DefaultPlugins
                 .build()

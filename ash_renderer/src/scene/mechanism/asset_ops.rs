@@ -1,5 +1,5 @@
 //! 资产写操作封装（4.2.4）："改资产内容"四类驱动的可复用实现——BRP 方法族
-//! （[`crate::remote_assets`]）与将来 egui 面板共用这一层，不养两份逻辑
+//! （[`crate::remote::assets`]）与将来 egui 面板共用这一层，不养两份逻辑
 //! （3.11.2 apply_transform_edit / 4.1.5 object_ops 同款惯例）。
 //!
 //! 定位锚定实体（与换柄同口径）：BRP 参数给 entity，取它身上的
@@ -70,9 +70,11 @@ pub struct AssetOpReadback {
     pub image: Option<AssetId<Image>>,
 }
 
-/// mutate 总入口：按参数逐项执行，全部成功才返回读回（单项失败即整体
-/// 拒绝——半完成的 mutate 不留场）。**每项动用 `Assets::get_mut`，Modified
-/// 事件由容器自动发出**。
+/// mutate 总入口：**先全量预校验、再逐项执行**（4.5 F11 订正：原实现边校验
+/// 边修改，组合请求单项失败时前面的项已落改——与"整体拒绝，不留半完成"的
+/// 承诺不符）。校验段只读（`Assets::get`），不触发 `Modified` 事件——被拒
+/// 请求零副作用；执行段全部校验通过后才 `get_mut` 落改。**每项动用
+/// `Assets::get_mut`，Modified 事件由容器自动发出**。
 ///
 /// # Errors
 /// 实体缺席/非 primitive、资产容器查无、格式不支持、空请求。
@@ -99,6 +101,66 @@ pub fn mutate_asset(
     {
         return Err(AssetOpError::NothingToDo);
     }
+
+    // —— 预校验段（只读）：逐项检查可动性，执行段需要的解析结果就地收集。
+    // 换槽源槽柄与 tint 目标贴图柄都在这里定案。
+    let new_slot: Option<Option<Handle<Image>>> = match p.slot_base_color_from {
+        None => None,
+        Some(source) => {
+            let source_texture = world
+                .get::<MeshMaterial3d<StandardMaterial>>(source)
+                .ok_or(AssetOpError::SourceNotPrimitive(source))?
+                .0
+                .clone();
+            // 源材质的 base_color 槽柄（None = 清目标槽——拷槽语义含"没有"）
+            let assets = world
+                .get_resource::<Assets<StandardMaterial>>()
+                .ok_or(AssetOpError::AssetMissing("Assets<StandardMaterial> 容器缺席"))?;
+            let source_material = assets
+                .get(&source_texture)
+                .ok_or(AssetOpError::AssetMissing("StandardMaterial"))?;
+            Some(source_material.base_color_texture.clone())
+        }
+    };
+    let tint_target: Option<Handle<Image>> = match p.image_tint {
+        None => None,
+        Some(_) => {
+            let texture_handle = {
+                let assets = world
+                    .get_resource::<Assets<StandardMaterial>>()
+                    .ok_or(AssetOpError::AssetMissing("Assets<StandardMaterial> 容器缺席"))?;
+                let material = assets
+                    .get(&material_handle)
+                    .ok_or(AssetOpError::AssetMissing("StandardMaterial"))?;
+                material.base_color_texture.clone().ok_or(AssetOpError::AssetMissing(
+                    "该实体材质没有 base_color_texture,无处 tint",
+                ))?
+            };
+            let assets = world
+                .get_resource::<Assets<Image>>()
+                .ok_or(AssetOpError::AssetMissing("Assets<Image> 容器缺席"))?;
+            let image = assets
+                .get(&texture_handle)
+                .ok_or(AssetOpError::AssetMissing("Image"))?;
+            check_tint_rgba8(image)?;
+            Some(texture_handle)
+        }
+    };
+    if p.mesh_vertex_scale.is_some() {
+        let assets =
+            world.get_resource::<Assets<Mesh>>().ok_or(AssetOpError::AssetMissing(
+                "Assets<Mesh> 容器缺席",
+            ))?;
+        let mesh = assets
+            .get(&mesh_handle)
+            .ok_or(AssetOpError::AssetMissing("Mesh"))?;
+        match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+            Some(VertexAttributeValues::Float32x3(_)) => {}
+            _ => return Err(AssetOpError::MeshPositionsUnsupported),
+        }
+    }
+
+    // —— 执行段：全部校验通过，逐项 get_mut 落改（此段起才触发 Modified 事件）
     let mut readback = AssetOpReadback::default();
 
     if let Some(color) = p.base_color {
@@ -113,22 +175,7 @@ pub fn mutate_asset(
         readback.material = Some(material_handle.id());
     }
 
-    if let Some(source) = p.slot_base_color_from {
-        let source_texture = world
-            .get::<MeshMaterial3d<StandardMaterial>>(source)
-            .ok_or(AssetOpError::SourceNotPrimitive(source))?
-            .0
-            .clone();
-        // 源材质的 base_color 槽柄（None = 清目标槽——拷槽语义含"没有"）
-        let source_slot = {
-            let assets = world
-                .get_resource::<Assets<StandardMaterial>>()
-                .ok_or(AssetOpError::AssetMissing("Assets<StandardMaterial> 容器缺席"))?;
-            let source_material = assets
-                .get(&source_texture)
-                .ok_or(AssetOpError::AssetMissing("StandardMaterial"))?;
-            source_material.base_color_texture.clone()
-        };
+    if let Some(source_slot) = new_slot {
         let mut assets = world.get_resource_mut::<Assets<StandardMaterial>>().ok_or(
             AssetOpError::AssetMissing("Assets<StandardMaterial> 容器缺席"),
         )?;
@@ -158,19 +205,12 @@ pub fn mutate_asset(
     }
 
     if let Some(tint) = p.image_tint {
-        // 目标贴图 = 该实体材质的 base_color 槽（image_tint 与贴图槽参数是
-        // 同一驱动的两面:先换槽再 tint 时 tint 作用于新槽——执行序即参数序）
-        let texture_handle = {
-            let assets = world
-                .get_resource::<Assets<StandardMaterial>>()
-                .ok_or(AssetOpError::AssetMissing("Assets<StandardMaterial> 容器缺席"))?;
-            let material = assets
-                .get(&material_handle)
-                .ok_or(AssetOpError::AssetMissing("StandardMaterial"))?;
-            material.base_color_texture.clone().ok_or(AssetOpError::AssetMissing(
-                "该实体材质没有 base_color_texture,无处 tint",
-            ))?
-        };
+        // 目标贴图 = 该实体材质的 base_color 槽（校验段已解析柄；image_tint 与
+        // 贴图槽参数是同一驱动的两面:先换槽再 tint 时 tint 作用于新槽——
+        // 执行序即参数序）
+        let texture_handle = tint_target.ok_or(AssetOpError::AssetMissing(
+            "该实体材质没有 base_color_texture,无处 tint",
+        ))?;
         let mut assets = world
             .get_resource_mut::<Assets<Image>>()
             .ok_or(AssetOpError::AssetMissing("Assets<Image> 容器缺席"))?;
@@ -184,14 +224,24 @@ pub fn mutate_asset(
     Ok(readback)
 }
 
-/// RGBA 4 字节族逐像素乘色调（线性域系数直接乘字节值——验证观测以画面
-/// 变化为准，不做色彩管理换算）。只收 4B RGBA 族，其余格式明确拒绝。
+/// tint 前置校验（4.5 F11 预校验段用）：格式与像素数据在场判定，零副作用。
 ///
 /// # Errors
-/// 格式不在 4 字节 RGBA 族。
-fn tint_rgba8(image: &mut Image, tint: [f32; 3]) -> Result<(), AssetOpError> {
+/// 格式不在 4 字节 RGBA 族，或像素数据缺席。
+fn check_tint_rgba8(image: &Image) -> Result<(), AssetOpError> {
     let format = image.texture_descriptor.format;
-    if !matches!(
+    if !tint_format_supported(format) {
+        return Err(AssetOpError::ImageFormatUnsupported(format));
+    }
+    if image.data.is_none() {
+        return Err(AssetOpError::AssetMissing("Image 像素数据"));
+    }
+    Ok(())
+}
+
+/// 4 字节 RGBA 族判定（tint 可动格式的唯一清单）。
+fn tint_format_supported(format: TextureFormat) -> bool {
+    matches!(
         format,
         TextureFormat::Rgba8Unorm
             | TextureFormat::Rgba8UnormSrgb
@@ -200,7 +250,18 @@ fn tint_rgba8(image: &mut Image, tint: [f32; 3]) -> Result<(), AssetOpError> {
             | TextureFormat::Rgba8Sint
             | TextureFormat::Bgra8Unorm
             | TextureFormat::Bgra8UnormSrgb
-    ) {
+    )
+}
+
+/// RGBA 4 字节族逐像素乘色调（线性域系数直接乘字节值——验证观测以画面
+/// 变化为准，不做色彩管理换算）。只收 4B RGBA 族，其余格式明确拒绝。
+/// 预校验段已过 [`check_tint_rgba8`]，此处防御性复查同清单。
+///
+/// # Errors
+/// 格式不在 4 字节 RGBA 族。
+fn tint_rgba8(image: &mut Image, tint: [f32; 3]) -> Result<(), AssetOpError> {
+    let format = image.texture_descriptor.format;
+    if !tint_format_supported(format) {
         return Err(AssetOpError::ImageFormatUnsupported(format));
     }
     let Some(data) = image.data.as_mut() else {

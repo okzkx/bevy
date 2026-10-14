@@ -63,6 +63,13 @@ pub(super) fn init_vulkan(
 
 /// 创建链本体：`?` 串起全部创建步骤，任一层失败即短路返回 `VulkanError`；
 /// 失败处理集中在调用方（init_vulkan 的单点 match）。
+///
+/// 4.5 F12:自 Uploader 建成起，失败路径可能有在飞 transfer（fallback 白图
+/// 批次在 `BindlessTables::new` 内发票据不等待），半建资源逆序 Drop 前必须
+/// 排空——否则 Uploader/表/贴图本体在 transfer 仍消费它们时析构，违反 D4
+/// "wait_idle 先于一切 Drop"。排空靠 [`InitDrainGuard`]：声明于 Uploader 之后，
+/// 逆序 Drop 中最先析构；成功路径 `mem::forget` 让位给 teardown 序
+///（teardown_vulkan 自带首步排空）。
 fn try_init_vulkan(
     wrapper: &Query<&RawHandleWrapper, With<PrimaryWindow>>,
 ) -> Result<InitChain> {
@@ -86,6 +93,8 @@ fn try_init_vulkan(
         1024 * 1024,
         2,
     )?;
+    // F12 排空护栏：此后任一步失败，护栏先于全部半建资源析构（逆序 Drop）
+    let drain_guard = InitDrainGuard(ctx.device.clone());
     // 贴图：驻留缓存空建，首帧随上传链按需进图
     let image_cache = ImageCache::default();
     // 常驻描述符表（限额对账在表内做，失败即 Tier②）+ fallback 白图走同一上传链
@@ -119,10 +128,26 @@ fn try_init_vulkan(
     // UI 顶点环（3.7.2）：每帧槽一对 HOST_VISIBLE 顶点/索引 buffer，纯 Context
     // 依赖（初始化链尾端，拆除随帧级一批——无表/管线依赖）
     let ui_ring = UiVertexRing::new(&ctx)?;
+    // 成功路径：护栏退役，排空责任交还 teardown 序
+    std::mem::forget(drain_guard);
     Ok((
         ctx, swapchain, frames, pool, uploader, image_cache, tables, pipeline, overlay_pipeline,
         ui_ring,
     ))
+}
+
+/// F12 初始化失败排空护栏：半建链逆序 Drop 中第一个析构（声明在 Uploader
+/// 之后），Drop 时 device_wait_idle 等在飞 transfer 完成，其后 Uploader/表/
+/// GpuImage 的析构才满足 D4。设备丢失时等待失败——错误已由初始化链冒泡，
+/// 这里静默放行拆除。
+struct InitDrainGuard(ash::Device);
+
+impl Drop for InitDrainGuard {
+    fn drop(&mut self) {
+        unsafe { self.0.device_wait_idle() }.unwrap_or_else(|e| {
+            bevy::log::warn!("初始化失败路径排空失败（设备丢失？），继续拆除: {e}")
+        });
+    }
 }
 
 /// 池 buffer 的共享族集合:有专用 transfer 族(≠graphics)时返回两族(池按
@@ -167,8 +192,8 @@ pub(super) fn teardown_vulkan(world: &mut World) {
     world.remove_resource::<MeshPool>();
     world.remove_resource::<BindlessTables>();
     world.remove_resource::<ImageCache>();
-    // overlay 图集 graveyard 在表之后拆：槽位持有的是 view/sampler 句柄借用，
-    // 与 bindless 表同寿同序（先拆借用账本，再拆本体；overlay 未装时 no-op）
+    // overlay 图集 graveyard 在表之后拆：4.5 F15 起旧代随 flush 排空点定期销毁，
+    // 此处只剩残量（teardown 序不变：先拆借用账本，再拆本体；overlay 未装时 no-op）
     world.remove_resource::<AtlasGpu>();
     world.remove_resource::<Context>();
     // 初始化失败路径资源从未插入，此处静默即可——根因已由统一 handler 记过 error

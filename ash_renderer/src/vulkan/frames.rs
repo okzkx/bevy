@@ -67,8 +67,6 @@ pub struct FrameDraw<'a> {
     pub set1: vk::DescriptorSet,
     pub vertex_buffer: Option<vk::Buffer>,
     pub index_buffer: Option<vk::Buffer>,
-    /// 本帧槽的深度附件 view。
-    pub depth_view: vk::ImageView,
     pub draws: &'a [DrawCall],
     /// overlay 管线（UI 半边的绘制入口；深度格式与实例对齐声明，读/写全关）。
     pub overlay_pipeline: vk::Pipeline,
@@ -292,7 +290,7 @@ impl FramePool {
         })
     }
 
-    /// 当前帧槽位。与 `wait_and_reset` 之间不得 `advance`。
+    /// 当前帧槽位。与 `wait_for_slot`（D2 改名后的等待+重置入口）之间不得 `advance`。
     pub fn current(&self) -> &Frame {
         &self.frames[self.current]
     }

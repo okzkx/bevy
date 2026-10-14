@@ -12,8 +12,9 @@
 //! "signal 值须大于当前值")。提交挂 fence(null)——完成只由 timeline 表达,
 //! CPU 等待只发生在复用/维护/退出路径,不在逐批路径上。空批次(无 staging 写、
 //! 无拷贝)不提交、不发票据(返回 `None`);任何失败(重置/录制/提交)在改写
-//! `next_ticket` 之前早退,不发布票据、不占槽——"失败不发布虚假完成票据"
-//! (3.2.4.4)从结构上成立。
+//! `next_ticket` 之前早退,不发布票据——"失败不发布虚假完成票据"(3.2.4.4)
+//! 从结构上成立(4.5 订正:"不占槽"删去——staging 槽位游标在等待/复用判定
+//! 时已先行推进,失败帧的槽位占用是复用纪律内部消化的事,与票据无关)。
 //!
 //! **timeline 提交接口定案**(面板口径):保留旧式 SubmitInfo,timeline 信号量
 //! 进提交时按 VUID-VkSubmitInfo-pNext-03239 挂 `TimelineSemaphoreSubmitInfo`;
@@ -310,8 +311,7 @@ impl Uploader {
         self.cursor = (self.cursor + 1) % self.slots.len();
         let pending = self.slots[index].in_flight;
         let completed = self.completed_ticket()?;
-        if pending.is_some_and(|p| completed < p) {
-            let p = pending.expect("is_some_and 已判定存在");
+        if let Some(p) = pending.filter(|p| completed < *p) {
             self.wait_until(p)?;
             info!("staging 槽位 {index} 复用:等上批票据 {p} 完成后重录(按完成票据复用)");
         }
@@ -341,7 +341,13 @@ impl Uploader {
         let slot = &mut self.slots[index];
         // 批内容落盘 staging:宿主写(非 coherent 时 write 内建 atom 对齐 flush)。
         // 这一步必须在录制/提交之前——拷贝的源是 staging 映射内存
-        let staging_buffer = slot.staging.as_mut().expect("staging 已在上一步就绪");
+        let Some(staging_buffer) = slot.staging.as_mut() else {
+            // 上一分支已保证扩容或既有槽在场;违反即内部矛盾,按 Tier② 冒泡不 panic
+            // (4.5 小账:expect 字面退役)
+            return Err(VulkanError::Upload(
+                "内部矛盾:扩容判定后 staging 槽位仍缺席".into(),
+            ));
+        };
         staging_buffer.write(0, &batch.staging)?;
         unsafe {
             device

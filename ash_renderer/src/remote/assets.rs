@@ -1,7 +1,7 @@
 //! BRP 资产内容变更方法族（4.2.4）+ 运行期动态加载（4.3.3）：测试驱动与
 //! AI 通道的资产级变更入口。
 //!
-//! 分工（与 4.1.5 remote_objects 同款钉子）：**官方 BRP 没有资产内容写通道**
+//! 分工（与 4.1.5 objects 同款钉子）：**官方 BRP 没有资产内容写通道**
 //! ——反射 mutate 走 `world.mutate_component` 是组件值反射，够不着
 //! `Assets<T>` 容器里的资产本体，本方法族自研；操作本体在
 //! [`crate::scene::mechanism::mutate_asset`] 与 [`object_ops`] 的加载封装
@@ -24,8 +24,8 @@ use crate::scene::mechanism::{
     MutateAsset,
 };
 
-use super::remote::invalid_params;
-use super::remote_objects::object_op_error;
+use super::invalid_params;
+use super::objects::object_op_error;
 
 use ash_macros::system;
 
@@ -171,7 +171,12 @@ pub(crate) fn reload_asset_cmd(In(params): In<Option<Value>>, world: &mut World)
     let value = params.ok_or_else(|| invalid_params("params 缺失：需要 path"))?;
     let p: ReloadAssetParams =
         serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
-    world.resource::<AssetServer>().reload(p.path.clone());
+    // reload 收 `impl Into<AssetPath>`，String → AssetPath 的 From 走 panic
+    // 解析器——统一 try_parse 预校验，非法路径回协议错误（4.5 F5）
+    let path = bevy::asset::AssetPath::try_parse(&p.path)
+        .map_err(|e| invalid_params(format!("资产路径解析失败：{}: {e}", p.path)))?
+        .into_owned();
+    world.resource::<AssetServer>().reload(path);
     Ok(json!({
         "path": p.path,
         "state": "reloading",

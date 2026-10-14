@@ -33,7 +33,7 @@ use thiserror::Error;
 use wgpu_types::{TextureDimension, TextureFormat};
 
 use super::resources::MemoryContract;
-use super::uploader::Ticket;
+use super::uploader::{Ticket, Uploader};
 use crate::common::error::{Result, VulkanError};
 
 /// bevy `Image` → 渲染器规格的映射拒绝。Tier①：不影响帧循环，warn 一次跳过该资产
@@ -118,7 +118,6 @@ pub struct GpuImage {
     image: vk::Image,
     memory: vk::DeviceMemory,
     view: vk::ImageView,
-    sampler: vk::Sampler,
     format: vk::Format,
     width: u32,
     height: u32,
@@ -126,7 +125,10 @@ pub struct GpuImage {
 
 impl GpuImage {
     /// 按契约创建:image(usage 按读回条款三用途)→ requirements → 选型(必需
-    /// DEVICE_LOCAL)→ 恰量分配 → offset 0 绑定 → view → 采样器。
+    /// DEVICE_LOCAL)→ 恰量分配 → offset 0 绑定 → view。**采样器不在此建**
+    ///（4.5 F2 订正:本体归 [`super::descriptors::BindlessTables`] 按功能键
+    /// 持有——同键贴图共享一个描述符槽,槽内句柄若随某张图生灭,共享方先卸载
+    /// "最后发布者"即悬空;键即完整配方,表侧 [`SamplerKey::create_sampler`] 建本体）。
     /// `sharing_families`:≥2 个不同族时按 CONCURRENT 创建(3.4 定案,与
     /// `GpuBuffer::create_with_families` 同一取舍——EXCLUSIVE 的 release/acquire
     /// 成对语义下,验证层对"已写入但未被 draw 访问的 UAB 数组元素"的布局账本
@@ -194,14 +196,14 @@ impl GpuImage {
         }?;
         let result =
             unsafe { Self::create_inner(device, contract, spec, usage, features, image) };
-        // image 的回收统一收口在这里(内层只管 memory/view/sampler 的回收)
+        // image 的回收统一收口在这里(内层只管 memory/view 的回收)
         if result.is_err() {
             unsafe { device.destroy_image(image, None) };
         }
         result
     }
 
-    /// 创建链的后半段(image 已建):失败路径回收已分配的 memory / 已建的 view、sampler。
+    /// 创建链的后半段(image 已建):失败路径回收已分配的 memory / 已建的 view。
     ///
     /// # Safety
     /// `image` 须是刚创建成功的合法句柄;错误返回后调用方不得再使用它。
@@ -253,14 +255,6 @@ impl GpuImage {
                     return Err(VulkanError::Vk(e));
                 }
             };
-            let sampler = match Self::create_sampler(device, &spec.sampler) {
-                Ok(s) => s,
-                Err(e) => {
-                    device.destroy_image_view(view, None);
-                    device.free_memory(memory, None);
-                    return Err(e);
-                }
-            };
             let heap = contract.heap_of_type(memory_type);
             info!(
                 "贴图按契约就绪: {0:?} {1}×{2} → requirements 分配 {reqs_size}B(对齐 {reqs_alignment}B), \
@@ -280,40 +274,11 @@ impl GpuImage {
                 image,
                 memory,
                 view,
-                sampler,
                 format: spec.format,
                 width: spec.width,
                 height: spec.height,
             })
         }
-    }
-
-    /// bevy 采样描述符 → VkSampler。lod 上限钉 0:静态 mip0 模式的可采样 LOD 限制
-    ///（3.3.1 口径)——描述符里的 lod_max_clamp(默认 32)按本步策略覆盖为 0;
-    /// anisotropy 需要独立 feature,本步不开,描述符里的 clamp 一律不启用。
-    ///
-    /// # Errors
-    /// `vkCreateSampler` 失败。
-    fn create_sampler(
-        device: &Device,
-        d: &ImageSamplerDescriptor,
-    ) -> Result<vk::Sampler> {
-        let info = vk::SamplerCreateInfo::default()
-            .mag_filter(filter(d.mag_filter))
-            .min_filter(filter(d.min_filter))
-            .mipmap_mode(mipmap_mode(d.mipmap_filter))
-            .address_mode_u(address_mode(d.address_mode_u))
-            .address_mode_v(address_mode(d.address_mode_v))
-            .address_mode_w(address_mode(d.address_mode_w))
-            .mip_lod_bias(0.0)
-            .min_lod(0.0)
-            .max_lod(0.0)
-            .compare_enable(d.compare.is_some())
-            .compare_op(d.compare.map_or(vk::CompareOp::NEVER, compare_op))
-            .border_color(d.border_color.map_or(vk::BorderColor::FLOAT_TRANSPARENT_BLACK, border_color))
-            // anisotropy_enable false 时 clamp 值不参与采样,无需特性
-            .anisotropy_enable(false);
-        unsafe { device.create_sampler(&info, None) }.map_err(VulkanError::from)
     }
 
     /// 绑定的 Vulkan image 句柄(上传拷贝的目标、读回拷贝的源)。
@@ -326,14 +291,6 @@ impl GpuImage {
     #[must_use]
     pub fn view(&self) -> vk::ImageView {
         self.view
-    }
-
-    /// 采样器句柄(3.3.3 描述符表从这里取;去重按 [`sampler_key`] 的功能参数,
-    /// 同键贴图共享一个描述符槽位——注意槽里存的是"首个发布者"的句柄,见
-    /// descriptors.rs 的 retire 前置条件)。
-    #[must_use]
-    pub fn sampler(&self) -> vk::Sampler {
-        self.sampler
     }
 
     /// 绑定的格式(证据查询口;3.3.3 描述符布局与此一致)。
@@ -357,10 +314,10 @@ unsafe impl Sync for GpuImage {}
 impl Drop for GpuImage {
     fn drop(&mut self) {
         // 契约边界(与 GpuBuffer/Uploader 同款):不等 GPU;退出排空由 teardown_vulkan
-        // 的 device_wait_idle 先于一切资源 Drop(D4 定案)。销毁序:采样器/view 先于
-        // image,memory 最后(image 销毁后再释放其绑定)。
+        // 的 device_wait_idle 先于一切资源 Drop(D4 定案)。销毁序:view 先于
+        // image,memory 最后(image 销毁后再释放其绑定)。采样器本体归
+        // BindlessTables(4.5 F2),不在此销毁。
         unsafe {
-            self.device.destroy_sampler(self.sampler, None);
             self.device.destroy_image_view(self.view, None);
             self.device.destroy_image(self.image, None);
             self.device.free_memory(self.memory, None);
@@ -375,11 +332,12 @@ impl Drop for GpuImage {
 #[derive(bevy::prelude::Resource, Default)]
 pub struct ImageCache {
     resident: HashMap<AssetId<BevyImage>, (GpuImage, Ticket, super::descriptors::SlotBinding)>,
-    /// 内容替换的旧图停尸房（4.2.3）：换条目时旧 `GpuImage` 移入此处而非就地
-    /// Drop——描述符槽重写后，在飞 draw 仍可能经旧描述符或已取的引用读旧图，
-    /// 销毁必须等"图形最后使用"（排空时由调用方经帧侧等待闸门收口，4.1.1
-    /// 契约的第二次兑现）；Drop 自身不等 GPU，与全部 Vulkan 资源同契约。
-    graveyard: Vec<GpuImage>,
+    /// 内容替换/卸载的旧图停尸房（4.2.3/4.4.1，4.5 F3 起票据随行）：旧 `GpuImage`
+    /// 移入此处而非就地 Drop——描述符槽改指后，在飞 draw 仍可能经旧描述符或已
+    /// 取的引用读旧图，销毁必须等双条件：图形最后使用（帧槽 fence）+ 上传完成
+    ///（票据——最小化期间 flush 仍可提交 transfer 而无图形提交，帧 fence 完成
+    /// 不蕴含上传完成）。票据以"本图进入驻留时的批次"为准。
+    graveyard: Vec<(GpuImage, Ticket)>,
 }
 
 impl ImageCache {
@@ -401,36 +359,68 @@ impl ImageCache {
         self.graveyard.len()
     }
 
-    /// 内容替换取条目（4.2.3）：旧图移入停尸房、条目让位，返回旧槽位绑定
-    /// 供新图**原槽重写**（`BindlessTables::rebind`——纹理槽占用不因内容变化
-    /// 增长）。停尸房里的旧图由 [`Self::drain_graveyard`] 在安全点销毁。
-    pub fn take(&mut self, id: AssetId<BevyImage>) -> Option<super::descriptors::SlotBinding> {
-        let (image, _, slots) = self.resident.remove(&id)?;
-        self.graveyard.push(image);
-        Some(slots)
+    /// 同身份内容替换登记（4.5 F1/F2 改版，取代原 `take` + 原槽重写）：旧条目
+    /// 原子退场、新条目随即入账。旧图进停尸房（票据随行，双条件排空见
+    /// [`Self::drain_graveyard`]）；旧纹理槽进待回收账（F1 订正：原槽重写对在飞
+    /// draw 不安全——UAB 不授权覆盖仍被未完成命令消费的描述符，改走"新槽
+    /// 发布 + 旧槽延迟回收"）；旧采样器槽仅当新条目不同槽且无其余驻留共享方
+    /// 才请求回收（F2：本体归表，槽退场 = 本体在排空点销毁）。未驻留身份 =
+    /// 纯新登记。**必须在 [`super::descriptors::BindlessTables::publish`] 之后
+    /// 调用**——新槽已定，退场判定才能对照新槽去重（同键共享则新旧同采样器
+    /// 槽，不回收）。
+    pub fn swap_commit(
+        &mut self,
+        id: AssetId<BevyImage>,
+        image: GpuImage,
+        ticket: Ticket,
+        slots: super::descriptors::SlotBinding,
+        tables: &mut super::descriptors::BindlessTables,
+    ) {
+        if let Some((old_image, old_ticket, old_slots)) = self.resident.remove(&id) {
+            self.graveyard.push((old_image, old_ticket));
+            tables.retire_texture(old_slots.texture);
+            if old_slots.sampler != slots.sampler
+                && !self
+                    .resident
+                    .values()
+                    .any(|(_, _, s)| s.sampler == old_slots.sampler)
+            {
+                tables.retire_sampler_by_slot(old_slots.sampler);
+            }
+        }
+        self.resident.insert(id, (image, ticket, slots));
     }
 
-    /// 排空停尸房（4.2.3）：`wait_draws` 等"图形最后使用"（全部帧槽 fence，
-    /// 4.1.1 闸门）通过后才销毁旧图——此刻无任何在飞 draw 再经描述符或引用
-    /// 读它们。空房直接返回不等待（稳态零成本）。
+    /// 排空停尸房（4.2.3，4.5 F3 凭据补全）：双条件齐备后才销毁旧图——
+    /// `wait_draws` 等"图形最后使用"（全部帧槽 fence，4.1.1 闸门），
+    /// `uploader.wait_until` 等"上传完成"（停尸房票据的时间线信号量）。空房
+    /// 直接返回不等待（稳态零成本）。
     ///
     /// # Errors
-    /// 帧侧等待失败（排空未发生，停尸房保留，下帧重试）。
+    /// 帧侧等待或票据等待失败（排空未发生，停尸房保留，下帧重试）。
     pub fn drain_graveyard(
         &mut self,
+        uploader: &Uploader,
         wait_draws: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
         if self.graveyard.is_empty() {
             return Ok(());
         }
         wait_draws()?;
+        // 票据取最大值一次等待:同一条时间线信号量按值单调,等最大即等全部
+        let max_ticket = self
+            .graveyard
+            .iter()
+            .map(|(_, ticket)| *ticket)
+            .fold(0u64, u64::max);
+        uploader.wait_until(max_ticket)?;
         let count = self.graveyard.len();
-        self.graveyard.clear(); // Drop 序：sampler/view 先于 image，memory 最后
-        info!("贴图停尸房排空:销毁 {count} 张旧图（等待图形最后使用后,4.2 内容替换收尾）");
+        self.graveyard.clear(); // Drop 序：view 先于 image，memory 最后
+        info!("贴图停尸房排空:销毁 {count} 张旧图（双条件齐备:图形最后使用 + 上传票据,4.2/4.4/4.5 F3）");
         Ok(())
     }
 
-    /// 卸载驻留条目（4.4.1）：旧图进停尸房（在飞安全）、描述符槽进待回收账
+    /// 卸载驻留条目（4.4.1）：旧图进停尸房（票据随行）、描述符槽进待回收账
     /// ——纹理槽直接请求回收；采样器槽仅当同键最后一张退场才请求（共享去重
     /// 的反向操作，与 publish 的"同键共享"配对）。本条目出账后再查同键，检查
     /// 针对剩余驻留条目。返回是否发生退场（幂等：未驻留身份 no-op）。
@@ -439,10 +429,10 @@ impl ImageCache {
         id: AssetId<BevyImage>,
         tables: &mut super::descriptors::BindlessTables,
     ) -> bool {
-        let Some((image, _, slots)) = self.resident.remove(&id) else {
+        let Some((image, ticket, slots)) = self.resident.remove(&id) else {
             return false;
         };
-        self.graveyard.push(image);
+        self.graveyard.push((image, ticket));
         tables.retire_texture(slots.texture);
         if !self
             .resident
@@ -508,7 +498,7 @@ pub struct SamplerKey {
     border: i32,
 }
 
-/// bevy 采样描述符 → [`SamplerKey`](映射与 [`GpuImage::create_sampler`] 消费的
+/// bevy 采样描述符 → [`SamplerKey`](映射与 [`SamplerKey::create_sampler`] 消费的
 /// 参数一一对应,改其一必改其二)。
 #[must_use]
 pub fn sampler_key(d: &ImageSamplerDescriptor) -> SamplerKey {
@@ -524,6 +514,37 @@ pub fn sampler_key(d: &ImageSamplerDescriptor) -> SamplerKey {
             .border_color
             .map_or(vk::BorderColor::FLOAT_TRANSPARENT_BLACK, border_color)
             .as_raw(),
+    }
+}
+
+impl SamplerKey {
+    /// 从功能键创建 VkSampler 本体（4.5 F2：采样器归描述符表所有，键即完整
+    /// 配方——raw 值即 vk 枚举，与历史 `GpuImage::create_sampler` 的映射同源）。
+    /// lod 上限钉 0（静态 mip0 模式，3.3.1 口径）、anisotropy 不启用（需独立
+    /// feature，本步不开）——两条全局策略随键固化。
+    ///
+    /// # Errors
+    /// `vkCreateSampler` 失败。
+    pub(crate) fn create_sampler(&self, device: &Device) -> Result<vk::Sampler> {
+        let info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::from_raw(self.mag))
+            .min_filter(vk::Filter::from_raw(self.min))
+            .mipmap_mode(vk::SamplerMipmapMode::from_raw(self.mip))
+            .address_mode_u(vk::SamplerAddressMode::from_raw(self.u))
+            .address_mode_v(vk::SamplerAddressMode::from_raw(self.v))
+            .address_mode_w(vk::SamplerAddressMode::from_raw(self.w))
+            .mip_lod_bias(0.0)
+            .min_lod(0.0)
+            .max_lod(0.0)
+            .compare_enable(self.compare.is_some())
+            .compare_op(
+                self.compare
+                    .map_or(vk::CompareOp::NEVER, vk::CompareOp::from_raw),
+            )
+            .border_color(vk::BorderColor::from_raw(self.border))
+            // anisotropy_enable false 时 clamp 值不参与采样,无需特性
+            .anisotropy_enable(false);
+        unsafe { device.create_sampler(&info, None) }.map_err(VulkanError::from)
     }
 }
 
