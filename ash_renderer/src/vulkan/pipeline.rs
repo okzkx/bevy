@@ -1,10 +1,9 @@
-//! 图形管线：dynamic rendering 图形管线 + pipeline layout（set0/set1 + push）。
+//! 图形管线：dynamic rendering 图形管线 + pipeline layout（set0/set1/set2 + push）。
 //!
-//! 管线吃的是三方契约：set0/set1 layout 来自 [`super::BindlessTables`]
-//!（"集与布局同源，不可另建"），push constant range 按 96B 冻结表（偏移
-//! 0/64/68/80，与 `debug_draw.wgsl` 的 PushParams 及下方 [`PushLayout`] 镜像
-//! `offset_of!` 静态互证——"repr(C) 或低于 128B 都不能独立证明对齐"，断言在
-//! 编译期执法）。
+//! 管线吃的是三方契约：set0/set1 layout 来自 [`super::BindlessTables`]、set2
+//! layout 来自 [`super::InstanceTables`]（"集与布局同源，不可另建"），push
+//! constant range 按 4B 冻结（实例槽号；5.1 起逐对象绘制参数进 GPU 常驻表，
+//! shader 按实例索引读——96B PushData 退役，见 instance_table 模块文档）。
 //!
 //! 状态选型（面板定案）：
 //! - **顶点输入**：交错 32B（pos12+normal12+uv8，[`super::VERTEX_STRIDE`]），与
@@ -32,63 +31,11 @@ use super::Context;
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与探针同一编译路径）。
 const DEBUG_DRAW_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/debug_draw.spv"));
 
-/// push constant 冻结布局（96B）的 Rust 镜像：本类型不参与运行时（字节由
-/// [`pack_push`] 按偏移常量手工排布，不依赖 repr 对齐的巧合），存在的意义是
-/// 让 `offset_of!`/`size_of` 静态断言把 WGSL/管线/CPU 三方钉在一起。
-#[repr(C)]
-#[allow(dead_code)]
-struct PushLayout {
-    model: [f32; 16],
-    tex_index: u32,
-    sampler_index: u32,
-    /// 68→80 的对齐垫：vec4f 的 16B 对齐在 WGSL 端自然产生，镜像端显式写出
-    _pad: [u32; 2],
-    base_color: [f32; 4],
-}
-
-const _: () = {
-    assert!(std::mem::offset_of!(PushLayout, model) == 0);
-    assert!(std::mem::offset_of!(PushLayout, tex_index) == 64);
-    assert!(std::mem::offset_of!(PushLayout, sampler_index) == 68);
-    assert!(std::mem::offset_of!(PushLayout, base_color) == 80);
-    assert!(std::mem::size_of::<PushLayout>() == 96);
-};
-
-/// push constant 总长（pipeline layout 声明 + [`pack_push`] 排布 + WGSL 侧
-/// PushParams，三方同源）。
-pub const PUSH_CONSTANTS_SIZE: u32 = 96;
-
-/// 一个 draw 的 push 参数（宿主侧取数产物，[`super::frames::DrawCall`] 的成员）。
-#[derive(Clone, Copy, Debug)]
-pub struct PushData {
-    /// local→world（GlobalTransform 终值，列主序展平见 `to_cols_array`）。
-    pub model: [f32; 16],
-    /// set0 b0 纹理数组下标（缺贴图走 fallback 槽 0）。
-    pub tex_index: u32,
-    /// set0 b1 采样器数组下标。
-    pub sampler_index: u32,
-    /// 材质基色（线性域；与采样端解码互补，编码只在输出端做一次）。
-    pub base_color: [f32; 4],
-}
-
-/// [`PushData`] → 96B push 字节（偏移按 [`PushLayout`] 的静态断言表手工排布）。
-#[must_use]
-pub fn pack_push(d: &PushData) -> [u8; PUSH_CONSTANTS_SIZE as usize] {
-    let mut out = [0u8; PUSH_CONSTANTS_SIZE as usize];
-    let mut put = |offset: usize, bytes: &[u8]| {
-        out[offset..offset + bytes.len()].copy_from_slice(bytes);
-    };
-    for (i, v) in d.model.iter().enumerate() {
-        put(i * 4, &v.to_le_bytes());
-    }
-    put(64, &d.tex_index.to_le_bytes());
-    put(68, &d.sampler_index.to_le_bytes());
-    // 72..80 是对齐垫，保持 0
-    for (i, v) in d.base_color.iter().enumerate() {
-        put(80 + i * 4, &v.to_le_bytes());
-    }
-    out
-}
+/// push constant 总长（pipeline layout 声明 + WGSL 侧 PushParams 同源）：
+/// 4B = 实例槽号（u32），逐对象绘制参数（model/材质/范围）已全部进 GPU
+/// 常驻表（判定线 1 的结构前提；push 字节数与对象数解耦在字节层面成立
+/// ——每 draw 只推一个 u32 标识，参数本体零推送）。
+pub const PUSH_CONSTANTS_SIZE: u32 = 4;
 
 /// 图形管线 + pipeline layout（dynamic rendering 形态，无 RenderPass）。
 #[derive(bevy::prelude::Resource)]
@@ -99,7 +46,7 @@ pub struct GraphicsPipeline {
 }
 
 impl GraphicsPipeline {
-    /// 建管线链：shader module（build.rs 补丁产物）→ pipeline layout（双 set +
+    /// 建管线链：shader module（build.rs 补丁产物）→ pipeline layout（三 set +
     /// push range）→ GraphicsPipelineCreateInfo（dynamic rendering 附件格式声明）。
     /// 任何失败回收已建对象（全有或全无）。
     ///
@@ -111,6 +58,7 @@ impl GraphicsPipeline {
         depth_format: vk::Format,
         set0_layout: vk::DescriptorSetLayout,
         set1_layout: vk::DescriptorSetLayout,
+        set2_layout: vk::DescriptorSetLayout,
     ) -> Result<Self> {
         let device = &ctx.device;
         // 词流（小端）→ ash 的 &[u32]；build.rs 只写整词，as_chunks 即全部字节
@@ -133,6 +81,7 @@ impl GraphicsPipeline {
                 depth_format,
                 set0_layout,
                 set1_layout,
+                set2_layout,
                 module,
             )
         };
@@ -152,15 +101,16 @@ impl GraphicsPipeline {
         depth_format: vk::Format,
         set0_layout: vk::DescriptorSetLayout,
         set1_layout: vk::DescriptorSetLayout,
+        set2_layout: vk::DescriptorSetLayout,
         module: vk::ShaderModule,
     ) -> Result<Self> {
         unsafe {
-            // push range 覆盖全 96B、双 stage：model 在 vertex 用，其余在 fragment 用
+            // push range 覆盖 4B、双 stage：实例槽号 VS/FS 都用
             let push_range = vk::PushConstantRange::default()
                 .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
                 .offset(0)
                 .size(PUSH_CONSTANTS_SIZE);
-            let set_layouts = [set0_layout, set1_layout];
+            let set_layouts = [set0_layout, set1_layout, set2_layout];
             let layout = device.create_pipeline_layout(
                 &vk::PipelineLayoutCreateInfo::default()
                     .set_layouts(&set_layouts)
@@ -283,7 +233,7 @@ impl GraphicsPipeline {
             info!(
                 "图形管线就绪: dynamic rendering（color {color_format:?} / depth {depth_format:?}），\
                  顶点输入 32B 交错（pos/normal/uv @ 0/12/24），reverse-Z（clear 0 + GREATER），\
-                 viewport 正高度直出，剔除关，push 96B（0/64/68/80），set0/set1 来自常驻表"
+                 viewport 正高度直出，剔除关，push 4B（实例槽号，参数进 GPU 常驻表），set0/set1/set2 同源绑定"
             );
             Ok(Self {
                 device: device.clone(),

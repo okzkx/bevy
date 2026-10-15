@@ -43,8 +43,8 @@ use crate::{
     common::syntax::{OnceLog, OptionTierExt, ResultTierExt},
     scene::{AssetInvalidations, AssetReadiness, AssetRetirements, InstanceLedger},
     vulkan::{
-        sampler_key, FramePool, GpuImage, ImageCache, MeshPool, StagingImageCopy, UploadBatch,
-        Uploader,
+        pack_object_record, sampler_key, FramePool, GpuImage, ImageCache, InstanceTables, MeshPool,
+        StagingCopy, StagingImageCopy, UploadBatch, Uploader, OBJECT_RECORD_SIZE,
     },
 };
 
@@ -110,6 +110,9 @@ pub(crate) struct UploadData<'w> {
     /// 卸载回收账面:事件读侧记下的待回收身份,本系统独占消费
     /// (take + 驻留条目出账)。
     retirements: ResMut<'w, AssetRetirements>,
+    /// GPU 常驻绘制数据(对象表/材质槽/停尸房):实例槽分配与记录换槽的
+    /// 写点独占本系统(行盘点期间);环的写入在帧循环(draw_frame)。
+    instance_tables: ResMut<'w, InstanceTables>,
     /// overlay 图集账面:旧代停尸房并入本排空点;overlay 未装时
     /// 缺席 = None(no-op)。
     atlas: Option<ResMut<'w, crate::overlay::AtlasGpu>>,
@@ -141,6 +144,7 @@ pub(crate) fn flush_uploads(
         mut invalidations,
         mut readiness,
         mut retirements,
+        mut instance_tables,
         mut atlas,
         ref ctx,
         ref frames,
@@ -156,6 +160,16 @@ pub(crate) fn flush_uploads(
     pool.drain_graveyard(&uploader, &mut || frames.wait_all_inflight())
         .or_fatal("网格回收停尸房排空失败(帧侧等待),上传链无法继续")?;
     let drained_slots = tables.drain_retired_slots();
+    // —— 0.4) 对象表停尸房排空 + 槽位交接账消费:行删除/换绑换下的旧实例槽
+    // (update_ledger 交接而来)进停尸房,等"图形最后使用"后排空归 free list
+    // ——与网格/贴图停尸房同一节拍,共用同一次帧侧等待。排空先于本帧槽位
+    // 分配:复用槽的旧记录读者已全部收口,新记录写入无竞态。
+    for slot in ledger.take_freed_slots() {
+        instance_tables.retire_object_slot(slot);
+    }
+    instance_tables
+        .drain_graveyard(&mut || frames.wait_all_inflight())
+        .or_fatal("对象表停尸房排空失败(帧侧等待),上传链无法继续")?;
     // —— 0.5) 卸载回收消费:事件读侧记下的待回收身份出账——驻留条目
     // 进停尸房(网格区间/旧图)、描述符槽进待回收账(下帧步骤 0 排空后才真正
     // 复用/销毁),失效凭据一并出清(资产已不在容器,凭据是僵尸账)。**先于脏行
@@ -207,8 +221,10 @@ pub(crate) fn flush_uploads(
     // mesh 未驻留 = DrawList 本就暂缓该行,失败贴图 = fallback 白图照画)
     let mut failed_settled_rows = 0usize;
     let dirty_entities: Vec<Entity> = ledger.dirty_entities().collect();
+    // 对象记录待写集（行扫描收集,排批段并入 staging）:(实例槽, 记录 48B)。
+    let mut staged_records: Vec<(u32, [u8; OBJECT_RECORD_SIZE as usize])> = Vec::new();
     for entity in dirty_entities {
-        let Some(row) = ledger.row(entity) else {
+        let Some(row) = ledger.row(entity).cloned() else {
             // 行已清(同帧先摘后挂等时序):脏标一并清,不留悬空脏标
             settled_rows.push(entity);
             continue;
@@ -220,7 +236,8 @@ pub(crate) fn flush_uploads(
         let mut failed_leg = false;
         let mesh_id = row.mesh.id();
         let mesh_replace = invalidations.mesh_pending(mesh_id);
-        if pool.resident(mesh_id).is_some() && !mesh_replace {
+        let mesh_leg_done = pool.resident(mesh_id).is_some() && !mesh_replace;
+        if mesh_leg_done {
             // 该腿完成
         } else if readiness.mesh_failed(mesh_id) {
             failed_leg = true;
@@ -258,6 +275,45 @@ pub(crate) fn flush_uploads(
                     pending_leg = true;
                     materials_pending += 1;
                 }
+            }
+        }
+        // —— 实例槽与对象记录(5.1):mesh 腿完成才动(记录内容来自 MeshSlot)。
+        // 记录身份 (mesh 身份, 内容票据, 材质身份) 三者不变 = 内容不变,免重写;
+        // 变化(首次驻留/换绑/换内容)走"新槽写 + 旧槽停尸房"(从不原地覆盖
+        // ——在飞 draw 可能在读旧记录)。材质**内容**不进记录:材质环每帧
+        // 全量重写,内容变化自动生效(材质槽索引跨帧稳定)。
+        // 材质缺/贴图 pending 不拦记录(记录只持材质槽号,内容环里现读)。
+        if mesh_leg_done {
+            // 腿判定刚确认驻留,取不到是状态矛盾(与"容量保证后池缺席"同级)
+            let mesh_slot = pool
+                .resident(mesh_id)
+                .ok_or_fatal("mesh 腿判定完成后驻留条目消失,状态矛盾")?;
+            let bound = (mesh_id, mesh_slot.ticket, row.material.id());
+            if row.instance_slot.is_none() || row.bound != Some(bound) {
+                let mat_index = instance_tables
+                    .ensure_material_slot(row.material.id())
+                    .or_fatal("材质槽分配失败,上传链无法继续")?;
+                let slot = instance_tables
+                    .alloc_object_slot()
+                    .or_fatal("对象表实例槽分配失败,上传链无法继续")?;
+                let old_slot = ledger.set_instance_slot(entity, slot, bound);
+                if let Some(old) = old_slot {
+                    instance_tables.retire_object_slot(old);
+                }
+                let (aabb_min, aabb_max) = mesh_slot.local_aabb;
+                staged_records.push((
+                    slot,
+                    pack_object_record(
+                        mesh_slot.first_index(),
+                        mesh_slot.index_count,
+                        mesh_slot.vertex_base(),
+                        mat_index,
+                        aabb_min,
+                        aabb_max,
+                    ),
+                ));
+                // 新槽的模型要写进两个帧槽的环(本帧 + 下帧各一写)
+                ledger.mark_model_dirty(entity);
             }
         }
         if !pending_leg {
@@ -334,7 +390,7 @@ pub(crate) fn flush_uploads(
             },
         }
     }
-    if converted.is_empty() && image_specs.is_empty() {
+    if converted.is_empty() && image_specs.is_empty() && staged_records.is_empty() {
         // 空批不提交;pending 帧末对账照走——未到货的等待帧数照常累计
         readiness.reconcile(&marked_meshes, &marked_images);
         return Ok(());
@@ -389,7 +445,10 @@ pub(crate) fn flush_uploads(
                 .map_or(0, Vec::len) as u64
         })
         .sum();
-    let mut staging = Vec::with_capacity((vertex_bytes + index_bytes + image_bytes) as usize);
+    let mut staging = Vec::with_capacity(
+        (vertex_bytes + index_bytes + image_bytes) as usize
+            + staged_records.len() * OBJECT_RECORD_SIZE as usize,
+    );
     let mut uploads = Vec::with_capacity(converted.len() * 2);
     let mut image_uploads = Vec::with_capacity(image_specs.len());
     let mut planned: Vec<(
@@ -438,6 +497,21 @@ pub(crate) fn flush_uploads(
             height: spec.height,
         });
     }
+    // —— 对象记录入批:staging 排布 → 对象表拷贝段(48B/记录,按实例槽定址)。
+    // 记录写经本批票据保护,图形提交在 ALL_COMMANDS 等票据——"上传完成才可
+    // 使用"同一条执法点(读侧;写侧由"槽位只来自 bump 或排空点归还"保证)。
+    let mut record_bytes = 0u64;
+    for (slot, record) in &staged_records {
+        let src_offset = staging.len() as u64;
+        staging.extend_from_slice(record);
+        uploads.push(StagingCopy {
+            dst: instance_tables.object_buffer(),
+            src_offset,
+            dst_offset: u64::from(*slot) * OBJECT_RECORD_SIZE,
+            size: OBJECT_RECORD_SIZE,
+        });
+        record_bytes += OBJECT_RECORD_SIZE;
+    }
     // 跨族内存可见性不靠 release/acquire 成对:图像与池一样走 CONCURRENT 双族
     // 共享——上传批次的图像收尾是纯布局转换(IGNORED 族),
     // 跨队列内存可见性由图形提交等票据信号量收口(见 frames.rs 提交段注释)。
@@ -463,11 +537,27 @@ pub(crate) fn flush_uploads(
     for (id, replace, c, vertex, index) in planned {
         if replace {
             // 旧槽位进停尸房(在飞安全,排空后归还 free list),返回值无需持有
-            let _old_slot = pool.replace(id, vertex, index, c.vertex_count, c.index_count, ticket);
+            let _old_slot = pool.replace(
+                id,
+                vertex,
+                index,
+                c.vertex_count,
+                c.index_count,
+                c.local_aabb,
+                ticket,
+            );
             replaced_meshes += 1;
         } else {
-            pool.commit(id, vertex, index, c.vertex_count, c.index_count, ticket)
-                .or_fatal("驻留登记失败,上传链无法继续")?;
+            pool.commit(
+                id,
+                vertex,
+                index,
+                c.vertex_count,
+                c.index_count,
+                c.local_aabb,
+                ticket,
+            )
+            .or_fatal("驻留登记失败,上传链无法继续")?;
         }
         committed_meshes.push(id);
     }
@@ -510,26 +600,39 @@ pub(crate) fn flush_uploads(
         .iter()
         .filter(|(_, _, spec, _)| spec.srgb_role())
         .count();
-    // 计量:上传侧累计进账本(判定线的字节/批次口径)
-    let batch_bytes = vertex_bytes + index_bytes + image_bytes;
+    // 计量:上传侧累计进账本(判定线的字节/批次口径);对象记录字节并入
+    // 批次字节、槽位读数单独报(对象表/材质槽分列——判定线 4 的证据口径)
+    let batch_bytes = vertex_bytes + index_bytes + image_bytes + record_bytes;
     let dirty_after = ledger.dirty_count();
     let stats = &mut ledger.stats;
     stats.upload_batches_total += 1;
     stats.upload_bytes_total += batch_bytes;
     stats.last_batch_bytes = batch_bytes;
     stats.dirty_rows = dirty_after;
+    stats.object_slots = usize::try_from(instance_tables.used_object_slots())
+        .unwrap_or(usize::MAX);
+    stats.material_slots = usize::try_from(instance_tables.used_material_slots())
+        .unwrap_or(usize::MAX);
     info!(
         "上传批次 #{ticket}:mesh {} 个(其中换内容 {replaced_meshes},顶点 {vertex_bytes}B / 索引 {index_bytes}B)\
-         + 贴图 {} 张(其中换内容重传 {replaced_images},{image_bytes}B,sRGB 角色 {srgb_count} / 线性 {});\
+         + 贴图 {} 张(其中换内容重传 {replaced_images},{image_bytes}B,sRGB 角色 {srgb_count} / 线性 {})\
+         + 对象记录 {} 条(换槽重写,{record_bytes}B);\
          槽位发布:纹理槽 {}/{}(含 fallback 0 号)、采样器槽 {} 种(本批涉及 {new_sampler});\
+         实例槽 {}/{}(停尸房 {})、材质槽 {}/{};\
          未到货跳过 mesh {pending} / 贴图 {pending_images}(材质缺 {materials_pending}),失败出队行 {failed_settled_rows};\
          已驻留 mesh {} / 贴图 {}",
         planned_count,
         image_specs.len(),
         image_specs.len() - srgb_count,
+        staged_records.len(),
         tables.used_texture_slots(),
         tables.capacity(),
         tables.used_sampler_slots(),
+        instance_tables.used_object_slots(),
+        instance_tables.capacity_objects(),
+        instance_tables.graveyard_count(),
+        instance_tables.used_material_slots(),
+        instance_tables.capacity_materials(),
         pool.resident_count(),
         image_cache.resident_count(),
         new_sampler = sampler_slots_hit.len(),

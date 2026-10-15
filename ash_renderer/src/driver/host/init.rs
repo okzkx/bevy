@@ -23,7 +23,7 @@ use crate::{
     common::syntax::ResultTierExt,
     overlay::{AtlasGpu, UiVertexRing},
     vulkan::{
-        BindlessTables, Context, FramePool, GraphicsPipeline, ImageCache, MeshPool,
+        BindlessTables, Context, FramePool, GraphicsPipeline, ImageCache, InstanceTables, MeshPool,
         OverlayPipeline, Swapchain, Uploader, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
@@ -41,11 +41,11 @@ pub(super) fn init_vulkan(
     _main_thread: NonSendMarker,
     mut commands: Commands,
 ) -> Result<(), BevyError> {
-    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, pipeline, overlay_pipeline, ui_ring) =
+    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, pipeline, overlay_pipeline, ui_ring) =
         try_init_vulkan(&wrapper)
-            .or_fatal("Vulkan 初始化失败，资源束一个都不插入")?; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过
+            .or_fatal("Vulkan 初始化失败，资源束一个都不插入")?; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过帧循环
     info!(
-        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ GraphicsPipeline + OverlayPipeline + UiVertexRing；清屏+绘制自下一帧（Last）起"
+        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GraphicsPipeline + OverlayPipeline + UiVertexRing；清屏+绘制自下一帧（Last）起"
     );
     // 插入顺序 = 创建顺序；World 清场顺序不定，退出时的反序拆除见 teardown_vulkan
     commands.insert_resource(ctx);
@@ -55,6 +55,7 @@ pub(super) fn init_vulkan(
     commands.insert_resource(uploader);
     commands.insert_resource(image_cache);
     commands.insert_resource(tables);
+    commands.insert_resource(instance_tables);
     commands.insert_resource(pipeline);
     commands.insert_resource(overlay_pipeline);
     commands.insert_resource(ui_ring);
@@ -108,6 +109,13 @@ fn try_init_vulkan(
         ctx.queue_family_index,
         TABLE_CAPACITY,
     )?;
+    // GPU 常驻绘制数据（5.1）：对象表（DEVICE_LOCAL，staging 写）+ 模型/材质环
+    //（host-visible 每帧写）+ set2 三条只读 storage（自建 pool，init 一次写入）
+    let instance_tables = InstanceTables::new(
+        &ctx.device,
+        ctx.memory_contract(),
+        &pool_sharing_families(&ctx),
+    )?;
     // 图形管线：吃 swapchain 的渲染 view 格式与帧槽深度格式，布局与常驻表同源
     let pipeline = GraphicsPipeline::new(
         &ctx,
@@ -115,6 +123,7 @@ fn try_init_vulkan(
         DEPTH_FORMAT,
         tables.set0_layout(),
         tables.set1_layout(),
+        instance_tables.set2_layout(),
     )?;
     // overlay 管线：UI 半边的第二管线——只借常驻表 set0（无 set1），预乘混合；
     // 深度格式与渲染实例对齐但读写全关（VUID-08914），与场景管线同批拆除（layout
@@ -131,8 +140,8 @@ fn try_init_vulkan(
     // 成功路径：护栏被 mem::forget 跳过 Drop，排空责任交还 teardown 序
     std::mem::forget(drain_guard);
     Ok((
-        ctx, swapchain, frames, pool, uploader, image_cache, tables, pipeline, overlay_pipeline,
-        ui_ring,
+        ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, pipeline,
+        overlay_pipeline, ui_ring,
     ))
 }
 
@@ -188,6 +197,9 @@ pub(super) fn teardown_vulkan(world: &mut World) {
     // 再拆本体
     world.remove_resource::<OverlayPipeline>();
     world.remove_resource::<GraphicsPipeline>();
+    // GPU 常驻绘制数据随管线之后拆（管线 layout 借用其 set2 layout），描述符
+    // 只指向自己的三份 buffer——随字段 Drop，顺序在资产级自由
+    world.remove_resource::<InstanceTables>();
     world.remove_resource::<Uploader>();
     world.remove_resource::<MeshPool>();
     world.remove_resource::<BindlessTables>();
@@ -211,6 +223,7 @@ type InitChain = (
     Uploader,
     ImageCache,
     BindlessTables,
+    InstanceTables,
     GraphicsPipeline,
     OverlayPipeline,
     UiVertexRing,

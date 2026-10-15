@@ -18,9 +18,11 @@
 //! 编排方 [`crate::driver::host`] 只消费本层重出口的类型，不进子模块内部。
 
 mod context;
+mod depth;
 mod descriptors;
 mod frames;
 mod images;
+mod instance_table;
 mod mesh_convert;
 mod overlay_pipeline;
 mod pipeline;
@@ -35,13 +37,17 @@ pub use descriptors::{
     PLACEHOLDER_DIR_TO_LIGHT,
     FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
 };
-pub use frames::{DepthTarget, DrawCall, FrameDraw, Frame, FramePool, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT};
-pub use images::{image_spec, sampler_key, GpuImage, ImageCache, ImageConvertError, ImageSpec, SamplerKey};
+pub use frames::{DepthTarget, DrawCall, FrameDraw, Frame, FramePool, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT};pub use images::{image_spec, sampler_key, GpuImage, ImageCache, ImageConvertError, ImageSpec, SamplerKey};
+pub use instance_table::{
+    conservative_world_aabb, pack_material_record, pack_model, pack_object_record, InstanceTables,
+    MATERIAL_RECORD_SIZE, MATERIAL_TABLE_CAPACITY, MODEL_STRIDE, OBJECT_RECORD_SIZE,
+    OBJECT_TABLE_CAPACITY,
+};
 pub use mesh_convert::{convert_mesh, ConvertedMesh, MeshConvertError, VERTEX_STRIDE};
 pub use overlay_pipeline::{
     pack_ui_push, OverlayPipeline, UiDrawCall, UiPaint, UI_PUSH_CONSTANTS_SIZE, UI_VERTEX_STRIDE,
 };
-pub use pipeline::{pack_push, GraphicsPipeline, PushData, PUSH_CONSTANTS_SIZE};
+pub use pipeline::{GraphicsPipeline, PUSH_CONSTANTS_SIZE};
 pub use pool::{MeshPool, MeshSlot, PoolRange};
 pub use resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
 pub use swapchain::{AcquireOutcome, PresentOutcome, Swapchain};

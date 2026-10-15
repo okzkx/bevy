@@ -29,6 +29,7 @@ use bevy::{
 use ash_macros::system;
 use crate::vulkan::Context;
 
+mod drawlist;
 mod frame;
 mod init;
 

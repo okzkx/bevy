@@ -402,6 +402,7 @@ fn upload_asset(
         index,
         converted.vertex_count,
         converted.index_count,
+        converted.local_aabb,
         ticket,
     )
     .expect("登记(探针内身份唯一)");

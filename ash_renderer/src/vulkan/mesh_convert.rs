@@ -56,6 +56,9 @@ pub struct ConvertedMesh {
     pub indices: Vec<u8>,
     pub vertex_count: u32,
     pub index_count: u32,
+    /// 局部包围盒(POSITION 逐点 min/max,与顶点同源一次扫出)——对象表记录的
+    /// 包围体素材(5.1:随驻留入库;世界空间保守推导与消费归 5.2)。
+    pub local_aabb: ([f32; 3], [f32; 3]),
 }
 
 /// 转换一个网格;拒绝条件见模块文档(缺失 POSITION / 非 TriangleList / 空)。
@@ -114,9 +117,16 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
     // to_le_bytes 让布局不依赖平台内建序的巧合)。逐顶点三次 extend——55392 顶点
     // 级别的量,可读性优先,不为微优化引入 bytemuck 依赖。
     let mut vertices = Vec::with_capacity(vertex_count * VERTEX_STRIDE as usize);
+    let mut aabb_min = [f32::INFINITY; 3];
+    let mut aabb_max = [f32::NEG_INFINITY; 3];
     for i in 0..vertex_count {
         for b in positions[i] {
             vertices.extend_from_slice(&b.to_le_bytes());
+        }
+        // 包围盒与顶点交错同一遍扫出(POSITION 是逐点全量,边界即真值)
+        for (k, v) in positions[i].into_iter().enumerate() {
+            aabb_min[k] = aabb_min[k].min(v);
+            aabb_max[k] = aabb_max[k].max(v);
         }
         match normals {
             Some(n) => {
@@ -161,5 +171,6 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
         indices,
         vertex_count: vertex_count as u32,
         index_count: index_count as u32,
+        local_aabb: (aabb_min, aabb_max),
     })
 }

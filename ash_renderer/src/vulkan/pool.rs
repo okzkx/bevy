@@ -62,6 +62,8 @@ pub struct MeshSlot {
     pub index: PoolRange,
     pub vertex_count: u32,
     pub index_count: u32,
+    /// 局部包围盒(min,max;转换器逐点扫出)——对象表记录的包围体素材。
+    pub local_aabb: ([f32; 3], [f32; 3]),
     /// 发布本内容的上传批次完成票据(3.4 图形提交按它等数据;CPU 侧仅在
     /// 复用/维护/退出时等待)。0 = 初始分配批(无拷贝)。
     pub ticket: u64,
@@ -433,6 +435,10 @@ impl MeshPool {
     ///
     /// # Errors
     /// 该资产身份已有驻留条目(去重纪律被打破)。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "驻留条目即七项事实(身份/两池区间/两计数/包围盒/票据),拆结构体的收益不抵两处解构"
+    )]
     pub fn commit(
         &mut self,
         id: AssetId<Mesh>,
@@ -440,6 +446,7 @@ impl MeshPool {
         index: PoolRange,
         vertex_count: u32,
         index_count: u32,
+        local_aabb: ([f32; 3], [f32; 3]),
         ticket: u64,
     ) -> Result<()> {
         let slot = MeshSlot {
@@ -447,6 +454,7 @@ impl MeshPool {
             index,
             vertex_count,
             index_count,
+            local_aabb,
             ticket,
         };
         if self.residency.insert(id, slot).is_some() {
@@ -463,6 +471,10 @@ impl MeshPool {
     /// [`Self::commit`] 的分工:编排层持失效凭据(AssetInvalidations)才允许
     /// 走 replace,纪律边界在编排层,vulkan 层只提供换条目的能力。
     #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "驻留条目即七项事实(身份/两池区间/两计数/包围盒/票据),与 commit 同款"
+    )]
     pub fn replace(
         &mut self,
         id: AssetId<Mesh>,
@@ -470,6 +482,7 @@ impl MeshPool {
         index: PoolRange,
         vertex_count: u32,
         index_count: u32,
+        local_aabb: ([f32; 3], [f32; 3]),
         ticket: u64,
     ) -> Option<MeshSlot> {
         let slot = MeshSlot {
@@ -477,6 +490,7 @@ impl MeshPool {
             index,
             vertex_count,
             index_count,
+            local_aabb,
             ticket,
         };
         let old = self.residency.insert(id, slot);
