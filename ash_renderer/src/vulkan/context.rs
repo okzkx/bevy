@@ -217,7 +217,12 @@ impl Context {
                 .iter()
                 .enumerate()
                 .find(|(i, f)| {
+                    // COMPUTE 是 5.2 起的选族硬条件（视锥剔除 dispatch 跑图形族，
+                    // 同队列最简——无跨队列信号量）：compute 是 1.0 core 无 feature
+                    // 位，但"支持"必须在此钉成硬条件而非口头确认（1.3 基线同纪律：
+                    // 不达标的设备出局并记日志，比创建后 dispatch 炸了便宜）
                     f.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                        && f.queue_flags.contains(vk::QueueFlags::COMPUTE)
                         && unsafe {
                             surface_fns.get_physical_device_surface_support(pd, *i as u32, surface)
                         }
@@ -238,7 +243,7 @@ impl Context {
         }
         let Some((_score, queue_family_index, physical_device)) = best else {
             return Err(VulkanError::Init(
-                "没有报支持 Vulkan 1.3 且 graphics+present 同支持的物理设备".into(),
+                "没有报支持 Vulkan 1.3 且 graphics+present+compute 同支持的物理设备".into(),
             ));
         };
 
@@ -407,7 +412,7 @@ impl Context {
         let memory_contract =
             unsafe { crate::vulkan::MemoryContract::new(&instance, physical_device) };
         info!(
-            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  features[支持→已启用]: timelineSemaphore {}→on  dynamicRendering {}→on  descriptorIndexing+4 位 {}→on  swapchain_mutable_format on  验证层 {}",
+            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}（GRAPHICS+COMPUTE+PRESENT，5.2 前置闸门①实测钉明）  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  features[支持→已启用]: timelineSemaphore {}→on  dynamicRendering {}→on  descriptorIndexing+4 位 {}→on  swapchain_mutable_format on  synchronization2 off（屏障走传统形状）  验证层 {}",
             vk::api_version_major(dev_props.api_version),
             vk::api_version_minor(dev_props.api_version),
             vk::api_version_patch(dev_props.api_version),

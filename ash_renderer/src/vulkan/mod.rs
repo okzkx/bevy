@@ -13,11 +13,13 @@
 //! | `mesh_convert` | 纯函数 | `Assets<Mesh>` → 32B 交错顶点 + U32 索引 |
 //! | `images` | 资产级 | 贴图:bevy `Image` → VkImage/view/sampler + 驻留缓存 |
 //! | `descriptors` | 资产级 | 常驻描述符表(set0 双表/set1 每帧 UBO)+ 槽位发布 |
+//! | `cull` | 进程级+纯函数 | 视锥剔除 compute 半边(5.2):CullPass 管线 + 平面提取 + CPU 参照 + 诊断账面 |
 //!
 //! 拆分点：同步对象不挂任何一张 swapchain image 上——重建 swapchain 时原地不动；
 //! 编排方 [`crate::driver::host`] 只消费本层重出口的类型，不进子模块内部。
 
 mod context;
+mod cull;
 mod depth;
 mod descriptors;
 mod frames;
@@ -32,6 +34,10 @@ mod swapchain;
 mod uploader;
 
 pub use context::Context;
+pub use cull::{
+    aabb_outside_plane, aabb_visible, frustum_planes, pack_cull_push, CullDiagnostics, CullDraw,
+    CullPass, CullSettings, CULL_PUSH_SIZE,
+};
 pub use descriptors::{
     pack_frame_uniforms, BindlessTables, FrameUniformsData, SlotBinding, TABLE_CAPACITY,
     PLACEHOLDER_DIR_TO_LIGHT,
@@ -40,7 +46,7 @@ pub use descriptors::{
 pub use frames::{DepthTarget, DrawCall, FrameDraw, Frame, FramePool, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT};pub use images::{image_spec, sampler_key, GpuImage, ImageCache, ImageConvertError, ImageSpec, SamplerKey};
 pub use instance_table::{
     conservative_world_aabb, pack_material_record, pack_model, pack_object_record, InstanceTables,
-    MATERIAL_RECORD_SIZE, MATERIAL_TABLE_CAPACITY, MODEL_STRIDE, OBJECT_RECORD_SIZE,
+    MARK_SIZE, MATERIAL_RECORD_SIZE, MATERIAL_TABLE_CAPACITY, MODEL_STRIDE, OBJECT_RECORD_SIZE,
     OBJECT_TABLE_CAPACITY,
 };
 pub use mesh_convert::{convert_mesh, ConvertedMesh, MeshConvertError, VERTEX_STRIDE};

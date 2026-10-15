@@ -2,6 +2,8 @@
 
 > 2026-10-15 立案（用户指令，纯文档立案）。对应[路线图](../学习目标实现步骤.md)步骤 5：先让 GPU 独立决定画哪些实例，再扩大规模。本文管步骤 5 做什么、按什么顺序、验收什么；段目录与段级施工计划开工时立（一次只施工一段），"实际做了什么"开工后另立施工记录，不回写本文。
 >
+> **一句话说明**：步骤 5 要把"画哪些实例"逐步交给 GPU——5.1 绘制数据常驻（GPU 按实例索引读）打底，5.2 compute 视锥剔除（GPU 写可见标记），5.3 indirect 闭环（GPU 写绘制参数，CPU 提交与对象数解耦），5.4 再扩到常驻大场景，5.5 三档压测收口。"CPU 不回读可见集、不逐对象重建 draw list"是贯穿全程的红线；Hi-Z、LOD、流送都归步骤 6。
+>
 > **场景与规模定案（2026-10-15）**：**5.1～5.3 以 FlightHelmet 小场景验正确性**——小场景足以暴露数据依赖、剔除与 indirect 的错误；**5.4 起小场景不够**，交付"常驻大场景生成器"程序化铺实例（bevy_city 为参照不是底座），不找更大的 glTF 文件；**5.5 按 1 万/5 万/10 万三档压测**（起始档/目标档/压力档），能承载的规模由测量给出。
 
 ## 0. 定位：现状与要换掉的东西
@@ -34,13 +36,13 @@ M2 前置契约已注明"全量拓扑快照与逐 draw push constants 是阶段�
 ### 5.2 GPU frustum
 
 - **前置闸门**（最先做，独立小任务）：compute 环境四件——图形队列族 compute 支持确认（当前按打分选族未显式查 compute，施工时实测钉明；备选=独立 compute 队列族）、naga compute WGSL→SPIR-V 编译链验证（build.rs 现只走图形入口）、spirv-val 过、compute pipeline 首跑空转通过。当前 1.2/1.3 只启用了 timeline_semaphore、descriptor_indexing、dynamic_rendering，compute 是 1.0 core 无 feature 开关，但**支持≠验证，前置闸门补齐前不开工本段主体**。
-- **交付**：compute shader 对对象表做视锥→可见标记；compute 写→图形读的依赖显式化（barrier 形状，synchronization2 已启用）。
+- **交付**：compute shader 对对象表做视锥→可见标记；compute 写→图形读的依赖显式化（barrier 形状——核实订正 2026-10-15：现状屏障走传统 `cmd_pipeline_barrier`，synchronization2 设备 feature **未启用**，此前"已启用"系与同步验证层（instance 级 `SYNCHRONIZATION_VALIDATION`）混淆；启用与否 [5.2 段施工计划](5.2-GPU视锥剔除/施工计划：GPU视锥剔除拆解.md)待决钉明）。
 - **判定线**：①可见标记与 CPU 参照对照一致——**CPU 参照只做正确性验证，不驱动绘制**；②CPU 每对象剔除不存在、可见集不回读驱动绘制（红线，与 5.3 共同遵守）；③剔除开关 A/B 画面一致（只被剔除的都不可见）。
 
 ### 5.3 indirect 闭环
 
 - **交付**：compute 写 indirect 参数（`drawIndirectCount` 为 1.2 core、`multiDrawIndirect` 为 1.1 core，进程已请求 API 1.3，无需额外 feature——施工时以 capability 日志钉明）；图形提交消费 GPU 写的参数；起步口径 = **固定槽位、不可见 `instanceCount=0`**（路线图已定，不做压缩合批起步）。
-- **判定线**：①CPU 绘制调用数固定不随 N 增长（1 万档实测读数）；②不可见对象 `instanceCount=0` 且不产生对应 GPU 工作；③不回读可见集（红线）；④5.1/5.2 判定线零回退。
+- **判定线**：①CPU 绘制调用数固定不随 N 增长（1 万档实测读数）；②不可见对象 `instanceCount=0` 且不产生对应 GPU 工作；③不回读可见集（红线）；④5.1/5.2 判定线零回退；⑤剔除开关**画面级** A/B——只被剔除的都不可见（自 5.2 判定线③挪入：画面级 A/B 需绘制侧消费可见标记，2026-10-15 拍板随 indirect 消费归本段，5.2 只验标记数据层，见 [5.2 段施工计划](5.2-GPU视锥剔除/施工计划：GPU视锥剔除拆解.md)待决 5）。
 
 ### 5.4 常驻大场景组织
 

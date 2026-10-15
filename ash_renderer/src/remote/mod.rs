@@ -11,6 +11,7 @@
 //! | [`mouse`] | 虚拟鼠标：窗口无关鼠标输入源，注入 `Messages<WindowEvent>` 与 bevy_winit 同层 |
 //! | [`objects`] | 对象生命周期方法族：spawn 克隆/换柄写方法 + increment_stats 统计读数 |
 //! | [`assets`] | 资产内容变更 + 运行期动态加载：mutate/load_mesh/load_image/reload |
+//! | [`cull`] | 剔除读数与开关（5.2）：cull_stats 对照 + cull_set_enabled 开关 |
 //!
 //! 机制与边界（侦察笔记《bevy_remote：BRP远程协议与自定义方法》）：handler 本身
 //! 就是一个 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍执行——写值下一帧
@@ -18,6 +19,7 @@
 //! 安全边界：默认只绑 loopback、完全无鉴权，仅限本机调试使用，不改绑对外地址。
 
 pub mod assets;
+pub mod cull;
 pub mod mouse;
 pub mod objects;
 
@@ -32,6 +34,7 @@ use serde_json::{json, Value};
 
 use self::{
     assets::{load_image_cmd, load_mesh_cmd, mutate_asset_cmd, reload_asset_cmd},
+    cull::{cull_set_enabled, cull_stats},
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     objects::{increment_stats, replace_handles, spawn_primitive},
 };
@@ -66,7 +69,9 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/mouse_move", mouse_move)
                 .with_method_main("ash_renderer/mouse_button", mouse_button)
                 .with_method_main("ash_renderer/mouse_wheel", mouse_wheel)
-                .with_method_main("ash_renderer/mouse_status", mouse_status),
+                .with_method_main("ash_renderer/mouse_status", mouse_status)
+                .with_method_main("ash_renderer/cull_stats", cull_stats)
+                .with_method_main("ash_renderer/cull_set_enabled", cull_set_enabled),
             RemoteHttpPlugin::default(),
         ));
     }

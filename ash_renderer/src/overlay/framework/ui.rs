@@ -41,6 +41,7 @@ use crate::overlay::windows::entity_tree_window::{
     EntityTreeData, EntityTreeWindow, SelectedDetails, SelectedEntity, TransformDragCache,
     collect_selected_details,
 };
+use crate::vulkan::{CullDiagnostics, CullSettings};
 
 use ash_macros::system;
 
@@ -166,6 +167,10 @@ struct DebugUiParams<'w, 's> {
     cameras: Query<'w, 's, &'static GlobalTransform, With<Camera>>,
     /// Transform 编辑排队（pass 产，清账系统消费）
     edit_queue: ResMut<'w, TransformEditQueue>,
+    /// 剔除开关（5.2：checkbox 写，draw_frame 读）
+    cull_settings: ResMut<'w, CullSettings>,
+    /// 剔除诊断读数（draw_frame 每帧刷新，只读展示）
+    cull_diag: Res<'w, CullDiagnostics>,
 }
 
 /// Update：组 RawInput → begin_pass → 总控 + 各调试窗口（按显隐开关）→
@@ -240,6 +245,8 @@ fn run_egui_pass(
             ppp,
             mode: &mut ui.mode,
             stats: &ui.stats,
+            cull_settings: &mut ui.cull_settings,
+            cull_diag: &ui.cull_diag,
         }
         .show();
     }

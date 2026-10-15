@@ -11,8 +11,7 @@
 //!   present 已被 present engine 消费完——这是帧 fence 给不了的保证（fence 只证提交
 //!   完成，不证 present engine 的消费进度；依据 Khronos Vulkan Guide "Swapchain
 //!   semaphore reuse"；同一队列上提交有序，下一次 signal 排在前一个 present 消费之后）。
-//! - **深度附件按帧槽分配**：数量 = MAX_FRAMES_IN_FLIGHT，本体在 [`super::depth`]
-//!   （3.6 P1 摊薄兑现位）。两份同步证据：① 在飞的两帧各用各的槽位深度，并发写
+//! - **深度附件按帧槽分配**：数量 = MAX_FRAMES_IN_FLIGHT，本体在 [`super::depth`]//!   （3.6 P1 摊薄兑现位）。两份同步证据：① 在飞的两帧各用各的槽位深度，并发写
 //!   不可能撞同一张图；② 同槽深度的两次使用之间隔着 `wait_for_slot` 的 fence
 //!   等待（录制前 CPU 已确认上一轮提交完成）——不把"归帧级"当无冲突证明，冲突
 //!   不存在是由 fence + 槽位隔离证出来的。尺寸随 swapchain 重建（[`Self::rebuild_depth`]，
@@ -32,6 +31,7 @@ use ash::{vk, Device};
 use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
+use crate::vulkan::cull::CullDraw;
 use crate::vulkan::overlay_pipeline::{pack_ui_push, UiPaint};
 use crate::vulkan::Context;
 
@@ -76,6 +76,10 @@ pub struct FrameDraw<'a> {
     pub ui: Option<&'a UiPaint>,
     /// 本帧槽 UI 顶点/索引 buffer（`ui` 为 Some 时必有当帧写入）。
     pub ui_buffers: (vk::Buffer, vk::Buffer),
+    /// 视锥剔除 dispatch（5.2；空场或开关关闭为 None——关闭时 host 已把本帧
+    /// 槽标记填全可见，诊断读数仍有语义）。录制在渲染进场之前（compute 写 →
+    /// 屏障 → 图形读的依赖形状，消费归 5.3）。
+    pub cull: Option<CullDraw>,
     /// 上传票据等待值：图形提交在 GPU 侧等 timeline ≥ 此值——"上传完成才可使用"
     /// 的执法点（0 = 无上传过，跳过等待）。该等待同时收口 transfer 写的跨队列
     /// 内存可见性（池/贴图 CONCURRENT 双族共享，无所有权屏障，定案）。
@@ -326,6 +330,14 @@ impl FramePool {
             // （TRANSFER_DST→SHADER_READ_ONLY，IGNORED 族）由 uploader 图像段
             // 在 transfer 提交内完成，跨队列可见性由下方票据等待收口。
             // EXCLUSIVE 成对语义保留在 image_probe 组 C 作机制实证。
+
+            // —— 视锥剔除 dispatch（5.2，渲染进场之前）：compute 读 set2 三表
+            // + push 平面，写标记环本帧槽；随后的屏障是 compute 写→图形读的
+            // 依赖形状（消费归 5.3，判定线 3）。空场/关闭 = None（host 已把
+            // 本帧槽标记填全可见，诊断语义不断）。
+            if let Some(cull) = &draw.cull {
+                super::cull::record(device, frame.command_buffer, draw.set2, cull);
+            }
 
             // —— dynamic rendering：清屏 + 绘制。颜色 loadOp CLEAR（线性域清值，
             // SRGB view 的编码在 ROP 写出时做）；深度 loadOp CLEAR 清 0（reverse-Z
