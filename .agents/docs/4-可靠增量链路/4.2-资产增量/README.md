@@ -2,6 +2,8 @@
 
 对应[步骤 4 README](../README.md) 与[路线图](../../学习目标实现步骤.md)。主计划=[施工计划：资产增量与同柄内容变化](施工计划：资产增量与同柄内容变化.md)；本 README 是段任务面板（**状态：✅ 全部收官 2026-10-10**——当日立案当日开工当日收官，判定线全过、零修复项）。
 
+**一句话说明**：这一段补"同 Id 内容变了"的资产层通道——`Modified` 事件翻译成失效凭据加关联行重挂，flush 按"查无或失效"重传；十个实体共享一份资产也只重传一份。卸载回收归 4.4，本段只主张"事件不误动作"。
+
 ## 任务清单（4.2.1~4.2.5）
 
 - [x] **4.2.1 资产事件读侧**：`scene/mechanism/asset_events.rs`——三类资产 `MessageReader<AssetEvent<A>>`（PostUpdate，账本对账之后），`Modified` 进失效集，`Added/Removed/Unused/LoadedWithDependencies` 只计数不动作；事件计量（按变体）接入 `IncrementStats` 与 `increment_stats` 读数。

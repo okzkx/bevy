@@ -6,6 +6,8 @@
 
 **目的**：把逐对象绘制参数从 CPU 逐 draw push（96B/对象）换成 GPU 常驻对象表/材质表、按实例索引读取——GPU frustum（5.2）与 indirect 闭环（5.3）的数据地基。
 
+**一句话说明**：这一段是 GPU-driven 的地基——逐对象绘制参数从 CPU 逐 draw 推送换成 GPU 常驻三表（对象表写一次、模型环增量、材质环全量重写），shader 按实例索引读表，push 从 96B 缩到 4B。剔除和 indirect 归 5.2/5.3，本段只立"数据在 GPU 上"。
+
 ## 任务清单（5.1.1~5.1.6，全部收官）
 
 - [x] **5.1.1 数据结构定案与实现**：`vulkan/instance_table.rs`——对象表（DEVICE_LOCAL 131072 槽 × 48B，写一次/槽）+ 模型环/材质环（HOST_VISIBLE ×2 帧槽）+ set2 三条只读 storage（init 一次写入）+ 实例槽 free list/停尸房/材质槽 bump-only；3.6 冻结解冻范围 = 仅新增 set2 + push 缩 4B，set0/set1 原样。
