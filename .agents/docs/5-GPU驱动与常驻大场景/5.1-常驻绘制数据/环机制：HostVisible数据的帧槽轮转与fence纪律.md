@@ -105,3 +105,7 @@ for entity in ledger.take_model_dirty(frame) { ...写 model_ring[frame]... }
 | 材质环 | base_color + 贴图/采样器槽 ×材质槽 | ×2 | **全量** | 5.1 |
 
 四个环共享同一条 fence 纪律（写入点都在 `wait_for_slot` 之后）和同一份 GpuBuffer 写入纪律（§6）。新增一个环的三步定式：BufferRole::Storage 建份 ×帧槽数 → 描述符按帧槽绑本帧那份 → 写入点放 `wait_for_slot` 之后、按"量级×变更检测成本"选增量或全量。将来 5.2 的 compute 输入（若走 CPU 侧喂）或 6.x 的 LOD 决策数据，都是这个定式的潜在第四/五只环。
+
+### 为什么没有抽成通用 Ring 类型（取舍声明）
+
+环在代码里是**纪律 + 惯例**（`Vec<GpuBuffer>` + `current_index()` 轮转），不是类型——唯一以 Ring 命名的 `UiVertexRing`（顶点+索引成对才长成 struct）与 Uploader 内部私有的 staging `RingSlot`（按票据轮转，另一个体系）互不相干。不抽类型的理由有二：**抽象捕获不了关键不变式**——环的安全是"写点排在 `wait_for_slot` 之后"的时序事实，fence 在 FramePool、写点在调用方的调用序里，`Ring<T>` 类型装得下 buffer 装不下这条纪律，抽出来反而给"用了就安全"的虚假暗示；**四实例差异面宽于共性**（份内容/描述符形状/填充策略三维各不同，泛型参数面比四份手写实现还宽）。翻面条件：第五/六只环出现且形状收敛（K 副本 + 每帧描述符 + 双奇偶脏集同构），届时按上面定式收成 `FrameRing` 类型，`UiVertexRing`/frame_ubos 可迁入——先有稳定实例，再从实例收类型（与代码生成规范"重复模板必须下沉"的判据一致：现在的样板已经指得到 `GpuBuffer` 这个标准件，轮转只剩一行下标）。
