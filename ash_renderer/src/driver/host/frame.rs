@@ -6,10 +6,10 @@
 //! [`super::init`]。
 //!
 //! 住址：`Last`，与采集同帧闭环——Update 变更 → PostUpdate 传播+采集
-//!（`scene::ledger` 账本对账）→ Last 消费账本：查驻留账本
-//!（MeshPool/ImageCache）
-//! 与材质容器组装 DrawList（账本跨帧存活，读侧零扫描；GPU 执行异步——上传票据在
-//! GPU 侧等待，CPU 不阻塞）；材质按不透明调试策略覆盖（详见 draw_frame 收账日志）。
+//!（`scene::ledger` 账本对账）→ Last 消费账本：DrawList 槽位枚举与双环写入
+//!（[`super::drawlist`]，逐对象参数在 GPU 常驻表——5.1 起）→ 录制提交。
+//! GPU 执行异步——上传票据在 GPU 侧等待，CPU 不阻塞；材质按不透明调试
+//! 策略覆盖（详见 draw_frame 收账日志）。
 //!
 //! 帧内错误走统一错误通道（[`crate::common::error::tier_handler`]）：错误点一行
 //! `or_warn/or_fatal`（挂 context 负载 + 标 Severity）后 `?` 直冒泡，日志在 handler
@@ -38,11 +38,13 @@ use crate::{
     overlay::{paint_overlay, OverlayLogState, RenderMode, UiDrawData},
     scene::InstanceLedger,
     vulkan::{
-        pack_frame_uniforms, AcquireOutcome, BindlessTables, Context, DrawCall, FrameDraw,
-        FramePool, FrameUniformsData, GraphicsPipeline, ImageCache, MeshPool, OverlayPipeline,
-        PushData, Swapchain, Uploader,
+        pack_frame_uniforms, AcquireOutcome, BindlessTables, Context, FrameDraw,
+        FramePool, FrameUniformsData, GraphicsPipeline, ImageCache, InstanceTables, MeshPool,
+        OverlayPipeline, Swapchain, Uploader,
     },
 };
+
+use super::drawlist;
 
 /// resize 闸门状态（`draw_frame` 的 `Local`，跨帧保持）。
 ///
@@ -69,11 +71,13 @@ pub(crate) struct ResizeGate {
 #[derive(SystemParam)]
 pub(crate) struct FrameInput<'w, 's> {
     ctx: Res<'w, Context>,
-    /// 稳定槽账本（跨帧增量维护，读侧零扫描）。
-    ledger: Res<'w, InstanceLedger>,
+    /// 稳定槽账本（跨帧增量维护；模型环待写集的独占消费点在本系统）。
+    ledger: ResMut<'w, InstanceLedger>,
     std_materials: Res<'w, Assets<StandardMaterial>>,
     pool: Res<'w, MeshPool>,
     image_cache: Res<'w, ImageCache>,
+    /// GPU 常驻绘制数据（对象表/模型环/材质环）：本帧双环写入的写点。
+    instance_tables: ResMut<'w, InstanceTables>,
     pipeline: Res<'w, GraphicsPipeline>,
     /// overlay 管线：UI 半边绑定用（init 链与场景管线同批创建）。
     overlay_pipeline: Res<'w, OverlayPipeline>,
@@ -144,10 +148,11 @@ pub(crate) fn draw_frame(
     let overlay = input.overlay.take();
     let FrameInput {
         ref ctx,
-        ref ledger,
+        ref mut ledger,
         ref std_materials,
         ref pool,
         ref image_cache,
+        ref mut instance_tables,
         ref pipeline,
         ref overlay_pipeline,
         ref cameras,
@@ -225,59 +230,27 @@ pub(crate) fn draw_frame(
         Err(e) => return Err(fatal("acquire 失败，渲染链无法继续", e)),
     };
 
-    // 3) 组装 DrawList：账本行 → 驻留账本/资产容器 → push + 池引脚。
-    // mesh/材质未驻留/未到货 = 该 primitive 暂缓（Tier①，账本行驻留后自愈）；
-    // 缺 base color 贴图 = fallback 白图照画（缺资源用有效 fallback 或暂缓 draw，
-    // 贴图缺不拦几何）。账本读是纯 HashMap 走访——零组件扫描零 tick 比较。
-    let mut draws: Vec<DrawCall> = Vec::with_capacity(ledger.len());
-    let mut pending_rows = 0usize;
-    let mut alpha_override = 0usize;
-    for (_entity, row) in ledger.rows() {
-        let Some(slot) = pool.resident(row.mesh.id()) else {
-            pending_rows += 1;
-            continue;
-        };
-        let Some(material) = std_materials.get(&row.material) else {
-            pending_rows += 1;
-            continue;
-        };
-        let color = material.base_color.to_linear();
-        if color.alpha < 1.0 {
-            alpha_override += 1;
-        }
-        let slots = material
-            .base_color_texture
-            .as_ref()
-            .and_then(|handle| image_cache.slots(handle.id()))
-            .unwrap_or_else(BindlessTables::fallback_slots);
-        draws.push(DrawCall {
-            push: PushData {
-                model: row.model.to_cols_array(),
-                tex_index: slots.texture,
-                sampler_index: slots.sampler,
-                base_color: [color.red, color.green, color.blue, color.alpha],
-            },
-            vertex_base: slot.vertex_base(),
-            first_index: slot.first_index(),
-            index_count: slot.index_count,
-        });
-    }
-    if pending_rows > 0 {
+    // 3) 组装 DrawList：槽位枚举（账本行 → 实例槽 + 池引脚；逐对象参数已进
+    // GPU 常驻表，push 只剩 4B 实例槽号——见 drawlist 模块文档）。可绘判定
+    // 与 4.x 语义一致：实例槽缺/mesh 未驻留/材质缺席 = 暂缓（Tier① 自愈）。
+    let assembly = drawlist::assemble(ledger, pool, std_materials);
+    if assembly.pending_rows > 0 {
         if !draw_state.warned_pending {
             draw_state.warned_pending = true;
             info!(
-                "DrawList 暂缓 {pending_rows}/{} 行（mesh/材质未驻留或未到货，上传链自愈后消失）",
+                "DrawList 暂缓 {}/{} 行（实例槽/mesh/材质未就绪，上传链自愈后消失）",
+                assembly.pending_rows,
                 ledger.len(),
             );
         }
     } else {
         draw_state.warned_pending = false;
     }
-    if !ledger.is_empty() && pending_rows == 0 {
+    if !ledger.is_empty() && assembly.pending_rows == 0 {
         draw_state.override_logged.log(|| info!(
-            "材质调试覆盖：{} 个 primitive 全部按不透明绘制——blend 关闭（alpha<1 的 {} 行照常画出，glTF BLEND 镜片在此列）；贴图只采 base color 槽，其余四槽不进调试着色；着色模式按 ASH_RENDER_MODE（三态，见灯光收账日志）",
+            "材质调试覆盖：{} 个 primitive 全部按不透明绘制——blend 关闭（alpha<1 的 {} 行照常画出，glTF BLEND 镜片在此列）；材质参数/贴图槽走材质环（每帧从容器现读）；着色模式按 ASH_RENDER_MODE（三态，见灯光收账日志）",
             ledger.len(),
-            alpha_override,
+            assembly.alpha_override,
         ));
     }
 
@@ -375,6 +348,19 @@ pub(crate) fn draw_frame(
         )
         .or_fatal("帧 UBO 写失败，渲染链无法继续")?;
 
+    // 4a) 双环写入（wait_for_slot 之后，与帧 UBO 同一条 fence 证据）：模型环
+    // 增量重写（本帧奇偶集的改动行）+ 材质环全量重写（可绘行的材质从容器
+    // 现读）。见 instance_table 模块文档的 hazard 纪律表。
+    drawlist::write_rings(
+        instance_tables,
+        ledger,
+        std_materials,
+        image_cache,
+        &assembly,
+        frames.current_index(),
+    )
+    .or_fatal("模型/材质环写失败，渲染链无法继续")?;
+
     // 4b) overlay 绘制半边：图集整传（可能多出一张 transfer 票据——本帧
     // 图形提交的 wait_ticket 在此后快照，flush_uploads 批与图集批都被等待）→
     // 镶嵌 → 顶点环写入 → UiPaint + 本帧槽 buffer 句柄（record_frame 的 UI 段
@@ -413,9 +399,10 @@ pub(crate) fn draw_frame(
         layout: pipeline.layout(),
         set0: tables.resident_set(),
         set1: tables.frame_set(frames.current_index()),
+        set2: instance_tables.frame_set2(frames.current_index()),
         vertex_buffer: pool.vertex_buffer(),
         index_buffer: pool.index_buffer(),
-        draws: &draws,
+        draws: &assembly.draws,
         overlay_pipeline: overlay_pipeline.pipeline(),
         overlay_layout: overlay_pipeline.layout(),
         ui: ui.as_ref().map(|(paint, _)| paint),

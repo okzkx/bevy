@@ -21,7 +21,7 @@ use crate::{
         replace_handles as apply_handle_swap, spawn_primitive_clone, AssetReadiness,
         AssetRetirements, HandleSwapReadback, InstanceLedger, ObjectOpError,
     },
-    vulkan::{BindlessTables, ImageCache, MeshPool},
+    vulkan::{BindlessTables, ImageCache, InstanceTables, MeshPool, OBJECT_TABLE_CAPACITY},
 };
 
 use super::invalid_params;
@@ -126,6 +126,10 @@ pub(crate) fn replace_handles(In(params): In<Option<Value>>, world: &mut World) 
 /// 处理数/扫描数分列——"零上传"不说成"零 CPU 每对象成本"。readiness 段
 /// 报异步就绪账（pending/等待/到货/失败/取消分列）；recycle 段报卸载回收
 /// 账（事件/出账/驻留存量/停尸房/free list 分列——"存量回基线"的读数口）。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "BRP 只读读数口的参数表即数据源清单:账本/就绪/回收/池/贴图缓存/表/常驻表逐项只读,拆参数束过度设计"
+)]
 #[system]
 pub(crate) fn increment_stats(
     In(_params): In<Option<Value>>,
@@ -135,6 +139,7 @@ pub(crate) fn increment_stats(
     pool: Res<MeshPool>,
     image_cache: Res<ImageCache>,
     tables: Res<BindlessTables>,
+    instance_tables: Res<InstanceTables>,
 ) -> BrpResult {
     let s = ledger.stats;
     let r = readiness.stats;
@@ -166,6 +171,16 @@ pub(crate) fn increment_stats(
             "total": s.asset_events_total,
             "invalidations_total": s.asset_invalidations_total,
             "invalidations_current": s.asset_invalidations_current,
+        },
+        "gpu_tables": {
+            "object_slots": s.object_slots,
+            "object_capacity": instance_tables.capacity_objects(),
+            "object_capacity_const": OBJECT_TABLE_CAPACITY,
+            "object_graveyard": instance_tables.graveyard_count(),
+            "object_retired_total": instance_tables.slots_retired_total(),
+            "material_slots": s.material_slots,
+            "material_capacity": instance_tables.capacity_materials(),
+            "push_bytes_per_draw": 4,
         },
         "readiness": {
             "pending_meshes": r.pending_meshes,

@@ -75,6 +75,12 @@ pub enum BufferRole {
     /// 之下当场判断丢弃(调用方 Tier① 分流);复用安全与 FrameUniform 同一条
     /// fence 纪律(wait_for_slot 先行,写发生在本槽上一轮提交完成之后)。
     DynamicDraw,
+    /// 设备侧参数表(对象表/可见标记等着色器按索引读的常驻数据):
+    /// DEVICE_LOCAL 硬契约(常驻的意义),transfer 提交写(staging 环)。
+    /// 写入纪律:表内容只经上传批次改写——新槽写入或排空点归还后的复用,
+    /// 从不覆盖仍被在飞 draw 读取的记录(对象记录按槽分配写一次,
+    /// 更新走"新槽 + 旧槽停尸房",见 instance_table 模块)。
+    DeviceStorage,
 }
 
 impl BufferRole {
@@ -96,6 +102,11 @@ impl BufferRole {
             Self::DynamicDraw => {
                 vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER
             }
+            Self::DeviceStorage => {
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::TRANSFER_SRC
+            }
             Self::Storage => {
                 vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::TRANSFER_DST
@@ -109,6 +120,7 @@ impl BufferRole {
     pub fn required_memory(self) -> vk::MemoryPropertyFlags {
         match self {
             Self::DevicePool => vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            Self::DeviceStorage => vk::MemoryPropertyFlags::DEVICE_LOCAL,
             Self::Staging
             | Self::Readback
             | Self::FrameUniform
@@ -123,7 +135,7 @@ impl BufferRole {
     #[must_use]
     pub fn preferred_memory(self) -> vk::MemoryPropertyFlags {
         match self {
-            Self::DevicePool => vk::MemoryPropertyFlags::empty(),
+            Self::DevicePool | Self::DeviceStorage => vk::MemoryPropertyFlags::empty(),
             Self::Staging => vk::MemoryPropertyFlags::HOST_COHERENT,
             Self::Readback | Self::FrameUniform | Self::DynamicDraw | Self::Storage => {
                 vk::MemoryPropertyFlags::HOST_CACHED | vk::MemoryPropertyFlags::HOST_COHERENT

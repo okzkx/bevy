@@ -27,6 +27,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::{
+    asset::AssetId,
     pbr::{MeshMaterial3d, StandardMaterial},
     prelude::*,
     transform::TransformSystems,
@@ -35,13 +36,22 @@ use bevy::{
 use ash_macros::system;
 
 /// 账本一行：一个可渲染 primitive 的跨帧实例数据。柄去资产容器取内容，
-/// `model` 直进 push constant（行内容即实例数据终值，跨帧维护而非每帧重建）。
+/// `model` 直进模型环（帧循环增量重写）；`instance_slot` 是 GPU 对象表下标
+/// （flush_uploads 分配，`None` = 尚未驻留成表——对象记录/模型环内容的
+/// hazard 纪律见 `vulkan::instance_table` 模块文档）。
 #[derive(Clone)]
 pub struct InstanceRow {
     pub mesh: Handle<Mesh>,
     pub material: Handle<StandardMaterial>,
     /// [`GlobalTransform`] 终值矩阵（PostUpdate 传播后直读，含父链）。
     pub model: Mat4,
+    /// GPU 对象表实例槽（对象表下标）；None = 该行未驻留成表（不参与绘制）。
+    pub instance_slot: Option<u32>,
+    /// 记录身份：(mesh 身份, mesh 内容票据, 材质身份)——三者不变 = 对象表
+    /// 记录内容不变（免重写免换槽）；任一变化 = 换槽重写（swap-on-commit）。
+    /// mesh 内容票据取自 MeshSlot.ticket：同身份内容变化（Modified）必然
+    /// 换票据，记录随身份比对失效。
+    pub bound: Option<(AssetId<Mesh>, u64, AssetId<StandardMaterial>)>,
 }
 
 /// 增量计量：发现侧逐帧刷新，上传侧累计（BRP `increment_stats` 的读数源）。
@@ -86,6 +96,10 @@ pub struct IncrementStats {
     pub asset_invalidations_total: u64,
     /// 当前待换内容身份集规模（存量口径，mesh+image 失效集现值，与累计分列）。
     pub asset_invalidations_current: usize,
+    /// 对象表已用实例槽数（存量口径;含停尸房/free list 在途,历史峰值语义）。
+    pub object_slots: usize,
+    /// 已分配材质槽数（存量口径）。
+    pub material_slots: usize,
 }
 
 /// 稳定槽账本：在场可渲染 primitive 的 Entity→实例数据关联（跨帧存活），
@@ -96,6 +110,14 @@ pub struct InstanceLedger {
     rows: BTreeMap<Entity, InstanceRow>,
     /// 新增/换柄置位，flush_uploads 盘点（驻留或登记重试）后清。
     dirty: BTreeSet<Entity>,
+    /// 行删除/换绑换下的实例槽（纯 ECS 侧事实的整数账）：flush_uploads
+    /// 消费进对象表停尸房（排空后才复用）。update_ledger 不能触 Vulkan，
+    /// 以此账交接——桥接纪律与停尸房同款（旧内容多活一帧，无悬空）。
+    pub(crate) freed_slots: Vec<u32>,
+    /// 模型环待写标记，按帧槽奇偶两套：改动行的 model 要写进**两个帧槽**
+    /// 各自的环（draw_frame 只消费本帧奇偶的那套，另一套下帧消费）——
+    /// 每个改动行两次写入后两个环都新鲜，静态场景零写入。
+    model_dirty: [BTreeSet<Entity>; 2],
     pub stats: IncrementStats,
 }
 
@@ -143,6 +165,43 @@ impl InstanceLedger {
     /// 发现侧第二条入口，与 update_ledger 的 Changed/Removed 通道并轨同一脏集）。
     pub(crate) fn mark_dirty(&mut self, entity: Entity) {
         self.dirty.insert(entity);
+    }
+
+    /// 落一行实例槽与记录身份（flush_uploads 换槽时调用），返回旧槽
+    /// （调用方送停尸房）。行已清 = None（脏标清空路径不会调到这里）。
+    pub(crate) fn set_instance_slot(
+        &mut self,
+        entity: Entity,
+        slot: u32,
+        bound: (AssetId<Mesh>, u64, AssetId<StandardMaterial>),
+    ) -> Option<u32> {
+        let old = self
+            .rows
+            .get_mut(&entity)
+            .and_then(|row| row.instance_slot.replace(slot));
+        if let Some(row) = self.rows.get_mut(&entity) {
+            row.bound = Some(bound);
+        }
+        old
+    }
+
+    /// 取走全部待交接实例槽（flush 开头消费，账随取随清）。
+    pub(crate) fn take_freed_slots(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.freed_slots)
+    }
+
+    /// 标记一行模型待写：进**两套**奇偶集（两个帧槽的环都要补写）。
+    pub(crate) fn mark_model_dirty(&mut self, entity: Entity) {
+        self.model_dirty[0].insert(entity);
+        self.model_dirty[1].insert(entity);
+    }
+
+    /// 取走一套奇偶集的待写实体（draw_frame 按本帧奇偶消费，取走即清）。
+    pub(crate) fn take_model_dirty(&mut self, frame: usize) -> Vec<Entity> {
+        let set = &mut self.model_dirty[frame % 2];
+        let out: Vec<Entity> = set.iter().copied().collect();
+        set.clear();
+        out
     }
 }
 
@@ -210,9 +269,13 @@ pub(crate) fn update_ledger(
     let mut processed = 0usize;
 
     // —— ① 移除：组件被摘（含 despawn 递归连带）即退出可渲染集。先于新增
-    // 处理，同帧"摘了又挂回"的实体由 ② 重建行，终态正确。
+    // 处理，同帧"摘了又挂回"的实体由 ② 重建行，终态正确。删行携带的实例槽
+    // 交接给 flush（→ 对象表停尸房）。
     for entity in removed_meshes.read().chain(removed_materials.read()) {
-        if ledger.rows.remove(&entity).is_some() {
+        if let Some(row) = ledger.rows.remove(&entity) {
+            if let Some(slot) = row.instance_slot {
+                ledger.freed_slots.push(slot);
+            }
             removed += 1;
             processed += 1;
             info!(
@@ -224,11 +287,14 @@ pub(crate) fn update_ledger(
     }
 
     // —— ② 新增/换绑：行不存在 = 入账，柄变化 = 换绑；两处都置脏等上传盘点。
+    // 行的实例槽/记录身份由 flush_uploads 分配（None = 未驻留成表）。
     for (entity, mesh3d, material3d, global) in &assets {
         let new_row = InstanceRow {
             mesh: mesh3d.0.clone(),
             material: material3d.0.clone(),
             model: global.to_matrix(),
+            instance_slot: None,
+            bound: None,
         };
         match ledger.rows.get(&entity) {
             None => {
@@ -248,6 +314,10 @@ pub(crate) fn update_ledger(
                     old.mesh.id(),
                     new_row.mesh.id()
                 );
+                // 旧实例槽随换绑交接（flush 换新槽 + 旧槽进停尸房）
+                if let Some(slot) = old.instance_slot {
+                    ledger.freed_slots.push(slot);
+                }
             }
             // 同值重复变更（重插同柄）：行重写、脏重置，不计处理数
             Some(_) => {}
@@ -256,12 +326,14 @@ pub(crate) fn update_ledger(
         ledger.rows.insert(entity, new_row);
     }
 
-    // —— ③ 矩阵：只写 model，不进脏集（矩阵走 push constant，不过上传链）。
+    // —— ③ 矩阵：只写 model，不进脏集（模型走模型环，不过上传链）；
+    // 待写标记进两套奇偶集（两个帧槽的环都要补写）。
     for (entity, global) in &moved {
         if let Some(row) = ledger.rows.get_mut(&entity) {
             let model = global.to_matrix();
             if row.model != model {
                 row.model = model;
+                ledger.mark_model_dirty(entity);
                 transform_updates += 1;
                 processed += 1;
             }

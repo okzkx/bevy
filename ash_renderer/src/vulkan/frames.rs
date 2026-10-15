@@ -1,4 +1,4 @@
-//! 帧级资源：命令池/命令缓冲 + 每帧"image_available + fence + 深度附件"。
+//! 帧级资源：命令池/命令缓冲 + 每帧"image_available + fence"。
 //!
 //! 生命周期四层里的"帧级"（VulkanContext字段释义：从Entry到Swapchain.md §12）：MAX_FRAMES_IN_FLIGHT 组
 //! 轮转复用，CPU 最多领先 GPU 这么多帧。与 swapchain 解耦的是帧槽对象，各归其位：
@@ -11,8 +11,8 @@
 //!   present 已被 present engine 消费完——这是帧 fence 给不了的保证（fence 只证提交
 //!   完成，不证 present engine 的消费进度；依据 Khronos Vulkan Guide "Swapchain
 //!   semaphore reuse"；同一队列上提交有序，下一次 signal 排在前一个 present 消费之后）。
-//! - **深度附件按帧槽分配**：数量 = MAX_FRAMES_IN_FLIGHT，
-//!   不挂 swapchain image。两份同步证据：① 在飞的两帧各用各的槽位深度，并发写
+//! - **深度附件按帧槽分配**：数量 = MAX_FRAMES_IN_FLIGHT，本体在 [`super::depth`]
+//!   （3.6 P1 摊薄兑现位）。两份同步证据：① 在飞的两帧各用各的槽位深度，并发写
 //!   不可能撞同一张图；② 同槽深度的两次使用之间隔着 `wait_for_slot` 的 fence
 //!   等待（录制前 CPU 已确认上一轮提交完成）——不把"归帧级"当无冲突证明，冲突
 //!   不存在是由 fence + 槽位隔离证出来的。尺寸随 swapchain 重建（[`Self::rebuild_depth`]，
@@ -33,23 +33,20 @@ use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
 use crate::vulkan::overlay_pipeline::{pack_ui_push, UiPaint};
-use crate::vulkan::pipeline::{pack_push, PushData};
 use crate::vulkan::Context;
+
+pub use super::depth::{DepthTarget, DEPTH_FORMAT};
 
 /// CPU 领先 GPU 的最大帧数：第 N 帧要等第 N-2 帧的组资源空出来才能重录。
 pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
-/// 深度附件格式（D32_SFLOAT，reverse-Z 深度链的载体）。支持查询在
-/// [`DepthTarget::new`]（支持与启用分开，证据落日志）；管线的深度附件格式声明与
-/// 这里同一常量（pipeline.rs 只消费不另立）。
-pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
-
-/// 一个 draw 的绘制参数：push 数据 + 池内引脚。
-/// push 字节排布契约在 [`crate::vulkan::pipeline`]（pack_push），本结构是宿主侧
-/// 的取数形态——host 从快照/驻留账本/资产容器组出来，录制层只消费。
+/// 一个 draw 的绘制引脚：实例槽号（push，4B——shader 按实例索引读 GPU 常驻
+/// 表取全部逐对象参数，见 instance_table 模块文档）+ 池内引脚。
+/// 录制层只消费；host 的 DrawList 组装（槽位枚举）在 `driver::host::drawlist`。
 #[derive(Clone, Copy, Debug)]
 pub struct DrawCall {
-    pub push: PushData,
+    /// 实例槽号（对象表/模型环下标，push 4B）。
+    pub instance: u32,
     /// `vkCmdDrawIndexed` 的 vertexOffset（字节偏移 ÷ 32，来自 MeshSlot）。
     pub vertex_base: u32,
     /// 索引池内首索引号（字节偏移 ÷ 4，来自 MeshSlot）。
@@ -65,6 +62,8 @@ pub struct FrameDraw<'a> {
     pub set0: vk::DescriptorSet,
     /// set1 本帧槽的 UBO 集（内容 = 相机 view_proj，后续扩灯光）。
     pub set1: vk::DescriptorSet,
+    /// set2 本帧槽的表集（对象表 + 本帧模型/材质环，instance_table 契约）。
+    pub set2: vk::DescriptorSet,
     pub vertex_buffer: Option<vk::Buffer>,
     pub index_buffer: Option<vk::Buffer>,
     pub draws: &'a [DrawCall],
@@ -95,131 +94,6 @@ pub struct Frame {
     pub in_flight: vk::Fence,
     /// 本槽位的深度附件（D32_SFLOAT，随 swapchain 尺寸重建）。
     pub depth: DepthTarget,
-}
-
-/// 一张深度附件：VkImage（D32_SFLOAT，DEPTH_STENCIL_ATTACHMENT 用途）+ dedicated
-/// memory + view（DEPTH aspect）。生命周期 = 帧槽，重建见 [`FramePool::rebuild_depth`]。
-pub struct DepthTarget {
-    device: Device,
-    image: vk::Image,
-    memory: vk::DeviceMemory,
-    pub view: vk::ImageView,
-}
-
-impl DepthTarget {
-    /// 按契约创建深度附件。格式支持先查后用（支持与启用分开，1.3 实现对
-    /// D32_SFLOAT 的 depth-stencil attachment 支持是 mandatory，仍不省查询——
-    /// 证据落日志）。
-    ///
-    /// # Errors
-    /// D32_SFORMAT 的 optimal tiling feature 不足，或 Vulkan 创建/分配/绑定失败。
-    pub fn new(ctx: &Context, extent: vk::Extent2D) -> Result<Self> {
-        let format = DEPTH_FORMAT;
-        let features = unsafe {
-            ctx.instance
-                .get_physical_device_format_properties(ctx.physical_device, format)
-        }
-        .optimal_tiling_features;
-        if !features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT) {
-            return Err(VulkanError::Init(format!(
-                "深度格式 {format:?} 的 optimal tiling features {features:?} 不含 DEPTH_STENCIL_ATTACHMENT，reverse-Z 深度链无法建立"
-            )));
-        }
-        // # Safety:create_image 参数全为合法常量 + 查过的格式/usage,无裸指针
-        let image = unsafe {
-            ctx.device.create_image(
-                &vk::ImageCreateInfo::default()
-                    .image_type(vk::ImageType::TYPE_2D)
-                    .format(format)
-                    .extent(vk::Extent3D {
-                        width: extent.width,
-                        height: extent.height,
-                        depth: 1,
-                    })
-                    .mip_levels(1)
-                    .array_layers(1)
-                    .samples(vk::SampleCountFlags::TYPE_1)
-                    .tiling(vk::ImageTiling::OPTIMAL)
-                    .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .initial_layout(vk::ImageLayout::UNDEFINED),
-                None,
-            )
-        }?;
-        let result = unsafe { Self::create_inner(ctx, image) };
-        if result.is_err() {
-            unsafe { ctx.device.destroy_image(image, None) };
-        }
-        result
-    }
-
-    /// 创建链后半段(image 已建):失败路径回收 memory。
-    ///
-    /// # Safety
-    /// `image` 须刚创建成功且未销毁;错误返回后调用方不得再使用它。
-    unsafe fn create_inner(ctx: &Context, image: vk::Image) -> Result<Self> {
-        unsafe {
-            let reqs = ctx.device.get_image_memory_requirements(image);
-            let memory_type = ctx.memory_contract().find_type(
-                reqs.memory_type_bits,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                vk::MemoryPropertyFlags::empty(),
-            )?;
-            let memory = ctx.device.allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(reqs.size)
-                    .memory_type_index(memory_type),
-                None,
-            )?;
-            if let Err(e) = ctx.device.bind_image_memory(image, memory, 0) {
-                ctx.device.free_memory(memory, None);
-                return Err(VulkanError::Vk(e));
-            }
-            // view:DEPTH aspect（D32_SFLOAT 无 stencil 面）、mip0 单层
-            let view = ctx.device.create_image_view(
-                &vk::ImageViewCreateInfo::default()
-                    .image(image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(DEPTH_FORMAT)
-                    .subresource_range(
-                        vk::ImageSubresourceRange::default()
-                            .aspect_mask(vk::ImageAspectFlags::DEPTH)
-                            .level_count(1)
-                            .layer_count(1),
-                    ),
-                None,
-            );
-            let view = match view {
-                Ok(v) => v,
-                Err(e) => {
-                    ctx.device.free_memory(memory, None);
-                    return Err(VulkanError::Vk(e));
-                }
-            };
-            info!(
-                "深度附件就绪: D32_SFLOAT，内存类型 {memory_type}（DEVICE_LOCAL），requirements 分配 {size}B",
-                size = reqs.size,
-            );
-            Ok(Self {
-                device: ctx.device.clone(),
-                image,
-                memory,
-                view,
-            })
-        }
-    }
-}
-
-impl Drop for DepthTarget {
-    fn drop(&mut self) {
-        // 契约边界:不等 GPU(重建路径的等待在 rebuild_depth,退出排空在 teardown)。
-        // view 先于 image,memory 最后。
-        unsafe {
-            self.device.destroy_image_view(self.view, None);
-            self.device.destroy_image(self.image, None);
-            self.device.free_memory(self.memory, None);
-        }
-    }
 }
 
 #[derive(bevy::prelude::Resource)]
@@ -504,9 +378,10 @@ impl FramePool {
                     vk::PipelineBindPoint::GRAPHICS,
                     draw.pipeline,
                 );
-                // 常驻双集整帧绑一次：set0 = bindless 表（槽位在飞更新即生效），
-                // set1 = 本帧槽 UBO（内容 = 相机 view_proj）
-                let sets = [draw.set0, draw.set1];
+                // 常驻三集整帧绑一次：set0 = bindless 表（槽位在飞更新即生效），
+                // set1 = 本帧槽 UBO（内容 = 相机 view_proj），set2 = GPU 常驻
+                // 绘制数据（对象表 + 本帧模型/材质环，instance_table 契约）
+                let sets = [draw.set0, draw.set1, draw.set2];
                 device.cmd_bind_descriptor_sets(
                     frame.command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
@@ -547,7 +422,9 @@ impl FramePool {
                     vk::IndexType::UINT32,
                 );
                 for call in draw.draws {
-                    let push_bytes = pack_push(&call.push);
+                    // push 4B = 实例槽号：shader 按实例索引读 GPU 常驻表取
+                    // model/材质/范围（96B PushData 已随 5.1 退役）
+                    let push_bytes = call.instance.to_le_bytes();
                     device.cmd_push_constants(
                         frame.command_buffer,
                         draw.layout,
