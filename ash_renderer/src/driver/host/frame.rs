@@ -38,9 +38,10 @@ use crate::{
     overlay::{paint_overlay, OverlayLogState, RenderMode, UiDrawData},
     scene::InstanceLedger,
     vulkan::{
-        pack_frame_uniforms, AcquireOutcome, BindlessTables, Context, FrameDraw,
-        FramePool, FrameUniformsData, GraphicsPipeline, ImageCache, InstanceTables, MeshPool,
-        OverlayPipeline, Swapchain, Uploader,
+        frustum_planes, pack_frame_uniforms, AcquireOutcome, BindlessTables, Context,
+        CullDiagnostics, CullPass, CullSettings, FrameDraw, FramePool, FrameUniformsData,
+        GraphicsPipeline, ImageCache, InstanceTables, MARK_SIZE, MeshPool, OverlayPipeline,
+        Swapchain, Uploader,
     },
 };
 
@@ -101,6 +102,12 @@ pub(crate) struct FrameInput<'w, 's> {
     render_mode: Option<Res<'w, RenderMode>>,
     /// overlay 绘制半边资源束（None = overlay 未装，UI 段整段跳过）。
     overlay: Option<UiDrawData<'w>>,
+    /// 视锥剔除 compute 管线（5.2；init 链与场景管线同批创建）。
+    cull_pass: Res<'w, CullPass>,
+    /// 剔除开关（egui checkbox 与 BRP 写；AshHostPlugin 恒插入）。
+    cull_settings: Res<'w, CullSettings>,
+    /// 剔除诊断账面（每帧刷新，egui/BRP 读数口）。
+    cull_diag: ResMut<'w, CullDiagnostics>,
 }
 
 /// DrawList 消费状态（跨帧 `Local`）：缺资源/相机告警去重 + 材质覆盖一次性收账。
@@ -160,6 +167,9 @@ pub(crate) fn draw_frame(
         ref ambient,
         ref render_mode,
         ref mut uploader,
+        ref cull_pass,
+        ref cull_settings,
+        ref mut cull_diag,
         ..
     } = input;
     // —— 闸门①：读 resize 消息。一次 update 可能积压多条（拖拽 125Hz 输入 vs 60fps
@@ -361,6 +371,54 @@ pub(crate) fn draw_frame(
     )
     .or_fatal("模型/材质环写失败，渲染链无法继续")?;
 
+    // 4a-2) 视锥剔除半边（5.2）：开关决定 compute dispatch 或 host 全可见填充
+    //（数据层 A/B）；诊断读数在写入路径之后取——标记环读写都在 wait_for_slot
+    // 的 fence 纪律内（与环同链，cull 模块文档）。诊断只进计量（判定线 2
+    // 边界：任何系统不得读它决定画什么）。
+    let cull_frame = frames.current_index();
+    let cull_bound = instance_tables.used_object_slots();
+    let cull_dispatch = if cull_settings.enabled && cull_bound > 0 {
+        // 闸门④空转首跑留痕：首个 dispatch 帧收账一次（零 VUID 由验证层执法）
+        if !cull_diag.first_dispatch_logged {
+            info!(
+                "视锥剔除 dispatch 首跑（前置闸门④）：bound {cull_bound}，组 {}，平面随 112B push 进 compute",
+                cull_bound.div_ceil(64),
+            );
+            cull_diag.first_dispatch_logged = true;
+        }
+        Some(cull_pass.draw(&frustum_planes(&view_proj), cull_bound))
+    } else {
+        None
+    };
+    // 诊断读数：开 = 本帧槽两帧前 compute 的输出（最新确定值）；关 = host
+    // 全可见填充后直读（A/B 的 B 面基准）。逐可绘行计数。
+    if !cull_settings.enabled && cull_bound > 0 {
+        let ones: Vec<u8> = (0..cull_bound).flat_map(|_| 1u32.to_le_bytes()).collect();
+        instance_tables
+            .mark_ring(cull_frame)
+            .write(0, &ones)
+            .or_fatal("剔除标记环全可见填充失败，渲染链无法继续")?;
+    }
+    if cull_bound > 0 {
+        let mut bytes = vec![0u8; cull_bound as usize * MARK_SIZE as usize];
+        instance_tables
+            .mark_ring(cull_frame)
+            .read(0, &mut bytes)
+            .or_fatal("剔除标记环读数失败，渲染链无法继续")?;
+        let mark_at =
+            |slot: u32| u32::from_le_bytes(bytes[slot as usize * 4..slot as usize * 4 + 4].try_into().expect("4B"));
+        let visible = assembly
+            .draws
+            .iter()
+            .filter(|call| mark_at(call.instance) == 1)
+            .count() as u32;
+        cull_diag.enabled = cull_settings.enabled;
+        cull_diag.bound = cull_bound;
+        cull_diag.marks_frame = cull_frame;
+        cull_diag.rows_compared = assembly.draws.len();
+        cull_diag.visible_count = visible;
+    }
+
     // 4b) overlay 绘制半边：图集整传（可能多出一张 transfer 票据——本帧
     // 图形提交的 wait_ticket 在此后快照，flush_uploads 批与图集批都被等待）→
     // 镶嵌 → 顶点环写入 → UiPaint + 本帧槽 buffer 句柄（record_frame 的 UI 段
@@ -414,6 +472,7 @@ pub(crate) fn draw_frame(
         wait_ticket: uploader.last_issued_ticket(),
         ticket_semaphore: uploader.ticket_semaphore(),
         clear: CLEAR_COLOR,
+        cull: cull_dispatch,
     };
     frames
         .record_frame(

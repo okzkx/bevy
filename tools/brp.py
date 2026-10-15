@@ -216,6 +216,15 @@ def cmd_stats(args):
     out(rpc(args.host, args.port, "ash_renderer/increment_stats"))
 
 
+def cmd_cull_stats(args):
+    out(rpc(args.host, args.port, "ash_renderer/cull_stats"))
+
+
+def cmd_cull_set(args):
+    out(rpc(args.host, args.port, "ash_renderer/cull_set_enabled",
+            {"enabled": args.enabled == "true"}))
+
+
 def cmd_load_mesh(args):
     params = {"path": args.path}
     if args.entity and args.source:
@@ -349,6 +358,12 @@ def main():
     p.set_defaults(func=cmd_mutate)
 
     sub.add_parser("stats", help="增量计量读数（ash_renderer/increment_stats）").set_defaults(func=cmd_stats)
+
+    sub.add_parser("cull-stats", help="剔除读数对照：GPU 标记 vs CPU 参照逐实体 + 不一致清单（ash_renderer/cull_stats；读数陈旧 ≤2 帧，对照前等 ≥3 帧）").set_defaults(func=cmd_cull_stats)
+
+    p = sub.add_parser("cull-set", help="剔除开关（ash_renderer/cull_set_enabled；true=compute dispatch，false=host 全可见填充——数据层 A/B）")
+    p.add_argument("--enabled", required=True, choices=["true", "false"], help="开关目标态")
+    p.set_defaults(func=cmd_cull_set)
 
     p = sub.add_parser("load-mesh", help="异步加载新 mesh：entity=换到既有实体 / source=克隆挂新实体（ash_renderer/load_mesh）")
     p.add_argument("--path", required=True, help='资产路径（如 "models/FlightHelmet/FlightHelmet.gltf#Mesh0/Primitive1"）')

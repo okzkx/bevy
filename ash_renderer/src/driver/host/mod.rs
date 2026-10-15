@@ -51,6 +51,9 @@ impl Plugin for AshHostPlugin {
         // NONE 只表示不解压缩纹理格式（basis/ktx2），png/jpeg 照常；贴图解码不依赖 GPU。
         app.insert_resource(CompressedImageFormatSupport(CompressedImageFormats::NONE))
             .register_asset_loader(bevy::image::ImageLoader::new(CompressedImageFormats::NONE))
+            // 剔除开关与诊断账面（5.2）：纯 ECS 侧状态，overlay 缺席时 BRP 仍可用
+            .init_resource::<crate::vulkan::CullSettings>()
+            .init_resource::<crate::vulkan::CullDiagnostics>()
             // update 节流：MAILBOX 没有 vsync 背压，默认 Continuous 会空转烧 CPU；
             // Reactive(1/60) 让空闲时 update 按主屏刷新率封顶，事件（拖拽/输入）仍即时驱动。
             .insert_resource(bevy::winit::WinitSettings {

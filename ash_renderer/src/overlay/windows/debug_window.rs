@@ -6,7 +6,8 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::vulkan::{
-    BindlessTables, Uploader, FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
+    BindlessTables, CullDiagnostics, CullSettings, Uploader, FRAME_MODE_LAMBERT,
+    FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
 };
 
 use crate::overlay::framework::paint::AtlasGpu;
@@ -111,12 +112,17 @@ pub(in crate::overlay) struct DebugWindow<'a> {
     /// 单选钮直接写它（借用自 pass 侧 ResMut，就地落资源）。
     pub(in crate::overlay) mode: &'a mut RenderMode,
     pub(in crate::overlay) stats: &'a RendererStats<'a>,
+    /// 剔除开关（checkbox 直接写，draw_frame 读；BRP 与此同源）。
+    pub(in crate::overlay) cull_settings: &'a mut CullSettings,
+    /// 剔除诊断读数（draw_frame 每帧刷新；只进计量，不驱动绘制）。
+    pub(in crate::overlay) cull_diag: &'a CullDiagnostics,
 }
 
 impl DebugWindow<'_> {
-    /// 面板本体：fps/窗口信息 + 着色模式单选 + 渲染器内部统计（vulkan 侧资源只读）。
+    /// 面板本体：fps/窗口信息 + 着色模式单选 + 剔除开关与读数 + 渲染器内部统计
+    ///（vulkan 侧资源只读）。
     pub(in crate::overlay) fn show(self) {
-        let Self { ctx, open, fps, window, ppp, mode, stats } = self;
+        let Self { ctx, open, fps, window, ppp, mode, stats, cull_settings, cull_diag } = self;
         egui::Window::new("ash 调试")
             .open(open)
             .default_pos(egui::pos2(12.0, 12.0))
@@ -136,6 +142,18 @@ impl DebugWindow<'_> {
                     ui.selectable_value(mode, RenderMode::Unlit, "unlit");
                     ui.selectable_value(mode, RenderMode::Normal, "normal");
                 });
+                ui.separator();
+                // 5.2 视锥剔除：开关切 compute dispatch / host 全可见填充
+                //（数据层 A/B——两条路径都不进绘制，画面不变）；读数为帧槽
+                // 直读（陈旧 ≤2 帧），只进计量（判定线 2 边界）。
+                ui.checkbox(&mut cull_settings.enabled, "视锥剔除（compute）");
+                ui.monospace(format!(
+                    "标记 可见 {}/{} 行（bound {}，帧槽 {} 读数，诊断不驱动绘制）",
+                    cull_diag.visible_count,
+                    cull_diag.rows_compared,
+                    cull_diag.bound,
+                    cull_diag.marks_frame,
+                ));
                 ui.separator();
                 ui.monospace(format!(
                     "常驻表 纹理 {}/{} · 采样器 {}",
