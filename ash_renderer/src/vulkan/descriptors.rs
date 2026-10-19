@@ -431,6 +431,8 @@ impl BindlessTables {
             width: 1,
             height: 1,
             format: vk::Format::R8G8B8A8_UNORM,
+            // 1×1 单级（fallback 白图，无链）
+            mip_levels: 1,
             sampler: ImageSamplerDescriptor::linear(),
         };
         let fallback = GpuImage::create(
@@ -448,6 +450,7 @@ impl BindlessTables {
                 src_offset: 0,
                 width: 1,
                 height: 1,
+                mip_levels: 1,
             }],
             // 图像 CONCURRENT 双族共享,不随批次 release
             ..Default::default()

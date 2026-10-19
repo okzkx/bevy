@@ -285,13 +285,8 @@ fn group_a_mapping() {
         e,
         ash_renderer::vulkan::ImageConvertError::UnsupportedDimension(_)
     ));
-    let mut mipped = bevy_image(TextureFormat::Rgba8Unorm, unorm_bytes());
-    mipped.texture_descriptor.mip_level_count = 3;
-    let e = image_spec(&mipped).unwrap_err();
-    assert!(matches!(
-        e,
-        ash_renderer::vulkan::ImageConvertError::UnsupportedMipLevels(3)
-    ));
+    // 5.4.3：静态 mip0 退役——带链描述符不再拒绝（链由 GPU blit 生成），
+    // mip_level_count 形状本就不进规格（资产数据按 level 0 收）
     let hdr = Image::new(
         Extent3d {
             width: 4,
@@ -366,12 +361,14 @@ fn group_b_upload_closure(
                     src_offset: 0,
                     width: 4,
                     height: 4,
+                    mip_levels: 1,
                 },
                 StagingImageCopy {
                     image: gpu_unorm.image(),
                     src_offset: 64,
                     width: 4,
                     height: 4,
+                    mip_levels: 1,
                 },
             ],
             ..Default::default()
@@ -517,6 +514,7 @@ fn group_c_cross_family(
                 src_offset: 0,
                 width: 4,
                 height: 4,
+                mip_levels: 1,
             }],
             image_releases: vec![ash_renderer::vulkan::ImageRelease {
                 image: gpu.image(),

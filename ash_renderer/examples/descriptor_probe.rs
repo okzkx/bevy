@@ -144,6 +144,7 @@ fn main() {
             width: 2,
             height: 2,
             format: vk::Format::R8G8B8A8_UNORM,
+            mip_levels: 1,
             sampler: ImageSamplerDescriptor::linear(),
         };
         let img = GpuImage::create(&device, &instance, pd, &contract, &spec, &[]).expect("测试贴图");
@@ -183,6 +184,7 @@ fn main() {
         width: 2,
         height: 2,
         format: vk::Format::R8G8B8A8_UNORM,
+        mip_levels: 1,
         sampler: ImageSamplerDescriptor::linear(),
     };
     let white = GpuImage::create(&device, &instance, pd, &contract, &white_spec, &[]).expect("白色贴图");
@@ -327,6 +329,7 @@ fn upload_and_publish(
             src_offset,
             width: 2,
             height: 2,
+            mip_levels: 1,
         });
     }
     let ticket = uploader

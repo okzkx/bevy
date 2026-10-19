@@ -75,18 +75,23 @@ pub struct Release {
     pub to_family: u32,
 }
 
-/// 一段 staging → image 的拷贝:src 恒为本批 staging,dst 是 2D mip0 单层
-/// (静态 mip0 形状)。字节排布按紧 packing(`bufferRowLength/bufferImageHeight = 0`,
+/// 一段 staging → image 的拷贝:src 恒为本批 staging,dst 是 2D level 0
+///(mip 链从 level 0 起步,其余层级由本提交内的 blit 段生成)。
+/// 字节排布按紧 packing(`bufferRowLength/bufferImageHeight = 0`,
 /// 行距由驱动按格式推导),与 bevy `Image.data` 的 mip0 布局一致。
 #[derive(Clone, Copy, Debug)]
 pub struct StagingImageCopy {
-    /// 目标 VkImage(须含 TRANSFER_DST usage;首用即从 UNDEFINED 迁入传输布局)。
+    /// 目标 VkImage(须含 TRANSFER_DST+TRANSFER_SRC usage;首用即从
+    /// UNDEFINED 迁入传输布局)。
     pub image: vk::Image,
     /// 本批 staging 内的源偏移(4 的倍数——RGBA8 texel block 对齐,
     /// VUID-vkCmdCopyBufferToImage-pRegions-06223)。
     pub src_offset: u64,
     pub width: u32,
     pub height: u32,
+    /// 实际建成的 mip 级数(= GpuImage::create 的能力判定产物,view 同源;
+    /// 1 = 单级,无 blit 生成段)。
+    pub mip_levels: u32,
 }
 
 /// 异族 release(图像):所有权从 transfer 族让渡。图像侧与 buffer 侧不同——
@@ -107,8 +112,8 @@ pub struct UploadBatch {
     pub staging: Vec<u8>,
     /// staging → 池的拷贝段(src 一律是本批 staging)。
     pub uploads: Vec<StagingCopy>,
-    /// staging → 贴图的拷贝段(2D mip0 单层;每图配"迁入传输布局"前置屏障与
-    /// "迁出为可采样"后置屏障,见录制段)。
+    /// staging → 贴图的拷贝段(2D level 0;每图配"迁入传输布局"前置屏障与
+    /// "迁出为可采样"后置屏障,多级图在本提交内 blit 生成链,见录制段)。
     pub image_uploads: Vec<StagingImageCopy>,
     /// 池 → 池的设备侧拷贝(迁移;同提交内与 uploads 间以屏障收口)。
     pub device_copies: Vec<CopyRegion>,
@@ -429,13 +434,166 @@ impl Uploader {
                         }],
                     );
                 }
-                // 后置:TRANSFER_DST → SHADER_READ_ONLY。src 作用域罩住本提交内的
+                // mip 链生成（5.4.3）：blit 逐级缩。链内时序——level 0 拷贝写完
+                // → 迁 TRANSFER_SRC 作源；级 i 从级 i-1 blit（dst 落
+                // TRANSFER_DST）；每级写完即迁回 TRANSFER_SRC（含末级，使链内
+                // 全层级布局归一，后置屏障单一形状）。级数 = 建图级数（能力
+                // 判定在 GpuImage::create），单级图无此段。
+                let mut chain_seen: Vec<vk::Image> = Vec::new();
+                for region in &batch.image_uploads {
+                    if region.mip_levels <= 1 || chain_seen.contains(&region.image) {
+                        continue;
+                    }
+                    chain_seen.push(region.image);
+                    // level 0：拷贝写（TRANSFER_DST）→ blit 源（TRANSFER_SRC）
+                    let src_ready = vk::ImageMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(region.image)
+                        .subresource_range(color_mip0());
+                    // 目标层级 1..n：UNDEFINED → TRANSFER_DST（blit 的写布局）
+                    let dst_ready = vk::ImageMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(region.image)
+                        .subresource_range(
+                            vk::ImageSubresourceRange::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .base_mip_level(1)
+                                .level_count(region.mip_levels - 1)
+                                .layer_count(1),
+                        );
+                    device.cmd_pipeline_barrier(
+                        slot.command_buffer,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[src_ready, dst_ready],
+                    );
+                    for level in 1..region.mip_levels {
+                        // 级 i 从级 i-1 线性缩（逐级缩 = 2× 平均，与 bevy
+                        // generate_mipmaps 同形）；两维 .max(1) 收底
+                        let (src_w, src_h) = (
+                            (region.width >> (level - 1)).max(1),
+                            (region.height >> (level - 1)).max(1),
+                        );
+                        let (dst_w, dst_h) = (
+                            (region.width >> level).max(1),
+                            (region.height >> level).max(1),
+                        );
+                        device.cmd_blit_image(
+                            slot.command_buffer,
+                            region.image,
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            region.image,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            &[vk::ImageBlit::default()
+                                .src_subresource(
+                                    vk::ImageSubresourceLayers::default()
+                                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                        .mip_level(level - 1)
+                                        .base_array_layer(0)
+                                        .layer_count(1),
+                                )
+                                .src_offsets([
+                                    vk::Offset3D::default(),
+                                    vk::Offset3D {
+                                        x: src_w as i32,
+                                        y: src_h as i32,
+                                        z: 1,
+                                    },
+                                ])
+                                .dst_subresource(
+                                    vk::ImageSubresourceLayers::default()
+                                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                        .mip_level(level)
+                                        .base_array_layer(0)
+                                        .layer_count(1),
+                                )
+                                .dst_offsets([
+                                    vk::Offset3D::default(),
+                                    vk::Offset3D {
+                                        x: dst_w as i32,
+                                        y: dst_h as i32,
+                                        z: 1,
+                                    },
+                                ])],
+                            vk::Filter::LINEAR,
+                        );
+                        // 级 i 写完 → TRANSFER_SRC（下一级作源；末级也迁，
+                        // 让链内全部层级布局归一）
+                        let level_ready = vk::ImageMemoryBarrier::default()
+                            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                            .image(region.image)
+                            .subresource_range(
+                                vk::ImageSubresourceRange::default()
+                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                    .base_mip_level(level)
+                                    .level_count(1)
+                                    .layer_count(1),
+                            );
+                        device.cmd_pipeline_barrier(
+                            slot.command_buffer,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::DependencyFlags::empty(),
+                            &[],
+                            &[],
+                            &[level_ready],
+                        );
+                    }
+                }
+                // 后置:布局现状 → SHADER_READ_ONLY。src 作用域罩住本提交内的
+                // 拷贝/blit 写;本提交内没有消费者,dst 作用域为空——真正的
+                // 读依赖由消费方"等票据 + 自己的屏障"建立(票据信号量完成 memory
+                // 释放/获取语义)。带 release 的图把所有权让渡合成进同一条屏障,
+                // dst 阶段/访问掩码被规范声明忽略(与 buffer release 同款);不带
+                // release 的图按同族纯布局转换收尾(IGNORED = 无所有权语义)。
                 // 拷贝写(TRANSFER_WRITE);本提交内没有消费者,dst 作用域为空——真正的
                 // 读依赖由消费方"等票据 + 自己的屏障"建立(票据信号量完成 memory
                 // 释放/获取语义)。带 release 的图把所有权让渡合成进同一条屏障,
                 // dst 阶段/访问掩码被规范声明忽略(与 buffer release 同款);不带
                 // release 的图按同族纯布局转换收尾(IGNORED = 无所有权语义)。
                 for image in distinct_images(&batch.image_uploads) {
+                    // 多级图：blit 段已把全链归一到 TRANSFER_SRC，后置按
+                    // TRANSFER_SRC 迁（全层级范围）；单级图保持 TRANSFER_DST
+                    // 迁（mip0 范围）——两种形状是布局现状不同，不是模板分叉
+                    let chain_levels = batch
+                        .image_uploads
+                        .iter()
+                        .find(|r| r.image == image)
+                        .map_or(1, |r| r.mip_levels);
+                    let (old_layout, src_access, range) = if chain_levels > 1 {
+                        (
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::TRANSFER_READ,
+                            vk::ImageSubresourceRange::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .level_count(chain_levels)
+                                .layer_count(1),
+                        )
+                    } else {
+                        (
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            vk::AccessFlags::TRANSFER_WRITE,
+                            color_mip0(),
+                        )
+                    };
                     let release_to = batch
                         .image_releases
                         .iter()
@@ -443,20 +601,20 @@ impl Uploader {
                         .map(|r| r.to_family);
                     let out_of_transfer = match release_to {
                         Some(to_family) => vk::ImageMemoryBarrier::default()
-                            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                            .src_access_mask(src_access)
+                            .old_layout(old_layout)
                             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                             .src_queue_family_index(queue_family)
                             .dst_queue_family_index(to_family),
                         None => vk::ImageMemoryBarrier::default()
-                            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                            .src_access_mask(src_access)
+                            .old_layout(old_layout)
                             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED),
                     }
                     .image(image)
-                    .subresource_range(color_mip0());
+                    .subresource_range(range);
                     device.cmd_pipeline_barrier(
                         slot.command_buffer,
                         vk::PipelineStageFlags::TRANSFER,
