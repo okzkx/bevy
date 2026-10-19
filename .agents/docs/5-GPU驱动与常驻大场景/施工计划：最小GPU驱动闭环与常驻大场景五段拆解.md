@@ -41,7 +41,7 @@ M2 前置契约已注明"全量拓扑快照与逐 draw push constants 是阶段�
 
 ### 5.3 indirect 闭环
 
-- **交付**：compute 写 indirect 参数（`drawIndirectCount` 为 1.2 core、`multiDrawIndirect` 为 1.1 core，进程已请求 API 1.3，无需额外 feature——施工时以 capability 日志钉明）；图形提交消费 GPU 写的参数；起步口径 = **固定槽位、不可见 `instanceCount=0`**（路线图已定，不做压缩合批起步）。
+- **交付**：compute 写 indirect 参数（`drawIndirectCount` 为 1.2 core、`multiDrawIndirect` 为 1.1 core，进程已请求 API 1.3——立案期核实订正 2026-10-19：原文"无需额外 feature"**不属实**，`multi_draw_indirect` 挂在 `VkPhysicalDeviceFeatures`（1.0 起的 feature 位，当前设备创建未传 base features）、`draw_indirect_count` 是 1.2 core 晋升但 feature 位未取消（`VkPhysicalDeviceVulkan12Features` 保留位），两条位当前均未启用，查询/启用/空转首跑随 [5.3 段施工计划](5.3-indirect闭环/施工计划：indirect闭环拆解.md)前置闸门钉明）；图形提交消费 GPU 写的参数；起步口径 = **固定槽位、不可见 `instanceCount=0`**（路线图已定，不做压缩合批起步）。
 - **判定线**：①CPU 绘制调用数固定不随 N 增长（1 万档实测读数）；②不可见对象 `instanceCount=0` 且不产生对应 GPU 工作；③不回读可见集（红线）；④5.1/5.2 判定线零回退；⑤剔除开关**画面级** A/B——只被剔除的都不可见（自 5.2 判定线③挪入：画面级 A/B 需绘制侧消费可见标记，2026-10-15 拍板随 indirect 消费归本段，5.2 只验标记数据层，见 [5.2 段施工计划](5.2-GPU视锥剔除/施工计划：GPU视锥剔除拆解.md)待决 5）。
 
 ### 5.4 常驻大场景组织
