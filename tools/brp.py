@@ -225,6 +225,10 @@ def cmd_cull_set(args):
             {"enabled": args.enabled == "true"}))
 
 
+def cmd_draw_stats(args):
+    out(rpc(args.host, args.port, "ash_renderer/draw_stats"))
+
+
 def cmd_load_mesh(args):
     params = {"path": args.path}
     if args.entity and args.source:
@@ -364,6 +368,8 @@ def main():
     p = sub.add_parser("cull-set", help="剔除开关（ash_renderer/cull_set_enabled；true=compute dispatch，false=host 全可见填充——数据层 A/B）")
     p.add_argument("--enabled", required=True, choices=["true", "false"], help="开关目标态")
     p.set_defaults(func=cmd_cull_set)
+
+    sub.add_parser("draw-stats", help="indirect 闭环读数：绘制调用数/命令条数/零实例条数/在场走访行（ash_renderer/draw_stats；读数陈旧一帧）").set_defaults(func=cmd_draw_stats)
 
     p = sub.add_parser("load-mesh", help="异步加载新 mesh：entity=换到既有实体 / source=克隆挂新实体（ash_renderer/load_mesh）")
     p.add_argument("--path", required=True, help='资产路径（如 "models/FlightHelmet/FlightHelmet.gltf#Mesh0/Primitive1"）')

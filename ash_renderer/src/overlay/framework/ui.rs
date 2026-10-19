@@ -41,7 +41,7 @@ use crate::overlay::windows::entity_tree_window::{
     EntityTreeData, EntityTreeWindow, SelectedDetails, SelectedEntity, TransformDragCache,
     collect_selected_details,
 };
-use crate::vulkan::{CullDiagnostics, CullSettings};
+use crate::vulkan::{CullDiagnostics, CullSettings, IndirectStats};
 
 use ash_macros::system;
 
@@ -171,6 +171,8 @@ struct DebugUiParams<'w, 's> {
     cull_settings: ResMut<'w, CullSettings>,
     /// 剔除诊断读数（draw_frame 每帧刷新，只读展示）
     cull_diag: Res<'w, CullDiagnostics>,
+    /// indirect 闭环读数（5.3：draw_frame 每帧刷新，只读展示）
+    indirect_stats: Res<'w, IndirectStats>,
 }
 
 /// Update：组 RawInput → begin_pass → 总控 + 各调试窗口（按显隐开关）→
@@ -247,6 +249,7 @@ fn run_egui_pass(
             stats: &ui.stats,
             cull_settings: &mut ui.cull_settings,
             cull_diag: &ui.cull_diag,
+            indirect_stats: &ui.indirect_stats,
         }
         .show();
     }

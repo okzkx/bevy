@@ -40,8 +40,8 @@ use crate::{
     vulkan::{
         frustum_planes, pack_frame_uniforms, AcquireOutcome, BindlessTables, Context,
         CullDiagnostics, CullPass, CullSettings, FrameDraw, FramePool, FrameUniformsData,
-        GraphicsPipeline, ImageCache, InstanceTables, MARK_SIZE, MeshPool, OverlayPipeline,
-        Swapchain, Uploader,
+        GraphicsPipeline, ImageCache, IndirectPass, IndirectStats, InstanceTables, MARK_SIZE,
+        MeshPool, OverlayPipeline, Swapchain, Uploader,
     },
 };
 
@@ -108,6 +108,10 @@ pub(crate) struct FrameInput<'w, 's> {
     cull_settings: Res<'w, CullSettings>,
     /// 剔除诊断账面（每帧刷新，egui/BRP 读数口）。
     cull_diag: ResMut<'w, CullDiagnostics>,
+    /// indirect 命令组装 compute 管线（5.3；init 链与场景管线同批创建）。
+    indirect_pass: Res<'w, IndirectPass>,
+    /// indirect 诊断账面（每帧刷新，egui/BRP 读数口；只进计量）。
+    indirect_stats: ResMut<'w, IndirectStats>,
 }
 
 /// DrawList 消费状态（跨帧 `Local`）：缺资源/相机告警去重 + 材质覆盖一次性收账。
@@ -170,6 +174,8 @@ pub(crate) fn draw_frame(
         ref cull_pass,
         ref cull_settings,
         ref mut cull_diag,
+        ref indirect_pass,
+        ref mut indirect_stats,
         ..
     } = input;
     // —— 闸门①：读 resize 消息。一次 update 可能积压多条（拖拽 125Hz 输入 vs 60fps
@@ -391,7 +397,7 @@ pub(crate) fn draw_frame(
         None
     };
     // 诊断读数：开 = 本帧槽两帧前 compute 的输出（最新确定值）；关 = host
-    // 全可见填充后直读（A/B 的 B 面基准）。逐可绘行计数。
+    // 全可见填充后直读（A/B 的 B 面基准）。逐在场行计数。
     if !cull_settings.enabled && cull_bound > 0 {
         let ones: Vec<u8> = (0..cull_bound).flat_map(|_| 1u32.to_le_bytes()).collect();
         instance_tables
@@ -399,6 +405,7 @@ pub(crate) fn draw_frame(
             .write(0, &ones)
             .or_fatal("剔除标记环全可见填充失败，渲染链无法继续")?;
     }
+    let mut visible_among_live = 0u32;
     if cull_bound > 0 {
         let mut bytes = vec![0u8; cull_bound as usize * MARK_SIZE as usize];
         instance_tables
@@ -407,17 +414,45 @@ pub(crate) fn draw_frame(
             .or_fatal("剔除标记环读数失败，渲染链无法继续")?;
         let mark_at =
             |slot: u32| u32::from_le_bytes(bytes[slot as usize * 4..slot as usize * 4 + 4].try_into().expect("4B"));
-        let visible = assembly
-            .draws
+        visible_among_live = assembly
+            .slots
             .iter()
-            .filter(|call| mark_at(call.instance) == 1)
+            .filter(|&&slot| mark_at(slot) == 1)
             .count() as u32;
         cull_diag.enabled = cull_settings.enabled;
         cull_diag.bound = cull_bound;
         cull_diag.marks_frame = cull_frame;
-        cull_diag.rows_compared = assembly.draws.len();
-        cull_diag.visible_count = visible;
+        cull_diag.rows_compared = assembly.slots.len();
+        cull_diag.visible_count = visible_among_live;
     }
+
+    // 4a-3) indirect 命令组装半边（5.3）：在场行数 = GPU 命令条数（CPU 在账
+    // 信息，非可见集回读）；count > 0 才有命令可组装（空场 = None，场景绘制
+    // 整段跳过）。诊断读数（draw 调用数/命令条数/instanceCount=0 条数）只进
+    // 计量，单独标注（诊断性回读边界照 5.2 拍板）。
+    let indirect_count = assembly.slots.len() as u32;
+    let indirect_dispatch = if indirect_count > 0 {
+        if !indirect_stats.first_run_logged {
+            info!(
+                "indirect 提交首跑（前置闸门②）：在场行 {indirect_count}，命令环 {}B/条，\
+                 图形侧一次 cmd_draw_indexed_indirect（push 已退役，firstInstance 携带槽号）",
+                crate::vulkan::INDIRECT_COMMAND_SIZE,
+            );
+            indirect_stats.first_run_logged = true;
+        }
+        Some(
+            indirect_pass
+                .draw(indirect_count)
+                .or_fatal("indirect dispatch 输入组装失败，渲染链无法继续")?,
+        )
+    } else {
+        None
+    };
+    indirect_stats.draw_calls_recorded = u32::from(indirect_count > 0);
+    indirect_stats.command_count = indirect_count;
+    indirect_stats.zero_instance_count = indirect_count - visible_among_live;
+    indirect_stats.walk_rows = ledger.len();
+    indirect_stats.pending_rows = assembly.pending_rows;
 
     // 4b) overlay 绘制半边：图集整传（可能多出一张 transfer 票据——本帧
     // 图形提交的 wait_ticket 在此后快照，flush_uploads 批与图集批都被等待）→
@@ -460,7 +495,9 @@ pub(crate) fn draw_frame(
         set2: instance_tables.frame_set2(frames.current_index()),
         vertex_buffer: pool.vertex_buffer(),
         index_buffer: pool.index_buffer(),
-        draws: &assembly.draws,
+        // 命令环句柄在 count = 0 时不被读（record_frame 的场景绘制整段跳过）
+        indirect_count,
+        indirect_buffer: instance_tables.indirect_buffer(frames.current_index()),
         overlay_pipeline: overlay_pipeline.pipeline(),
         overlay_layout: overlay_pipeline.layout(),
         ui: ui.as_ref().map(|(paint, _)| paint),
@@ -473,6 +510,7 @@ pub(crate) fn draw_frame(
         ticket_semaphore: uploader.ticket_semaphore(),
         clear: CLEAR_COLOR,
         cull: cull_dispatch,
+        indirect: indirect_dispatch,
     };
     frames
         .record_frame(

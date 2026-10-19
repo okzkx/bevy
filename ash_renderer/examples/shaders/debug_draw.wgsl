@@ -5,6 +5,9 @@
 // 实例索引读 set2 的对象表（mesh 范围/材质索引/局部包围盒）与模型环（model），
 // fragment 读材质环（base_color/贴图槽）。逐对象参数不再走 CPU 推送，
 // CPU 不回读、不逐对象组装（GPU frustum 与 indirect 闭环的地基）。
+// 5.3 扩（indirect 闭环）：push 4B 退役——indirect 命令的 firstInstance 携带
+// 实例槽号，vertex 改按 @builtin(instance_index) 读表（instanceCount=1 时
+// instance_index == firstInstance == 槽号）；图形 push 从此归零。
 //
 // 接口 = 3.3 前置闸门冻结的 set/binding 表 + 5.1 新增 set2：
 // - set0 b0/b1：纹理数组 + sampler 数组，runtime array（build.rs 补丁器补 capability）。
@@ -14,10 +17,10 @@
 // - set2 b0/b1/b2：只读 storage——对象表（48B/记录，stride 与 Rust 镜像
 //   `vulkan/instance_table.rs::ObjectRecordLayout` 静态互证）、模型环（64B=mat4）、
 //   材质环（32B/记录，MaterialRecordLayout 同源）。b1/b2 按帧槽绑本帧的环。
-// - push constant：4B 实例槽号（push 范围与 pipeline layout 同步缩到 4B）。
+// - push constant：无（5.3 退役；实例槽号随 indirect 命令 firstInstance 进来）。
 //
-// 索引语义：push.instance = 实例槽（跨帧稳定，free list 复用经停尸房排空）；
-// 一个 draw 内槽号恒定（uniform 下标），不触发 NonUniform。
+// 索引语义：instance_index = 实例槽（跨帧稳定，free list 复用经停尸房排空）；
+// 一个 draw 命令内槽号恒定（uniform 下标），不触发 NonUniform。
 // fragment 着色 = 材质三模式（UBO mode，与 Rust `FRAME_MODE_*` 同值）：
 // - 0 Lambert（默认）：albedo × (direct + ambient) × exposure。物理链与 bevy GPU
 //   侧同构：UBO 里的 light_color = linear × illuminance、ambient = linear ×
@@ -83,12 +86,6 @@ const EXPOSURE: f32 = 0.0010019;
 @group(2) @binding(1) var<storage, read> models: array<mat4x4f>;
 @group(2) @binding(2) var<storage, read> materials: array<MaterialRecord>;
 
-// push 4B = 实例槽号（逐对象参数全部按它进表读取）
-var<immediate> push: PushParams;
-struct PushParams {
-    instance: u32,
-}
-
 // 模型的逆转置法线矩阵（cofactor 矩阵形态）：设 mat3 列为 a,b,c，则
 // (M⁻¹)ᵀ = cofactor(M)/det(M)，而 cofactor 列 = [b×c, c×a, a×b]。
 // det 标量在 normalize 中消失——不用除法、不引入 inverse()，非均匀缩放正确；
@@ -113,9 +110,12 @@ fn vs_main(
     @location(0) position: vec3f,
     @location(1) normal: vec3f,
     @location(2) uv: vec2f,
+    // 实例槽号（5.3）：indirect 命令 firstInstance 携带，instanceCount=1 时
+    // instance_index == firstInstance == 槽号——push 通道退役后的唯一入口。
+    @builtin(instance_index) instance_index: u32,
 ) -> VsOut {
-    let obj = objects[push.instance];
-    let model = models[push.instance];
+    let obj = objects[instance_index];
+    let model = models[instance_index];
     var out: VsOut;
     // 列主序全链：model(local→world) 后 view_proj(world→clip)，与 Rust 侧
     // Mat4::to_cols_array / get_clip_from_view × view 的乘序同一约定。

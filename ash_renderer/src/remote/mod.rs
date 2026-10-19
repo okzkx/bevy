@@ -12,6 +12,7 @@
 //! | [`objects`] | 对象生命周期方法族：spawn 克隆/换柄写方法 + increment_stats 统计读数 |
 //! | [`assets`] | 资产内容变更 + 运行期动态加载：mutate/load_mesh/load_image/reload |
 //! | [`cull`] | 剔除读数与开关（5.2）：cull_stats 对照 + cull_set_enabled 开关 |
+//! | [`draw`] | indirect 闭环读数（5.3）：draw_stats 绘制调用/命令条数/不可见计数 |
 //!
 //! 机制与边界（侦察笔记《bevy_remote：BRP远程协议与自定义方法》）：handler 本身
 //! 就是一个 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍执行——写值下一帧
@@ -20,6 +21,7 @@
 
 pub mod assets;
 pub mod cull;
+pub mod draw;
 pub mod mouse;
 pub mod objects;
 
@@ -35,6 +37,7 @@ use serde_json::{json, Value};
 use self::{
     assets::{load_image_cmd, load_mesh_cmd, mutate_asset_cmd, reload_asset_cmd},
     cull::{cull_set_enabled, cull_stats},
+    draw::draw_stats,
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     objects::{increment_stats, replace_handles, spawn_primitive},
 };
@@ -71,7 +74,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/mouse_wheel", mouse_wheel)
                 .with_method_main("ash_renderer/mouse_status", mouse_status)
                 .with_method_main("ash_renderer/cull_stats", cull_stats)
-                .with_method_main("ash_renderer/cull_set_enabled", cull_set_enabled),
+                .with_method_main("ash_renderer/cull_set_enabled", cull_set_enabled)
+                .with_method_main("ash_renderer/draw_stats", draw_stats),
             RemoteHttpPlugin::default(),
         ));
     }

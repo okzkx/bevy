@@ -277,6 +277,9 @@ impl Context {
             .push_next(&mut vk12_query)
             .push_next(&mut vk13_query);
         unsafe { instance.get_physical_device_features2(physical_device, &mut features2) };
+        // base features 支持位在此快照（features2 借用 vk12/vk13 查询结构，
+        // 借用链活到哪，字段就能读到哪——日志段用快照值）
+        let multi_draw_indirect_supported = features2.features.multi_draw_indirect != 0;
         // 与 1.3 基线同款的硬校验：要用而驱动不支持 = 出局，不创建半残设备
         if vk12_query.timeline_semaphore == 0 || vk13_query.dynamic_rendering == 0 {
             return Err(VulkanError::Init(format!(
@@ -310,6 +313,16 @@ impl Context {
             return Err(VulkanError::Init(format!(
                 "物理设备 descriptor indexing 特性不足：{name} 不支持（bindless 路线无传统回退，该设备出局）"
             )));
+        }
+        // 硬校验：indirect 绘制能力（5.3 闸门①）。multi_draw_indirect 挂在
+        // 1.0 起的 base feature 位（VkPhysicalDeviceFeatures）——"1.1/1.2 core
+        // 晋升"只收编命令不取消启用位（timeline 同理），"查询为 true ≠ 已启用"
+        // 纪律照旧：未启用时调 cmd_draw_indexed_indirect(drawCount>1) 直接违
+        // VUID-02718。缺位 = 出局（1.3 基线同款待遇）。
+        if !multi_draw_indirect_supported {
+            return Err(VulkanError::Init(
+                "物理设备 feature 不足：multi_draw_indirect 不支持（5.3 indirect 闭环无逐 draw 回退路径，该设备出局）".into(),
+            ));
         }
         // 惯例：20 个分位的支持值全量落日志——"不启用≠不查"，后续段要用
         // 哪位（SSBO 表/variable count…）的证据都在这行里，不重新侦察
@@ -348,6 +361,9 @@ impl Context {
             .descriptor_binding_sampled_image_update_after_bind(true)
             .descriptor_binding_partially_bound(true);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
+        // base features 启用位（DeviceCreateInfo 的 features 字段——此前未传，
+        // 全 0）：multi_draw_indirect 是 indirect 闭环（5.3）的闸门①启用位
+        let base_features = vk::PhysicalDeviceFeatures::default().multi_draw_indirect(true);
         let queue_priority = [1.0f32];
         let mut queue_infos = vec![vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
@@ -386,6 +402,7 @@ impl Context {
                 &vk::DeviceCreateInfo::default()
                     .queue_create_infos(&queue_infos)
                     .enabled_extension_names(&dev_exts)
+                    .enabled_features(&base_features)
                     .push_next(&mut vulkan12)
                     .push_next(&mut vulkan13),
                 None,
@@ -412,7 +429,7 @@ impl Context {
         let memory_contract =
             unsafe { crate::vulkan::MemoryContract::new(&instance, physical_device) };
         info!(
-            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}（GRAPHICS+COMPUTE+PRESENT，5.2 前置闸门①实测钉明）  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  features[支持→已启用]: timelineSemaphore {}→on  dynamicRendering {}→on  descriptorIndexing+4 位 {}→on  swapchain_mutable_format on  synchronization2 off（屏障走传统形状）  验证层 {}",
+            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}（GRAPHICS+COMPUTE+PRESENT，5.2 前置闸门①实测钉明）  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  features[支持→已启用]: timelineSemaphore {}→on  dynamicRendering {}→on  descriptorIndexing+4 位 {}→on  multiDrawIndirect {}→on（5.3 闸门①）  maxDrawIndirectCount {}（5.3 闸门③留痕）  swapchain_mutable_format on  synchronization2 off（屏障走传统形状）  验证层 {}",
             vk::api_version_major(dev_props.api_version),
             vk::api_version_minor(dev_props.api_version),
             vk::api_version_patch(dev_props.api_version),
@@ -420,6 +437,8 @@ impl Context {
             vk12_query.timeline_semaphore != 0,
             vk13_query.dynamic_rendering != 0,
             vk12_query.descriptor_indexing != 0,
+            multi_draw_indirect_supported,
+            dev_props.limits.max_draw_indirect_count,
             if validation { "on" } else { "未找到" },
         );
 
@@ -443,6 +462,12 @@ impl Context {
     #[must_use]
     pub fn memory_contract(&self) -> &crate::vulkan::MemoryContract {
         &self.memory_contract
+    }
+
+    /// 物理设备 limits(进程级事实,设备存活期恒定;indirect 上界等留痕口)。
+    pub fn limits(&self) -> vk::PhysicalDeviceLimits {
+        // # Safety:physical_device 来自成功枚举、instance 未销毁(同 memory_contract)
+        unsafe { self.instance.get_physical_device_properties(self.physical_device) }.limits
     }
 }
 

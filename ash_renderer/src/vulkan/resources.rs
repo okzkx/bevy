@@ -81,6 +81,11 @@ pub enum BufferRole {
     /// 从不覆盖仍被在飞 draw 读取的记录(对象记录按槽分配写一次,
     /// 更新走"新槽 + 旧槽停尸房",见 instance_table 模块)。
     DeviceStorage,
+    /// indirect 绘制命令环(5.3):compute 每帧全量重写、`cmd_draw_indexed_indirect`
+    /// 按 DRAW_INDIRECT 阶段读——纯设备侧双端(宿主零参与),DEVICE_LOCAL;
+    /// usage 带 INDIRECT_BUFFER(cmdDrawIndexedIndirect 的 VUID-00533 硬要求)。
+    /// 复用安全与标记环同一条 fence 纪律(帧槽 ×2,wait_for_slot 先行)。
+    IndirectCommands,
 }
 
 impl BufferRole {
@@ -107,6 +112,10 @@ impl BufferRole {
                     | vk::BufferUsageFlags::TRANSFER_DST
                     | vk::BufferUsageFlags::TRANSFER_SRC
             }
+            Self::IndirectCommands => {
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::INDIRECT_BUFFER
+            }
             Self::Storage => {
                 vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::TRANSFER_DST
@@ -119,8 +128,9 @@ impl BufferRole {
     #[must_use]
     pub fn required_memory(self) -> vk::MemoryPropertyFlags {
         match self {
-            Self::DevicePool => vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            Self::DeviceStorage => vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            Self::DevicePool | Self::DeviceStorage | Self::IndirectCommands => {
+                vk::MemoryPropertyFlags::DEVICE_LOCAL
+            }
             Self::Staging
             | Self::Readback
             | Self::FrameUniform
@@ -135,7 +145,9 @@ impl BufferRole {
     #[must_use]
     pub fn preferred_memory(self) -> vk::MemoryPropertyFlags {
         match self {
-            Self::DevicePool | Self::DeviceStorage => vk::MemoryPropertyFlags::empty(),
+            Self::DevicePool | Self::DeviceStorage | Self::IndirectCommands => {
+                vk::MemoryPropertyFlags::empty()
+            }
             Self::Staging => vk::MemoryPropertyFlags::HOST_COHERENT,
             Self::Readback | Self::FrameUniform | Self::DynamicDraw | Self::Storage => {
                 vk::MemoryPropertyFlags::HOST_CACHED | vk::MemoryPropertyFlags::HOST_COHERENT

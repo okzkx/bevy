@@ -180,7 +180,9 @@ pub(crate) fn increment_stats(
             "object_retired_total": instance_tables.slots_retired_total(),
             "material_slots": s.material_slots,
             "material_capacity": instance_tables.capacity_materials(),
-            "push_bytes_per_draw": 4,
+            // 5.3 起图形 push 退役（firstInstance 携带槽号）——场景绘制 push
+            // 字节恒 0；字段保留供 5.4/5.5 压测对照（读数从硬编码 4 订正为 0）
+            "push_bytes_per_draw": 0,
         },
         "readiness": {
             "pending_meshes": r.pending_meshes,

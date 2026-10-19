@@ -23,9 +23,9 @@ use crate::{
     common::syntax::ResultTierExt,
     overlay::{AtlasGpu, UiVertexRing},
     vulkan::{
-        BindlessTables, Context, CullPass, FramePool, GraphicsPipeline, ImageCache, InstanceTables,
-        MeshPool, OverlayPipeline, Swapchain, Uploader, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT,
-        TABLE_CAPACITY,
+        BindlessTables, Context, CullPass, FramePool, GraphicsPipeline, ImageCache, IndirectPass,
+        InstanceTables, MeshPool, OverlayPipeline, Swapchain, Uploader, DEPTH_FORMAT,
+        MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
 
@@ -42,11 +42,11 @@ pub(super) fn init_vulkan(
     _main_thread: NonSendMarker,
     mut commands: Commands,
 ) -> Result<(), BevyError> {
-    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, pipeline, overlay_pipeline, cull_pass, ui_ring) =
+    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, pipeline, overlay_pipeline, cull_pass, indirect_pass, ui_ring) =
         try_init_vulkan(&wrapper)
             .or_fatal("Vulkan 初始化失败，资源束一个都不插入")?; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过帧循环
     info!(
-        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GraphicsPipeline + OverlayPipeline + CullPass（视锥剔除 compute）+ UiVertexRing；清屏+剔除+绘制自下一帧（Last）起"
+        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GraphicsPipeline + OverlayPipeline + CullPass（视锥剔除 compute）+ IndirectPass（indirect 命令组装 compute）+ UiVertexRing；清屏+剔除+组装+绘制自下一帧（Last）起"
     );
     // 插入顺序 = 创建顺序；World 清场顺序不定，退出时的反序拆除见 teardown_vulkan
     commands.insert_resource(ctx);
@@ -60,6 +60,7 @@ pub(super) fn init_vulkan(
     commands.insert_resource(pipeline);
     commands.insert_resource(overlay_pipeline);
     commands.insert_resource(cull_pass);
+    commands.insert_resource(indirect_pass);
     commands.insert_resource(ui_ring);
     Ok(())
 }
@@ -139,6 +140,9 @@ fn try_init_vulkan(
     // 视锥剔除 compute 管线（5.2）：只借 set2（b0/b1/b2 只读三表 + b3 标记），
     // 平面随 112B push——前置闸门④的载体（空转首跑在首个有实例的帧收账）
     let cull_pass = CullPass::new(&ctx, instance_tables.set2_layout())?;
+    // indirect 命令组装 compute 管线（5.3）：只借 set2（b0 对象表 + b3 标记 +
+    // b4 在场环 + b5 命令环），count 随 4B push——闸门②首跑在首个有在场行的帧收账
+    let indirect_pass = IndirectPass::new(&ctx, instance_tables.set2_layout())?;
     // UI 顶点环：每帧槽一对 HOST_VISIBLE 顶点/索引 buffer，纯 Context
     // 依赖（初始化链尾端，拆除随帧级一批——无表/管线依赖）
     let ui_ring = UiVertexRing::new(&ctx)?;
@@ -146,7 +150,7 @@ fn try_init_vulkan(
     std::mem::forget(drain_guard);
     Ok((
         ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, pipeline,
-        overlay_pipeline, cull_pass, ui_ring,
+        overlay_pipeline, cull_pass, indirect_pass, ui_ring,
     ))
 }
 
@@ -203,6 +207,7 @@ pub(super) fn teardown_vulkan(world: &mut World) {
     world.remove_resource::<OverlayPipeline>();
     world.remove_resource::<GraphicsPipeline>();
     world.remove_resource::<CullPass>();
+    world.remove_resource::<IndirectPass>();
     // GPU 常驻绘制数据随管线之后拆（管线 layout 借用其 set2 layout），描述符
     // 只指向自己的三份 buffer——随字段 Drop，顺序在资产级自由
     world.remove_resource::<InstanceTables>();
@@ -233,5 +238,6 @@ type InitChain = (
     GraphicsPipeline,
     OverlayPipeline,
     CullPass,
+    IndirectPass,
     UiVertexRing,
 );
