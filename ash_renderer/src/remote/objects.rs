@@ -65,6 +65,9 @@ pub(crate) fn object_op_error(err: ObjectOpError) -> BrpError {
             "资产路径解析失败（坏标签/坏 source 语法）：{what}"
         )),
         ObjectOpError::InvalidParams(what) => invalid_params(what),
+        ObjectOpError::ChunkMissing(id) => invalid_params(format!(
+            "chunk {id} 不在场（ash_renderer/chunk_census 可查在场块）"
+        )),
     }
 }
 

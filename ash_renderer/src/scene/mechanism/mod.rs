@@ -38,7 +38,10 @@ pub use object_ops::{
     load_image_slot, load_mesh_rebind, replace_handles, spawn_primitive_clone,
     spawn_with_loaded_mesh,
 };
-pub use scene_gen::{generate_instances, SceneGenParams};
+pub use scene_gen::{
+    chunk_census, despawn_chunk, generate_chunks, generate_instances, ChunkGenParams,
+    SceneGenParams,
+};
 pub(crate) use object_ops::{HandleSwapReadback, ObjectOpError};
 
 // 排序锚点（语义 = 账本已与 World 对账完毕）：业务侧核验

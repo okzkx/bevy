@@ -40,7 +40,7 @@ use self::{
     assets::{load_image_cmd, load_mesh_cmd, mutate_asset_cmd, reload_asset_cmd},
     cull::{cull_set_enabled, cull_stats},
     draw::draw_stats,
-    generate::generate_scene,
+    generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     objects::{increment_stats, replace_handles, spawn_primitive},
 };
@@ -67,6 +67,9 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/set_camera", set_camera)
                 .with_method_main("ash_renderer/spawn_primitive", spawn_primitive)
                 .with_method_main("ash_renderer/generate_scene", generate_scene)
+                .with_method_main("ash_renderer/generate_chunks", generate_chunks_cmd)
+                .with_method_main("ash_renderer/chunk_census", chunk_census)
+                .with_method_main("ash_renderer/chunk_despawn", chunk_despawn)
                 .with_method_main("ash_renderer/replace_handles", replace_handles)
                 .with_method_main("ash_renderer/mutate_asset", mutate_asset_cmd)
                 .with_method_main("ash_renderer/load_mesh", load_mesh_cmd)

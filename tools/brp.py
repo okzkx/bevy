@@ -178,6 +178,28 @@ def cmd_spawn(args):
     out(rpc(args.host, args.port, "ash_renderer/spawn_primitive", params))
 
 
+def cmd_generate_chunks(args):
+    params = {
+        "chunk_grid": args.chunk_grid,
+        "instances_per_chunk": args.instances_per_chunk,
+        "spacing": args.spacing,
+        "seed": args.seed,
+    }
+    if args.source:
+        params["source"] = args.source
+    if args.jitter:
+        params["jitter"] = args.jitter
+    out(rpc(args.host, args.port, "ash_renderer/generate_chunks", params))
+
+
+def cmd_chunk_census(args):
+    out(rpc(args.host, args.port, "ash_renderer/chunk_census"))
+
+
+def cmd_chunk_despawn(args):
+    out(rpc(args.host, args.port, "ash_renderer/chunk_despawn", {"id": args.id}))
+
+
 def cmd_generate(args):
     params = {
         "count": args.count,
