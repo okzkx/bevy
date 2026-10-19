@@ -148,8 +148,8 @@ fn main() {
         }
     );
 
-    group_b_upload_closure(&device, &contract, transfer_family, transfer_queue);
-    group_c_maintenance(&device, &contract, transfer_family, transfer_queue);
+    group_b_upload_closure(&device, &contract, transfer_family, transfer_queue, gfx_family, gfx_queue);
+    group_c_maintenance(&device, &contract, transfer_family, transfer_queue, gfx_family, gfx_queue);
     if cross_family {
         group_d_cross_family(
             &device,
@@ -487,6 +487,8 @@ fn group_b_upload_closure(
     contract: &MemoryContract,
     transfer_family: u32,
     transfer_queue: vk::Queue,
+    gfx_family: u32,
+    gfx_queue: vk::Queue,
 ) {
     let mut pool = MeshPool::new(device, contract, &[]);
     let mut uploader = Uploader::new(
@@ -494,6 +496,8 @@ fn group_b_upload_closure(
         contract,
         transfer_family,
         transfer_queue,
+        gfx_family,
+        gfx_queue,
         256 * 1024,
         2,
     )
@@ -580,6 +584,8 @@ fn group_c_maintenance(
     contract: &MemoryContract,
     transfer_family: u32,
     transfer_queue: vk::Queue,
+    gfx_family: u32,
+    gfx_queue: vk::Queue,
 ) {
     println!("\n== 组 C(维护扩容观察:容量不足 → 显式维护迁移)==");
     let mut pool = MeshPool::new(device, contract, &[]);
@@ -588,6 +594,8 @@ fn group_c_maintenance(
         contract,
         transfer_family,
         transfer_queue,
+        gfx_family,
+        gfx_queue,
         64 * 1024,
         2,
     )
@@ -698,6 +706,8 @@ fn group_d_cross_family(
         contract,
         transfer_family,
         transfer_queue,
+        gfx_family,
+        gfx_queue,
         64 * 1024,
         2,
     )

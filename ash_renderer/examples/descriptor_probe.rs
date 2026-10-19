@@ -122,7 +122,7 @@ fn main() {
     let device = make_device(&instance, pd);
     let queue = unsafe { device.get_device_queue(0, 0) }; // families[0] = graphics
     let contract = unsafe { MemoryContract::new(&instance, pd) };
-    let mut uploader = Uploader::new(&device, &contract, 0, queue, 1024, 2).expect("探针 Uploader");
+    let mut uploader = Uploader::new(&device, &contract, 0, queue, 0, queue, 1024, 2).expect("探针 Uploader");
     // 生产表：容量 TABLE_CAPACITY，限额对账在 new 内落日志
     let mut tables = BindlessTables::new(&device, &instance, pd, &contract, &mut uploader, 0, TABLE_CAPACITY)
         .expect("生产常驻描述符表(容量 1024)");

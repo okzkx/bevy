@@ -128,6 +128,8 @@ pub struct UploadBatch {
 struct RingSlot {
     staging: Option<GpuBuffer>,
     command_buffer: vk::CommandBuffer,
+    /// mip 生成续批命令缓冲（graphics 族池;与 transfer 槽同 index 配对）。
+    blit_command_buffer: vk::CommandBuffer,
     in_flight: Option<Ticket>,
 }
 
@@ -138,6 +140,12 @@ pub struct Uploader {
     queue_family: u32,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
+    /// mip 生成续批（5.4.3）：blit 须 graphics 命令池（VUID-vkCmdBlitImage-
+    /// commandBuffer-cmdpool——transfer-only 池录 blit 违规且设备丢失，运行
+    /// 实抓）。链生成段挂 graphics 队列、等 transfer 票据后执行、signal
+    /// 同一票据信号量 +1（发布票据 = 续批票据，消费方等待语义不变）。
+    graphics_queue: vk::Queue,
+    blit_pool: vk::CommandPool,
     slots: Vec<RingSlot>,
     cursor: usize,
     /// 完成票据的载体(timeline 信号量,初值 0)。
@@ -156,11 +164,17 @@ impl Uploader {
     ///
     /// # Errors
     /// 命令池/命令缓冲/信号量创建失败。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "创建参数即设备事实清单:transfer/graphics 两族的族号+队列成对出现,收参数束反而藏住提交拓扑"
+    )]
     pub fn new(
         device: &Device,
         contract: &MemoryContract,
         queue_family: u32,
         queue: vk::Queue,
+        graphics_family: u32,
+        graphics_queue: vk::Queue,
         staging_capacity: u64,
         slots: usize,
     ) -> Result<Self> {
@@ -174,10 +188,28 @@ impl Uploader {
                 None,
             )
         }?;
+        // blit 池：graphics 族（mip 链生成续批的提交目标;两池同族设备下
+        // 仍是两个池,统一一条续批代码路径）
+        let blit_pool = unsafe {
+            device.create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                    .queue_family_index(graphics_family),
+                None,
+            )
+        }?;
         let command_buffers = unsafe {
             device.allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default()
                     .command_pool(command_pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(slots as u32),
+            )
+        }?;
+        let blit_command_buffers = unsafe {
+            device.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(blit_pool)
                     .level(vk::CommandBufferLevel::PRIMARY)
                     .command_buffer_count(slots as u32),
             )
@@ -188,13 +220,19 @@ impl Uploader {
                 contract,
                 queue_family,
                 queue,
+                graphics_queue,
                 staging_capacity,
                 command_pool,
+                blit_pool,
                 &command_buffers,
+                &blit_command_buffers,
             )
         };
         if result.is_err() {
-            unsafe { device.destroy_command_pool(command_pool, None) };
+            unsafe {
+                device.destroy_command_pool(command_pool, None);
+                device.destroy_command_pool(blit_pool, None);
+            };
         }
         result
     }
@@ -203,14 +241,21 @@ impl Uploader {
     ///
     /// # Safety
     /// `command_pool` 与 `command_buffers` 须刚创建成功且未销毁。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "同 new:创建链后半段的参数表即设备事实清单"
+    )]
     unsafe fn new_inner(
         device: &Device,
         contract: &MemoryContract,
         queue_family: u32,
         queue: vk::Queue,
+        graphics_queue: vk::Queue,
         staging_capacity: u64,
         command_pool: vk::CommandPool,
+        blit_pool: vk::CommandPool,
         command_buffers: &[vk::CommandBuffer],
+        blit_command_buffers: &[vk::CommandBuffer],
     ) -> Result<Self> {
         // timeline:支持(1.3 核心 mandatory)≠ 启用——timelineSemaphore 已在
         // 设备创建时显式开启(context.rs);此处只用不另设
@@ -226,13 +271,17 @@ impl Uploader {
             command_pool,
             slots: command_buffers
                 .iter()
-                .map(|&command_buffer| RingSlot {
+                .zip(blit_command_buffers)
+                .map(|(&command_buffer, &blit_command_buffer)| RingSlot {
                     staging: None,
                     command_buffer,
+                    blit_command_buffer,
                     in_flight: None,
                 })
                 .collect(),
             cursor: 0,
+            graphics_queue,
+            blit_pool,
             ticket_semaphore,
             next_ticket: 1,
             staging_capacity,
@@ -434,18 +483,22 @@ impl Uploader {
                         }],
                     );
                 }
-                // mip 链生成（5.4.3）：blit 逐级缩。链内时序——level 0 拷贝写完
-                // → 迁 TRANSFER_SRC 作源；级 i 从级 i-1 blit（dst 落
-                // TRANSFER_DST）；每级写完即迁回 TRANSFER_SRC（含末级，使链内
-                // 全层级布局归一，后置屏障单一形状）。级数 = 建图级数（能力
-                // 判定在 GpuImage::create），单级图无此段。
+                // mip 链图的 level 0 迁出为 blit 源（TRANSFER_DST →
+                // TRANSFER_SRC）。链生成的主体（blit + 逐级 barrier + 迁入
+                // 可采样布局）不在此录——blit 须 graphics 命令池
+                //（VUID-vkCmdBlitImage-commandBuffer-cmdpool，transfer-only
+                // 池录制直接违规并设备丢失，运行实抓），由 transfer 提交
+                // 之后的 graphics 队列续批消费（见 submit 尾段）。单级图
+                // 无此屏障，直接走下方后置。
                 let mut chain_seen: Vec<vk::Image> = Vec::new();
                 for region in &batch.image_uploads {
                     if region.mip_levels <= 1 || chain_seen.contains(&region.image) {
                         continue;
                     }
                     chain_seen.push(region.image);
-                    // level 0：拷贝写（TRANSFER_DST）→ blit 源（TRANSFER_SRC）
+                    // dstAccess = TRANSFER_READ：layout transition 自带一次
+                    // 写（元数据），必须挂进 dst 作用域才对后续 blit 的
+                    // TRANSFER_READ 可见——跨提交依赖由票据信号量续接
                     let src_ready = vk::ImageMemoryBarrier::default()
                         .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                         .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
@@ -455,22 +508,6 @@ impl Uploader {
                         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                         .image(region.image)
                         .subresource_range(color_mip0());
-                    // 目标层级 1..n：UNDEFINED → TRANSFER_DST（blit 的写布局）
-                    let dst_ready = vk::ImageMemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .old_layout(vk::ImageLayout::UNDEFINED)
-                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .image(region.image)
-                        .subresource_range(
-                            vk::ImageSubresourceRange::default()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .base_mip_level(1)
-                                .level_count(region.mip_levels - 1)
-                                .layer_count(1),
-                        );
                     device.cmd_pipeline_barrier(
                         slot.command_buffer,
                         vk::PipelineStageFlags::TRANSFER,
@@ -478,122 +515,26 @@ impl Uploader {
                         vk::DependencyFlags::empty(),
                         &[],
                         &[],
-                        &[src_ready, dst_ready],
+                        &[src_ready],
                     );
-                    for level in 1..region.mip_levels {
-                        // 级 i 从级 i-1 线性缩（逐级缩 = 2× 平均，与 bevy
-                        // generate_mipmaps 同形）；两维 .max(1) 收底
-                        let (src_w, src_h) = (
-                            (region.width >> (level - 1)).max(1),
-                            (region.height >> (level - 1)).max(1),
-                        );
-                        let (dst_w, dst_h) = (
-                            (region.width >> level).max(1),
-                            (region.height >> level).max(1),
-                        );
-                        device.cmd_blit_image(
-                            slot.command_buffer,
-                            region.image,
-                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                            region.image,
-                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            &[vk::ImageBlit::default()
-                                .src_subresource(
-                                    vk::ImageSubresourceLayers::default()
-                                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                        .mip_level(level - 1)
-                                        .base_array_layer(0)
-                                        .layer_count(1),
-                                )
-                                .src_offsets([
-                                    vk::Offset3D::default(),
-                                    vk::Offset3D {
-                                        x: src_w as i32,
-                                        y: src_h as i32,
-                                        z: 1,
-                                    },
-                                ])
-                                .dst_subresource(
-                                    vk::ImageSubresourceLayers::default()
-                                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                        .mip_level(level)
-                                        .base_array_layer(0)
-                                        .layer_count(1),
-                                )
-                                .dst_offsets([
-                                    vk::Offset3D::default(),
-                                    vk::Offset3D {
-                                        x: dst_w as i32,
-                                        y: dst_h as i32,
-                                        z: 1,
-                                    },
-                                ])],
-                            vk::Filter::LINEAR,
-                        );
-                        // 级 i 写完 → TRANSFER_SRC（下一级作源；末级也迁，
-                        // 让链内全部层级布局归一）
-                        let level_ready = vk::ImageMemoryBarrier::default()
-                            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-                            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                            .image(region.image)
-                            .subresource_range(
-                                vk::ImageSubresourceRange::default()
-                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                    .base_mip_level(level)
-                                    .level_count(1)
-                                    .layer_count(1),
-                            );
-                        device.cmd_pipeline_barrier(
-                            slot.command_buffer,
-                            vk::PipelineStageFlags::TRANSFER,
-                            vk::PipelineStageFlags::TRANSFER,
-                            vk::DependencyFlags::empty(),
-                            &[],
-                            &[],
-                            &[level_ready],
-                        );
-                    }
                 }
-                // 后置:布局现状 → SHADER_READ_ONLY。src 作用域罩住本提交内的
-                // 拷贝/blit 写;本提交内没有消费者,dst 作用域为空——真正的
-                // 读依赖由消费方"等票据 + 自己的屏障"建立(票据信号量完成 memory
-                // 释放/获取语义)。带 release 的图把所有权让渡合成进同一条屏障,
-                // dst 阶段/访问掩码被规范声明忽略(与 buffer release 同款);不带
-                // release 的图按同族纯布局转换收尾(IGNORED = 无所有权语义)。
-                // 拷贝写(TRANSFER_WRITE);本提交内没有消费者,dst 作用域为空——真正的
-                // 读依赖由消费方"等票据 + 自己的屏障"建立(票据信号量完成 memory
-                // 释放/获取语义)。带 release 的图把所有权让渡合成进同一条屏障,
-                // dst 阶段/访问掩码被规范声明忽略(与 buffer release 同款);不带
-                // release 的图按同族纯布局转换收尾(IGNORED = 无所有权语义)。
+                // 后置:TRANSFER_DST → SHADER_READ_ONLY（单级图）。src 作用域
+                // 罩住本提交内的拷贝写;本提交内没有消费者,dst 作用域为空——
+                // 真正的读依赖由消费方"等票据 + 自己的屏障"建立(票据信号量完成
+                // memory 释放/获取语义)。带 release 的图把所有权让渡合成进同一条
+                // 屏障,dst 阶段/访问掩码被规范声明忽略(与 buffer release 同款);
+                // 不带 release 的图按同族纯布局转换收尾(IGNORED = 无所有权语义)。
+                // 多级图不在此列:它们的 level 0 已在上方迁为 TRANSFER_SRC、
+                // 高层级仍在 UNDEFINED,收口(全链 → SHADER_READ_ONLY)由 graphics
+                // 队列续批在 blit 之后做——transfer 批没有它们可用的最终布局。
                 for image in distinct_images(&batch.image_uploads) {
-                    // 多级图：blit 段已把全链归一到 TRANSFER_SRC，后置按
-                    // TRANSFER_SRC 迁（全层级范围）；单级图保持 TRANSFER_DST
-                    // 迁（mip0 范围）——两种形状是布局现状不同，不是模板分叉
-                    let chain_levels = batch
+                    let is_chained = batch
                         .image_uploads
                         .iter()
-                        .find(|r| r.image == image)
-                        .map_or(1, |r| r.mip_levels);
-                    let (old_layout, src_access, range) = if chain_levels > 1 {
-                        (
-                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                            vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::TRANSFER_READ,
-                            vk::ImageSubresourceRange::default()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .level_count(chain_levels)
-                                .layer_count(1),
-                        )
-                    } else {
-                        (
-                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            vk::AccessFlags::TRANSFER_WRITE,
-                            color_mip0(),
-                        )
-                    };
+                        .any(|r| r.image == image && r.mip_levels > 1);
+                    if is_chained {
+                        continue;
+                    }
                     let release_to = batch
                         .image_releases
                         .iter()
@@ -601,20 +542,20 @@ impl Uploader {
                         .map(|r| r.to_family);
                     let out_of_transfer = match release_to {
                         Some(to_family) => vk::ImageMemoryBarrier::default()
-                            .src_access_mask(src_access)
-                            .old_layout(old_layout)
+                            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                             .src_queue_family_index(queue_family)
                             .dst_queue_family_index(to_family),
                         None => vk::ImageMemoryBarrier::default()
-                            .src_access_mask(src_access)
-                            .old_layout(old_layout)
+                            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED),
                     }
                     .image(image)
-                    .subresource_range(range);
+                    .subresource_range(color_mip0());
                     device.cmd_pipeline_barrier(
                         slot.command_buffer,
                         vk::PipelineStageFlags::TRANSFER,
@@ -701,8 +642,213 @@ impl Uploader {
         // 虚假完成票据不存在
         slot.in_flight = Some(ticket);
         self.next_ticket += 1;
-        Ok(Some(ticket))
+        // —— mip 生成续批（5.4.3）：多级图的链生成在 graphics 队列续批——
+        // 等本批 transfer 票据（信号量 wait @ ticket）→ blit 逐级缩 + 逐级
+        // barrier → 全链迁 SHADER_READ_ONLY → signal 最终票据（ticket + 1）。
+        // 发布给消费方的票据 = 续批票据（"链可用"的完成点），等待语义不变。
+        // 生产图像 CONCURRENT 双族,跨队列无所有权让渡;EXCLUSIVE + 多级图的
+        // 探针组合不存在(探针全单级),image_releases 只在单级路径生效。
+        let chained = chained_images(&batch.image_uploads);
+        if chained.is_empty() {
+            return Ok(Some(ticket));
+        }
+        let blit_cb = self.slots[index].blit_command_buffer;
+        self.record_blit_continuation(blit_cb, ticket, &chained)?;
+        let published = ticket + 1;
+        self.slots[index].in_flight = Some(published);
+        self.next_ticket = published + 1;
+        info!(
+            "mip 生成续批:graphics 队列 blit {} 张(transfer 票据 #{ticket} → 发布票据 #{published})",
+            chained.len(),
+        );
+        Ok(Some(published))
     }
+
+    /// 录制并提交 mip 生成续批（graphics 队列）：等 transfer 票据 → 逐图
+    /// blit 生成链 → 全链迁 SHADER_READ_ONLY → signal 同信号量 +1。
+    /// timeline 信号量支持同提交内 wait+signal（wait 在前 signal 在后，
+    /// 执行序由规范保证）。
+    ///
+    /// # Errors
+    /// 命令重置/录制/提交失败（transfer 票据已发出,链停在中间布局——调用方
+    /// 按 Tier② 致命退出,无重试路径）。
+    fn record_blit_continuation(
+        &self,
+        blit_cb: vk::CommandBuffer,
+        transfer_ticket: Ticket,
+        chained: &[&StagingImageCopy],
+    ) -> Result<()> {
+        let published = transfer_ticket + 1;
+        unsafe {
+            self.device
+                .reset_command_buffer(blit_cb, vk::CommandBufferResetFlags::empty())?;
+            self.device.begin_command_buffer(
+                blit_cb,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
+            for region in chained {
+                // 高层级 1..n:UNDEFINED → TRANSFER_DST（blit 的写布局;
+                // level 0 已在 transfer 批里迁为 TRANSFER_SRC 作源）
+                let dst_ready = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(region.image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(1)
+                            .level_count(region.mip_levels - 1)
+                            .layer_count(1),
+                    );
+                self.device.cmd_pipeline_barrier(
+                    blit_cb,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[dst_ready],
+                );
+                for level in 1..region.mip_levels {
+                    // 级 i 从级 i-1 线性缩（逐级缩 = 2× 平均,与 bevy
+                    // generate_mipmaps 同形）;两维 .max(1) 收底
+                    let (src_w, src_h) = (
+                        (region.width >> (level - 1)).max(1),
+                        (region.height >> (level - 1)).max(1),
+                    );
+                    let (dst_w, dst_h) = (
+                        (region.width >> level).max(1),
+                        (region.height >> level).max(1),
+                    );
+                    self.device.cmd_blit_image(
+                        blit_cb,
+                        region.image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        region.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[vk::ImageBlit::default()
+                            .src_subresource(
+                                vk::ImageSubresourceLayers::default()
+                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                    .mip_level(level - 1)
+                                    .base_array_layer(0)
+                                    .layer_count(1),
+                            )
+                            .src_offsets([
+                                vk::Offset3D::default(),
+                                vk::Offset3D { x: src_w as i32, y: src_h as i32, z: 1 },
+                            ])
+                            .dst_subresource(
+                                vk::ImageSubresourceLayers::default()
+                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                    .mip_level(level)
+                                    .base_array_layer(0)
+                                    .layer_count(1),
+                            )
+                            .dst_offsets([
+                                vk::Offset3D::default(),
+                                vk::Offset3D { x: dst_w as i32, y: dst_h as i32, z: 1 },
+                            ])],
+                        vk::Filter::LINEAR,
+                    );
+                    // 级 i 写完 → TRANSFER_SRC（下一级作源;末级也迁,使链内
+                    // 全层级布局归一,收口屏障单一形状）
+                    // dstAccess = TRANSFER_READ：transition 写对下一级
+                    // blit 的 TRANSFER_READ 可见（READ_AFTER_WRITE 实抓口径）
+                    let level_ready = vk::ImageMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(region.image)
+                        .subresource_range(
+                            vk::ImageSubresourceRange::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .base_mip_level(level)
+                                .level_count(1)
+                                .layer_count(1),
+                        );
+                    self.device.cmd_pipeline_barrier(
+                        blit_cb,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[level_ready],
+                    );
+                }
+                // 收口:全链（此时全在 TRANSFER_SRC）→ SHADER_READ_ONLY。
+                // 生产图像 CONCURRENT 双族,IGNORED 无所有权语义;图形消费的
+                // 内存依赖由"等最终票据 + 票据信号量"收口(与单级图同一条
+                // 执法点,值不同而已)。
+                let finalize = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::TRANSFER_READ)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(region.image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .level_count(region.mip_levels)
+                            .layer_count(1),
+                    );
+                self.device.cmd_pipeline_barrier(
+                    blit_cb,
+                    vk::PipelineStageFlags::TRANSFER,
+                    // dst 阶段 = 实际采样者（片段着色器）：与 dstAccess
+                    // SHADER_READ 配套（VUID-02820——BOTTOM_OF_PIPE 不支持
+                    // 任何 access 位,是"无消费者"专用）
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[finalize],
+                );
+            }
+            self.device.end_command_buffer(blit_cb)?;
+            // VUID-03239/03241 同 transfer 提交:timeline 挂
+            // TimelineSemaphoreSubmitInfo,wait/signal 值成对
+            let mut timeline_submit = vk::TimelineSemaphoreSubmitInfo::default()
+                .wait_semaphore_values(slice::from_ref(&transfer_ticket))
+                .signal_semaphore_values(slice::from_ref(&published));
+            let wait_stages = [vk::PipelineStageFlags::ALL_COMMANDS];
+            let cbs = slice::from_ref(&blit_cb);
+            let sem = slice::from_ref(&self.ticket_semaphore);
+            self.device.queue_submit(
+                self.graphics_queue,
+                &[vk::SubmitInfo::default()
+                    .command_buffers(cbs)
+                    .wait_semaphores(sem)
+                    .wait_dst_stage_mask(&wait_stages)
+                    .signal_semaphores(sem)
+                    .push_next(&mut timeline_submit)],
+                vk::Fence::null(),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// image_uploads 里实际建成级数 > 1 的不同目标 image（去重,每身份一批一条）。
+fn chained_images(regions: &[StagingImageCopy]) -> Vec<&StagingImageCopy> {
+    let mut out: Vec<&StagingImageCopy> = Vec::new();
+    for region in regions {
+        if region.mip_levels > 1 && !out.iter().any(|r| r.image == region.image) {
+            out.push(region);
+        }
+    }
+    out
 }
 
 /// device_copies 里出现过的不同 src buffer(写后读屏障逐 buffer 挂)。
@@ -743,6 +889,7 @@ impl Drop for Uploader {
         unsafe {
             self.device.destroy_semaphore(self.ticket_semaphore, None);
             self.device.destroy_command_pool(self.command_pool, None);
+            self.device.destroy_command_pool(self.blit_pool, None);
         }
     }
 }
