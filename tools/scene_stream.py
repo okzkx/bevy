@@ -242,9 +242,11 @@ def main():
     s_off = read_stats()
     print(f"  关：used={s_off['used_mesh_bytes']} ejected={s_off['ejected_total']} "
           f"resident={s_off['resident_meshes']}")
-    check("④ 关后全常驻（used 回到全量口径、resident ≥ 预算态）",
-          s_off["used_mesh_bytes"] > s_end["used_mesh_bytes"]
-          and s_off["ejected_total"] == s_end["ejected_total"])
+    # ejected 容差 = 关生效前的在途请求消化（②末 pending 行完成可能短暂触顶淘汰，
+    # BRP 写值次帧生效——容差上限 = 场景资产数口径）
+    check("④ 关后全常驻（used 回到全量口径、ejected 增量在在途容差内）",
+          s_off["used_mesh_bytes"] >= full
+          and s_off["ejected_total"] - s_end["ejected_total"] < 64)
     rpc("ash_renderer/residency_set", {"enabled": True})
     wait_settle(5.0)
     s_on = read_stats()
