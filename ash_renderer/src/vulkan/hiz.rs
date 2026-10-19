@@ -820,7 +820,9 @@ impl HizPyramid {
     /// 遮挡测试的全链采样描述符（b0 = occlusion 视图，每帧槽一套）。
     fn build_occlusion_sets(&mut self, ctx: &Context, _depth_images: &[vk::Image]) -> Result<()> {
         let device = &ctx.device;
-        if self.occlusion_layout == vk::DescriptorSetLayout::null() {
+        // pool 首建/重建分流：重建路径先 reset（释放旧 2 套再分——否则
+        // OUT_OF_POOL_MEMORY，resize 负例实抓）
+        if self.occlusion_pool == vk::DescriptorPool::null() {
             let binding = vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
@@ -842,6 +844,11 @@ impl HizPyramid {
                             .descriptor_count(super::MAX_FRAMES_IN_FLIGHT as u32)]),
                     None,
                 )
+            }
+            .map_err(VulkanError::from)?;
+        } else {
+            unsafe {
+                device.reset_descriptor_pool(self.occlusion_pool, vk::DescriptorPoolResetFlags::empty())
             }
             .map_err(VulkanError::from)?;
         }
