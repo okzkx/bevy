@@ -127,6 +127,13 @@ impl AssetRetirements {
         self.stats.removed_meshes_total += 1;
     }
 
+    /// 记一笔管理器发起的 mesh 淘汰（6.3 驻留管理器：非 `Removed` 事件，
+    /// 不进事件累计——淘汰计数归 [`crate::scene::ResidencyStats`]，账面
+    /// 出账与停尸房复用与 [`Self::retire_mesh`] 完全同路）。
+    pub fn eject_mesh(&mut self, id: AssetId<Mesh>) {
+        self.meshes.insert(id);
+    }
+
     /// 记一笔待回收贴图身份（语义同 [`Self::retire_mesh`]）。
     pub fn retire_image(&mut self, id: AssetId<Image>) {
         self.images.insert(id);

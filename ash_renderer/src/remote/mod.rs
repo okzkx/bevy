@@ -16,6 +16,7 @@
 //! | [`cull`] | 剔除读数与开关（5.2）：cull_stats 对照 + cull_set_enabled 开关 |
 //! | [`draw`] | indirect 闭环读数（5.3）：draw_stats 绘制调用/命令条数/不可见计数 |
 //! | [`perf`] | 性能读数与变更形态（5.5）：perf_stats 分位数/分段/显存 + perf_samples 原始导出 + workload 变更形态开关 |
+//! | [`residency`] | 驻留管理器读数与设置（6.3）：residency_stats 预算/实占/逐资产清单 + residency_set 开关/预算/半径 |
 //!
 //! 机制与边界（侦察笔记《bevy_remote：BRP远程协议与自定义方法》）：handler 本身
 //! 就是一个 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍执行——写值下一帧
@@ -30,6 +31,7 @@ pub mod lod;
 pub mod mouse;
 pub mod objects;
 pub mod perf;
+pub mod residency;
 pub mod shapes;
 
 use std::collections::HashMap;
@@ -49,6 +51,7 @@ use self::{
     lod::{lod_census, lod_set_enabled, lod_set_params},
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     objects::{increment_stats, replace_handles, spawn_primitive},
+    residency::{residency_set, residency_stats},
     perf::{perf_samples, perf_stats, workload},
     shapes::{spawn_lod, spawn_shape},
 };
@@ -99,6 +102,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/lod_set_enabled", lod_set_enabled)
                 .with_method_main("ash_renderer/lod_set_params", lod_set_params)
                 .with_method_main("ash_renderer/draw_stats", draw_stats)
+                .with_method_main("ash_renderer/residency_stats", residency_stats)
+                .with_method_main("ash_renderer/residency_set", residency_set)
                 .with_method_main("ash_renderer/perf_stats", perf_stats)
                 .with_method_main("ash_renderer/perf_samples", perf_samples)
                 .with_method_main("ash_renderer/workload", workload),
