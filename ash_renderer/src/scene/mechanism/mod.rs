@@ -10,6 +10,7 @@
 //! | [`object_ops`] | 对象写操作封装：spawn 克隆/换柄，BRP 与将来 egui 面板共用（despawn/摘组件走官方 BRP） |
 //! | [`asset_ops`] | 资产写操作封装：mutate 材质参数/贴图槽/mesh 顶点/image 像素，BRP 薄壳的可复用实现 |
 //! | [`scene_gen`] | 常驻大场景生成器（5.4）：程序化批量铺实例（共享资产/规模参数化/种子复现）+ chunk 身份与整块增删 |
+//! | [`test_entities`] | 测试实体方法族（6.1.1）：五形状 + 颜色 → Lambert 材质的单个测试体（遮挡对/墙体样本载具），mesh 按形状/材质按颜色缓存 |
 //! | [`camera_aspect`] | 宽高比补位：随窗口 resize 修正任意相机的 aspect_ratio |
 //! | [`camera_control`] | 相机轨道控制：左键拖拽环绕 + 滚轮推拉，目标点由组件携带 |
 //! | [`workload`] | 变更形态注入（5.5）：BRP 开关控制的每帧旋转工作源（压测矩阵的少量变化/全动态形态） |
@@ -26,6 +27,7 @@ mod ledger;
 mod material_hook;
 mod object_ops;
 pub mod scene_gen;
+pub mod test_entities;
 mod workload;
 
 pub use asset_events::{AshAssetEventPlugin, AssetInvalidations, AssetRetirements, RecycleStats};
@@ -45,6 +47,7 @@ pub use scene_gen::{
     chunk_census, despawn_chunk, generate_chunks, generate_instances, ChunkGenParams,
     SceneGenParams,
 };
+pub use test_entities::{spawn_test_shape, TestShape};
 pub(crate) use object_ops::{HandleSwapReadback, ObjectOpError};
 
 // 排序锚点（语义 = 账本已与 World 对账完毕）：业务侧核验

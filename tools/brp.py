@@ -178,6 +178,21 @@ def cmd_spawn(args):
     out(rpc(args.host, args.port, "ash_renderer/spawn_primitive", params))
 
 
+def cmd_spawn_shape(args):
+    params = {"shape": args.shape}
+    if args.color:
+        params["color"] = args.color
+    if args.translation:
+        params["translation"] = args.translation
+    if args.rotation:
+        params["rotation_euler_deg"] = args.rotation
+    if args.scale:
+        params["scale"] = args.scale
+    if args.name:
+        params["name"] = args.name
+    out(rpc(args.host, args.port, "ash_renderer/spawn_shape", params))
+
+
 def cmd_generate_chunks(args):
     params = {
         "chunk_grid": args.chunk_grid,
@@ -396,6 +411,15 @@ def main():
     p.add_argument("--offset", nargs=3, type=float, metavar=("X", "Y", "Z"), help="相对源实体的平移偏移")
     p.add_argument("--name-suffix", help="Name 后缀（默认 （副本））")
     p.set_defaults(func=cmd_spawn)
+
+    p = sub.add_parser("spawn-shape", help="造测试体：五形状+颜色→Lambert 材质（ash_renderer/spawn_shape，6.1.1；mesh 按形状/材质按颜色缓存，同参共享零新上传）")
+    p.add_argument("shape", choices=["sphere", "cylinder", "capsule", "cone", "cuboid"], help="形状（cuboid 非均匀缩放 = 墙体遮挡样本）")
+    p.add_argument("--color", nargs=3, type=float, metavar=("R", "G", "B"), help="sRGB 颜色 [0,1]（默认 0.8 0.8 0.8）")
+    p.add_argument("--translation", nargs=3, type=float, metavar=("X", "Y", "Z"), help="世界坐标位置（默认原点）")
+    p.add_argument("--rotation", nargs=3, type=float, metavar=("YAW", "PITCH", "ROLL"), help="欧拉角 YXZ 度数（默认 0）")
+    p.add_argument("--scale", nargs=3, type=float, metavar=("X", "Y", "Z"), help="非均匀缩放（默认 1 1 1）")
+    p.add_argument("--name", help="树内 Name（默认 测试体-<shape>）")
+    p.set_defaults(func=cmd_spawn_shape)
 
     p = sub.add_parser("generate", help="程序化铺实例（ash_renderer/generate_scene，5.4 常驻大场景生成器：批量克隆共享资产，种子固定可复现）")
     p.add_argument("--count", type=int, required=True, help="实例总数")
