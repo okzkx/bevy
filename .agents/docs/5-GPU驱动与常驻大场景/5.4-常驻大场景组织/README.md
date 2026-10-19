@@ -15,6 +15,7 @@
 - [x] 5.4.3 基础 mip 链（静态 mip0 退役：全链级数/view 全链/max_lod 放开；**施工订正：blit 不落 transfer 批——graphics 队列续批，发布票据 = 续批票据**；READ_AFTER_WRITE/VUID-02820 两道同步订正）
 - [x] 5.4.4 验证通道（BRP census 族 + egui chunk 计量行；读图取证受阻遗留——DLP 遮挡堵死 PrintWindow，恢复条件记施工记录 §4）
 - [x] 5.4.5 验收回归（判定线六条全过 + 负例：chunk 不在场/空参/resize 途中增删/带链无链混载/拆 Device；零 VUID ×6 进程、WM_CLOSE exit 0 ×2、库测试 12/12）
+- [x] 追加：WASDQE 漫游 + 右键环视（Unity Scene 式视角控制，2026-10-19 收官后追加——与轨道共用球坐标状态、pivot 跟随；详施工记录 §8）
 
 ## 材料清单
 
