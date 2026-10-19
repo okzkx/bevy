@@ -60,7 +60,11 @@ pub fn generate_instances(
     p: SceneGenParams,
 ) -> Result<SceneGenReadback, ObjectOpError> {
     if p.count == 0 || p.columns == 0 {
-        return Err(ObjectOpError::NothingToDo);
+        // 不走 NothingToDo——它的协议文案是 replace_handles 专属（"至少一项
+        // 变更"），数值域问题按参数非法报
+        return Err(ObjectOpError::InvalidParams(
+            "count/columns 须 > 0（空场景直接不生成，删除走 chunk_despawn）".into(),
+        ));
     }
     if p.spacing <= 0.0 || p.jitter < 0.0 {
         return Err(ObjectOpError::InvalidParams(format!(
@@ -201,7 +205,9 @@ pub fn generate_chunks(
     p: ChunkGenParams,
 ) -> Result<ChunkGenReadback, ObjectOpError> {
     if p.chunk_grid == 0 || p.instances_per_chunk == 0 {
-        return Err(ObjectOpError::NothingToDo);
+        return Err(ObjectOpError::InvalidParams(
+            "chunk_grid/instances_per_chunk 须 > 0".into(),
+        ));
     }
     if p.spacing <= 0.0 || p.jitter < 0.0 {
         return Err(ObjectOpError::InvalidParams(format!(

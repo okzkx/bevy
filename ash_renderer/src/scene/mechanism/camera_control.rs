@@ -46,10 +46,12 @@ const FULL_TURN_PER_HEIGHT: f32 = std::f32::consts::TAU;
 /// 指数缩放保证远近手感一致。
 const ZOOM_PER_LINE: f32 = 0.95;
 
-/// 环绕半径限位：下限防穿模（头盔半身尺 ~0.3，0.5 时贴脸近裁剪面也安全），
-/// 上限防把模型缩成一点后找不到。
+/// 环绕半径限位：下限防穿模（头盔半身尺 ~0.3，0.5 时贴脸近裁剪面也安全）；
+/// 上限原为 FlightHelmet 小场景钉 10.0，5.4 起常驻大场景（4096 实例铺
+/// ~256 单位）取景需要俯瞰全程，放宽到 2000（5.5 三档压测同够用——远平面
+/// 同步放宽，见 content/camera）。
 const MIN_ORBIT_RADIUS: f32 = 0.5;
-const MAX_ORBIT_RADIUS: f32 = 10.0;
+const MAX_ORBIT_RADIUS: f32 = 2000.0;
 
 /// 俯仰限位：距极点留 1° 余量，`offset()` 里 `cos(pitch)` 恒非零，
 /// look_at 的 up=Y 才不退化。
