@@ -1,6 +1,6 @@
 # 术语速查：UBO、UAB、VUID与常用缩写
 
-> 2026-09-28 建档。出处：bindless 描述符设计讲解（3.3.3/3.3.4 收官后）——行文里成排的缩写没有展开，读施工记录、知识篇、代码注释遇到不认识的缩写先查这里。每个词条给全称、一句话机制和本项目落点；深机制看对应知识篇。场景类术语（WorldAsset/引擎 World/glTF scene）另见[《场景三层含义》](../3-静态取数链路/3.1-ECS侧取数/场景三层含义：glTF scene、WorldAsset与引擎World.md)，本文不重复。
+> 2026-09-28 建档。出处：bindless 描述符设计讲解（3.3.3/3.3.4 收官后）——行文里成排的缩写没有展开，读施工记录、知识篇、代码注释遇到不认识的缩写先查这里。每个词条给全称、一句话机制和本项目落点；深机制看对应知识篇。场景类术语（WorldAsset/引擎 World/glTF scene）另见[《场景三层含义》](../../3-静态取数链路/3.1-ECS侧取数/场景三层含义：glTF scene、WorldAsset与引擎World.md)，本文不重复。
 
 ## 0. 核心三件（本项目行文最常用）
 
@@ -41,7 +41,7 @@
 
 | 缩写 | 全称 | 一句话 |
 |---|---|---|
-| WGSL | WebGPU Shading Language | 我们的着色器源语言，喂给 naga；本项目选型与 HLSL 备用路线见[《选型记录》](../3-静态取数链路/3.3-贴图与bindless描述符/选型记录：WGSL源语言与HLSL备用路线.md) |
+| WGSL | WebGPU Shading Language | 我们的着色器源语言，喂给 naga；本项目选型与 HLSL 备用路线见[《选型记录》](../../3-静态取数链路/3.3-贴图与bindless描述符/选型记录：WGSL源语言与HLSL备用路线.md) |
 | SPIR-V | Standard Portable Intermediate Representation – Vulkan | GPU 驱动消费的二进制着色器中间码，naga 的输出 |
 | HLSL / GLSL | High-Level Shading Language / OpenGL Shading Language | DirectX / OpenGL 家族的着色语言；frenderer 用 HLSL |
 | SSBO | Shader Storage Buffer Object | `STORAGE_BUFFER` 描述符类型，可读写的大块着色器存储；探针的输出数组用它 |
@@ -78,7 +78,7 @@
 | ECS | Entity Component System | Bevy 的架构模型；我们的采集系统住 PostUpdate |
 | BRP | Bevy Remote Protocol | Bevy 的远程查询协议（JSON-RPC/HTTP，端口 15702）；World 检查工具候选底座 |
 
-Bindless 与 Unity 四刀对照的完整机制（SRP Batcher/bindless/Instancing/Indirect 各砍一刀）见[《bindless机制》](../3-静态取数链路/3.3-贴图与bindless描述符/bindless机制：从换绑到索引——frenderer锚点与Unity批处理对照.md)。
+Bindless 与 Unity 四刀对照的完整机制（SRP Batcher/bindless/Instancing/Indirect 各砍一刀）见[《bindless机制》](../../3-静态取数链路/3.3-贴图与bindless描述符/bindless机制：从换绑到索引——frenderer锚点与Unity批处理对照.md)。
 
 ## 5. 工程内部编号（非行业缩写，常与上面混排）
 

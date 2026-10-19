@@ -36,7 +36,9 @@ use super::paint::{AtlasGpu, AtlasMirror};
 use crate::overlay::transform_edit::{TransformEditQueue, apply_transform_edits};
 use crate::overlay::widgets::axis_gizmo::AxisGizmo;
 use crate::overlay::windows::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
-use crate::overlay::windows::debug_window::{DebugWindow, FpsMeter, RenderMode, RendererStats};
+use crate::overlay::windows::debug_window::{
+    ChunkRows, DebugWindow, FpsMeter, RenderMode, RendererStats,
+};
 use crate::overlay::windows::entity_tree_window::{
     EntityTreeData, EntityTreeWindow, SelectedDetails, SelectedEntity, TransformDragCache,
     collect_selected_details,
@@ -173,6 +175,8 @@ struct DebugUiParams<'w, 's> {
     cull_diag: Res<'w, CullDiagnostics>,
     /// indirect 闭环读数（5.3：draw_frame 每帧刷新，只读展示）
     indirect_stats: Res<'w, IndirectStats>,
+    /// chunk 盘点（5.4：块数与成员总数计量行）
+    chunks: ChunkRows<'w, 's>,
 }
 
 /// Update：组 RawInput → begin_pass → 总控 + 各调试窗口（按显隐开关）→
@@ -250,6 +254,7 @@ fn run_egui_pass(
             cull_settings: &mut ui.cull_settings,
             cull_diag: &ui.cull_diag,
             indirect_stats: &ui.indirect_stats,
+            chunks: &ui.chunks,
         }
         .show();
     }

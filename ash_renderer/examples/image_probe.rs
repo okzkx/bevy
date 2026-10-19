@@ -148,6 +148,8 @@ fn main() {
         pd,
         device: &device,
         contract: &contract,
+        gfx_family,
+        gfx_queue,
     };
     let cross_family = transfer_family != gfx_family;
     println!(
@@ -161,7 +163,7 @@ fn main() {
 
     group_b_upload_closure(&ctx, transfer_family, transfer_queue);
     if cross_family {
-        group_c_cross_family(&ctx, gfx_family, gfx_queue, transfer_family, transfer_queue);
+        group_c_cross_family(&ctx, transfer_family, transfer_queue);
     } else {
         println!("\n== 组 C(跨族所有权观察):本机无专用 transfer 族,EXCLUSIVE release/acquire 路径无硬件载体——");
         println!("   回退路径未实测(诚实注明);同族形状已由组 B 在验证层下零 VUID 覆盖。");
@@ -285,13 +287,8 @@ fn group_a_mapping() {
         e,
         ash_renderer::vulkan::ImageConvertError::UnsupportedDimension(_)
     ));
-    let mut mipped = bevy_image(TextureFormat::Rgba8Unorm, unorm_bytes());
-    mipped.texture_descriptor.mip_level_count = 3;
-    let e = image_spec(&mipped).unwrap_err();
-    assert!(matches!(
-        e,
-        ash_renderer::vulkan::ImageConvertError::UnsupportedMipLevels(3)
-    ));
+    // 5.4.3：静态 mip0 退役——带链描述符不再拒绝（链由 GPU blit 生成），
+    // mip_level_count 形状本就不进规格（资产数据按 level 0 收）
     let hdr = Image::new(
         Extent3d {
             width: 4,
@@ -322,6 +319,9 @@ struct ProbeCtx<'a> {
     pd: vk::PhysicalDevice,
     device: &'a Device,
     contract: &'a MemoryContract,
+    /// mip 生成续批的提交目标（graphics 族/队列）
+    gfx_family: u32,
+    gfx_queue: vk::Queue,
 }
 
 // ============ 组 B:上传闭环 + 同族读回 ============
@@ -336,10 +336,12 @@ fn group_b_upload_closure(
         pd,
         device,
         contract,
+        gfx_family,
+        gfx_queue,
     } = *ctx;
     println!("\n== 组 B(上传闭环观察:staging → copyBufferToImage → 布局链 → 读回逐字节)==");
     let mut uploader =
-        Uploader::new(device, contract, transfer_family, transfer_queue, 64 * 1024, 2)
+        Uploader::new(device, contract, transfer_family, transfer_queue, gfx_family, gfx_queue, 64 * 1024, 2)
             .expect("组 B 创建上传器");
 
     let expect_srgb = srgb_bytes();
@@ -366,12 +368,14 @@ fn group_b_upload_closure(
                     src_offset: 0,
                     width: 4,
                     height: 4,
+                    mip_levels: 1,
                 },
                 StagingImageCopy {
                     image: gpu_unorm.image(),
                     src_offset: 64,
                     width: 4,
                     height: 4,
+                    mip_levels: 1,
                 },
             ],
             ..Default::default()
@@ -485,22 +489,18 @@ fn group_b_upload_closure(
 
 // ============ 组 C:跨族所有权(release → graphics 等票据 + acquire + 真实读)============
 
-fn group_c_cross_family(
-    ctx: &ProbeCtx,
-    gfx_family: u32,
-    gfx_queue: vk::Queue,
-    transfer_family: u32,
-    transfer_queue: vk::Queue,
-) {
+fn group_c_cross_family(ctx: &ProbeCtx, transfer_family: u32, transfer_queue: vk::Queue) {
     let ProbeCtx {
         instance,
         pd,
         device,
         contract,
+        gfx_family,
+        gfx_queue,
     } = *ctx;
     println!("\n== 组 C(跨族所有权观察:release(合成迁出布局)→ graphics 等票据 + acquire + 真实读)==");
     let mut uploader =
-        Uploader::new(device, contract, transfer_family, transfer_queue, 64 * 1024, 2)
+        Uploader::new(device, contract, transfer_family, transfer_queue, gfx_family, gfx_queue, 64 * 1024, 2)
             .expect("组 C 创建上传器");
 
     let expect = srgb_bytes();
@@ -517,6 +517,7 @@ fn group_c_cross_family(
                 src_offset: 0,
                 width: 4,
                 height: 4,
+                mip_levels: 1,
             }],
             image_releases: vec![ash_renderer::vulkan::ImageRelease {
                 image: gpu.image(),
@@ -679,6 +680,8 @@ fn group_d_negative(ctx: &ProbeCtx, transfer_family: u32, transfer_queue: vk::Qu
         pd,
         device,
         contract,
+        gfx_family: _,
+        gfx_queue: _,
     } = *ctx;
     println!("\n== 组 D(负例诊断:绕过前置屏障直接拷贝 UNDEFINED 布局的图——record-only)==");
     let mut staging = GpuBuffer::create(device, contract, 64, BufferRole::Staging).expect("D staging");

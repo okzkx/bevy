@@ -94,6 +94,8 @@ fn try_init_vulkan(
         ctx.memory_contract(),
         ctx.transfer_queue_family_index,
         ctx.transfer_queue,
+        ctx.queue_family_index,
+        ctx.queue,
         1024 * 1024,
         2,
     )?;

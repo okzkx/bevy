@@ -10,7 +10,7 @@
 
 ## 技术底座（开工先读，勿重复侦察）
 
-- [BRP 侦察笔记](../../笔记/bevy_remote：BRP远程协议与自定义方法.md)：协议两层（RemotePlugin 协议核心 + RemoteHttpPlugin HTTP 传输）、内置方法全景、自定义方法=system、安全边界（loopback 无鉴权）。0.20 改名警告：`world.*` 方法族，旧资料 `bevy.query` 风格会 METHOD_NOT_FOUND。
+- [BRP 侦察笔记](../../笔记/Bevy/bevy_remote：BRP远程协议与自定义方法.md)：协议两层（RemotePlugin 协议核心 + RemoteHttpPlugin HTTP 传输）、内置方法全景、自定义方法=system、安全边界（loopback 无鉴权）。0.20 改名警告：`world.*` 方法族，旧资料 `bevy.query` 风格会 METHOD_NOT_FOUND。
 - 3.11 底座：`apply_transform_edit` 唯一实现（写侧复用点，立案原话"3.12 的 BRP 方法调同款实现，不养两份逻辑"）。
 - 3.9 底座：`CameraOrbit` 球坐标组件（机制半边驱动）——CLI 给值做成同模块封装 `apply_camera_command`，与鼠标共用限位与 Transform 写路径。
 

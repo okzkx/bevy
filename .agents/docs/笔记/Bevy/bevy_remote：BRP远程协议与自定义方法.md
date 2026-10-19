@@ -77,7 +77,7 @@ handler 能力上限：**可独占 `&mut World`**——内置的 `process_remote
 2. **跨域已留口**：`Headers`/`HostHeaders` 资源给 HTTP 响应加头，源码 doc 里就有 `cors_headers` 示例（`http.rs:184-194`）——`RemoteHttpPlugin::default().with_headers(Headers::new()...)`。⚠ CORS 预检（OPTIONS）是否完备**未验证**，开工先测。
 3. **安全边界**：默认只绑 loopback、**完全无鉴权**——console 只能开发期本地用，绝不 `with_address` 绑 `0.0.0.0` 对外。
 4. **自定义方法当"业务接口"**：内置方法是裸 ECS CRUD，让前端拼反射类型名很脆；渲染器内部状态（bindless 池占用、FlightHelmet 到货统计、collect_scene 采集范围）应注册成自定义方法暴露——前端只调语义接口。
-5. **Unity 类比**：相当于把 Unity Editor attach 到 Player 的通道（Hierarchy/Inspector 走网络读运行时状态）协议化、无头化。官方 Bevy Editor 将来大概率骑在 BRP 上——见《[Bevy编辑器路线与代码热重载](../1-熟悉Bevy结构/材料/Bevy编辑器路线与代码热重载.md)》（该篇 §"BRP 基建现状"是编辑器路线视角，协议细节以本篇为准；其"调试面板可用"的判断就是本篇 Web Console 落点的出处）。
+5. **Unity 类比**：相当于把 Unity Editor attach 到 Player 的通道（Hierarchy/Inspector 走网络读运行时状态）协议化、无头化。官方 Bevy Editor 将来大概率骑在 BRP 上——见《[Bevy编辑器路线与代码热重载](../../1-熟悉Bevy结构/材料/Bevy编辑器路线与代码热重载.md)》（该篇 §"BRP 基建现状"是编辑器路线视角，协议细节以本篇为准；其"调试面板可用"的判断就是本篇 Web Console 落点的出处）。
 
 ## 7. 启用成本与源码索引
 

@@ -1,4 +1,5 @@
-//! 相机轨道控制（机制半边）：左键拖动绕目标点环绕、滚轮沿视线推拉缩放，
+//! 相机控制（机制半边）：左键拖动绕目标点环绕、滚轮沿视线推拉缩放；5.4 起
+//! 追加 Unity Scene 式漫游——右键拖拽环视 + WASD 沿视线平移 + Q/E 世界升降。
 //! 零 Vulkan 代码，也不含写死的场景参数——环绕目标由组件携带，进场时由
 //! 业务半边（[`crate::scene::content::camera`]）按取景参数给出。
 //! 输入源有两个：鼠标（左键 + 滚轮，逐帧增量）与 CLI 给值（BRP
@@ -10,6 +11,15 @@
 //! 禁渲染宿主挂不上也用不着——我们只要"固定中心点的检视轨道"这一档，球坐标
 //! 参数化（yaw/pitch/radius）自写：拖动按
 //! 窗口高度归一（拖满一屏高 = 转一整圈）、滚轮每格 ×0.95 指数缩放。
+//!
+//! 漫游与轨道共用一套球坐标状态（单一机位真源，BRP 给值照常生效）：右键
+//! 环视 = 相机位置钉住、yaw/pitch 随拖拽旋转、环绕中心搬到新视线正前方
+//!（pivot 跟随，松开右键后左键轨道绕新中心继续——Unity Scene 同款）；
+//! WASD 沿相机视线系平移（W = 视线方向），Q/E 世界升降；速度 = radius·系数
+//! 每秒（缩放档位即速度档位，头盔近景与大场景俯瞰同一手感）。键盘侧仲裁 =
+//! egui `wants_keyboard_input()`（面板文本编辑中让键），鼠标侧同 layer_id_at
+//! 门。局限：环视不做指针抓取，光标拖出窗口即无增量（会话保活、回窗续拖，
+//! 与左键会话同款防跳变）。
 //!
 //! 帧内时序：Update 改 [`Transform`] → PostUpdate 传播（TransformSystems::Propagate）
 //! → Last 的 draw_frame 直读 `GlobalTransform` 建 VP（driver/host/frame.rs
@@ -26,6 +36,7 @@
 use bevy::{
     camera::Camera,
     input::{
+        keyboard::KeyCode,
         mouse::{AccumulatedMouseScroll, MouseButton, MouseScrollPixelsPerLine},
         ButtonInput,
     },
@@ -46,10 +57,16 @@ const FULL_TURN_PER_HEIGHT: f32 = std::f32::consts::TAU;
 /// 指数缩放保证远近手感一致。
 const ZOOM_PER_LINE: f32 = 0.95;
 
-/// 环绕半径限位：下限防穿模（头盔半身尺 ~0.3，0.5 时贴脸近裁剪面也安全），
-/// 上限防把模型缩成一点后找不到。
+/// 漫游速度系数：每秒平移 radius·系数。缩放档位即速度档位——radius 300
+/// 的俯瞰档跑得快、radius 3 的检视档走得慢，同一手感覆盖头盔与大场景。
+const FLY_SPEED_FACTOR: f32 = 0.5;
+
+/// 环绕半径限位：下限防穿模（头盔半身尺 ~0.3，0.5 时贴脸近裁剪面也安全）；
+/// 上限原为 FlightHelmet 小场景钉 10.0，5.4 起常驻大场景（4096 实例铺
+/// ~256 单位）取景需要俯瞰全程，放宽到 2000（5.5 三档压测同够用——远平面
+/// 同步放宽，见 content/camera）。
 const MIN_ORBIT_RADIUS: f32 = 0.5;
-const MAX_ORBIT_RADIUS: f32 = 10.0;
+const MAX_ORBIT_RADIUS: f32 = 2000.0;
 
 /// 俯仰限位：距极点留 1° 余量，`offset()` 里 `cos(pitch)` 恒非零，
 /// look_at 的 up=Y 才不退化。
@@ -171,33 +188,73 @@ fn apply_orbit_command(
     Ok(*orbit)
 }
 
-/// 相机轨道控制插件：Update 里读鼠标输入改写相机位姿，接线收在本插件内，
+/// 右键环视的一帧增量：相机位置钉住不动，yaw/pitch 随拖拽换算（方向与左键
+/// 同号——右拖 = 视线右转、下拖 = 视线下俯），环绕中心搬到新视线正前方等距
+/// 处（pivot 跟随，radius 不变）。
+fn look_rotate(orbit: &mut CameraOrbit, delta: Vec2, turn: f32) {
+    let position = orbit.target + orbit.offset();
+    orbit.yaw -= delta.x * turn;
+    orbit.pitch = (orbit.pitch + delta.y * turn).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    orbit.target = position - orbit.offset();
+}
+
+/// 漫游平移向量（未归一）：WASD 沿视线系（forward = 视线方向），Q/E 世界
+/// 升降。俯仰限位保证 forward 不与 Y 平行，right 不退化。
+fn fly_vector(forward: Vec3, keys: &ButtonInput<KeyCode>) -> Vec3 {
+    let right = forward.cross(Vec3::Y);
+    let mut v = Vec3::ZERO;
+    if keys.pressed(KeyCode::KeyW) {
+        v += forward;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        v -= forward;
+    }
+    if keys.pressed(KeyCode::KeyD) {
+        v += right;
+    }
+    if keys.pressed(KeyCode::KeyA) {
+        v -= right;
+    }
+    if keys.pressed(KeyCode::KeyE) {
+        v += Vec3::Y;
+    }
+    if keys.pressed(KeyCode::KeyQ) {
+        v -= Vec3::Y;
+    }
+    v
+}
+
+/// 相机控制插件：Update 里读鼠标/键盘输入改写相机位姿，接线收在本插件内，
 /// main 只 `add_plugins`。作用对象 = 带 [`CameraOrbit`] 的相机。
 pub struct AshCameraControlPlugin;
 
 impl Plugin for AshCameraControlPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, orbit_camera_control);
+        app.add_systems(Update, camera_control);
     }
 }
 
-/// 轨道控制（Update）：左键按下且 egui 不感兴趣 → 开启拖拽会话，按住期间
-/// 逐帧位移换算 yaw/pitch；滚轮按格缩放半径。写 Transform 只在参数变化时，
-/// 朝向恒用 look_at 对准环绕中心（与业务半边进场的 looking_at 同语义，
-/// 相机就位核验的 0° 判定线在拖拽后仍成立）。
+/// 相机控制（Update）：左键按下且 egui 不感兴趣 → 开启轨道拖拽会话，按住
+/// 期间逐帧位移换算 yaw/pitch；右键同款会话做环视（位置钉住、pivot 跟随）；
+/// 滚轮按格缩放半径；WASDQE 漫游平移。写 Transform 只在参数变化时，朝向恒
+/// 用 look_at 对准环绕中心（与业务半边进场的 looking_at 同语义，相机就位
+/// 核验的 0° 判定线在拖拽后仍成立）。
 #[expect(
     clippy::too_many_arguments,
-    reason = "bevy 系统的参数表即依赖注入清单：窗口/鼠标/滚轮/换算率/egui 仲裁/相机组/拖拽会话/首接管收账，逐项声明是框架惯例"
+    reason = "bevy 系统的参数表即依赖注入清单：窗口/鼠标/键盘/滚轮/换算率/时间/egui 仲裁/相机组/双拖拽会话/首接管收账，逐项声明是框架惯例"
 )]
 #[system]
-fn orbit_camera_control(
+fn camera_control(
     windows: Query<&Window, With<PrimaryWindow>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     scroll: Res<AccumulatedMouseScroll>,
     pixels_per_line: Res<MouseScrollPixelsPerLine>,
+    time: Res<Time>,
     egui: Option<Res<EguiState>>,
     mut cameras: Query<(&mut Transform, &mut CameraOrbit), With<Camera>>,
     mut session: Local<DragSession>,
+    mut look: Local<DragSession>,
     mut engaged: Local<bool>,
 ) {
     // 主窗未建/最小化：无指针域，拖拽会话就地作废（等还原后重新按下）。
@@ -228,6 +285,14 @@ fn orbit_camera_control(
         session.dragging = false;
         session.last_cursor = None;
     }
+    if mouse.just_pressed(MouseButton::Right) && !egui_wants {
+        look.dragging = cursor.is_some();
+        look.last_cursor = cursor;
+    }
+    if mouse.just_released(MouseButton::Right) {
+        look.dragging = false;
+        look.last_cursor = None;
+    }
 
     let mut dirty = false;
     // 滚轮推拉：悬在 egui 区上滚轮让给调试窗口（该帧半径不动，扫出
@@ -256,6 +321,36 @@ fn orbit_camera_control(
         }
         session.last_cursor = Some(pos);
     }
+    // 右键拖拽环视：位置钉住、yaw/pitch 旋转、pivot 搬到新视线正前方
+    //（[`look_rotate`]，Unity Scene 同款）；egui 门与左键同款。
+    if look.dragging
+        && mouse.pressed(MouseButton::Right)
+        && let Some(pos) = cursor
+    {
+        if let Some(last) = look.last_cursor {
+            let delta = pos - last;
+            let turn = FULL_TURN_PER_HEIGHT / window.height();
+            for (_, mut orbit) in &mut cameras {
+                look_rotate(&mut orbit, delta, turn);
+            }
+            dirty |= delta != Vec2::ZERO;
+        }
+        look.last_cursor = Some(pos);
+    }
+    // WASDQE 漫游：WASD 沿视线系、Q/E 世界升降，速度随 radius 自适应；
+    // egui 文本编辑中让键（面板输入不被相机劫持）。
+    let egui_wants_kb = egui.as_deref().is_some_and(|s| s.ctx.egui_wants_keyboard_input());
+    if !egui_wants_kb {
+        let dt = time.delta_secs();
+        for (_, mut orbit) in &mut cameras {
+            let v = fly_vector(-orbit.offset().normalize_or_zero(), &keys);
+            if v != Vec3::ZERO {
+                let step = v.normalize_or_zero() * (orbit.radius * FLY_SPEED_FACTOR * dt);
+                orbit.target += step;
+                dirty = true;
+            }
+        }
+    }
 
     if !dirty {
         return;
@@ -270,8 +365,54 @@ fn orbit_camera_control(
     {
         *engaged = true;
         info!(
-            "相机控制首次接管：yaw {:.3} rad / pitch {:.3} rad / radius {:.3}（左键拖拽环绕 + 滚轮推拉已生效）",
+            "相机控制首次接管：yaw {:.3} rad / pitch {:.3} rad / radius {:.3}（左键环绕 + 滚轮推拉 + 右键环视 + WASDQE 漫游已生效）",
             orbit.yaw, orbit.pitch, orbit.radius,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::input::ButtonInput;
+
+    /// 鼠标右拖 = 视线右转，且相机位置钉住不动（环视非环绕）。
+    #[test]
+    fn look_mouse_right_turns_view_and_keeps_position() {
+        let mut orbit =
+            CameraOrbit { target: Vec3::ZERO, yaw: 0.0, pitch: 0.0, radius: 4.0 };
+        let position = orbit.target + orbit.offset();
+        look_rotate(&mut orbit, Vec2::new(150.0, 0.0), 0.01);
+        assert!((orbit.target + orbit.offset() - position).length() < 1e-4);
+        let forward = (orbit.target - position).normalize();
+        assert!(forward.x > 0.9, "右拖后视线应转向 +X，实际 {forward:?}");
+    }
+
+    /// 鼠标下拖 = 视线下俯（Unity Scene 同款，与左键"下拖相机升"同号）。
+    #[test]
+    fn look_mouse_down_pitches_view_down() {
+        let mut orbit =
+            CameraOrbit { target: Vec3::ZERO, yaw: 0.0, pitch: 0.0, radius: 4.0 };
+        look_rotate(&mut orbit, Vec2::new(0.0, 50.0), 0.01);
+        let position = orbit.target + orbit.offset();
+        let forward = (orbit.target - position).normalize();
+        assert!(forward.y < 0.0, "下拖后视线应朝下，实际 {forward:?}");
+    }
+
+    /// 漫游轴向：W = 视线前进、D = 视线右侧、E/Q = 世界升/降。
+    #[test]
+    fn fly_axes_follow_view_and_world_up() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::KeyW);
+        assert_eq!(fly_vector(Vec3::NEG_Z, &keys), Vec3::NEG_Z);
+        keys.reset_all();
+        keys.press(KeyCode::KeyD);
+        assert_eq!(fly_vector(Vec3::NEG_Z, &keys), Vec3::X);
+        keys.reset_all();
+        keys.press(KeyCode::KeyE);
+        assert_eq!(fly_vector(Vec3::NEG_Z, &keys), Vec3::Y);
+        keys.reset_all();
+        keys.press(KeyCode::KeyQ);
+        assert_eq!(fly_vector(Vec3::NEG_Z, &keys), Vec3::NEG_Y);
     }
 }

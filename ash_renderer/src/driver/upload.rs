@@ -436,14 +436,12 @@ pub(crate) fn flush_uploads(
     }
     // —— 4b) 排批:staging 连续排布(网格两段 + 每贴图一段);分配必在
     // ensure_capacity 之后——"不写越界"的顺序契约——
+    // 贴图字节按 level 0 计（RGBA8 两档 4B/texel）：mip 链其余层级由提交内
+    // blit 生成，不进 staging（5.4.3；数据量 = w*h*4，与 data.len() 在单级
+    // 资产上恒等）
     let image_bytes: u64 = image_specs
         .iter()
-        .map(|(_, handle, _, _)| {
-            image_assets
-                .get(handle)
-                .and_then(|img| img.data.as_ref())
-                .map_or(0, Vec::len) as u64
-        })
+        .map(|(_, _, spec, _)| u64::from(spec.width) * u64::from(spec.height) * 4)
         .sum();
     let mut staging = Vec::with_capacity(
         (vertex_bytes + index_bytes + image_bytes) as usize
@@ -488,13 +486,24 @@ pub(crate) fn flush_uploads(
             .data
             .as_ref()
             .ok_or_fatal(format!("贴图 {id:?} 像素数据消失,状态矛盾"))?;
+        // 只排 level 0（见 image_bytes 口径）；数据不足 = 宽高与数据不符的
+        // 资产形状矛盾（能力降级后单级也至少要覆盖 level 0）
+        let level0_bytes = u64::from(spec.width) * u64::from(spec.height) * 4;
+        (bytes.len() as u64 >= level0_bytes)
+            .then_some(())
+            .ok_or_fatal(format!(
+                "贴图 {id:?} 数据 {}B 不足 level 0 {level0_bytes}B,资产形状矛盾",
+                bytes.len()
+            ))?;
         let src_offset = staging.len() as u64;
-        staging.extend_from_slice(bytes);
+        staging.extend_from_slice(&bytes[..level0_bytes as usize]);
         image_uploads.push(StagingImageCopy {
             image: gpu.image(),
             src_offset,
             width: spec.width,
             height: spec.height,
+            // 实际建成级数（blit 能力降级后的值，与 view 层级同源）
+            mip_levels: gpu.mip_levels(),
         });
     }
     // —— 对象记录入批:staging 排布 → 对象表拷贝段(48B/记录,按实例槽定址)。
@@ -565,6 +574,11 @@ pub(crate) fn flush_uploads(
     // → 驻留登记带槽位。只写排空点归还过的新槽;换内容改走"新槽发布 + 旧槽
     // 延迟回收"(原槽重写对在飞 draw 不安全,UAB 不授权覆盖仍被未完成
     // 命令消费的描述符)。发布失败 = 槽容量耗尽,按 Tier② 冒泡,不静默截断
+    // mip 链计量（实际建成级数 > 1 的张数；单级/降级不计）
+    let mip_chained = gpu_images
+        .iter()
+        .filter(|(_, gpu)| gpu.mip_levels() > 1)
+        .count();
     let mut sampler_slots_hit = HashSet::new();
     let mut replaced_images = 0usize;
     let mut committed_images: Vec<AssetId<Image>> = Vec::with_capacity(image_specs.len());
@@ -615,7 +629,7 @@ pub(crate) fn flush_uploads(
         .unwrap_or(usize::MAX);
     info!(
         "上传批次 #{ticket}:mesh {} 个(其中换内容 {replaced_meshes},顶点 {vertex_bytes}B / 索引 {index_bytes}B)\
-         + 贴图 {} 张(其中换内容重传 {replaced_images},{image_bytes}B,sRGB 角色 {srgb_count} / 线性 {})\
+         + 贴图 {} 张(其中换内容重传 {replaced_images},{image_bytes}B,sRGB 角色 {srgb_count} / 线性 {},mip 链 {mip_chained} 张)\
          + 对象记录 {} 条(换槽重写,{record_bytes}B);\
          槽位发布:纹理槽 {}/{}(含 fallback 0 号)、采样器槽 {} 种(本批涉及 {new_sampler});\
          实例槽 {}/{}(停尸房 {})、材质槽 {}/{};\

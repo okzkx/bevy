@@ -328,6 +328,8 @@ pub(crate) fn paint_overlay(
             width: image.size[0] as u32,
             height: image.size[1] as u32,
             format: vk::Format::R8G8B8A8_UNORM,
+            // 图集走单级（egui 图集无 mip 需求；blit 段按级数缺席自动跳过）
+            mip_levels: 1,
             sampler: ImageSamplerDescriptor::linear(),
         };
         // 图像与池同款 CONCURRENT 双族（transfer 写 + graphics 读）
@@ -357,6 +359,7 @@ pub(crate) fn paint_overlay(
                 src_offset: 0,
                 width: spec.width,
                 height: spec.height,
+                mip_levels: 1,
             }],
             ..Default::default()
         };

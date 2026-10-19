@@ -12,7 +12,7 @@
 
 ## 技术底座（开工先读，勿重复侦察）
 
-- [BRP 侦察笔记 §8](../../笔记/bevy_remote：BRP远程协议与自定义方法.md)：官方数据收集口径（`bevy_dev_tools::inspection` 的组件检视、`world_summary`、label 解析）可学；**UI 表现不学**（用户实测定案：官方面板又闪又卡）。
+- [BRP 侦察笔记 §8](../../笔记/Bevy/bevy_remote：BRP远程协议与自定义方法.md)：官方数据收集口径（`bevy_dev_tools::inspection` 的组件检视、`world_summary`、label 解析）可学；**UI 表现不学**（用户实测定案：官方面板又闪又卡）。
 - 3.10 既有底座：`SelectedEntity` 选中资源（overlay 内 `pub(super)`）、`DebugUiParams` 取数束（新取数走束，不撑 pass 签名——系统参数 16 上限）、overlay 加窗三步惯例（独立文件 struct + 总控开关字段 + pass 显示门）。
 - 同帧 relay：Update 改值 → PostUpdate `TransformSystems::Propagate` 传播 → `collect_scene` 采集 → Last `draw_frame`——3.11.2 改值即走此链。
 

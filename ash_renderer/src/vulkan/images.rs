@@ -17,8 +17,12 @@
 //!（bevy_image/src/image.rs:181 `ImagePlugin::default()` = `ImageSamplerDescriptor::linear()`），
 //! 禁渲染宿主里照该常量解析，不发明新默认。
 //!
-//! mip 策略：静态 mip0——只收单级贴图、只传 level 0，采样端以 `max_lod = 0` 钉死
-//! 可采样 LOD；mip 链生成不归本层。
+//! mip 策略（5.4.3 起修订，静态 mip0 退役）：资产侧数据按 mip0 收（图片
+//! 加载器只给 level 0，带链数据解析不归本层——TextureDataOrder 排布复杂度
+//! 不引入），mip 链由 GPU blit 逐级缩生成（传输批内完成，一次性非每帧）；
+//! 采样端 `max_lod` 放开到 `VK_LOD_CLAMP_NONE`，可用 LOD 上界 = 实际链级数。
+//! 格式缺 blit/线性过滤支持的贴图降级单级创建（能力判定在
+//! [`GpuImage::create`]，降级有日志）。
 
 use std::collections::HashMap;
 
@@ -47,38 +51,35 @@ pub enum ImageConvertError {
     /// 没有 2D 网格就无法进采样路径。
     #[error("不支持的维度 {0:?}（只收 2D）")]
     UnsupportedDimension(TextureDimension),
-    /// 静态 mip0 形状：mip 链生成不归本层，带链数据进来先拒绝（避免只取 mip0
-    /// 还要解析 TextureDataOrder 排布的复杂度）。
-    #[error("mip 链 {0} 级（静态 mip0，只收单级）")]
-    UnsupportedMipLevels(u32),
     /// 未初始化的存储贴图没有可上传内容。
     #[error("贴图无像素数据（data 为 None）")]
     MissingData,
 }
 
 /// 一张贴图的渲染器规格：纯映射产物（可失败 = Tier①）；Vulkan 对象由
-/// [`GpuImage::create`] 按此建，像素字节由调用方从 `Image.data` 直取进 staging。
+/// [`GpuImage::create`] 按此建，像素字节由调用方从 `Image.data` 直取进 staging
+///（只取 mip0，见模块注释）。
 #[derive(Debug)]
 pub struct ImageSpec {
     pub width: u32,
     pub height: u32,
     /// 已核对的格式（创建时再查 optimal tiling feature 支持——支持与使用分开核）。
     pub format: vk::Format,
+    /// 全链级数（`floor(log2(max(w,h))) + 1`；实际建几级由
+    /// [`GpuImage::create`] 的格式 blit 能力定，缺支持降级 1）。
+    pub mip_levels: u32,
     /// 已解析的采样设置（`Default` → 官方 ImagePlugin 全局默认 linear()，见模块注释）。
     pub sampler: ImageSamplerDescriptor,
 }
 
-/// bevy `Image` → [`ImageSpec`]：核对维度/mip 形状/格式角色，解析采样设置。
+/// bevy `Image` → [`ImageSpec`]：核对维度/格式角色，解析采样设置，算全链级数。
 ///
 /// # Errors
-/// 维度非 2D、mip 非单级、格式不在 RGBA8 两档、data 缺失时返回 [`ImageConvertError`]。
+/// 维度非 2D、格式不在 RGBA8 两档、data 缺失时返回 [`ImageConvertError`]。
 pub fn image_spec(image: &BevyImage) -> Result<ImageSpec, ImageConvertError> {
     let desc = &image.texture_descriptor;
     if desc.dimension != TextureDimension::D2 {
         return Err(ImageConvertError::UnsupportedDimension(desc.dimension));
-    }
-    if desc.mip_level_count != 1 {
-        return Err(ImageConvertError::UnsupportedMipLevels(desc.mip_level_count));
     }
     let format = match desc.format {
         TextureFormat::Rgba8UnormSrgb => vk::Format::R8G8B8A8_SRGB,
@@ -97,8 +98,17 @@ pub fn image_spec(image: &BevyImage) -> Result<ImageSpec, ImageConvertError> {
         width: image.width(),
         height: image.height(),
         format,
+        mip_levels: full_mip_chain(image.width(), image.height()),
         sampler,
     })
+}
+
+/// 2D 贴图的全 mip 链级数：`floor(log2(max(w,h))) + 1`（1×1 → 1 级，
+/// 1024×256 → 11 级）。VkImage 的 mip_levels 与 view 的 level_count 同源。
+#[must_use]
+pub fn full_mip_chain(width: u32, height: u32) -> u32 {
+    let m = width.max(height).max(1);
+    (u32::BITS - m.leading_zeros()).max(1)
 }
 
 impl ImageSpec {
@@ -121,6 +131,9 @@ pub struct GpuImage {
     format: vk::Format,
     width: u32,
     height: u32,
+    /// 实际建成的 mip 级数（规格的全链级数经 blit 能力降级后的值；
+    /// view 的 level_count 与上传侧 blit 生成段同源）。
+    mip_levels: u32,
 }
 
 impl GpuImage {
@@ -165,6 +178,14 @@ impl GpuImage {
                 spec.format
             )));
         }
+        // mip 链能力判定（5.4.3）：blit 逐级缩要求 BLIT_SRC/DST + 线性过滤
+        // 位；缺任一 → 降级单级创建（RGBA8 两档本机均全含，判定留证据日志）
+        let blit_ok = features.contains(
+            vk::FormatFeatureFlags::BLIT_SRC
+                | vk::FormatFeatureFlags::BLIT_DST
+                | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR,
+        );
+        let mip_levels = if blit_ok { spec.mip_levels.max(1) } else { 1 };
         // # Safety:create_image 参数全为合法常量 + 核对过的格式/usage,无裸指针
         let image = unsafe {
             device.create_image(
@@ -176,7 +197,7 @@ impl GpuImage {
                         height: spec.height,
                         depth: 1,
                     })
-                    .mip_levels(1)
+                    .mip_levels(mip_levels)
                     .array_layers(1)
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
@@ -194,7 +215,7 @@ impl GpuImage {
             )
         }?;
         let result =
-            unsafe { Self::create_inner(device, contract, spec, usage, features, image) };
+            unsafe { Self::create_inner(device, contract, spec, usage, features, mip_levels, image) };
         // image 的回收统一收口在这里(内层只管 memory/view 的回收)
         if result.is_err() {
             unsafe { device.destroy_image(image, None) };
@@ -212,6 +233,7 @@ impl GpuImage {
         spec: &ImageSpec,
         usage: vk::ImageUsageFlags,
         features: vk::FormatFeatureFlags,
+        mip_levels: u32,
         image: vk::Image,
     ) -> Result<Self> {
         unsafe {
@@ -233,7 +255,8 @@ impl GpuImage {
                 device.free_memory(memory, None);
                 return Err(VulkanError::Vk(e));
             }
-            // view:全量 COLOR 子资源、mip0 单层——与上传/采样的子资源范围一致
+            // view:全量 COLOR 子资源、全 mip 链（实际级数 = 建图级数，
+            // 与上传侧 blit 生成段/采样端 max_lod 同源）
             let view = device.create_image_view(
                 &vk::ImageViewCreateInfo::default()
                     .image(image)
@@ -242,7 +265,7 @@ impl GpuImage {
                     .subresource_range(
                         vk::ImageSubresourceRange::default()
                             .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .level_count(1)
+                            .level_count(mip_levels)
                             .layer_count(1),
                     ),
                 None,
@@ -258,7 +281,7 @@ impl GpuImage {
             info!(
                 "贴图按契约就绪: {0:?} {1}×{2} → requirements 分配 {reqs_size}B(对齐 {reqs_alignment}B), \
                  内存类型 {memory_type} 堆 {heap_index}({heap_size}B, {heap_flags:?}), \
-                 usage {usage:?} 全含于 optimal features {features:?}",
+                 usage {usage:?} 全含于 optimal features {features:?},                  mip 链 {mip_levels} 级",
                 spec.format,
                 spec.width,
                 spec.height,
@@ -276,6 +299,7 @@ impl GpuImage {
                 format: spec.format,
                 width: spec.width,
                 height: spec.height,
+                mip_levels,
             })
         }
     }
@@ -302,6 +326,12 @@ impl GpuImage {
     #[must_use]
     pub fn extent(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// 实际建成的 mip 级数(上传侧 blit 生成段与 view 层级同源;1 = 单级)。
+    #[must_use]
+    pub fn mip_levels(&self) -> u32 {
+        self.mip_levels
     }
 }
 
@@ -480,8 +510,9 @@ fn filter(f: ImageFilterMode) -> vk::Filter {
 /// mip 模式、寻址三轴、比较、边框色。两个钉号背景:
 /// - **格式解释挂 image view,VkSampler 无格式参数**,所以
 ///   sRGB/线性色彩角色不进键——同键贴图共享采样器槽,与色彩角色无关;
-/// - lod clamp 与 anisotropy 在 [`GpuImage::create_sampler`] 里按全局策略
-///   钉死(max_lod=0、aniso off、bias 0),对全部采样器同值,不进键。
+/// - lod clamp 与 anisotropy 在 [`SamplerKey::create_sampler`] 里按全局策略
+///   固定(max_lod=VK_LOD_CLAMP_NONE——5.4.3 起 mip 链全放开,可用层级由
+///   view 级数决定;aniso off、bias 0),对全部采样器同值,不进键。
 ///
 /// 同键 ⇒ 同一 VkSampler 配方 ⇒ 可共享描述符槽位。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -519,8 +550,9 @@ pub fn sampler_key(d: &ImageSamplerDescriptor) -> SamplerKey {
 impl SamplerKey {
     /// 从功能键创建 VkSampler 本体（采样器归描述符表所有，键即完整
     /// 配方——raw 值即 vk 枚举）。
-    /// lod 上限钉 0（静态 mip0 模式）、anisotropy 不启用（需独立
-    /// feature，不开启）——两条全局策略随键固化。
+    /// lod 上限放开到 VK_LOD_CLAMP_NONE（5.4.3 起 mip 链全采样，可用层级由
+    /// view 级数决定；单级贴图该值无害——只有 0 级可采）、anisotropy 不启用
+    ///（需独立 feature，不开启）——两条全局策略随键固化。
     ///
     /// # Errors
     /// `vkCreateSampler` 失败。
@@ -534,7 +566,9 @@ impl SamplerKey {
             .address_mode_w(vk::SamplerAddressMode::from_raw(self.w))
             .mip_lod_bias(0.0)
             .min_lod(0.0)
-            .max_lod(0.0)
+            // VK_LOD_CLAMP_NONE：采样请求的 LOD 高于此值时钳到最大可用级
+            //（层级由 view 决定）——单级/全链同一配方，采样器键无需携带级数
+            .max_lod(vk::LOD_CLAMP_NONE)
             .compare_enable(self.compare.is_some())
             .compare_op(
                 self.compare
@@ -582,5 +616,19 @@ fn border_color(c: ImageSamplerBorderColor) -> vk::BorderColor {
         ImageSamplerBorderColor::OpaqueBlack => vk::BorderColor::FLOAT_OPAQUE_BLACK,
         ImageSamplerBorderColor::OpaqueWhite => vk::BorderColor::FLOAT_OPAQUE_WHITE,
         ImageSamplerBorderColor::Zero => vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::full_mip_chain;
+
+    #[test]
+    fn mip_chain_levels() {
+        assert_eq!(full_mip_chain(1, 1), 1);
+        assert_eq!(full_mip_chain(2, 2), 2);
+        assert_eq!(full_mip_chain(4, 2), 3);
+        assert_eq!(full_mip_chain(1024, 256), 11);
+        assert_eq!(full_mip_chain(6, 6), 3);
     }
 }

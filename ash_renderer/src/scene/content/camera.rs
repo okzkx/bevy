@@ -44,6 +44,8 @@ pub(super) fn spawn_camera(
         && let Projection::Perspective(ref mut persp) = projection
     {
         persp.aspect_ratio = window.resolution.width() / window.resolution.height();
+        // 远平面随 5.4 大场景取景放宽（默认 1000 不够俯瞰 256+ 单位场景）
+        persp.far = 4000.0;
         aspect_note = "按主窗口";
     }
     commands.spawn((
