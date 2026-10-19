@@ -39,9 +39,9 @@ use crate::{
     scene::InstanceLedger,
     vulkan::{
         frustum_planes, pack_frame_uniforms, AcquireOutcome, BindlessTables, Context,
-        CullDiagnostics, CullPass, CullSettings, FrameDraw, FramePool, FrameUniformsData,
-        GraphicsPipeline, ImageCache, IndirectPass, IndirectStats, InstanceTables, MARK_SIZE,
-        MeshPool, OverlayPipeline, Swapchain, Uploader,
+        CullDiagnostics, CullPass, CullSettings, FrameDraw, FramePool, FrameSample,
+        FrameUniformsData, GraphicsPipeline, GpuTimer, ImageCache, IndirectPass, IndirectStats,
+        InstanceTables, MARK_SIZE, MeshPool, OverlayPipeline, PerfLedger, Swapchain, Uploader,
     },
 };
 
@@ -112,6 +112,10 @@ pub(crate) struct FrameInput<'w, 's> {
     indirect_pass: Res<'w, IndirectPass>,
     /// indirect 诊断账面（每帧刷新，egui/BRP 读数口；只进计量）。
     indirect_stats: ResMut<'w, IndirectStats>,
+    /// GPU 帧计时器（5.5；停用时 enabled=false，GPU 区间读数缺席）。
+    timer: ResMut<'w, GpuTimer>,
+    /// 帧样本账（每帧 push 一份 CPU 分段 + GPU 区间 + 规模；只进计量）。
+    perf: ResMut<'w, PerfLedger>,
 }
 
 /// DrawList 消费状态（跨帧 `Local`）：缺资源/相机告警去重 + 材质覆盖一次性收账。
@@ -176,6 +180,8 @@ pub(crate) fn draw_frame(
         ref mut cull_diag,
         ref indirect_pass,
         ref mut indirect_stats,
+        ref mut timer,
+        ref mut perf,
         ..
     } = input;
     // —— 闸门①：读 resize 消息。一次 update 可能积压多条（拖拽 125Hz 输入 vs 60fps
@@ -220,12 +226,22 @@ pub(crate) fn draw_frame(
     // 1) 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在下方提交前一刻）。
     // 失败 = 等待/重置层面坏掉（设备丢失、内存枯竭），继续帧循环只会撞上未知的
     // fence 状态——Tier②
+    let frame_clock = std::time::Instant::now();
     frames
         .wait_for_slot()
         .or_fatal("帧槽等待/重置失败，渲染链无法继续")?;
+    let wait_slot_ms = frame_clock.elapsed().as_secs_f32() * 1000.0;
+    // —— GPU 帧计时取回（5.5）：本槽 fence 已等完 = 上轮提交执行完毕，4 位
+    // timestamp 可读。混合口径如实标注：GPU 区间是本槽上轮（两帧前）的提交，
+    // 稳态下与当前帧同构；停用时恒 0。
+    let gpu_sections = timer
+        .fetch(frames.current_index())
+        .or_fatal("GPU 帧计时取回失败，渲染链无法继续")?
+        .unwrap_or([0.0; 3]);
 
     // 2) acquire：拿到一张可画的 image；OUT_OF_DATE = 这个 swapchain 已不可用
     //（最小化/恢复/独占模式切换等），必须立即重建——等不得下一帧
+    let acquire_clock = std::time::Instant::now();
     let index = match swapchain.acquire(frames.current().image_available) {
         Ok(AcquireOutcome::Ready(index)) => index,
         Ok(AcquireOutcome::Suboptimal(index)) => {
@@ -245,11 +261,14 @@ pub(crate) fn draw_frame(
         }
         Err(e) => return Err(fatal("acquire 失败，渲染链无法继续", e)),
     };
+    let acquire_ms = acquire_clock.elapsed().as_secs_f32() * 1000.0;
 
     // 3) 组装 DrawList：槽位枚举（账本行 → 实例槽 + 池引脚；逐对象参数已进
     // GPU 常驻表，push 只剩 4B 实例槽号——见 drawlist 模块文档）。可绘判定
     // 与 4.x 语义一致：实例槽缺/mesh 未驻留/材质缺席 = 暂缓（Tier① 自愈）。
+    let assemble_clock = std::time::Instant::now();
     let assembly = drawlist::assemble(ledger, pool, std_materials);
+    let assemble_ms = assemble_clock.elapsed().as_secs_f32() * 1000.0;
     if assembly.pending_rows > 0 {
         if !draw_state.warned_pending {
             draw_state.warned_pending = true;
@@ -367,6 +386,7 @@ pub(crate) fn draw_frame(
     // 4a) 双环写入（wait_for_slot 之后，与帧 UBO 同一条 fence 证据）：模型环
     // 增量重写（本帧奇偶集的改动行）+ 材质环全量重写（可绘行的材质从容器
     // 现读）。见 instance_table 模块文档的 hazard 纪律表。
+    let rings_clock = std::time::Instant::now();
     drawlist::write_rings(
         instance_tables,
         ledger,
@@ -376,6 +396,7 @@ pub(crate) fn draw_frame(
         frames.current_index(),
     )
     .or_fatal("模型/材质环写失败，渲染链无法继续")?;
+    let rings_ms = rings_clock.elapsed().as_secs_f32() * 1000.0;
 
     // 4a-2) 视锥剔除半边（5.2）：开关决定 compute dispatch 或 host 全可见填充
     //（数据层 A/B）；诊断读数在写入路径之后取——标记环读写都在 wait_for_slot
@@ -511,7 +532,9 @@ pub(crate) fn draw_frame(
         clear: CLEAR_COLOR,
         cull: cull_dispatch,
         indirect: indirect_dispatch,
+        timer: timer.enabled.then_some(&*timer),
     };
+    let record_clock = std::time::Instant::now();
     frames
         .record_frame(
             ctx,
@@ -522,6 +545,7 @@ pub(crate) fn draw_frame(
             &frame_draw,
         )
         .or_fatal("录制/提交失败，渲染链无法继续")?;
+    let record_submit_ms = record_clock.elapsed().as_secs_f32() * 1000.0;
 
     // 6) present：把画好的 image 交给 present engine，等它的信号量按 acquire 的
     // image index 取（不按帧槽轮转）。SUBOPTIMAL/OUT_OF_DATE 都只是标记 pending
@@ -529,6 +553,7 @@ pub(crate) fn draw_frame(
     // 提前返回——advance 必须照常推进保持帧槽账本一致，就地 error 留档 + 置位
     // 看门，退出由下一帧 Update 的 fatal_gate 生效（判定线：不提前 return 的
     // 失败不冒泡，就地处理）。
+    let present_clock = std::time::Instant::now();
     if let Err(e) = swapchain.present(ctx.queue, swapchain.render_finished[index as usize], index) {
         match e {
             VulkanError::SwapchainOutOfDate => gate.pending = true,
@@ -538,6 +563,26 @@ pub(crate) fn draw_frame(
             }
         }
     }
+    let present_ms = present_clock.elapsed().as_secs_f32() * 1000.0;
+
+    // —— 帧样本入账（5.5）：CPU 分段 + GPU 区间 + 规模读数，环形窗口逐帧
+    // push；只进计量（诊断性回读边界照 5.2 拍板）。让路帧（最小化/acquire
+    // 过时）不经过此处，不进样本。
+    let cpu_total_ms = wait_slot_ms + acquire_ms + assemble_ms + rings_ms + record_submit_ms + present_ms;
+    perf.push(FrameSample {
+        wait_slot_ms,
+        acquire_ms,
+        assemble_ms,
+        rings_ms,
+        record_submit_ms,
+        present_ms,
+        cpu_total_ms,
+        gpu_compute_ms: gpu_sections[0],
+        gpu_graphics_ms: gpu_sections[1],
+        gpu_total_ms: gpu_sections[2],
+        instance_rows: indirect_count,
+        visible_rows: visible_among_live,
+    });
 
     frames.advance();
     Ok(())

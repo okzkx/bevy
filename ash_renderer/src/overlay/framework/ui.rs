@@ -43,7 +43,10 @@ use crate::overlay::windows::entity_tree_window::{
     EntityTreeData, EntityTreeWindow, SelectedDetails, SelectedEntity, TransformDragCache,
     collect_selected_details,
 };
-use crate::vulkan::{CullDiagnostics, CullSettings, IndirectStats};
+use crate::scene::mechanism::WorkloadSettings;
+use crate::vulkan::{
+    CullDiagnostics, CullSettings, ImageCache, IndirectStats, MeshPool, PerfLedger,
+};
 
 use ash_macros::system;
 
@@ -177,6 +180,11 @@ struct DebugUiParams<'w, 's> {
     indirect_stats: Res<'w, IndirectStats>,
     /// chunk 盘点（5.4：块数与成员总数计量行）
     chunks: ChunkRows<'w, 's>,
+    /// 帧样本账（5.5：分位数/显存/注入读数）
+    perf: Res<'w, PerfLedger>,
+    image_cache: Res<'w, ImageCache>,
+    mesh_pool: Res<'w, MeshPool>,
+    workload: Res<'w, WorkloadSettings>,
 }
 
 /// Update：组 RawInput → begin_pass → 总控 + 各调试窗口（按显隐开关）→
@@ -254,6 +262,10 @@ fn run_egui_pass(
             cull_settings: &mut ui.cull_settings,
             cull_diag: &ui.cull_diag,
             indirect_stats: &ui.indirect_stats,
+            perf: &ui.perf,
+            workload: &ui.workload,
+            image_cache: &ui.image_cache,
+            mesh_pool: &ui.mesh_pool,
             chunks: &ui.chunks,
         }
         .show();

@@ -34,6 +34,7 @@ use crate::common::error::{Result, VulkanError};
 use crate::vulkan::cull::CullDraw;
 use crate::vulkan::indirect::IndirectDraw;
 use crate::vulkan::overlay_pipeline::{pack_ui_push, UiPaint};
+use crate::vulkan::perf::GpuTimer;
 use crate::vulkan::Context;
 
 pub use super::depth::{DepthTarget, DEPTH_FORMAT};
@@ -88,6 +89,9 @@ pub struct FrameDraw<'a> {
     pub ticket_semaphore: vk::Semaphore,
     /// 清屏颜色（线性域；SRGB view 的 ROP 编码在写出时做）。
     pub clear: [f32; 4],
+    /// GPU 帧计时（5.5）：Some = 帧首 reset+T0、段界 T1/T2/T3 四位采样；
+    /// None = 计时器停用（队列族无 timestamp）。
+    pub timer: Option<&'a GpuTimer>,
 }
 
 /// 一组在飞资源。image_available 桥接 present engine → GPU 渲染，in_flight 桥接
@@ -264,12 +268,18 @@ impl FramePool {
     ) -> Result<()> {
         let frame = &self.frames[self.current];
         let device = &self.device;
+        let slot = self.current;
         unsafe {
             device.begin_command_buffer(
                 frame.command_buffer,
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
+
+            // —— 帧计时（5.5）：query pool 重置 + T0（进场后原点位）。
+            if let Some(timer) = draw.timer {
+                timer.reset_and_start(frame.command_buffer, slot);
+            }
 
             // —— 进场 ①：颜色布局迁移。布局迁移是一次写访问，必须
             // 排在 acquire 对 image 的读之后——提交在 COLOR_ATTACHMENT_OUTPUT 阶段等
@@ -347,6 +357,11 @@ impl FramePool {
             // 自带屏障是命令写 → DRAW_INDIRECT 读的依赖形状。空场 = None。
             if let Some(indirect) = &draw.indirect {
                 super::indirect::record(device, frame.command_buffer, draw.set2, indirect);
+            }
+
+            // —— 帧计时 T1：compute 区间（cull+组装）结束点位。
+            if let Some(timer) = draw.timer {
+                timer.mark(frame.command_buffer, slot, 1);
             }
 
             // —— dynamic rendering：清屏 + 绘制。颜色 loadOp CLEAR（线性域清值，
@@ -537,6 +552,11 @@ impl FramePool {
 
             device.cmd_end_rendering(frame.command_buffer);
 
+            // —— 帧计时 T2：图形区间（清屏+场景+UI）结束点位。
+            if let Some(timer) = draw.timer {
+                timer.mark(frame.command_buffer, slot, 2);
+            }
+
             // —— 出场：颜色画完到 present 引擎接管之间必须收口；PRESENT_SRC 是
             // present 专用布局。深度无出场（storeOp DON'T CARE + 下帧 UNDEFINED 重进）。
             let to_present_src = vk::ImageMemoryBarrier::default()
@@ -561,6 +581,11 @@ impl FramePool {
                 &[],
                 &[to_present_src],
             );
+            // —— 帧计时 T3：全帧区间（T0→T3）结束点位，end_command_buffer 之前。
+            if let Some(timer) = draw.timer {
+                timer.mark(frame.command_buffer, slot, 3);
+            }
+
             device.end_command_buffer(frame.command_buffer)?;
 
             // fence 在提交前一刻才重置。此处到 queue_submit 之间没有任何提前
