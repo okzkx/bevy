@@ -11,7 +11,7 @@
 
 拆成三个练习目标，全部在自研渲染器侧完成：
 
-1. **Bindless**：descriptor indexing 起步，不建传统 bound 回退管线；descriptor buffer 保留为独立学习实验，按能力与实测决定是否替换，不作 GPU-driven 的必经终点；
+1. **Bindless**：descriptor indexing 起步，不建传统 bound 回退管线；
 2. **GPU-driven**：剔除、indirect draw、LOD 决策尽量搬到 GPU；
 3. **大世界数据获取与流送**：海量对象的组织、合并、按需加载。
 
@@ -116,7 +116,7 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 | M2 静态取数 | Assets 到 GPU 池、合批上传、descriptor indexing、直接绘制 | 统一不透明调试几何、base color/UV、光照方向分项对照，验证层实际启用 |
 | M3 可靠增量 | 对象变更、资产事件、异步就绪、延迟回收、热重载 | 零变化零上传；换柄、同柄改内容、删除取消、反复重载正确；扫描成本另记 |
 | M4 常驻 GPU-driven | 常驻实例表、GPU frustum、GPU indirect；共享资产与 chunk 组织 | 不回读可见集、不逐对象装配 draw；1万/5万/10万档测真实实例与成本 |
-| M5 高级 GPU-driven 与流送 | 遮挡、GPU LOD、有预算的粗粒度流送 | 分项开关与持续游历压力验证；细 mip/LOD 流送、descriptor buffer 独立深化 |
+| M5 高级 GPU-driven 与流送 | 遮挡、GPU LOD、有预算的粗粒度流送 | 分项开关与持续游历压力验证；细 mip/LOD 流送深化 |
 
 详细段落、状态和性能预算以[路线图](学习目标实现步骤.md)为唯一执行表，不在入口重复维护第二套任务面板。
 
