@@ -16,6 +16,7 @@ use bevy::{
     window::{PrimaryWindow, RawHandleWrapper},
 };
 
+use ash::vk;
 use ash_macros::system;
 
 use crate::{
@@ -23,9 +24,9 @@ use crate::{
     common::syntax::ResultTierExt,
     overlay::{AtlasGpu, UiVertexRing},
     vulkan::{
-        BindlessTables, Context, CullPass, FramePool, GraphicsPipeline, GpuTimer, ImageCache,
-        IndirectPass, InstanceTables, MeshPool, OverlayPipeline, Swapchain, Uploader,
-        DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
+        BindlessTables, Context, CullPass, FramePool, GraphicsPipeline, GpuTimer, HizPyramid,
+        ImageCache, IndirectPass, InstanceTables, MeshPool, OcclusionPass, OverlayPipeline,
+        Swapchain, Uploader, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
 
@@ -42,11 +43,11 @@ pub(super) fn init_vulkan(
     _main_thread: NonSendMarker,
     mut commands: Commands,
 ) -> Result<(), BevyError> {
-    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, pipeline, overlay_pipeline, cull_pass, indirect_pass, ui_ring, gpu_timer) =
+    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, ui_ring, gpu_timer) =
         try_init_vulkan(&wrapper)
             .or_fatal("Vulkan 初始化失败，资源束一个都不插入")?; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过帧循环
     info!(
-        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GraphicsPipeline + OverlayPipeline + CullPass（视锥剔除 compute）+ IndirectPass（indirect 命令组装 compute）+ UiVertexRing + GpuTimer（5.5 GPU 帧计时）；清屏+剔除+组装+绘制自下一帧（Last）起"
+        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GraphicsPipeline + OverlayPipeline + CullPass（视锥剔除 compute）+ IndirectPass（indirect 命令组装 compute）+ HizPyramid（Hi-Z 金字塔）+ OcclusionPass（遮挡测试 compute）+ UiVertexRing + GpuTimer（5.5 GPU 帧计时）；清屏+剔除+遮挡+组装+绘制自下一帧（Last）起"
     );
     // 插入顺序 = 创建顺序；World 清场顺序不定，退出时的反序拆除见 teardown_vulkan
     commands.insert_resource(ctx);
@@ -61,6 +62,8 @@ pub(super) fn init_vulkan(
     commands.insert_resource(overlay_pipeline);
     commands.insert_resource(cull_pass);
     commands.insert_resource(indirect_pass);
+    commands.insert_resource(hiz);
+    commands.insert_resource(occlusion_pass);
     commands.insert_resource(ui_ring);
     commands.insert_resource(gpu_timer);
     Ok(())
@@ -146,6 +149,15 @@ fn try_init_vulkan(
     // indirect 命令组装 compute 管线（5.3）：只借 set2（b0 对象表 + b3 标记 +
     // b4 在场环 + b5 命令环），count 随 4B push——闸门②首跑在首个有在场行的帧收账
     let indirect_pass = IndirectPass::new(&ctx, instance_tables.set2_layout())?;
+    // Hi-Z 金字塔（6.1.2）：×2 帧槽 R32F mip 链 + 逐级归约管线 + 遮挡测试的
+    // 全链采样描述符（深度 image 须已建成——本帧槽深度即 level 0 归约源；
+    // resize 随 rebuild_depth 同批重建，见 draw_frame 闸门③）
+    let depth_images: Vec<vk::Image> =
+        (0..MAX_FRAMES_IN_FLIGHT).map(|s| frames.depth_image(s)).collect();
+    let hiz = HizPyramid::new(&ctx, swapchain.extent, &depth_images)?;
+    // 遮挡测试 compute 管线（6.1）：[set2, hiz] 双集 + 80B push——hiz 的
+    // occlusion layout 是它的素材（layout 借用关系，拆除序先于 hiz）
+    let occlusion_pass = OcclusionPass::new(&ctx, instance_tables.set2_layout(), hiz.occlusion_layout())?;
     // UI 顶点环：每帧槽一对 HOST_VISIBLE 顶点/索引 buffer，纯 Context
     // 依赖（初始化链尾端，拆除随帧级一批——无表/管线依赖）
     let ui_ring = UiVertexRing::new(&ctx)?;
@@ -156,7 +168,7 @@ fn try_init_vulkan(
     std::mem::forget(drain_guard);
     Ok((
         ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, pipeline,
-        overlay_pipeline, cull_pass, indirect_pass, ui_ring, gpu_timer,
+        overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, ui_ring, gpu_timer,
     ))
 }
 
@@ -201,6 +213,11 @@ pub(super) fn teardown_vulkan(world: &mut World) {
             Err(e) => bevy::log::warn!("退出排空失败（设备丢失？），继续按反序拆除: {e}"),
         }
     }
+    // Hi-Z 家族先于帧级拆：OcclusionPass 的 layout 借用 hiz 的 occlusion
+    // layout（先拆管线再拆 hiz），hiz 的视图引用各帧槽深度 image（视图先于
+    // 深度 image 销毁——FramePool Drop 拆深度本体）
+    world.remove_resource::<OcclusionPass>();
+    world.remove_resource::<HizPyramid>();
     world.remove_resource::<FramePool>();
     // UI 顶点环随帧级一批拆（帧内使用，无表/管线依赖；overlay 未装时缺席即 no-op）
     world.remove_resource::<UiVertexRing>();
@@ -247,6 +264,8 @@ type InitChain = (
     OverlayPipeline,
     CullPass,
     IndirectPass,
+    HizPyramid,
+    OcclusionPass,
     UiVertexRing,
     GpuTimer,
 );

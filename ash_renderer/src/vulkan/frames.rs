@@ -22,8 +22,10 @@
 //! - 颜色：acquire 后布局不确定 → UNDEFINED→COLOR_ATTACHMENT_OPTIMAL（进场），
 //!   画完 → PRESENT_SRC_KHR（出场）；
 //! - 深度：每帧 UNDEFINED→DEPTH_STENCIL_ATTACHMENT_OPTIMAL（UNDEFINED 作 oldLayout
-//!   = 声明"旧内容不要了"，与 loadOp CLEAR 配套；storeOp DON'T CARE——深度从不
-//!   被读回，出场屏障不存在）。
+//!   = 声明"旧内容不要了"，与 loadOp CLEAR 配套）。**storeOp STORE（6.1.2 起
+//!   改 DON'T CARE→STORE）**：深度在本帧渲染后由 Hi-Z 归约采样（hiz 模块），
+//!   采完即弃——下帧 UNDEFINED 进场照常丢弃，深度内容不跨帧持久，金字塔才是
+//!   持久层；出场屏障仍不存在（消费发生在同一条命令缓冲内）。
 
 use std::slice;
 
@@ -32,7 +34,9 @@ use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
 use crate::vulkan::cull::CullDraw;
+use crate::vulkan::hiz::HizPyramid;
 use crate::vulkan::indirect::IndirectDraw;
+use crate::vulkan::occlusion::OcclusionDraw;
 use crate::vulkan::overlay_pipeline::{pack_ui_push, UiPaint};
 use crate::vulkan::perf::GpuTimer;
 use crate::vulkan::Context;
@@ -82,6 +86,14 @@ pub struct FrameDraw<'a> {
     /// 的依赖由 cull::record 的预置屏障收口），命令 → 绘制的依赖由组装自带
     /// 屏障收口（indirect::record）。
     pub indirect: Option<IndirectDraw>,
+    /// Hi-Z 遮挡测试 dispatch（6.1；fallback/关闭/空场为 None——b3 保持视锥
+    /// 纯结果，b6 host 填全可见）。录制在视锥剔除之后、indirect 组装之前
+    ///（视锥标记 → 遮挡合并 → 命令组装的依赖链，occlusion::record 自带屏障）。
+    pub occlusion: Option<OcclusionDraw>,
+    /// Hi-Z 金字塔归约链（6.1.2）：渲染后逐级重写本帧槽（Some = 恒 Some，
+    /// 重建窗口期也录——warmup 由 hiz 内部走账）。深度屏障（附件 → 只读）
+    /// 与进场/级间屏障在 hiz::record_reduction 内收口。
+    pub hiz: Option<&'a HizPyramid>,
     /// 上传票据等待值：图形提交在 GPU 侧等 timeline ≥ 此值——"上传完成才可使用"
     /// 的执法点（0 = 无上传过，跳过等待）。该等待同时收口 transfer 写的跨队列
     /// 内存可见性（池/贴图 CONCURRENT 双族共享，无所有权屏障，定案）。
@@ -89,8 +101,8 @@ pub struct FrameDraw<'a> {
     pub ticket_semaphore: vk::Semaphore,
     /// 清屏颜色（线性域；SRGB view 的 ROP 编码在写出时做）。
     pub clear: [f32; 4],
-    /// GPU 帧计时（5.5）：Some = 帧首 reset+T0、段界 T1/T2/T3 四位采样；
-    /// None = 计时器停用（队列族无 timestamp）。
+    /// GPU 帧计时（5.5，6.1.2 起五位）：Some = 帧首 reset+T0、段界 T1/T2/T3/T4
+    /// 采样；None = 计时器停用（队列族无 timestamp）。
     pub timer: Option<&'a GpuTimer>,
 }
 
@@ -182,6 +194,13 @@ impl FramePool {
     #[must_use]
     pub fn current_index(&self) -> usize {
         self.current
+    }
+
+    /// 第 `slot` 帧槽的深度 image 句柄（Hi-Z 归约 level 0 源视图的挂载目标，
+    /// 6.1.2——HizPyramid 建/重建时取）。
+    #[must_use]
+    pub fn depth_image(&self, slot: usize) -> vk::Image {
+        self.frames[slot].depth.image
     }
 
     /// 轮转到下一组帧资源（提交完成后调）。
@@ -351,6 +370,13 @@ impl FramePool {
                 super::cull::record(device, frame.command_buffer, draw.set2, cull);
             }
 
+            // —— Hi-Z 遮挡测试 dispatch（6.1，渲染进场之前、视锥之后）：读
+            // set2 三表 + 视锥标记 + 本帧槽金字塔（两帧前归约输出，fence 纪律
+            // 内），合并写回标记并落遮挡独立标记。fallback/关闭 = None。
+            if let Some(occlusion) = &draw.occlusion {
+                super::occlusion::record(device, frame.command_buffer, draw.set2, occlusion);
+            }
+
             // —— indirect 命令组装 dispatch（5.3，渲染进场之前）：compute 读
             // 在场环（host 每帧写）+ 标记（cull 写或 host 全可见填充）+ 对象表，
             // 逐在场行组装 VkDrawIndexedIndirectCommand 进命令环本帧槽；随后
@@ -381,7 +407,10 @@ impl FramePool {
                 .image_view(frame.depth.view)
                 .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                // 6.1.2 起 STORE（原 DON'T CARE）：本帧深度渲染后由 Hi-Z 归约
+                // 采样（同一条命令缓冲内，见帧尾的深度屏障）——采完即弃，
+                // 下帧 UNDEFINED 进场照常丢弃
+                .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue {
                     depth_stencil: vk::ClearDepthStencilValue {
                         depth: 0.0,
@@ -557,6 +586,46 @@ impl FramePool {
                 timer.mark(frame.command_buffer, slot, 2);
             }
 
+            // —— Hi-Z 归约链（6.1.2，渲染收口后）：深度附件转只读（本帧渲染
+            // 写 → 归约采样），再逐级 dispatch 重写本帧槽金字塔（进场/级间
+            // 屏障在 hiz::record_reduction 内）。消费发生在同一条命令缓冲内
+            //（storeOp STORE 的深度采完即弃，下帧 UNDEFINED 进场照常丢弃），
+            // 故无深度出场屏障。
+            if draw.hiz.is_some() {
+                let depth_to_read = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(frame.depth_image())
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                            .level_count(1)
+                            .layer_count(1),
+                    )
+                    .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                device.cmd_pipeline_barrier(
+                    frame.command_buffer,
+                    vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[depth_to_read],
+                );
+                if let Some(hiz) = draw.hiz {
+                    hiz.record_reduction(device, frame.command_buffer, slot);
+                }
+            }
+
+            // —— 帧计时 T3：Hi-Z 归约区间结束点位。
+            if let Some(timer) = draw.timer {
+                timer.mark(frame.command_buffer, slot, 3);
+            }
+
             // —— 出场：颜色画完到 present 引擎接管之间必须收口；PRESENT_SRC 是
             // present 专用布局。深度无出场（storeOp DON'T CARE + 下帧 UNDEFINED 重进）。
             let to_present_src = vk::ImageMemoryBarrier::default()
@@ -581,9 +650,9 @@ impl FramePool {
                 &[],
                 &[to_present_src],
             );
-            // —— 帧计时 T3：全帧区间（T0→T3）结束点位，end_command_buffer 之前。
+            // —— 帧计时 T4：全帧区间（T0→T4）结束点位，end_command_buffer 之前。
             if let Some(timer) = draw.timer {
-                timer.mark(frame.command_buffer, slot, 3);
+                timer.mark(frame.command_buffer, slot, 4);
             }
 
             device.end_command_buffer(frame.command_buffer)?;

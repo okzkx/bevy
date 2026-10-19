@@ -11,6 +11,7 @@
 
 use bevy::{
     camera::{Camera, Projection},
+    math::Vec2,
     prelude::*,
 };
 use serde_json::{json, Value};
@@ -21,8 +22,10 @@ use crate::{
     common::error::VulkanError,
     scene::InstanceLedger,
     vulkan::{
-        conservative_world_aabb, aabb_visible, frustum_planes, CullDiagnostics, CullSettings,
-        InstanceTables, MARK_SIZE, MeshPool, OBJECT_TABLE_CAPACITY,
+        aabb_screen_rect, aabb_visible, conservative_world_aabb, frustum_planes,
+        occluded_reverse_z, occlusion_mip_level, CullDiagnostics, CullSettings, HizPyramid,
+        InstanceTables, MARK_SIZE, MeshPool, OcclusionDiagnostics, OcclusionFallback,
+        OcclusionSettings, OBJECT_TABLE_CAPACITY,
     },
 };
 
@@ -118,6 +121,48 @@ pub(crate) fn cull_stats(In(_params): In<Option<Value>>, world: &mut World) -> B
             "cpu": cpu,
         }));
     }
+    // —— 遮挡分列（6.1）：读 occ 标记环（同帧槽，fence 纪律内）+ 诊断账面。
+    // 遮挡判可见数 = occ=1 的在场行；GPU 标记已含遮挡合并（b3 = 视锥 ∧ 遮挡），
+    // 本节单独报遮挡半边供 A/B 归因（视锥剔除量/遮挡剔除量分列）。
+    let occ_frame = world.resource::<OcclusionDiagnostics>().marks_frame;
+    let mut occ_bytes = vec![0u8; OBJECT_TABLE_CAPACITY as usize * MARK_SIZE as usize];
+    world
+        .resource_mut::<InstanceTables>()
+        .occ_mark_ring(occ_frame)
+        .read(0, &mut occ_bytes)
+        .map_err(|e: VulkanError| BrpError {
+            code: error_codes::COMPONENT_ERROR,
+            message: format!("遮挡标记环读失败: {e}"),
+            data: None,
+        })?;
+    let occ_at = |slot: u32| {
+        let o = slot as usize * 4;
+        u32::from_le_bytes(occ_bytes[o..o + 4].try_into().expect("4B"))
+    };
+    // 逐行找 occ 标记（rows 已按 slot 记录）
+    let mut occlusion_visible = 0u32;
+    for row in &rows {
+        let slot = row["slot"].as_u64().expect("slot 已按 u32 写入") as u32;
+        if occ_at(slot) == 1 {
+            occlusion_visible += 1;
+        }
+    }
+    let (occlusion_settings_enabled, occlusion_dispatched, occlusion_fallback) = {
+        let (diag, settings) = (
+            world.resource::<OcclusionDiagnostics>(),
+            world.resource::<OcclusionSettings>(),
+        );
+        (
+            settings.enabled,
+            diag.dispatched,
+            diag.fallback.map(|f| match f {
+                OcclusionFallback::Disabled => "disabled",
+                OcclusionFallback::CullOff => "cull_off",
+                OcclusionFallback::PyramidWarmup => "pyramid_warmup",
+                OcclusionFallback::CameraJump => "camera_jump",
+            }),
+        )
+    };
     Ok(json!({
         "enabled": enabled,
         "bound": bound,
@@ -125,6 +170,13 @@ pub(crate) fn cull_stats(In(_params): In<Option<Value>>, world: &mut World) -> B
         "staleness_note": "GPU 标记 = marks_frame 槽两帧前 compute 输出；对照前提 = 相机与变换自标记产生以来未变",
         "gpu_visible": gpu_visible,
         "cpu_visible": cpu_visible,
+        "occlusion": {
+            "settings_enabled": occlusion_settings_enabled,
+            "dispatched": occlusion_dispatched,
+            "fallback": occlusion_fallback,
+            "occlusion_visible": occlusion_visible,
+            "marks_frame": occ_frame,
+        },
         "rows_compared": rows.len(),
         "mismatches": mismatches,
         "rows": rows,
@@ -149,3 +201,188 @@ pub(crate) fn cull_set_enabled(In(params): In<Option<Value>>, world: &mut World)
     world.resource_mut::<CullSettings>().enabled = p.enabled;
     Ok(json!({ "enabled": p.enabled }))
 }
+
+/// `ash_renderer/occlusion_set_enabled`：写遮挡开关（6.1：true = 遮挡测试
+/// dispatch（金字塔就绪且相机稳定时），false = host 填 b6 全可见——数据层
+/// A/B 的远程驱动，egui checkbox 与此同源）。返回写入后的状态。
+///
+/// # Errors
+/// 参数缺失/类型错。
+#[system]
+pub(crate) fn occlusion_set_enabled(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let p: SetEnabledParams = serde_json::from_value(params.unwrap_or(Value::Null))
+        .map_err(|e| invalid_params(format!("enabled: {e}")))?;
+    world.resource_mut::<OcclusionSettings>().enabled = p.enabled;
+    Ok(json!({ "enabled": p.enabled }))
+}
+
+/// `ash_renderer/hiz_census` 参数：slot/level 可选（缺省 = 当前帧槽 / 全级）。
+#[derive(serde::Deserialize)]
+struct HizCensusParams {
+    #[serde(default)]
+    slot: Option<usize>,
+    #[serde(default)]
+    level: Option<u32>,
+}
+
+/// `ash_renderer/hiz_census`：Hi-Z 金字塔读回统计（6.1 判定线 3 的 CPU 参照
+/// 通道读数口）。逐级拷出统计 min/max/mean 与背景（0）占比——归约方向错误
+/// 或链路断裂会直接反映在统计上（如全 1/全 0/上下颠倒无 0）。**只进验证**，
+/// 不进绘制路径（红线同 cull_stats）。诊断提交 = 一次性命令池 + staging，
+/// 低频调用（测试脚本），不在帧循环内使用。
+///
+/// # Errors
+/// 参数不合法 / HizPyramid 缺席（禁渲染宿主）/ 读回提交失败。
+#[system]
+pub(crate) fn hiz_census(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let p: HizCensusParams = serde_json::from_value(params.unwrap_or(Value::Null))
+        .map_err(|e| invalid_params(format!("params: {e}")))?;
+    let ctx = world
+        .get_resource::<crate::vulkan::Context>()
+        .ok_or_else(|| BrpError::internal("Context 缺席——Vulkan 未初始化"))?;
+    let hiz = world
+        .get_resource::<crate::vulkan::HizPyramid>()
+        .ok_or_else(|| BrpError::internal("HizPyramid 资源缺席"))?;
+    let slot = p.slot.unwrap_or(0) as usize;
+    let levels = hiz.levels();
+    if p.level.is_some_and(|level| level >= levels) {
+        return Err(invalid_params(format!(
+            "level {} 越界（金字塔 {levels} 级）",
+            p.level.expect("is_some_and 已保证存在"),
+        )));
+    }
+    let wanted: Vec<u32> = p
+        .level
+        .map(|l| vec![l])
+        .unwrap_or_else(|| (0..levels).collect());
+    let mut rows = Vec::with_capacity(wanted.len());
+    for level in wanted {
+        let census = hiz.readback_level(ctx, slot, level).map_err(|e: VulkanError| BrpError {
+            code: error_codes::INTERNAL_ERROR,
+            message: format!("Hi-Z 读回失败: {e}"),
+            data: None,
+        })?;
+        rows.push(json!({
+            "level": census.level,
+            "size": [census.width, census.height],
+            "min": census.min,
+            "max": census.max,
+            "mean": census.mean,
+            "zero_ratio": census.zero_ratio,
+        }));
+    }
+    Ok(json!({ "slot": slot, "levels": rows }))
+}
+
+/// `ash_renderer/occlusion_probe` 参数：entity 可选（缺省 = 全部可绘行）。
+#[derive(serde::Deserialize)]
+struct OcclusionProbeParams {
+    #[serde(default)]
+    entity: Option<Entity>,
+    #[serde(default)]
+    slot: Option<u32>,
+}
+
+/// `ash_renderer/occlusion_probe`：遮挡判定 CPU 参照（判定线 1 的参照件，
+/// 判定线 3 金字塔读回的消费端）。对给定实体（缺省全部可绘行）：世界 AABB
+/// 投屏（[`aabb_screen_rect`]）→ mip 层选择（[`occlusion_mip_level`]）→
+/// 金字塔读回取 2×2 tap → [`occluded_reverse_z`] 保守判定——逐实体返回判定
+/// 中间量（矩形/层/tap 值/occluder/物体深度上界），与 occlusion.wgsl 逐位
+/// 同语义。**只进验证，不进绘制路径**（红线同 cull_stats）。诊断提交走
+/// [`HizPyramid::readback_level_raw`]（一次性 staging，低频）。
+///
+/// # Errors
+/// 参数不合法 / 相机缺席 / HizPyramid 缺席 / 读回失败。
+#[system]
+pub(crate) fn occlusion_probe(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let p: OcclusionProbeParams = serde_json::from_value(params.unwrap_or(Value::Null))
+        .map_err(|e| invalid_params(format!("params: {e}")))?;
+    let view_proj = {
+        let mut cameras =
+            world.query_filtered::<(&Projection, &GlobalTransform), With<Camera>>();
+        match cameras.single(world) {
+            Ok((projection, global)) => projection.get_clip_from_view() * global.affine().inverse(),
+            Err(_) => {
+                return Err(BrpError {
+                    code: error_codes::COMPONENT_ERROR,
+                    message: "World 里没有相机——投屏参照无法计算".to_owned(),
+                    data: None,
+                });
+            }
+        }
+    };
+    let hiz = world
+        .get_resource::<HizPyramid>()
+        .ok_or_else(|| BrpError::internal("HizPyramid 资源缺席"))?;
+    let ctx = world
+        .get_resource::<crate::vulkan::Context>()
+        .ok_or_else(|| BrpError::internal("Context 缺席——Vulkan 未初始化"))?;
+    let slot = p.slot.unwrap_or(0) as usize;
+    let levels = hiz.levels();
+    let screen = {
+        let (w, h) = hiz.level_dims(0);
+        [w as f32, h as f32]
+    };
+    let pool = world.resource::<MeshPool>();
+    let mut rows = Vec::new();
+    for (entity, row) in world.resource::<InstanceLedger>().rows() {
+        if p.entity.is_some_and(|want| entity != want) {
+            continue;
+        }
+        let Some(instance_slot) = row.instance_slot else {
+            continue;
+        };
+        let Some(mesh_slot) = pool.resident(row.mesh.id()) else {
+            continue;
+        };
+        let Some((px_min, px_max, depth_max)) = aabb_screen_rect(
+            &view_proj,
+            &row.model,
+            mesh_slot.local_aabb.0,
+            mesh_slot.local_aabb.1,
+            screen,
+        ) else {
+            rows.push(json!({
+                "entity": format!("{entity:?}"), "slot": instance_slot, "verdict": "visible",
+                "reason": "角点投影 w≤0（透视无意义，shader 同款早退）",
+            }));
+            continue;
+        };
+        let px_w = px_max.x - px_min.x;
+        let px_h = px_max.y - px_min.y;
+        let level = occlusion_mip_level(px_w, px_h, levels);
+        let (lw, lh, data) = hiz
+            .readback_level_raw(ctx, slot, level)
+            .map_err(|e: VulkanError| BrpError {
+                code: error_codes::INTERNAL_ERROR,
+                message: format!("Hi-Z 读回失败: {e}"),
+                data: None,
+            })?;
+        // 2×2 tap（与 occlusion.wgsl 同一坐标换算：tile = px_min 缩到本级、clamp）
+        let dims = Vec2::new(lw as f32, lh as f32);
+        let scale = dims / Vec2::from_array(screen);
+        let clamp_max = dims - Vec2::splat(1.0);
+        let tile = (px_min * scale).clamp(Vec2::ZERO, clamp_max).as_uvec2();
+        let at = |x: u32, y: u32| data[(y as usize) * (lw as usize) + (x as usize)];
+        let taps = [
+            at(tile.x, tile.y),
+            at((tile.x + 1).min(lw - 1), tile.y),
+            at(tile.x, (tile.y + 1).min(lh - 1)),
+            at((tile.x + 1).min(lw - 1), (tile.y + 1).min(lh - 1)),
+        ];
+        let occluder = taps.iter().copied().fold(f32::INFINITY, f32::min);
+        rows.push(json!({
+            "entity": format!("{entity:?}"),
+            "slot": instance_slot,
+            "px_rect": [px_min.x, px_min.y, px_max.x, px_max.y],
+            "level": level,
+            "level_size": [lw, lh],
+            "taps": taps,
+            "occluder": occluder,
+            "obj_depth_max": depth_max,
+            "occluded": occluded_reverse_z(depth_max, occluder),
+        }));
+    }
+    Ok(json!({ "slot": slot, "rows": rows }))
+}
+

@@ -52,10 +52,13 @@ impl Plugin for AshHostPlugin {
         app.insert_resource(CompressedImageFormatSupport(CompressedImageFormats::NONE))
             .register_asset_loader(bevy::image::ImageLoader::new(CompressedImageFormats::NONE))
             // 剔除开关与诊断账面（5.2）+ indirect 诊断账面（5.3）+ 帧样本账
-            //（5.5）：纯 ECS 侧状态，overlay 缺席时 BRP 仍可用
+            //（5.5）+ 遮挡开关与诊断账面（6.1）：纯 ECS 侧状态，overlay 缺席时
+            // BRP 仍可用
             .init_resource::<crate::vulkan::CullSettings>()
             .init_resource::<crate::vulkan::CullDiagnostics>()
             .init_resource::<crate::vulkan::IndirectStats>()
+            .init_resource::<crate::vulkan::OcclusionSettings>()
+            .init_resource::<crate::vulkan::OcclusionDiagnostics>()
             .init_resource::<crate::vulkan::PerfLedger>()
             // update 节流：MAILBOX 没有 vsync 背压，默认 Continuous 会空转烧 CPU；
             // Reactive(1/60) 让空闲时 update 按主屏刷新率封顶，事件（拖拽/输入）仍即时驱动。

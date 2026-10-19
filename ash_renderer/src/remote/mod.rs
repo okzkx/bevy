@@ -42,7 +42,7 @@ use serde_json::{json, Value};
 
 use self::{
     assets::{load_image_cmd, load_mesh_cmd, mutate_asset_cmd, reload_asset_cmd},
-    cull::{cull_set_enabled, cull_stats},
+    cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
     draw::draw_stats,
     generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
@@ -88,6 +88,9 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/mouse_wheel", mouse_wheel)
                 .with_method_main("ash_renderer/mouse_status", mouse_status)
                 .with_method_main("ash_renderer/cull_stats", cull_stats)
+                .with_method_main("ash_renderer/hiz_census", hiz_census)
+                .with_method_main("ash_renderer/occlusion_probe", occlusion_probe)
+                .with_method_main("ash_renderer/occlusion_set_enabled", occlusion_set_enabled)
                 .with_method_main("ash_renderer/cull_set_enabled", cull_set_enabled)
                 .with_method_main("ash_renderer/draw_stats", draw_stats)
                 .with_method_main("ash_renderer/perf_stats", perf_stats)

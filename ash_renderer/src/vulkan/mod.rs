@@ -14,6 +14,8 @@
 //! | `images` | 资产级 | 贴图:bevy `Image` → VkImage/view/sampler + 驻留缓存 |
 //! | `descriptors` | 资产级 | 常驻描述符表(set0 双表/set1 每帧 UBO)+ 槽位发布 |
 //! | `cull` | 进程级+纯函数 | 视锥剔除 compute 半边(5.2):CullPass 管线 + 平面提取 + CPU 参照 + 诊断账面 |
+//! | `occlusion` | 进程级+纯函数 | Hi-Z 遮挡测试 compute 半边(6.1):OcclusionPass 管线 + 投屏参照 + fallback 账面 |
+//! | `hiz` | 进程级+纯函数 | Hi-Z 深度金字塔(6.1.2):HizPyramid ×2 帧槽 + 逐级归约管线 + reverse-Z 保守方向纯函数 |
 //! | `indirect` | 进程级+纯函数 | indirect 闭环 compute 半边(5.3):IndirectPass 命令组装管线 + 诊断账面 + 命令布局参照 |
 //! | `perf` | 进程级 | GPU timestamp 计时(GpuTimer 每帧槽 query pool)+ 帧样本账(PerfLedger 分位数,5.5) |
 //!
@@ -25,10 +27,12 @@ mod cull;
 mod depth;
 mod descriptors;
 mod frames;
+mod hiz;
 mod images;
 mod indirect;
 mod instance_table;
 mod mesh_convert;
+mod occlusion;
 mod overlay_pipeline;
 mod perf;
 mod pipeline;
@@ -47,12 +51,19 @@ pub use descriptors::{
     PLACEHOLDER_DIR_TO_LIGHT,
     FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
 };
-pub use frames::{DepthTarget, FrameDraw, Frame, FramePool, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT};pub use images::{image_spec, sampler_key, GpuImage, ImageCache, ImageConvertError, ImageSpec, SamplerKey};
+pub use frames::{DepthTarget, FrameDraw, Frame, FramePool, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT};pub use hiz::{
+    occluded_reverse_z, occlusion_mip_level, reduce_tile_reverse_z, HizCensus, HizPyramid,
+    HIZ_FORMAT,
+};pub use images::{image_spec, sampler_key, GpuImage, ImageCache, ImageConvertError, ImageSpec, SamplerKey};
 pub use indirect::{IndirectDraw, IndirectPass, IndirectStats, INDIRECT_PUSH_SIZE};
 pub use instance_table::{
     conservative_world_aabb, pack_material_record, pack_model, pack_object_record, InstanceTables,
     INDIRECT_COMMAND_SIZE, MARK_SIZE, MATERIAL_RECORD_SIZE, MATERIAL_TABLE_CAPACITY, MODEL_STRIDE,
-    OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY, PRESENCE_ENTRY_SIZE,
+    OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY, OCC_MARK_SIZE, PRESENCE_ENTRY_SIZE,
+};
+pub use occlusion::{
+    aabb_screen_rect, pack_occlusion_push, OcclusionDiagnostics, OcclusionDraw, OcclusionFallback,
+    OcclusionPass, OcclusionSettings, OCCLUSION_PUSH_SIZE,
 };
 pub use mesh_convert::{convert_mesh, ConvertedMesh, MeshConvertError, VERTEX_STRIDE};
 pub use overlay_pipeline::{

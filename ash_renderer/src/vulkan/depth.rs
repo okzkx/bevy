@@ -17,8 +17,9 @@ use super::Context;
 ///（pipeline.rs 只消费不另立）。
 pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
-/// 一张深度附件：VkImage（D32_SFLOAT，DEPTH_STENCIL_ATTACHMENT 用途）+ dedicated
-/// memory + view（DEPTH aspect）。生命周期 = 帧槽，重建见 `FramePool::rebuild_depth`。
+/// 一张深度附件：VkImage（D32_SFLOAT，DEPTH_STENCIL_ATTACHMENT + SAMPLED
+/// 用途——6.1.2 起金字塔归约采样）+ dedicated memory + view（DEPTH aspect）。
+/// 生命周期 = 帧槽，重建见 `FramePool::rebuild_depth`。
 pub struct DepthTarget {
     device: Device,
     /// 本体 image（进场屏障的目标；FramePool 经 `raw_image` 访问）。
@@ -32,6 +33,10 @@ impl DepthTarget {
     /// D32_SFLOAT 的 depth-stencil attachment 支持是 mandatory，仍不省查询——
     /// 证据落日志）。
     ///
+    /// 6.1.2 起 usage 扩 SAMPLED：Hi-Z 金字塔归约在本帧渲染后采样本帧槽深度
+    ///（hiz 模块）。D32_SFLOAT 的 SAMPLED_IMAGE 位同样是 mandatory 格式支持，
+    /// 仍查过才用（"支持≠启用"纪律，立案期核实的 usage 缺口在此收口）。
+    ///
     /// # Errors
     /// D32_SFORMAT 的 optimal tiling feature 不足，或 Vulkan 创建/分配/绑定失败。
     pub fn new(ctx: &Context, extent: vk::Extent2D) -> Result<Self> {
@@ -44,6 +49,11 @@ impl DepthTarget {
         if !features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT) {
             return Err(VulkanError::Init(format!(
                 "深度格式 {format:?} 的 optimal tiling features {features:?} 不含 DEPTH_STENCIL_ATTACHMENT，reverse-Z 深度链无法建立"
+            )));
+        }
+        if !features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE) {
+            return Err(VulkanError::Init(format!(
+                "深度格式 {format:?} 的 optimal tiling features {features:?} 不含 SAMPLED_IMAGE，Hi-Z 归约无法采样深度（§2 核实项 1 出局）"
             )));
         }
         // # Safety:create_image 参数全为合法常量 + 查过的格式/usage,无裸指针
@@ -61,7 +71,7 @@ impl DepthTarget {
                     .array_layers(1)
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
-                    .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                    .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
                     .sharing_mode(vk::SharingMode::EXCLUSIVE)
                     .initial_layout(vk::ImageLayout::UNDEFINED),
                 None,

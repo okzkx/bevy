@@ -40,8 +40,10 @@ use crate::{
     vulkan::{
         frustum_planes, pack_frame_uniforms, AcquireOutcome, BindlessTables, Context,
         CullDiagnostics, CullPass, CullSettings, FrameDraw, FramePool, FrameSample,
-        FrameUniformsData, GraphicsPipeline, GpuTimer, ImageCache, IndirectPass, IndirectStats,
-        InstanceTables, MARK_SIZE, MeshPool, OverlayPipeline, PerfLedger, Swapchain, Uploader,
+        FrameUniformsData, GraphicsPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
+        IndirectStats, InstanceTables, MeshPool, OcclusionDiagnostics, OcclusionPass,
+        OcclusionSettings, OverlayPipeline, PerfLedger, Swapchain, Uploader,
+        MAX_FRAMES_IN_FLIGHT, MARK_SIZE,
     },
 };
 
@@ -66,6 +68,32 @@ pub(crate) struct ResizeGate {
     pending: bool,
     /// 状态转移日志去重：minimized 闸门的开关各报一次，不逐帧刷屏
     logged_minimized: bool,
+}
+
+/// 遮挡 fallback 的相机历史（`draw_frame` 的 `Local`，跨帧保持）：跳变判定
+/// 用"当前 vs 两帧前"——遮挡读的金字塔正是两帧前的深度（同帧槽 fence 纪律），
+/// 对两帧前的机位判稳语义才对齐（阈值钉明见 occlusion 模块注释：位移 0.5 /
+/// 旋转 15°，连续缓慢环绕不触发）。
+#[derive(Default)]
+pub(crate) struct OcclusionGate {
+    prev: Option<(Vec3, bevy::math::Quat)>,
+    prev_prev: Option<(Vec3, bevy::math::Quat)>,
+}
+
+impl OcclusionGate {
+    /// 推入本帧机位并返回"相对两帧前是否跳变"（历史不足 = 未就绪 = 视同跳变）。
+    fn push(&mut self, now: Option<(Vec3, bevy::math::Quat)>) -> bool {
+        let jump = match (self.prev_prev, now) {
+            (Some((p0, r0)), Some((p1, r1))) => {
+                (p1 - p0).length() > 0.5
+                    || bevy::math::Quat::angle_between(r0, r1) > 15f32.to_radians()
+            }
+            _ => true, // 机位历史不足（启动/相机缺席帧）= 未就绪
+        };
+        self.prev_prev = self.prev.take();
+        self.prev = now;
+        jump
+    }
 }
 
 /// draw_frame 的参数束（SystemParam）：参数束装下成排依赖，系统签名保持精简。
@@ -112,6 +140,14 @@ pub(crate) struct FrameInput<'w, 's> {
     indirect_pass: Res<'w, IndirectPass>,
     /// indirect 诊断账面（每帧刷新，egui/BRP 读数口；只进计量）。
     indirect_stats: ResMut<'w, IndirectStats>,
+    /// Hi-Z 遮挡测试 compute 管线（6.1；init 链与场景管线同批创建）。
+    occlusion_pass: Res<'w, OcclusionPass>,
+    /// Hi-Z 金字塔（6.1.2）：归约链录制句柄 + warmup 走账（本帧 note_reduced）。
+    hiz: ResMut<'w, HizPyramid>,
+    /// 遮挡开关（egui checkbox 与 BRP 写；AshHostPlugin 恒插入）。
+    occlusion_settings: Res<'w, OcclusionSettings>,
+    /// 遮挡诊断账面（每帧刷新，egui/BRP 读数口；只进计量）。
+    occlusion_diag: ResMut<'w, OcclusionDiagnostics>,
     /// GPU 帧计时器（5.5；停用时 enabled=false，GPU 区间读数缺席）。
     timer: ResMut<'w, GpuTimer>,
     /// 帧样本账（每帧 push 一份 CPU 分段 + GPU 区间 + 规模；只进计量）。
@@ -157,6 +193,7 @@ pub(crate) fn draw_frame(
     mut resized: MessageReader<WindowResized>,
     mut gate: Local<ResizeGate>,
     mut draw_state: Local<DrawListState>,
+    mut occlusion_gate: Local<OcclusionGate>,
     mut paint_log: Local<OverlayLogState>,
     _main_thread: NonSendMarker,
 ) -> Result<(), BevyError> {
@@ -180,6 +217,10 @@ pub(crate) fn draw_frame(
         ref mut cull_diag,
         ref indirect_pass,
         ref mut indirect_stats,
+        ref occlusion_pass,
+        ref mut hiz,
+        ref occlusion_settings,
+        ref mut occlusion_diag,
         ref mut timer,
         ref mut perf,
         ..
@@ -220,6 +261,12 @@ pub(crate) fn draw_frame(
         frames
             .rebuild_depth(ctx, swapchain.extent)
             .or_fatal("深度附件重建失败，渲染链无法继续")?;
+        // Hi-Z 金字塔随深度附件同批重建（同样幂等；自带 device_wait_idle，
+        // 重建后 warmup 重置——遮挡测试 fallback 到金字塔重新就绪）
+        let depth_images: Vec<vk::Image> =
+            (0..MAX_FRAMES_IN_FLIGHT).map(|s| frames.depth_image(s)).collect();
+        hiz.rebuild(ctx, swapchain.extent, &depth_images)
+            .or_fatal("Hi-Z 金字塔重建失败，渲染链无法继续")?;
         gate.pending = false;
     }
 
@@ -237,7 +284,7 @@ pub(crate) fn draw_frame(
     let gpu_sections = timer
         .fetch(frames.current_index())
         .or_fatal("GPU 帧计时取回失败，渲染链无法继续")?
-        .unwrap_or([0.0; 3]);
+        .unwrap_or([0.0; 4]);
 
     // 2) acquire：拿到一张可画的 image；OUT_OF_DATE = 这个 swapchain 已不可用
     //（最小化/恢复/独占模式切换等），必须立即重建——等不得下一帧
@@ -307,10 +354,12 @@ pub(crate) fn draw_frame(
     };
     let mut view_proj = Mat4::IDENTITY;
     let mut per_camera_ambient: Option<&AmbientLight> = None;
+    let mut cam_now: Option<(Vec3, bevy::math::Quat)> = None;
     match cameras.single() {
         Ok((projection, global, ambient_override)) => {
             view_proj = projection.get_clip_from_view() * global.affine().inverse();
             per_camera_ambient = ambient_override;
+            cam_now = Some((global.translation(), global.rotation()));
         }
         Err(_) => draw_state
             .warned_no_camera
@@ -447,6 +496,89 @@ pub(crate) fn draw_frame(
         cull_diag.visible_count = visible_among_live;
     }
 
+    // 4a-2-1) Hi-Z 遮挡半边（6.1）：fallback 判据逐项核对（occlusion 模块
+    // 注释钉明的四条），任一命中 → 本帧跳过 dispatch——b3 保持视锥纯结果、
+    // b6 host 填全可见（读数语义 = 遮挡剔除量 0，A/B 的 B 面同口径）。跳变
+    // 判定用"当前 vs 两帧前"机位（OcclusionGate——遮挡读的金字塔正是两帧前
+    // 的深度，判定线 2 的显式 fallback 落点）。
+    let camera_jumped = occlusion_gate.push(cam_now);
+    let occl_dispatch = if occlusion_settings.enabled
+        && cull_settings.enabled
+        && cull_bound > 0
+        && hiz.ready()
+        && !camera_jumped
+    {
+        if !occlusion_diag.first_run_logged {
+            info!(
+                "Hi-Z 遮挡测试 dispatch 首跑（前置闸门复用 5.2 compute 链）：bound {cull_bound}，\
+                 组 {}，金字塔 {} 级（80B push：view_proj+screen+bound；b3=视锥∧遮挡，b6 遮挡独立标记）",
+                cull_bound.div_ceil(64),
+                hiz.levels(),
+            );
+            occlusion_diag.first_run_logged = true;
+        }
+        Some(occlusion_pass.draw(
+            &view_proj,
+            [
+                swapchain.extent.width as f32,
+                swapchain.extent.height as f32,
+            ],
+            cull_bound,
+            hiz.occlusion_set(cull_frame),
+        ))
+    } else {
+        if cull_bound > 0 {
+            let ones: Vec<u8> = (0..cull_bound).flat_map(|_| 1u32.to_le_bytes()).collect();
+            instance_tables
+                .occ_mark_ring(cull_frame)
+                .write(0, &ones)
+                .or_fatal("遮挡标记环全可见填充失败，渲染链无法继续")?;
+        }
+        None
+    };
+    // 遮挡诊断读数（b6 = 本帧槽两帧前 compute 输出或 host 全可见填充；fence
+    // 纪律与标记环同链）。fallback 原因取首个命中（读数口径，不改控制流）。
+    let mut occlusion_visible = 0u32;
+    if cull_bound > 0 {
+        let mut occ_bytes = vec![0u8; cull_bound as usize * MARK_SIZE as usize];
+        instance_tables
+            .occ_mark_ring(cull_frame)
+            .read(0, &mut occ_bytes)
+            .or_fatal("遮挡标记环读数失败，渲染链无法继续")?;
+        occlusion_visible = assembly
+            .slots
+            .iter()
+            .filter(|&&slot| {
+                u32::from_le_bytes(
+                    occ_bytes[slot as usize * 4..slot as usize * 4 + 4]
+                        .try_into()
+                        .expect("4B"),
+                ) == 1
+            })
+            .count() as u32;
+    }
+    occlusion_diag.enabled = occlusion_settings.enabled;
+    occlusion_diag.dispatched = occl_dispatch.is_some();
+    occlusion_diag.fallback = if occl_dispatch.is_some() {
+        None
+    } else if !occlusion_settings.enabled {
+        Some(crate::vulkan::OcclusionFallback::Disabled)
+    } else if !cull_settings.enabled {
+        Some(crate::vulkan::OcclusionFallback::CullOff)
+    } else if cull_bound == 0 {
+        None // 空场：无可判行，不算 fallback（画面语义 = 本来就无对象）
+    } else if !hiz.ready() {
+        Some(crate::vulkan::OcclusionFallback::PyramidWarmup)
+    } else if camera_jumped {
+        Some(crate::vulkan::OcclusionFallback::CameraJump)
+    } else {
+        None
+    };
+    occlusion_diag.bound = cull_bound;
+    occlusion_diag.marks_frame = cull_frame;
+    occlusion_diag.rows_compared = assembly.slots.len();
+    occlusion_diag.occlusion_visible_count = occlusion_visible;
+
     // 4a-3) indirect 命令组装半边（5.3）：在场行数 = GPU 命令条数（CPU 在账
     // 信息，非可见集回读）；count > 0 才有命令可组装（空场 = None，场景绘制
     // 整段跳过）。诊断读数（draw 调用数/命令条数/instanceCount=0 条数）只进
@@ -532,6 +664,10 @@ pub(crate) fn draw_frame(
         clear: CLEAR_COLOR,
         cull: cull_dispatch,
         indirect: indirect_dispatch,
+        occlusion: occl_dispatch,
+        // 归约链恒录（深度每帧变，无隔帧空间；warmup 在 hiz 内走账——
+        // note_reduced 与录制一一对应，让路帧不经过此处不计数）
+        hiz: Some(&*hiz),
         timer: timer.enabled.then_some(&*timer),
     };
     let record_clock = std::time::Instant::now();
@@ -579,11 +715,14 @@ pub(crate) fn draw_frame(
         cpu_total_ms,
         gpu_compute_ms: gpu_sections[0],
         gpu_graphics_ms: gpu_sections[1],
-        gpu_total_ms: gpu_sections[2],
+        gpu_hiz_ms: gpu_sections[2],
+        gpu_total_ms: gpu_sections[3],
         instance_rows: indirect_count,
         visible_rows: visible_among_live,
     });
 
+    // 归约链已录（见 FrameDraw.hiz），warmup 走账与录制一一对应
+    hiz.note_reduced();
     frames.advance();
     Ok(())
 }

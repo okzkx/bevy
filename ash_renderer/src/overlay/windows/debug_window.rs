@@ -8,7 +8,8 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 use crate::scene::mechanism::scene_gen::SceneChunk;
 use crate::vulkan::{
     BindlessTables, CullDiagnostics, CullSettings, FrameSample, ImageCache, IndirectStats,
-    MeshPool, PerfLedger, Uploader, FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
+    MeshPool, OcclusionDiagnostics, OcclusionSettings, PerfLedger, Uploader, FRAME_MODE_LAMBERT,
+    FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
 };
 use crate::scene::mechanism::WorkloadSettings;
 
@@ -123,6 +124,10 @@ pub(in crate::overlay) struct DebugWindow<'a> {
     pub(in crate::overlay) cull_settings: &'a mut CullSettings,
     /// 剔除诊断读数（draw_frame 每帧刷新；只进计量，不驱动绘制）。
     pub(in crate::overlay) cull_diag: &'a CullDiagnostics,
+    /// 遮挡开关（6.1：checkbox 写，draw_frame 读；BRP occlusion_set 同源）。
+    pub(in crate::overlay) occlusion_settings: &'a mut OcclusionSettings,
+    /// 遮挡诊断读数（6.1：draw_frame 每帧刷新；只进计量，不驱动绘制）。
+    pub(in crate::overlay) occlusion_diag: &'a OcclusionDiagnostics,
     /// indirect 闭环读数（draw_frame 每帧刷新；只进计量，不驱动绘制）。
     pub(in crate::overlay) indirect_stats: &'a IndirectStats,
     /// 帧样本账（5.5：分位数在构建时现算，环形窗口）。
@@ -141,7 +146,7 @@ impl DebugWindow<'_> {
     /// 面板本体：fps/窗口信息 + 着色模式单选 + 剔除开关与读数 + 渲染器内部统计
     ///（vulkan 侧资源只读）。
     pub(in crate::overlay) fn show(self) {
-        let Self { ctx, open, fps, window, ppp, mode, stats, cull_settings, cull_diag, indirect_stats, perf, workload, image_cache, mesh_pool, chunks } = self;
+        let Self { ctx, open, fps, window, ppp, mode, stats, cull_settings, cull_diag, occlusion_settings, occlusion_diag, indirect_stats, perf, workload, image_cache, mesh_pool, chunks } = self;
         egui::Window::new("ash 调试")
             .open(open)
             .default_pos(egui::pos2(12.0, 12.0))
@@ -172,6 +177,29 @@ impl DebugWindow<'_> {
                     cull_diag.rows_compared,
                     cull_diag.bound,
                     cull_diag.marks_frame,
+                ));
+                // 6.1 Hi-Z 遮挡：开关切遮挡 dispatch / host 全可见填充（b6 读数
+                // 语义）；fallback 原因随读数展示（相机跳变/金字塔 warmup）
+                ui.checkbox(&mut occlusion_settings.enabled, "Hi-Z 遮挡剔除");
+                ui.monospace(format!(
+                    "遮挡 {}（{}）· 遮挡判可见 {}/{} 行（帧槽 {} 读数，诊断不驱动绘制）",
+                    if occlusion_diag.dispatched {
+                        "dispatch"
+                    } else {
+                        match occlusion_diag.fallback {
+                            Some(fallback) => match fallback {
+                                crate::vulkan::OcclusionFallback::Disabled => "关（A/B）",
+                                crate::vulkan::OcclusionFallback::CullOff => "关（视锥关闭）",
+                                crate::vulkan::OcclusionFallback::PyramidWarmup => "warmup",
+                                crate::vulkan::OcclusionFallback::CameraJump => "相机跳变",
+                            },
+                            None => "空场",
+                        }
+                    },
+                    if occlusion_settings.enabled { "开" } else { "关" },
+                    occlusion_diag.occlusion_visible_count,
+                    occlusion_diag.rows_compared,
+                    occlusion_diag.marks_frame,
                 ));
                 // 5.3 indirect 闭环：绘制调用数恒 1（判定线 1 读数）、命令条数
                 // 与 instanceCount=0 条数（诊断标注，不驱动绘制）
