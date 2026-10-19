@@ -383,6 +383,21 @@ def main():
     p.add_argument("--source", help="源 primitive 实体号（缺省=场景第一个 primitive）")
     p.set_defaults(func=cmd_generate)
 
+    p = sub.add_parser("generate-chunks", help="chunk 化批量生成（ash_renderer/generate_chunks，5.4.2：每轴 chunk_grid 块，每块一根实体+子树实例）")
+    p.add_argument("--chunk-grid", type=int, required=True, help="每轴块数（总块数=chunk_grid^2）")
+    p.add_argument("--instances-per-chunk", type=int, required=True, help="每块实例数（块内列数=ceil(sqrt(该值))）")
+    p.add_argument("--spacing", type=float, required=True, help="实例网格间距（世界单位，块边长=块内列数×spacing）")
+    p.add_argument("--seed", type=int, required=True, help="随机种子（同参数重跑同位）")
+    p.add_argument("--jitter", type=float, help="位置抖动幅度（世界单位，缺省 0=整齐网格）")
+    p.add_argument("--source", help="源 primitive 实体号（缺省=场景第一个 primitive）")
+    p.set_defaults(func=cmd_generate_chunks)
+
+    sub.add_parser("chunk-census", help="chunk 盘点（ash_renderer/chunk_census，只读：在场块 id/原点/边长/成员数）").set_defaults(func=cmd_chunk_census)
+
+    p = sub.add_parser("chunk-despawn", help="整块删除（ash_renderer/chunk_despawn，按 id 找根递归 despawn；removed_rows 次帧对账）")
+    p.add_argument("--id", type=int, required=True, help="目标 chunk id（chunk-census 可查）")
+    p.set_defaults(func=cmd_chunk_despawn)
+
     p = sub.add_parser("despawn", help="删实体及其子树（官方 world.despawn_entity，递归）")
     p.add_argument("entity", help="目标实体号（树节点或 primitive）")
     p.set_defaults(func=cmd_despawn)
