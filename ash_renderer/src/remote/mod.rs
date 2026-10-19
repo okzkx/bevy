@@ -10,6 +10,7 @@
 //! |---|---|
 //! | [`mouse`] | 虚拟鼠标：窗口无关鼠标输入源，注入 `Messages<WindowEvent>` 与 bevy_winit 同层 |
 //! | [`objects`] | 对象生命周期方法族：spawn 克隆/换柄写方法 + increment_stats 统计读数 |
+//! | [`generate`] | 常驻大场景方法族（5.4）：generate_scene 程序化铺实例；chunk 身份与整块增删（5.4.2） |
 //! | [`assets`] | 资产内容变更 + 运行期动态加载：mutate/load_mesh/load_image/reload |
 //! | [`cull`] | 剔除读数与开关（5.2）：cull_stats 对照 + cull_set_enabled 开关 |
 //! | [`draw`] | indirect 闭环读数（5.3）：draw_stats 绘制调用/命令条数/不可见计数 |
@@ -22,6 +23,7 @@
 pub mod assets;
 pub mod cull;
 pub mod draw;
+pub mod generate;
 pub mod mouse;
 pub mod objects;
 
@@ -38,6 +40,7 @@ use self::{
     assets::{load_image_cmd, load_mesh_cmd, mutate_asset_cmd, reload_asset_cmd},
     cull::{cull_set_enabled, cull_stats},
     draw::draw_stats,
+    generate::generate_scene,
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     objects::{increment_stats, replace_handles, spawn_primitive},
 };
@@ -63,6 +66,7 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/set_transform", set_transform)
                 .with_method_main("ash_renderer/set_camera", set_camera)
                 .with_method_main("ash_renderer/spawn_primitive", spawn_primitive)
+                .with_method_main("ash_renderer/generate_scene", generate_scene)
                 .with_method_main("ash_renderer/replace_handles", replace_handles)
                 .with_method_main("ash_renderer/mutate_asset", mutate_asset_cmd)
                 .with_method_main("ash_renderer/load_mesh", load_mesh_cmd)

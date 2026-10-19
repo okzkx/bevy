@@ -178,6 +178,20 @@ def cmd_spawn(args):
     out(rpc(args.host, args.port, "ash_renderer/spawn_primitive", params))
 
 
+def cmd_generate(args):
+    params = {
+        "count": args.count,
+        "columns": args.columns,
+        "spacing": args.spacing,
+        "seed": args.seed,
+    }
+    if args.source:
+        params["source"] = args.source
+    if args.jitter:
+        params["jitter"] = args.jitter
+    out(rpc(args.host, args.port, "ash_renderer/generate_scene", params))
+
+
 def cmd_despawn(args):
     out(rpc(args.host, args.port, "world.despawn_entity", {"entity": args.entity}))
 
@@ -337,6 +351,15 @@ def main():
     p.add_argument("--offset", nargs=3, type=float, metavar=("X", "Y", "Z"), help="相对源实体的平移偏移")
     p.add_argument("--name-suffix", help="Name 后缀（默认 （副本））")
     p.set_defaults(func=cmd_spawn)
+
+    p = sub.add_parser("generate", help="程序化铺实例（ash_renderer/generate_scene，5.4 常驻大场景生成器：批量克隆共享资产，种子固定可复现）")
+    p.add_argument("--count", type=int, required=True, help="实例总数")
+    p.add_argument("--columns", type=int, required=True, help="横向列数（行数=count 向上取整除列数；方阵给 ceil(sqrt(count))）")
+    p.add_argument("--spacing", type=float, required=True, help="实例网格间距（世界单位）")
+    p.add_argument("--seed", type=int, required=True, help="随机种子（抖动散列基，同参数重跑同位）")
+    p.add_argument("--jitter", type=float, help="位置抖动幅度（世界单位，缺省 0=整齐网格）")
+    p.add_argument("--source", help="源 primitive 实体号（缺省=场景第一个 primitive）")
+    p.set_defaults(func=cmd_generate)
 
     p = sub.add_parser("despawn", help="删实体及其子树（官方 world.despawn_entity，递归）")
     p.add_argument("entity", help="目标实体号（树节点或 primitive）")

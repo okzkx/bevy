@@ -25,6 +25,8 @@ pub enum ObjectOpError {
     MaterialAssetMissing(Entity),
     /// 资产路径解析失败（坏标签/坏 source 语法，如 `file.gltf#`）。
     InvalidAssetPath(String),
+    /// 请求参数形状非法（数值域越界等；与"缺参数"的 NothingToDo 分列）。
+    InvalidParams(String),
 }
 
 /// 路径预校验：`AssetServer::load/reload` 收 `impl Into<AssetPath>`，而

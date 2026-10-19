@@ -64,6 +64,7 @@ pub(crate) fn object_op_error(err: ObjectOpError) -> BrpError {
         ObjectOpError::InvalidAssetPath(what) => invalid_params(format!(
             "资产路径解析失败（坏标签/坏 source 语法）：{what}"
         )),
+        ObjectOpError::InvalidParams(what) => invalid_params(what),
     }
 }
 
