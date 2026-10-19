@@ -735,3 +735,41 @@ const CLEAR_COLOR: [f32; 4] = [0.02, 0.06, 0.14, 1.0];
 fn fmt_vec4(v: [f32; 4]) -> String {
     format!("({:.1}, {:.1}, {:.1}, {:.1})", v[0], v[1], v[2], v[3])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::OcclusionGate;
+    use bevy::math::{Quat, Vec3};
+
+    /// fallback 判据的阈值语义（判定线 2 的显式 fallback 判据，钉死）：比较
+    /// "本帧 vs 两帧前"（与遮挡读数滞后同窗——金字塔正是两帧前的深度），
+    /// 阈值作用于两帧累计量：历史不足 = 未就绪、静止不触发、累计微动/单帧
+    /// 大跳超阈（位移 0.5 / 旋转 15°，钉明见 occlusion 模块注释）都触发。
+    #[test]
+    fn occlusion_gate_jump_thresholds() {
+        let mut gate = OcclusionGate::default();
+        let p0 = Vec3::new(4.0, 2.0, 6.0);
+        let r0 = Quat::IDENTITY;
+        // 机位历史不足（前两帧）= 未就绪 = 视同跳变（遮挡测试让路）
+        assert!(gate.push(Some((p0, r0))), "无历史");
+        assert!(gate.push(Some((p0, r0))), "只有一帧历史");
+        // 静止相机：不触发
+        assert!(!gate.push(Some((p0, r0))), "静止两帧 = 稳定");
+        // 单帧小位移（0.3 < 0.5，窗口累计 0.3）：不触发
+        assert!(!gate.push(Some((p0 + Vec3::new(0.3, 0.0, 0.0), r0))));
+        // 连续微动两帧窗口累计 0.6 > 0.5：触发——滞后窗语义下金字塔内容
+        // 已落后累计量，让路是诚实行为（不是单帧阈值）
+        assert!(gate.push(Some((p0 + Vec3::new(0.6, 0.0, 0.0), r0))));
+        // 大位移（单帧 2.0 > 0.5）触发
+        assert!(gate.push(Some((p0 + Vec3::new(2.0, 0.0, 0.0), r0))));
+        // 大旋转（16° > 15°）触发
+        assert!(gate.push(Some((p0, Quat::from_rotation_y(16f32.to_radians())))));
+        // 历史对齐（同位姿再推两帧，清掉大位移残留，使比较基准 = 16° 姿态）
+        assert!(gate.push(Some((p0, Quat::from_rotation_y(16f32.to_radians())))));
+        assert!(!gate.push(Some((p0, Quat::from_rotation_y(16f32.to_radians())))));
+        // 小旋转（两帧窗累计 2° ≤ 15°）不触发
+        assert!(!gate.push(Some((p0, Quat::from_rotation_y(14f32.to_radians())))));
+        // 相机缺席帧（None = 场景装配问题）视同未就绪
+        assert!(gate.push(None));
+    }
+}
