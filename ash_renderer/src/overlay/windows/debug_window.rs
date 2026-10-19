@@ -5,6 +5,7 @@
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 
+use crate::scene::mechanism::scene_gen::SceneChunk;
 use crate::vulkan::{
     BindlessTables, CullDiagnostics, CullSettings, IndirectStats, Uploader, FRAME_MODE_LAMBERT,
     FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
@@ -99,6 +100,11 @@ impl FpsMeter {
     }
 }
 
+/// chunk 盘点查询（5.4 计量行数据源）：根实体带 SceneChunk，成员数 =
+/// 直接子实体数。生成期归属原样报出（不按当前位置重算）。
+pub(in crate::overlay) type ChunkRows<'w, 's> =
+    Query<'w, 's, (&'static SceneChunk, Option<&'static Children>)>;
+
 /// 调试窗口的一次构建输入：框架 pass 每帧组好、字段名逐项交给面板。
 pub(in crate::overlay) struct DebugWindow<'a> {
     pub(in crate::overlay) ctx: &'a egui::Context,
@@ -118,13 +124,15 @@ pub(in crate::overlay) struct DebugWindow<'a> {
     pub(in crate::overlay) cull_diag: &'a CullDiagnostics,
     /// indirect 闭环读数（draw_frame 每帧刷新；只进计量，不驱动绘制）。
     pub(in crate::overlay) indirect_stats: &'a IndirectStats,
+    /// chunk 盘点（5.4：块数与成员数计量行；明细走 BRP chunk_census）。
+    pub(in crate::overlay) chunks: &'a ChunkRows<'a, 'a>,
 }
 
 impl DebugWindow<'_> {
     /// 面板本体：fps/窗口信息 + 着色模式单选 + 剔除开关与读数 + 渲染器内部统计
     ///（vulkan 侧资源只读）。
     pub(in crate::overlay) fn show(self) {
-        let Self { ctx, open, fps, window, ppp, mode, stats, cull_settings, cull_diag, indirect_stats } = self;
+        let Self { ctx, open, fps, window, ppp, mode, stats, cull_settings, cull_diag, indirect_stats, chunks } = self;
         egui::Window::new("ash 调试")
             .open(open)
             .default_pos(egui::pos2(12.0, 12.0))
@@ -165,6 +173,16 @@ impl DebugWindow<'_> {
                     indirect_stats.zero_instance_count,
                     indirect_stats.walk_rows,
                     indirect_stats.pending_rows,
+                ));
+                // 5.4 常驻大场景：chunk 组织读数（块数/成员总数；判定线 1 的
+                // 面板侧读数，块明细与整块增删走 BRP census/despawn）
+                let (chunk_count, chunk_members) = chunks
+                    .iter()
+                    .fold((0usize, 0usize), |(n, m), (_, c)| {
+                        (n + 1, m + c.map_or(0, |c| c.len()))
+                    });
+                ui.monospace(format!(
+                    "chunk {chunk_count} 块 · 成员 {chunk_members}（生成期归属，明细走 BRP chunk_census）"
                 ));
                 ui.separator();
                 ui.monospace(format!(
