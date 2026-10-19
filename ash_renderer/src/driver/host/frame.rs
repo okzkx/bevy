@@ -36,12 +36,13 @@ use crate::{
     common::error::{request_graceful_exit, VulkanError},
     common::syntax::{fatal, OnceLog, ResultTierExt},
     overlay::{paint_overlay, OverlayLogState, RenderMode, UiDrawData},
-    scene::InstanceLedger,
+    scene::{InstanceLedger, LodGroups},
     vulkan::{
         frustum_planes, pack_frame_uniforms, AcquireOutcome, BindlessTables, Context,
         CullDiagnostics, CullPass, CullSettings, FrameDraw, FramePool, FrameSample,
         FrameUniformsData, GraphicsPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
-        IndirectStats, InstanceTables, MeshPool, OcclusionDiagnostics, OcclusionPass,
+        IndirectStats, InstanceTables, LOD_LEVEL_SIZE, LodDiagnostics, LodPass,
+        LodSettings, MAX_LOD_LEVELS, MeshPool, OcclusionDiagnostics, OcclusionPass,
         OcclusionSettings, OverlayPipeline, PerfLedger, Swapchain, Uploader,
         MAX_FRAMES_IN_FLIGHT, MARK_SIZE,
     },
@@ -148,6 +149,14 @@ pub(crate) struct FrameInput<'w, 's> {
     occlusion_settings: Res<'w, OcclusionSettings>,
     /// 遮挡诊断账面（每帧刷新，egui/BRP 读数口；只进计量）。
     occlusion_diag: ResMut<'w, OcclusionDiagnostics>,
+    /// GPU LOD 选档 compute 管线（6.2；init 链与场景管线同批创建）。
+    lod_pass: Res<'w, LodPass>,
+    /// LOD 开关与判据参数（egui checkbox 与 BRP 写；AshHostPlugin 恒插入）。
+    lod_settings: Res<'w, LodSettings>,
+    /// LOD 诊断账面（每帧刷新，egui/BRP 读数口；只进计量）。
+    lod_diag: ResMut<'w, LodDiagnostics>,
+    /// LOD 组登记处（6.2；只读——LOD 表环写入的变体柄来源）。
+    lod_groups: Res<'w, LodGroups>,
     /// GPU 帧计时器（5.5；停用时 enabled=false，GPU 区间读数缺席）。
     timer: ResMut<'w, GpuTimer>,
     /// 帧样本账（每帧 push 一份 CPU 分段 + GPU 区间 + 规模；只进计量）。
@@ -221,6 +230,10 @@ pub(crate) fn draw_frame(
         ref mut hiz,
         ref occlusion_settings,
         ref mut occlusion_diag,
+        ref lod_pass,
+        ref lod_settings,
+        ref mut lod_diag,
+        ref lod_groups,
         ref mut timer,
         ref mut perf,
         ..
@@ -443,8 +456,10 @@ pub(crate) fn draw_frame(
         image_cache,
         &assembly,
         frames.current_index(),
+        lod_groups,
+        pool,
     )
-    .or_fatal("模型/材质环写失败，渲染链无法继续")?;
+    .or_fatal("模型/材质/在场/LOD 环写失败，渲染链无法继续")?;
     let rings_ms = rings_clock.elapsed().as_secs_f32() * 1000.0;
 
     // 4a-2) 视锥剔除半边（5.2）：开关决定 compute dispatch 或 host 全可见填充
@@ -579,6 +594,61 @@ pub(crate) fn draw_frame(
     occlusion_diag.rows_compared = assembly.slots.len();
     occlusion_diag.occlusion_visible_count = occlusion_visible;
 
+    // 4a-2-2) GPU LOD 选档半边（6.2）：开关决定 compute dispatch 或 host 档位
+    // 环填 0（数据层 A/B；选档每帧从当前相机现算，无 fallback 专段——档位
+    // 环只是迟滞状态不是真值，lod 模块注释钉明）。诊断读数在写入路径之后
+    // 取——档位环读写都在 wait_for_slot 的 fence 纪律内。
+    let lod_dispatch = if lod_settings.enabled && cull_bound > 0 {
+        if !lod_diag.first_run_logged {
+            info!(
+                "GPU LOD 选档 dispatch 首跑（前置闸门复用 5.2 compute 链）：bound {cull_bound}，\
+                 组 {}，{MAX_LOD_LEVELS} 档（96B push：view_proj+screen+bound+threshold+hysteresis；\
+                 b7 变体表按档直址，b8 档位环 = 迟滞状态）",
+                cull_bound.div_ceil(64),
+            );
+            lod_diag.first_run_logged = true;
+        }
+        Some(lod_pass.draw(
+            &view_proj,
+            [swapchain.extent.width as f32, swapchain.extent.height as f32],
+            cull_bound,
+            lod_settings.threshold_px,
+            lod_settings.hysteresis,
+        ))
+    } else {
+        if cull_bound > 0 {
+            let zeros: Vec<u8> = (0..cull_bound).flat_map(|_| 0u32.to_le_bytes()).collect();
+            instance_tables
+                .lod_level_ring(cull_frame)
+                .write(0, &zeros)
+                .or_fatal("LOD 档位环全最细档填充失败，渲染链无法继续")?;
+        }
+        None
+    };
+    // LOD 诊断读数：档位分布逐在场行统计（b8 = 本帧槽两帧前 compute 输出或
+    // host 填 0；fence 纪律与标记环同链）。
+    if cull_bound > 0 {
+        let mut lod_bytes = vec![0u8; cull_bound as usize * LOD_LEVEL_SIZE as usize];
+        instance_tables
+            .lod_level_ring(cull_frame)
+            .read(0, &mut lod_bytes)
+            .or_fatal("LOD 档位环读数失败，渲染链无法继续")?;
+        let mut counts = [0u32; MAX_LOD_LEVELS as usize];
+        for slot in &assembly.slots {
+            let level = u32::from_le_bytes(
+                lod_bytes[*slot as usize * 4..*slot as usize * 4 + 4].try_into().expect("4B"),
+            );
+            let index = (level as usize).min(counts.len() - 1);
+            counts[index] += 1;
+        }
+        lod_diag.enabled = lod_settings.enabled;
+        lod_diag.dispatched = lod_dispatch.is_some();
+        lod_diag.bound = cull_bound;
+        lod_diag.level_counts = counts;
+        lod_diag.rows_compared = assembly.slots.len();
+        lod_diag.marks_frame = cull_frame;
+    }
+
     // 4a-3) indirect 命令组装半边（5.3）：在场行数 = GPU 命令条数（CPU 在账
     // 信息，非可见集回读）；count > 0 才有命令可组装（空场 = None，场景绘制
     // 整段跳过）。诊断读数（draw 调用数/命令条数/instanceCount=0 条数）只进
@@ -665,6 +735,7 @@ pub(crate) fn draw_frame(
         cull: cull_dispatch,
         indirect: indirect_dispatch,
         occlusion: occl_dispatch,
+        lod: lod_dispatch,
         // 归约链恒录（深度每帧变，无隔帧空间；warmup 在 hiz 内走账——
         // note_reduced 与录制一一对应，让路帧不经过此处不计数）
         hiz: Some(&*hiz),

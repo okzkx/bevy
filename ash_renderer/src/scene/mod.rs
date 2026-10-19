@@ -15,6 +15,6 @@ pub use content::SceneEntryPlugin;
 pub use mechanism::{
     AshAssetEventPlugin, AshCameraAspectPlugin, AshCameraControlPlugin, AshLedgerPlugin,
     AshMaterialHookPlugin, AshReadinessPlugin, AshWorkloadPlugin, AssetInvalidations,
-    AssetReadiness, AssetRetirements, IncrementStats, InstanceLedger, InstanceRow, ReadinessStats,
-    RecycleStats, WorkloadSettings,
+    AssetReadiness, AssetRetirements, IncrementStats, InstanceLedger, InstanceRow, LodGroups,
+    LodLadderReadback, ReadinessStats, RecycleStats, WorkloadSettings, spawn_lod_ladder,
 };

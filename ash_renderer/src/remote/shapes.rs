@@ -7,7 +7,7 @@
 use bevy::{prelude::*, remote::BrpResult};
 use serde_json::{json, Value};
 
-use crate::scene::mechanism::{spawn_test_shape, TestShape};
+use crate::scene::mechanism::{spawn_lod_ladder, spawn_test_shape, TestShape};
 
 use super::{invalid_params, objects::object_op_error};
 
@@ -59,5 +59,44 @@ pub(crate) fn spawn_shape(In(params): In<Option<Value>>, world: &mut World) -> B
         "mesh": readback.mesh.to_string(),
         "material": readback.material.to_string(),
         "mesh_created": readback.mesh_created,
+    }))
+}
+
+/// `ash_renderer/spawn_lod` 的请求参数：sphere 阶梯（ico 细分 4/3/2/1 四档，
+/// 形状口径见 lod_registry 模块注释），其余可选缺省同 spawn_shape。
+#[derive(serde::Deserialize)]
+struct SpawnLodParams {
+    shape: TestShape,
+    #[serde(default)]
+    color: Option<[f32; 3]>,
+    #[serde(default)]
+    translation: Option<[f32; 3]>,
+    #[serde(default)]
+    scale: Option<[f32; 3]>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// `ash_renderer/spawn_lod`：造一个 LOD 阶梯测试体（6.2.1 前置件——基准档
+/// 复用形状缓存，档位变体按形状缓存，登记进 LodGroups；档位资产随该实体
+/// 首次盘点一并上传）。返回实体号与各档资产身份（对账锚点）。
+#[system]
+pub(crate) fn spawn_lod(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let value = params.ok_or_else(|| invalid_params("params 缺席：需要 shape"))?;
+    let p: SpawnLodParams =
+        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let color = p.color.unwrap_or([0.8, 0.8, 0.8]);
+    let readback = spawn_lod_ladder(
+        world,
+        p.shape,
+        color,
+        p.translation.map(Vec3::from_array),
+        p.scale.map(Vec3::from_array),
+        p.name.as_deref(),
+    )
+    .map_err(object_op_error)?;
+    Ok(json!({
+        "entity": readback.entity.to_string(),
+        "levels": readback.levels.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
     }))
 }

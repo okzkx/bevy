@@ -26,6 +26,7 @@ pub mod assets;
 pub mod cull;
 pub mod draw;
 pub mod generate;
+pub mod lod;
 pub mod mouse;
 pub mod objects;
 pub mod perf;
@@ -45,10 +46,11 @@ use self::{
     cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
     draw::draw_stats,
     generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
+    lod::{lod_census, lod_set_enabled, lod_set_params},
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     objects::{increment_stats, replace_handles, spawn_primitive},
     perf::{perf_samples, perf_stats, workload},
-    shapes::spawn_shape,
+    shapes::{spawn_lod, spawn_shape},
 };
 
 use crate::{
@@ -73,6 +75,7 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/set_camera", set_camera)
                 .with_method_main("ash_renderer/spawn_primitive", spawn_primitive)
                 .with_method_main("ash_renderer/spawn_shape", spawn_shape)
+                .with_method_main("ash_renderer/spawn_lod", spawn_lod)
                 .with_method_main("ash_renderer/generate_scene", generate_scene)
                 .with_method_main("ash_renderer/generate_chunks", generate_chunks_cmd)
                 .with_method_main("ash_renderer/chunk_census", chunk_census)
@@ -92,6 +95,9 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/occlusion_probe", occlusion_probe)
                 .with_method_main("ash_renderer/occlusion_set_enabled", occlusion_set_enabled)
                 .with_method_main("ash_renderer/cull_set_enabled", cull_set_enabled)
+                .with_method_main("ash_renderer/lod_census", lod_census)
+                .with_method_main("ash_renderer/lod_set_enabled", lod_set_enabled)
+                .with_method_main("ash_renderer/lod_set_params", lod_set_params)
                 .with_method_main("ash_renderer/draw_stats", draw_stats)
                 .with_method_main("ash_renderer/perf_stats", perf_stats)
                 .with_method_main("ash_renderer/perf_samples", perf_samples)

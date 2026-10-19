@@ -8,7 +8,7 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 use crate::scene::mechanism::scene_gen::SceneChunk;
 use crate::vulkan::{
     BindlessTables, CullDiagnostics, CullSettings, FrameSample, ImageCache, IndirectStats,
-    MeshPool, OcclusionDiagnostics, OcclusionSettings, PerfLedger, Uploader, FRAME_MODE_LAMBERT,
+    MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics, OcclusionSettings, PerfLedger, Uploader, FRAME_MODE_LAMBERT,
     FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
 };
 use crate::scene::mechanism::WorkloadSettings;
@@ -128,6 +128,10 @@ pub(in crate::overlay) struct DebugWindow<'a> {
     pub(in crate::overlay) occlusion_settings: &'a mut OcclusionSettings,
     /// 遮挡诊断读数（6.1：draw_frame 每帧刷新；只进计量，不驱动绘制）。
     pub(in crate::overlay) occlusion_diag: &'a OcclusionDiagnostics,
+    /// LOD 开关（6.2：checkbox 写，draw_frame 读；BRP lod_set 同源）。
+    pub(in crate::overlay) lod_settings: &'a mut LodSettings,
+    /// LOD 诊断读数（6.2：draw_frame 每帧刷新；只进计量，不驱动绘制）。
+    pub(in crate::overlay) lod_diag: &'a LodDiagnostics,
     /// indirect 闭环读数（draw_frame 每帧刷新；只进计量，不驱动绘制）。
     pub(in crate::overlay) indirect_stats: &'a IndirectStats,
     /// 帧样本账（5.5：分位数在构建时现算，环形窗口）。
@@ -146,7 +150,7 @@ impl DebugWindow<'_> {
     /// 面板本体：fps/窗口信息 + 着色模式单选 + 剔除开关与读数 + 渲染器内部统计
     ///（vulkan 侧资源只读）。
     pub(in crate::overlay) fn show(self) {
-        let Self { ctx, open, fps, window, ppp, mode, stats, cull_settings, cull_diag, occlusion_settings, occlusion_diag, indirect_stats, perf, workload, image_cache, mesh_pool, chunks } = self;
+        let Self { ctx, open, fps, window, ppp, mode, stats, cull_settings, cull_diag, occlusion_settings, occlusion_diag, lod_settings, lod_diag, indirect_stats, perf, workload, image_cache, mesh_pool, chunks } = self;
         egui::Window::new("ash 调试")
             .open(open)
             .default_pos(egui::pos2(12.0, 12.0))
@@ -200,6 +204,17 @@ impl DebugWindow<'_> {
                     occlusion_diag.occlusion_visible_count,
                     occlusion_diag.rows_compared,
                     occlusion_diag.marks_frame,
+                ));
+                // 6.2 GPU LOD：开关切选档 dispatch / host 档位环填 0（最细档
+                // = 命令引脚回 5.3 基准）；档位分布随读数展示（b8 直读）
+                ui.checkbox(&mut lod_settings.enabled, "GPU LOD 选档");
+                ui.monospace(format!(
+                    "LOD {}（阈值 {:.0}px，迟滞 {:.2}）· 档位分布 {:?}（帧槽 {} 读数，诊断不驱动绘制）",
+                    if lod_diag.dispatched { "dispatch" } else { "关（A/B）" },
+                    lod_settings.threshold_px,
+                    lod_settings.hysteresis,
+                    lod_diag.level_counts,
+                    lod_diag.marks_frame,
                 ));
                 // 5.3 indirect 闭环：绘制调用数恒 1（判定线 1 读数）、命令条数
                 // 与 instanceCount=0 条数（诊断标注，不驱动绘制）

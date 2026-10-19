@@ -45,7 +45,7 @@ use crate::overlay::windows::entity_tree_window::{
 };
 use crate::scene::mechanism::WorkloadSettings;
 use crate::vulkan::{
-    CullDiagnostics, CullSettings, ImageCache, IndirectStats, MeshPool, OcclusionDiagnostics,
+    CullDiagnostics, CullSettings, ImageCache, IndirectStats, MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics,
     OcclusionSettings, PerfLedger,
 };
 
@@ -181,6 +181,10 @@ struct DebugUiParams<'w, 's> {
     occlusion_settings: ResMut<'w, OcclusionSettings>,
     /// 遮挡诊断读数（6.1：draw_frame 每帧刷新，只读展示）
     occlusion_diag: Res<'w, OcclusionDiagnostics>,
+    /// LOD 开关（6.2：checkbox 写，draw_frame 读）
+    lod_settings: ResMut<'w, LodSettings>,
+    /// LOD 诊断读数（6.2：draw_frame 每帧刷新，只读展示）
+    lod_diag: Res<'w, LodDiagnostics>,
     /// indirect 闭环读数（5.3：draw_frame 每帧刷新，只读展示）
     indirect_stats: Res<'w, IndirectStats>,
     /// chunk 盘点（5.4：块数与成员总数计量行）
@@ -268,6 +272,8 @@ fn run_egui_pass(
             cull_diag: &ui.cull_diag,
             occlusion_settings: &mut ui.occlusion_settings,
             occlusion_diag: &ui.occlusion_diag,
+            lod_settings: &mut ui.lod_settings,
+            lod_diag: &ui.lod_diag,
             indirect_stats: &ui.indirect_stats,
             perf: &ui.perf,
             workload: &ui.workload,

@@ -36,6 +36,7 @@ use crate::common::error::{Result, VulkanError};
 use crate::vulkan::cull::CullDraw;
 use crate::vulkan::hiz::HizPyramid;
 use crate::vulkan::indirect::IndirectDraw;
+use crate::vulkan::lod::LodDraw;
 use crate::vulkan::occlusion::OcclusionDraw;
 use crate::vulkan::overlay_pipeline::{pack_ui_push, UiPaint};
 use crate::vulkan::perf::GpuTimer;
@@ -90,6 +91,10 @@ pub struct FrameDraw<'a> {
     /// 纯结果，b6 host 填全可见）。录制在视锥剔除之后、indirect 组装之前
     ///（视锥标记 → 遮挡合并 → 命令组装的依赖链，occlusion::record 自带屏障）。
     pub occlusion: Option<OcclusionDraw>,
+    /// GPU LOD 选档 dispatch（6.2；关闭/空场为 None——档位环 host 填 0 =
+    /// 最细档，命令引脚回到对象记录基准）。录制在遮挡测试之后、indirect
+    /// 组装之前（档位写 → 组装读的依赖由 lod::record 自带屏障收口）。
+    pub lod: Option<LodDraw>,
     /// Hi-Z 金字塔归约链（6.1.2）：渲染后逐级重写本帧槽（Some = 恒 Some，
     /// 重建窗口期也录——warmup 由 hiz 内部走账）。深度屏障（附件 → 只读）
     /// 与进场/级间屏障在 hiz::record_reduction 内收口。
@@ -375,6 +380,14 @@ impl FramePool {
             // 内），合并写回标记并落遮挡独立标记。fallback/关闭 = None。
             if let Some(occlusion) = &draw.occlusion {
                 super::occlusion::record(device, frame.command_buffer, draw.set2, occlusion);
+            }
+
+            // —— GPU LOD 选档 dispatch（6.2，渲染进场之前、遮挡之后）：读
+            // set2 三表（对象表/模型环）做 AABB 投屏，写档位环 b8（迟滞状态
+            // 读旧写新，2 帧滞后由迟滞带吸收）。关闭/空场 = None（host 已把
+            // 本帧槽档位环填 0 = 最细档，命令引脚回到 5.3 基准）。
+            if let Some(lod) = &draw.lod {
+                super::lod::record(device, frame.command_buffer, draw.set2, lod);
             }
 
             // —— indirect 命令组装 dispatch（5.3，渲染进场之前）：compute 读

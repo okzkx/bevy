@@ -118,6 +118,10 @@ pub struct InstanceLedger {
     /// 各自的环（draw_frame 只消费本帧奇偶的那套，另一套下帧消费）——
     /// 每个改动行两次写入后两个环都新鲜，静态场景零写入。
     model_dirty: [BTreeSet<Entity>; 2],
+    /// LOD 变体表待写标记（6.2），按帧槽奇偶两套：行换槽/LOD 组档位资产
+    /// 到货时置位，draw_frame 消费本帧奇偶集（写该槽的 LOD 表条目进本帧
+    /// 槽环）——纪律与 model_dirty 相同（两帧后两个环都新鲜）。
+    lod_dirty: [BTreeSet<Entity>; 2],
     pub stats: IncrementStats,
 }
 
@@ -203,6 +207,32 @@ impl InstanceLedger {
         set.clear();
         out
     }
+
+    /// 标记一行 LOD 变体表待写（6.2）：进**两套**奇偶集（两个帧槽的环都要
+    /// 补写——模型环同款纪律）。触发点 = 行换槽（flush_uploads）与 LOD 组
+    /// 档位资产到货（同处）。
+    pub(crate) fn mark_lod_dirty(&mut self, entity: Entity) {
+        self.lod_dirty[0].insert(entity);
+        self.lod_dirty[1].insert(entity);
+    }
+
+    /// 取走一套奇偶集的 LOD 待写实体（draw_frame 按本帧奇偶消费，取走即清）。
+    pub(crate) fn take_lod_dirty(&mut self, frame: usize) -> Vec<Entity> {
+        let set = &mut self.lod_dirty[frame % 2];
+        let out: Vec<Entity> = set.iter().copied().collect();
+        set.clear();
+        out
+    }
+
+    /// 全部引用给定 mesh 身份的行（6.2：LOD 组档位资产到货时反查引用行
+    /// 重挂 LOD 脏标；O(rows) 走访，触发频率 = 档位资产提交，稀疏事件）。
+    pub(crate) fn rows_with_mesh(&self, id: AssetId<Mesh>) -> Vec<Entity> {
+        self.rows
+            .iter()
+            .filter(|(_, row)| row.mesh.id() == id)
+            .map(|(entity, _)| *entity)
+            .collect()
+    }
 }
 
 /// 账本插件：初始化 [`InstanceLedger`]，把 [`update_ledger`] 挂 PostUpdate
@@ -212,7 +242,11 @@ pub struct AshLedgerPlugin;
 
 impl Plugin for AshLedgerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<InstanceLedger>().add_systems(
+        app.init_resource::<InstanceLedger>()
+            // LOD 组登记处（6.2.2）：flush_uploads 以 Res 读它（档位资产盘点
+            // 与到货重挂），恒在账——随账本插件初始化
+            .init_resource::<super::LodGroups>()
+            .add_systems(
             PostUpdate,
             update_ledger.after(TransformSystems::Propagate),
         );

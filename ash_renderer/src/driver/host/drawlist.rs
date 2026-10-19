@@ -13,7 +13,8 @@
 //! 行级可绘判定与 4.x 语义一致：实例槽缺（未驻留成表）/mesh 未驻留/材质
 //! 容器缺席 = 该行暂缓（Tier①，自愈后消失）；缺贴图 = fallback 白图照画。
 //! 暂缓行不进在场环 = 自动无命令（5.3 待决 6 的钉明：暂缓语义由枚举源头
-//! 承载，GPU 侧零特判）。
+//! 承载，GPU 侧零特判）。6.2 起 LOD 变体表环的脏行增量写也在本模块
+//!（write_lod_table_ring——模型环同款两帧奇偶纪律，输入 = 账本 LOD 脏集）。
 
 use bevy::asset::AssetId;
 use bevy::pbr::StandardMaterial;
@@ -21,10 +22,10 @@ use bevy::prelude::*;
 use std::collections::HashSet;
 
 use crate::common::error::VulkanError;
-use crate::scene::InstanceLedger;
+use crate::scene::{InstanceLedger, LodGroups};
 use crate::vulkan::{
-    pack_material_record, pack_model, BindlessTables, ImageCache, InstanceTables,
-    MATERIAL_RECORD_SIZE, MODEL_STRIDE, MeshPool,
+    pack_lod_entry, pack_material_record, pack_model, BindlessTables, ImageCache, InstanceTables,
+    LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MATERIAL_RECORD_SIZE, MODEL_STRIDE, MeshPool,
 };
 
 /// 一帧 DrawList 组装产物。
@@ -152,12 +153,60 @@ fn write_presence_ring(
     Ok(())
 }
 
+/// 写 LOD 变体表环（6.2.2，增量）：LOD 脏行（换槽/档位资产到货）→ 本帧槽
+/// 的表环写该槽各档绘制引脚。level 0 = 本行基准 mesh 槽位（可绘判定保证
+/// 驻留；行恰在本帧暂缓时引脚查无 = 全哨兵，消费端回退对象记录——与
+/// 模型环"槽已清则跳过"同款防御）；level 1.. = 登记组变体引脚，未驻留
+/// = 哨兵 0。同槽的档位环一并写 0（换槽后迟滞状态从最细档重新收敛——
+/// 与描述符 init 零填充同语义）。
+fn write_lod_table_ring(
+    tables: &mut InstanceTables,
+    ledger: &mut InstanceLedger,
+    pool: &MeshPool,
+    lod_groups: &LodGroups,
+    frame: usize,
+) -> Result<(), VulkanError> {
+    for entity in ledger.take_lod_dirty(frame) {
+        let Some(row) = ledger.row(entity) else {
+            continue; // 行已清：槽位在停尸房途中或从未分配，表内容无人读
+        };
+        let Some(slot) = row.instance_slot else {
+            continue;
+        };
+        let mut bytes = vec![0u8; LOD_TABLE_STRIDE as usize];
+        if let Some(mesh_slot) = pool.resident(row.mesh.id()) {
+            let entry = pack_lod_entry(mesh_slot.first_index(), mesh_slot.index_count, mesh_slot.vertex_base());
+            bytes[0..LOD_ENTRY_SIZE as usize].copy_from_slice(&entry);
+        }
+        if let Some(levels) = lod_groups.levels_of(row.mesh.id()) {
+            for (level, handle) in levels.iter().enumerate().skip(1) {
+                let Some(handle) = handle else { continue };
+                let Some(mesh_slot) = pool.resident(handle.id()) else { continue }; // 该档未驻留 = 哨兵保持 0
+                let o = level * LOD_ENTRY_SIZE as usize;
+                let entry = pack_lod_entry(mesh_slot.first_index(), mesh_slot.index_count, mesh_slot.vertex_base());
+                bytes[o..o + LOD_ENTRY_SIZE as usize].copy_from_slice(&entry);
+            }
+        }
+        tables.lod_table_ring(frame).write(u64::from(slot) * LOD_TABLE_STRIDE, &bytes)?;
+        // 迟滞状态复位：换槽 = 新对象，从最细档重新开始（该槽号写入本帧槽环，
+        // 另一帧槽环随奇偶脏集下帧补写）
+        tables
+            .lod_level_ring(frame)
+            .write(u64::from(slot) * LOD_LEVEL_SIZE, &0u32.to_le_bytes())?;
+    }
+    Ok(())
+}
+
 /// 双环写入入口（draw_frame 在 wait_for_slot 之后调用）：模型增量 + 材质
-/// 全量 + 在场环全量都落在本帧槽的环上。失败按 Tier② 冒泡（环写失败 =
-/// host-visible 契约被打破，帧循环无法继续）。
+/// 全量 + 在场环全量 + LOD 表增量都落在本帧槽的环上。失败按 Tier② 冒泡
+///（环写失败 = host-visible 契约被打破，帧循环无法继续）。
 ///
 /// # Errors
 /// 环 buffer 写失败（host-visible 缺席/越界，内部契约矛盾级）。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "环写入的输入即四族账本来源（账本/材质容器/贴图缓存/LOD 组/池），逐项声明与 instance_table 的 hazard 纪律表逐项对账，拆束会藏掉写点清单"
+)]
 pub(crate) fn write_rings(
     tables: &mut InstanceTables,
     ledger: &mut InstanceLedger,
@@ -165,9 +214,12 @@ pub(crate) fn write_rings(
     image_cache: &ImageCache,
     assembly: &DrawAssembly,
     frame: usize,
+    lod_groups: &LodGroups,
+    pool: &MeshPool,
 ) -> Result<(), VulkanError> {
     write_model_ring(tables, ledger, frame)?;
     write_material_ring(tables, std_materials, image_cache, &assembly.materials, frame)?;
     write_presence_ring(tables, &assembly.slots, frame)?;
+    write_lod_table_ring(tables, ledger, pool, lod_groups, frame)?;
     Ok(())
 }
