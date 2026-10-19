@@ -140,6 +140,12 @@ impl AssetRetirements {
         self.stats.removed_images_total += 1;
     }
 
+    /// 记一笔管理器发起的贴图淘汰（6.4 驻留管理器：非 `Removed` 事件，
+    /// 不进事件累计；出账与停尸房复用与 [`Self::retire_image`] 完全同路）。
+    pub fn eject_image(&mut self, id: AssetId<Image>) {
+        self.images.insert(id);
+    }
+
     /// `Unused` 事件计数（只观察不动作——本宿主是否触发是探针口径）。
     pub fn note_unused(&mut self) {
         self.stats.unused_events_total += 1;

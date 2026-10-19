@@ -1,4 +1,4 @@
-//! 驻留管理器（6.3.1~6.3.4）：显存预算账 + 相机驱动的资产请求/淘汰——
+//! 驻留管理器（6.3.1~6.3.4 + 6.4 细粒度扩展）：显存预算账 + 相机驱动的资产请求/淘汰——
 //! "放不下的世界"的搬运工。纯 CPU 侧资源层新账（照 4.3 AssetReadiness
 //! 先例），零新 Vulkan 形状：请求 = 引用行重挂脏标（重传链复用），淘汰 =
 //! 卸载回收账进账（4.4 同入口），hazard 全由既有链闭合。
@@ -29,6 +29,24 @@
 //!
 //! A/B 面（判定线 5）：enabled=false（或预算 0）= 全常驻基线——管理器零
 //! 动作，既有 4.x 链语义（进场即驻留永驻）。
+//!
+//! 6.4 细粒度扩展（`fine_grained` 开关，默认关 = 6.3 整资产粒度）：
+//! - **LOD 档逐档驻留**（6.4.2/6.4.4）：LOD 组（6.2 登记）内 level 0 基准
+//!   永驻（行可绘前提=回退恒有落点，判定线 2 粗档保底策略），level 1..3
+//!   按"组内引用行的期望档位"逐档驻留/淘汰——期望档位 = 6.2 选档公式的
+//!   CPU 参照（同 threshold 同 screen），管理器判定无迟滞（请求半径与冷却
+//!   即迟滞，钉明）；档位淘汰**同步重挂行 LOD 脏标**（b7 表条目清哨兵——
+//!   否则表里残留已回收区间的引脚，free list 复用后画错几何）；请求 =
+//!   引用行 mark_dirty（行盘点的 LOD 组段一次收集全部未驻留档 = 判定线 3
+//!   请求合并的结构形式）。GPU 侧 6.2 表内回退在本段被真实驱动（细档缺席
+//!   → build_indirect 回退更细常驻档）。
+//! - **贴图字节预算**（6.4.3）：image 驻留 bytes（resident_bytes 现读）进
+//!   预算第二列；超支按"引用行最近距离远优先"淘汰整资产（eject_image 走
+//!   同一回收账）——缺席档由 fallback 白图兜底（永驻 0 号槽 = 粗档保底的
+//!   极端形式，零悬空采样由 fallback 槽保证，判定线 2 口径钉明）；重驻留 =
+//!   材质五槽盘点（引用行 mark_dirty，与 mesh 请求同一次置脏 = 合并）。
+//!   **整图替换（粗/细双 GpuImage swap）不做**——整资产粒度压测未证伪，
+//!   替换式留待步骤 7 真实资产（待决 1 落定，见施工记录）。
 
 use std::collections::HashMap;
 
@@ -41,8 +59,11 @@ use ash_macros::system;
 
 use crate::{
     driver::upload::flush_uploads,
-    scene::InstanceLedger,
-    vulkan::{aabb_visible, conservative_world_aabb, frustum_planes, ImageCache, MeshPool},
+    scene::{InstanceLedger, LodGroups},
+    vulkan::{
+        aabb_screen_rect, aabb_visible, conservative_world_aabb, frustum_planes, lod_raw_level,
+        ImageCache, LodSettings, MAX_LOD_LEVELS, MeshPool, Swapchain,
+    },
 };
 
 use super::asset_events::AssetRetirements;
@@ -58,6 +79,11 @@ pub struct ResidencySettings {
     pub request_radius: f32,
     /// 淘汰冷却（帧）：刚淘汰的身份在冷却期内不被重请求（防预算边界 thrash）。
     pub eject_cooldown_frames: u32,
+    /// 贴图驻留预算（字节；0 = 不设限——6.3 口径）。
+    pub budget_image_bytes: u64,
+    /// 细粒度开关（6.4）：true = LOD 档逐档驻留/淘汰（6.2 fallback 正式被
+    /// 驱动）；false = 6.3 整资产粒度（档位全驻留，判定线 4 的 A/B 面）。
+    pub fine_grained: bool,
 }
 
 impl Default for ResidencySettings {
@@ -67,6 +93,8 @@ impl Default for ResidencySettings {
             budget_mesh_bytes: 0,
             request_radius: 40.0,
             eject_cooldown_frames: 60,
+            budget_image_bytes: 0,
+            fine_grained: false,
         }
     }
 }
@@ -99,11 +127,28 @@ pub struct ResidencyStats {
     pub over_budget: bool,
     /// 账本行数（规模口径）。
     pub rows: usize,
+    // —— 6.4 细粒度段（fine_grained 开时填充）——
+    /// 贴图驻留预算（0 = 不设限）。
+    pub budget_image_bytes: u64,
+    /// 贴图驻留实占（resident_bytes 现读）。
+    pub used_image_bytes: u64,
+    /// 贴图超预算（候选耗尽仍超，如实报出）。
+    pub over_budget_image: bool,
+    /// 细粒度开关快照。
+    pub fine_grained: bool,
+    /// LOD 变体档驻留条数（level 1..3 的组×档条目，6.4.2 读数）。
+    pub lod_levels_resident: usize,
+    /// LOD 变体档淘汰累计（条目数）。
+    pub lod_levels_ejected_total: u64,
 }
 
-/// 管理器内部状态（冷却表：身份 → 剩余冷却帧）。
+/// 管理器内部状态（冷却表：mesh/贴图身份 → 剩余冷却帧——两张表，键型
+/// 不同分列，防抖语义同源）。
 #[derive(Resource, Default)]
-pub(crate) struct EjectCooldown(HashMap<AssetId<Mesh>, u32>);
+pub(crate) struct EjectCooldown {
+    meshes: HashMap<AssetId<Mesh>, u32>,
+    images: HashMap<AssetId<Image>, u32>,
+}
 
 /// 驻留管理器 tick（Last，先于 flush_uploads——请求/淘汰动作要进同一帧的
 /// 上传账）：预算读数 → 请求侧（半径内非驻留身份重挂引用行）→ 淘汰侧
@@ -122,25 +167,33 @@ pub(crate) fn residency_tick(
     mut retirements: ResMut<AssetRetirements>,
     pool: Res<MeshPool>,
     image_cache: Res<ImageCache>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    std_materials: Res<Assets<StandardMaterial>>,
+    lod_groups: Res<LodGroups>,
+    lod_settings: Res<LodSettings>,
+    swapchain: Res<Swapchain>,
     cameras: Query<(&Projection, &GlobalTransform), With<Camera>>,
     // 激活态下降沿检测（Local）：active→inactive 时全行置脏——被淘汰资产
     // 无请求者会永远缺席，关闭 B 面（全常驻基线）必须恢复全量（④ 判定线）
     mut prev_active: Local<bool>,
 ) {
-    let _ = &mut std_materials; // 预留：材质腿计量（6.4 贴图账一并）；本 tick 不触
     stats.enabled = settings.enabled;
     stats.budget_mesh_bytes = settings.budget_mesh_bytes;
+    stats.budget_image_bytes = settings.budget_image_bytes;
+    stats.fine_grained = settings.fine_grained;
     stats.rows = ledger.len();
     stats.ejected_last = 0;
     stats.requested_rows_last = 0;
     let recycle = pool.recycle_ledger();
     let mut used = recycle.resident_vertex_bytes + recycle.resident_index_bytes;
     stats.used_mesh_bytes = used;
+    let mut used_image = image_cache.resident_bytes();
+    stats.used_image_bytes = used_image;
     stats.resident_images = image_cache.resident_count();
     stats.resident_meshes = pool.resident_count();
-    stats.cooling = cooldown.0.len();
-    let active = settings.enabled && settings.budget_mesh_bytes > 0 && !ledger.is_empty();
+    stats.cooling = cooldown.meshes.len() + cooldown.images.len();
+    let active = settings.enabled
+        && (settings.budget_mesh_bytes > 0 || settings.budget_image_bytes > 0)
+        && !ledger.is_empty();
     if !active {
         if *prev_active && !ledger.is_empty() {
             // 激活→关闭的下降沿：全行置脏——被淘汰的资产没有请求者会永远
@@ -156,6 +209,7 @@ pub(crate) fn residency_tick(
         *prev_active = active;
         stats.requested = 0;
         stats.over_budget = false;
+        stats.over_budget_image = false;
         return; // B 面（全常驻基线）或空场：沿处理外零动作，读数照刷
     }
     *prev_active = true;
@@ -195,8 +249,12 @@ pub(crate) fn residency_tick(
         }
     }
 
-    // —— 冷却走账：剩余帧递减，归零出表。
-    cooldown.0.retain(|_, frames| {
+    // —— 冷却走账：剩余帧递减，归零出表（mesh/贴图两表同款）。
+    cooldown.meshes.retain(|_, frames| {
+        *frames = frames.saturating_sub(1);
+        *frames > 0
+    });
+    cooldown.images.retain(|_, frames| {
         *frames = frames.saturating_sub(1);
         *frames > 0
     });
@@ -209,7 +267,7 @@ pub(crate) fn residency_tick(
         if g.resident || g.min_dist > settings.request_radius {
             continue;
         }
-        if cooldown.0.contains_key(id) {
+        if cooldown.meshes.contains_key(id) {
             continue; // 冷却期：刚淘汰的身份不重请求（防抖窗，钉明见模块注释）
         }
         requested_ids += 1;
@@ -221,12 +279,19 @@ pub(crate) fn residency_tick(
     stats.requested = requested_ids;
     stats.requested_rows_last = request_rows.len();
     stats.requested_rows_total += request_rows.len() as u64;
+    let mut request_rows_all = request_rows;
+    let mut lod_levels_resident = 0usize;
+    let mut defer_image_request: Vec<Entity> = Vec::new();
+    let mut over_budget_image = false;
 
     // —— 淘汰侧：used > 预算 → 视锥外优先、距离远优先逐个出账，直到 ≤ 预算
     //（或可淘汰者耗尽——over_budget 如实报出，不硬凑：请求区内身份也按序
     // 淘汰时说明预算装不下需求，判定线 1 的读数面让位给诚实计量）。
     stats.over_budget = false;
-    if used > settings.budget_mesh_bytes {
+    // 预算 0 = 不设限（约定）：淘汰只在预算非零时执法——0 与 used>0 恒真
+    // 会把"不限"读成"全淘汰"（贴图账联调实抓：mesh 预算 0 + 贴图预算激活
+    // 时全场景 mesh 无限拉锯，行永在置脏集，贴图 eject 被排除法饿死）
+    if settings.budget_mesh_bytes > 0 && used > settings.budget_mesh_bytes {
         let mut candidates: Vec<(AssetId<Mesh>, f32, u64)> = groups
             .iter()
             .filter(|(_, g)| g.resident)
@@ -250,7 +315,7 @@ pub(crate) fn residency_tick(
             // 停尸房 → 排空后区间归还 free list；引用行此后 DrawList 暂缓
             //（mesh 未驻留 = 不进在场环——先撤引用后回收的幽灵防线）。
             retirements.eject_mesh(id);
-            cooldown.0.insert(id, settings.eject_cooldown_frames);
+            cooldown.meshes.insert(id, settings.eject_cooldown_frames);
             used = used.saturating_sub(bytes);
             stats.ejected_total += 1;
             stats.ejected_last += 1;
@@ -258,6 +323,162 @@ pub(crate) fn residency_tick(
         stats.over_budget = used > settings.budget_mesh_bytes;
     }
     stats.used_mesh_bytes = used;
+
+    // —— 6.4.2 LOD 档逐档驻留（fine_grained）：组内期望档位（6.2 选档公式
+    // CPU 参照同源）决定 level 1..3 的驻留需求——需求档未驻留 → 引用行
+    // 置脏（行盘点的 LOD 组段一次收集全部未驻留档 = 请求合并）；非需求档
+    // 驻留中 → 淘汰 + 重挂 LOD 脏标（b7 表条目清哨兵——残留引脚在 free
+    // list 复用后会画错几何）。level 0 基准永驻（回退恒有落点，判定线 2）。
+    // 档位驻留计数两面统一（fine_grained 关 = 档位全驻留的读数也要如实）
+    {
+        let screen = {
+            let (w, h) = (swapchain.extent.width, swapchain.extent.height);
+            [w as f32, h as f32]
+        };
+        for (base_id, g) in groups.iter() {
+            let Some(group_levels) = lod_groups.levels_of(*base_id) else { continue }; // 非阶梯 mesh 无档位账
+            // 期望档位并集：粗档保底之外，每个引用行的目标档都应驻留
+            let mut needed = [false; MAX_LOD_LEVELS as usize];
+            needed[0] = true; // 基准永驻（本段不 eject 它）
+            for (entity, row) in ledger.rows() {
+                if !g.rows.contains(&entity) {
+                    continue;
+                }
+                let Some(slot) = pool.resident(row.mesh.id()) else { continue };
+                if let Some((px_min, px_max, _)) = aabb_screen_rect(
+                    &view_proj, &row.model, slot.local_aabb.0, slot.local_aabb.1, screen,
+                ) {
+                    let size = (px_max.x - px_min.x).max(px_max.y - px_min.y);
+                    let raw = lod_raw_level(size, lod_settings.threshold_px, MAX_LOD_LEVELS);
+                    needed[raw as usize] = true;
+                }
+            }
+            // 请求合并：需求档未驻留 → 一次行置脏（盘点收集全部未驻留档）
+            let mut any_needed_missing = false;
+            for (level, needed_l) in needed.iter().enumerate().skip(1) {
+                if !*needed_l { continue; }
+                let Some(handle) = &group_levels[level] else { continue };
+                if pool.resident(handle.id()).is_none() {
+                    any_needed_missing = true;
+                } else {
+                    lod_levels_resident += 1;
+                }
+            }
+            if settings.fine_grained
+                && any_needed_missing
+                && g.min_dist <= settings.request_radius
+                && !cooldown.meshes.contains_key(base_id)
+            {
+                request_rows_all.extend(g.rows.iter().copied());
+            }
+            // 非需求档淘汰（距离远优先；冷却窗同源；仅 fine_grained 开）
+            if !settings.fine_grained {
+                continue;
+            }
+            for (level, needed_l) in needed.iter().enumerate().skip(1) {
+                if *needed_l { continue; }
+                let Some(handle) = &group_levels[level] else { continue };
+                let level_id = handle.id();
+                let Some(slot) = pool.resident(level_id) else { continue };
+                if cooldown.meshes.contains_key(&level_id) { continue; }
+                retirements.eject_mesh(level_id);
+                cooldown.meshes.insert(level_id, settings.eject_cooldown_frames);
+                used = used.saturating_sub(slot.vertex.size + slot.index.size);
+                stats.lod_levels_ejected_total += 1;
+                // b7 表条目清账：变体区间将进 free list，残留引脚 = 画错几何
+                for entity in &g.rows {
+                    ledger.mark_lod_dirty(*entity);
+                }
+            }
+        }
+    }
+    stats.lod_levels_resident = lod_levels_resident;
+    for entity in &request_rows_all {
+        ledger.mark_dirty(*entity);
+    }
+    stats.requested_rows_total += request_rows_all.len() as u64;
+    // 本 tick 已置脏的行集（贴图段排除用——置脏行的材质腿会同帧重传贴图，
+    // 对其贴图 eject = 同帧白 eject，结构冲突，见施工记录首钉）
+    let requested_row_set: std::collections::HashSet<Entity> =
+        request_rows_all.iter().copied().collect();
+
+    // —— 6.4.3 贴图字节预算：材质→行距离聚合 → 超支按距离远优先淘汰整资产
+    //（eject_image 同一回收账）；缺席档 = fallback 白图（永驻 0 号槽）兜底，
+    // 重驻留 = 材质五槽盘点（引用行置脏，与 mesh 请求同一次置脏 = 合并）。
+    {
+        // 材质 → (最近引用行距离, 引用行清单)；贴图 → (最近距离, 引用行清单)
+        let mut mat_dist: HashMap<AssetId<StandardMaterial>, (f32, Vec<Entity>)> = HashMap::new();
+        for (entity, row) in ledger.rows() {
+            let dist = (row.model.w_axis.truncate() - cam_pos).length();
+            let e = mat_dist.entry(row.material.id()).or_insert((f32::INFINITY, Vec::new()));
+            e.0 = e.0.min(dist);
+            e.1.push(entity);
+        }
+        let mut image_groups: HashMap<AssetId<Image>, (f32, Vec<Entity>)> = HashMap::new();
+        for (mat_id, (dist, rows)) in &mat_dist {
+            let Some(material) = std_materials.get(*mat_id) else { continue };
+            for handle in [
+                &material.base_color_texture,
+                &material.metallic_roughness_texture,
+                &material.occlusion_texture,
+                &material.normal_map_texture,
+                &material.emissive_texture,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !image_cache.resident(handle.id()).is_some() {
+                    continue; // 未驻留贴图不参与聚合（请求由行腿覆盖）
+                }
+                let e = image_groups.entry(handle.id()).or_insert((f32::INFINITY, Vec::new()));
+                e.0 = e.0.min(*dist);
+                e.1.extend(rows.iter().copied());
+            }
+        }
+        if settings.budget_image_bytes > 0 && used_image > settings.budget_image_bytes {
+            let mut candidates: Vec<(AssetId<Image>, f32, u64)> = image_groups
+                .iter()
+                .filter_map(|(id, (dist, _))| {
+                    let bytes = image_cache.image(*id).map(|g| g.alloc_bytes())?;
+                    Some((*id, *dist, bytes))
+                })
+                .collect();
+            candidates.sort_by(|a, b| b.1.total_cmp(&a.1)); // 距离远优先
+            for (id, _dist, bytes) in candidates {
+                if used_image <= settings.budget_image_bytes {
+                    break;
+                }
+                if cooldown.images.contains_key(&id) { continue; }
+                // 本 tick 已置脏行的贴图跳过：材质腿同帧重传会让 eject 空转
+                //（拉锯），排除后下一 tick 行稳定再淘汰
+                if image_groups[&id].1.iter().any(|r| requested_row_set.contains(r)) {
+                    continue;
+                }
+                retirements.eject_image(id);
+                cooldown.images.insert(id, settings.eject_cooldown_frames);
+                used_image = used_image.saturating_sub(bytes);
+                // 重驻留通道 = 下方"预算内"分支（冷却过期 ∧ 半径内 → 引用行
+                // 置脏重传）——eject 当帧不排队（同帧重传 = 自我拉锯，实抓：
+                // used 恒定全量，eject 空转）
+            }
+            over_budget_image = used_image > settings.budget_image_bytes;
+        } else if settings.budget_image_bytes > 0 {
+            // 预算内：半径内缺席贴图照常请求（与 mesh 请求同拍）
+            for (id, (dist, rows)) in &image_groups {
+                if *dist <= settings.request_radius
+                    && !image_cache.resident(*id).is_some()
+                    && !cooldown.images.contains_key(id)
+                {
+                    defer_image_request.extend(rows.iter().copied());
+                }
+            }
+        }
+        for entity in &defer_image_request {
+            ledger.mark_dirty(*entity);
+        }
+        stats.over_budget_image = over_budget_image;
+        stats.used_image_bytes = used_image;
+    }
 }
 
 /// 驻留管理器插件：设置/读数/冷却三资源 + tick 挂 Last（先于
@@ -276,7 +497,9 @@ impl Plugin for AshResidencyPlugin {
                     .before(flush_uploads)
                     .run_if(resource_exists::<MeshPool>)
                     .run_if(resource_exists::<crate::vulkan::BindlessTables>)
-                    .run_if(resource_exists::<AssetRetirements>),
+                    .run_if(resource_exists::<AssetRetirements>)
+                    .run_if(resource_exists::<Swapchain>)
+                    .run_if(resource_exists::<LodSettings>),
             );
     }
 }
