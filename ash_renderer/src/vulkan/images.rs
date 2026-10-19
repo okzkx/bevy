@@ -134,6 +134,9 @@ pub struct GpuImage {
     /// 实际建成的 mip 级数（规格的全链级数经 blit 能力降级后的值；
     /// view 的 level_count 与上传侧 blit 生成段同源）。
     mip_levels: u32,
+    /// dedicated 分配的实际字节（requirements.size，显存读数口径——
+    /// 分配粒度对齐后的真值，不是 width×height×bpp 的估算值）。
+    alloc_bytes: u64,
 }
 
 impl GpuImage {
@@ -300,6 +303,7 @@ impl GpuImage {
                 width: spec.width,
                 height: spec.height,
                 mip_levels,
+                alloc_bytes: reqs.size,
             })
         }
     }
@@ -332,6 +336,12 @@ impl GpuImage {
     #[must_use]
     pub fn mip_levels(&self) -> u32 {
         self.mip_levels
+    }
+
+    /// dedicated 分配字节（显存读数口径）。
+    #[must_use]
+    pub fn alloc_bytes(&self) -> u64 {
+        self.alloc_bytes
     }
 }
 
@@ -386,6 +396,13 @@ impl ImageCache {
     #[must_use]
     pub fn graveyard_len(&self) -> usize {
         self.graveyard.len()
+    }
+
+    /// 在场贴图 dedicated 分配字节合计(显存读数口径,5.5:requirements.size
+    /// 真值求和,停尸房残图不计——回收后才出账)。
+    #[must_use]
+    pub fn resident_bytes(&self) -> u64 {
+        self.resident.values().map(|(image, _, _)| image.alloc_bytes()).sum()
     }
 
     /// 同身份内容替换登记：旧条目

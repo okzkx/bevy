@@ -15,7 +15,7 @@ use ash_renderer::{
     remote::AshRemotePlugin,
     scene::{
         AshAssetEventPlugin, AshCameraAspectPlugin, AshCameraControlPlugin, AshLedgerPlugin,
-        AshMaterialHookPlugin, AshReadinessPlugin, SceneEntryPlugin,
+        AshMaterialHookPlugin, AshReadinessPlugin, AshWorkloadPlugin, SceneEntryPlugin,
     },
 };
 use bevy::{
@@ -77,6 +77,9 @@ fn main() -> AppExit {
         // 稳定槽账本（机制半边）：PostUpdate 传播后对账——Changed/Removed
         // 增量维护 Entity→实例数据账本（不做每帧全量快照重建）
         .add_plugins(AshLedgerPlugin)
+        // 变更形态注入（机制半边，5.5）：BRP 开关控制的每帧旋转工作源——
+        // 压测矩阵"少量变化/全动态"两形态的确定性变更源，默认关
+        .add_plugins(AshWorkloadPlugin)
         // 资产事件读侧（机制半边）：AssetEvent::Modified → 失效凭据 +
         // 关联行重挂脏标（发现侧第二条入口，与对象五类变更并轨同一脏集）
         .add_plugins(AshAssetEventPlugin)

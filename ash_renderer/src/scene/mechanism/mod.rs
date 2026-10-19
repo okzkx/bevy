@@ -12,6 +12,7 @@
 //! | [`scene_gen`] | 常驻大场景生成器（5.4）：程序化批量铺实例（共享资产/规模参数化/种子复现）+ chunk 身份与整块增删 |
 //! | [`camera_aspect`] | 宽高比补位：随窗口 resize 修正任意相机的 aspect_ratio |
 //! | [`camera_control`] | 相机轨道控制：左键拖拽环绕 + 滚轮推拉，目标点由组件携带 |
+//! | [`workload`] | 变更形态注入（5.5）：BRP 开关控制的每帧旋转工作源（压测矩阵的少量变化/全动态形态） |
 //!
 //! 判定线：driver（上传、帧循环）只依赖本层，业务半边（[`crate::scene::content`]）
 //! 没有任何引擎侧消费者。
@@ -25,6 +26,7 @@ mod ledger;
 mod material_hook;
 mod object_ops;
 pub mod scene_gen;
+mod workload;
 
 pub use asset_events::{AshAssetEventPlugin, AssetInvalidations, AssetRetirements, RecycleStats};
 pub use asset_readiness::{AshReadinessPlugin, AssetReadiness, ReadinessStats};
@@ -33,6 +35,7 @@ pub use camera_aspect::AshCameraAspectPlugin;
 pub use camera_control::{AshCameraControlPlugin, CameraOrbit};
 pub(crate) use camera_control::{apply_camera_command, CameraCommandError, CameraOrbitCommand};
 pub use ledger::{AshLedgerPlugin, IncrementStats, InstanceLedger, InstanceRow};
+pub use workload::{AshWorkloadPlugin, WorkloadSettings};
 pub use material_hook::AshMaterialHookPlugin;
 pub use object_ops::{
     load_image_slot, load_mesh_rebind, replace_handles, spawn_primitive_clone,

@@ -14,6 +14,7 @@
 //! | [`assets`] | 资产内容变更 + 运行期动态加载：mutate/load_mesh/load_image/reload |
 //! | [`cull`] | 剔除读数与开关（5.2）：cull_stats 对照 + cull_set_enabled 开关 |
 //! | [`draw`] | indirect 闭环读数（5.3）：draw_stats 绘制调用/命令条数/不可见计数 |
+//! | [`perf`] | 性能读数与变更形态（5.5）：perf_stats 分位数/分段/显存 + perf_samples 原始导出 + workload 变更形态开关 |
 //!
 //! 机制与边界（侦察笔记《bevy_remote：BRP远程协议与自定义方法》）：handler 本身
 //! 就是一个 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍执行——写值下一帧
@@ -26,6 +27,7 @@ pub mod draw;
 pub mod generate;
 pub mod mouse;
 pub mod objects;
+pub mod perf;
 
 use std::collections::HashMap;
 
@@ -43,6 +45,7 @@ use self::{
     generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     objects::{increment_stats, replace_handles, spawn_primitive},
+    perf::{perf_samples, perf_stats, workload},
 };
 
 use crate::{
@@ -82,7 +85,10 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/mouse_status", mouse_status)
                 .with_method_main("ash_renderer/cull_stats", cull_stats)
                 .with_method_main("ash_renderer/cull_set_enabled", cull_set_enabled)
-                .with_method_main("ash_renderer/draw_stats", draw_stats),
+                .with_method_main("ash_renderer/draw_stats", draw_stats)
+                .with_method_main("ash_renderer/perf_stats", perf_stats)
+                .with_method_main("ash_renderer/perf_samples", perf_samples)
+                .with_method_main("ash_renderer/workload", workload),
             RemoteHttpPlugin::default(),
         ));
     }

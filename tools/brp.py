@@ -263,6 +263,29 @@ def cmd_cull_set(args):
 
 def cmd_draw_stats(args):
     out(rpc(args.host, args.port, "ash_renderer/draw_stats"))
+def cmd_workload(args):
+    if args.on and args.off:
+        sys.exit("brp: --on 与 --off 互斥")
+    params = {}
+    if args.on:
+        params["enabled"] = True
+    elif args.off:
+        params["enabled"] = False
+    if args.rows is not None:
+        params["rows"] = args.rows
+    if not params:
+        sys.exit("brp: 需要至少一项：--on / --off / --rows")
+    out(rpc(args.host, args.port, "ash_renderer/workload", params))
+
+
+def cmd_perf_stats(args):
+    out(rpc(args.host, args.port, "ash_renderer/perf_stats"))
+
+
+def cmd_perf_samples(args):
+    params = {"last": args.last} if args.last else None
+    out(rpc(args.host, args.port, "ash_renderer/perf_samples", params))
+
 
 
 def cmd_load_mesh(args):
@@ -430,6 +453,17 @@ def main():
     p.set_defaults(func=cmd_cull_set)
 
     sub.add_parser("draw-stats", help="indirect 闭环读数：绘制调用数/命令条数/零实例条数/在场走访行（ash_renderer/draw_stats；读数陈旧一帧）").set_defaults(func=cmd_draw_stats)
+    p = sub.add_parser("workload", help="变更形态注入开关（5.5 压测：每帧旋转迭代序前 rows 个 primitive；rows 0 = 关）（ash_renderer/workload）")
+    p.add_argument("--on", action="store_true", help="开启注入")
+    p.add_argument("--off", action="store_true", help="关闭注入")
+    p.add_argument("--rows", type=int, help="每帧改写行数（缺省不动现值）")
+    p.set_defaults(func=cmd_workload)
+
+    sub.add_parser("perf-stats", help="帧时间分位数/CPU 分段均值/显存读数（ash_renderer/perf_stats；环形窗口 2048 帧现算）").set_defaults(func=cmd_perf_stats)
+
+    p = sub.add_parser("perf-samples", help="原始帧样本导出（离线汇总用；ash_renderer/perf_samples）")
+    p.add_argument("--last", type=int, help="取最近 N 条（缺省 256，上限 2048）")
+    p.set_defaults(func=cmd_perf_samples)
 
     p = sub.add_parser("load-mesh", help="异步加载新 mesh：entity=换到既有实体 / source=克隆挂新实体（ash_renderer/load_mesh）")
     p.add_argument("--path", required=True, help='资产路径（如 "models/FlightHelmet/FlightHelmet.gltf#Mesh0/Primitive1"）')

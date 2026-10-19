@@ -7,9 +7,10 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::scene::mechanism::scene_gen::SceneChunk;
 use crate::vulkan::{
-    BindlessTables, CullDiagnostics, CullSettings, IndirectStats, Uploader, FRAME_MODE_LAMBERT,
-    FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
+    BindlessTables, CullDiagnostics, CullSettings, FrameSample, ImageCache, IndirectStats,
+    MeshPool, PerfLedger, Uploader, FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
 };
+use crate::scene::mechanism::WorkloadSettings;
 
 use crate::overlay::framework::paint::AtlasGpu;
 
@@ -124,6 +125,14 @@ pub(in crate::overlay) struct DebugWindow<'a> {
     pub(in crate::overlay) cull_diag: &'a CullDiagnostics,
     /// indirect 闭环读数（draw_frame 每帧刷新；只进计量，不驱动绘制）。
     pub(in crate::overlay) indirect_stats: &'a IndirectStats,
+    /// 帧样本账（5.5：分位数在构建时现算，环形窗口）。
+    pub(in crate::overlay) perf: &'a PerfLedger,
+    /// 变更形态开关（5.5：注入读数，BRP workload 与此同源）。
+    pub(in crate::overlay) workload: &'a WorkloadSettings,
+    /// 贴图缓存（5.5：显存字节读数）。
+    pub(in crate::overlay) image_cache: &'a ImageCache,
+    /// 网格池（5.5：顶点/索引 used/capacity 字节读数）。
+    pub(in crate::overlay) mesh_pool: &'a MeshPool,
     /// chunk 盘点（5.4：块数与成员数计量行；明细走 BRP chunk_census）。
     pub(in crate::overlay) chunks: &'a ChunkRows<'a, 'a>,
 }
@@ -132,7 +141,7 @@ impl DebugWindow<'_> {
     /// 面板本体：fps/窗口信息 + 着色模式单选 + 剔除开关与读数 + 渲染器内部统计
     ///（vulkan 侧资源只读）。
     pub(in crate::overlay) fn show(self) {
-        let Self { ctx, open, fps, window, ppp, mode, stats, cull_settings, cull_diag, indirect_stats, chunks } = self;
+        let Self { ctx, open, fps, window, ppp, mode, stats, cull_settings, cull_diag, indirect_stats, perf, workload, image_cache, mesh_pool, chunks } = self;
         egui::Window::new("ash 调试")
             .open(open)
             .default_pos(egui::pos2(12.0, 12.0))
@@ -173,6 +182,38 @@ impl DebugWindow<'_> {
                     indirect_stats.zero_instance_count,
                     indirect_stats.walk_rows,
                     indirect_stats.pending_rows,
+                ));
+                // 5.5 分档压测：帧时间分位数 + 注入开关 + 显存字节（环形窗口
+                // 现算；GPU 区间 = 本槽两帧前的提交，混合口径）
+                // 三个字段的分位数各算各的（闭包异型不成数组，逐行展开）
+                let show_pct = |ui: &mut egui::Ui, label: &str, field: &dyn Fn(&FrameSample) -> f32| {
+                    let pct = |p: f32| perf.percentile(p, field).unwrap_or(0.0);
+                    ui.monospace(format!(
+                        "{label} p50 {:.2} · p95 {:.2} · p99 {:.2} ms（{n} 样本）",
+                        pct(0.50),
+                        pct(0.95),
+                        pct(0.99),
+                        n = perf.len(),
+                    ));
+                };
+                show_pct(ui, "CPU", &|s| s.cpu_total_ms);
+                show_pct(ui, "GPU 全帧", &|s| s.gpu_total_ms);
+                show_pct(ui, "GPU 图形", &|s| s.gpu_graphics_ms);
+                ui.monospace(format!(
+                    "变更注入 {}（rows {}）——只进计量，诊断不驱动绘制",
+                    if workload.enabled { "开" } else { "关" },
+                    workload.rows,
+                ));
+                let ((v_used, v_cap), (i_used, i_cap)) = mesh_pool.usage();
+                ui.monospace(format!(
+                    "显存 池顶点 {:.1}/{:.1}MB · 索引 {:.1}/{:.1}MB · 贴图 {} 张 {:.1}MB（停尸房 {}）",
+                    v_used as f64 / (1024.0 * 1024.0),
+                    v_cap as f64 / (1024.0 * 1024.0),
+                    i_used as f64 / (1024.0 * 1024.0),
+                    i_cap as f64 / (1024.0 * 1024.0),
+                    image_cache.resident_count(),
+                    image_cache.resident_bytes() as f64 / (1024.0 * 1024.0),
+                    image_cache.graveyard_len(),
                 ));
                 // 5.4 常驻大场景：chunk 组织读数（块数/成员总数；判定线 1 的
                 // 面板侧读数，块明细与整块增删走 BRP census/despawn）

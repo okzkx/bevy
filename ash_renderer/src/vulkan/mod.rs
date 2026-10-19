@@ -15,6 +15,7 @@
 //! | `descriptors` | 资产级 | 常驻描述符表(set0 双表/set1 每帧 UBO)+ 槽位发布 |
 //! | `cull` | 进程级+纯函数 | 视锥剔除 compute 半边(5.2):CullPass 管线 + 平面提取 + CPU 参照 + 诊断账面 |
 //! | `indirect` | 进程级+纯函数 | indirect 闭环 compute 半边(5.3):IndirectPass 命令组装管线 + 诊断账面 + 命令布局参照 |
+//! | `perf` | 进程级 | GPU timestamp 计时(GpuTimer 每帧槽 query pool)+ 帧样本账(PerfLedger 分位数,5.5) |
 //!
 //! 拆分点：同步对象不挂任何一张 swapchain image 上——重建 swapchain 时原地不动；
 //! 编排方 [`crate::driver::host`] 只消费本层重出口的类型，不进子模块内部。
@@ -29,6 +30,7 @@ mod indirect;
 mod instance_table;
 mod mesh_convert;
 mod overlay_pipeline;
+mod perf;
 mod pipeline;
 mod pool;
 mod resources;
@@ -56,6 +58,7 @@ pub use mesh_convert::{convert_mesh, ConvertedMesh, MeshConvertError, VERTEX_STR
 pub use overlay_pipeline::{
     pack_ui_push, OverlayPipeline, UiDrawCall, UiPaint, UI_PUSH_CONSTANTS_SIZE, UI_VERTEX_STRIDE,
 };
+pub use perf::{FrameSample, GpuTimer, PerfLedger, QUERIES_PER_FRAME};
 pub use pipeline::GraphicsPipeline;
 pub use pool::{MeshPool, MeshSlot, PoolRange};
 pub use resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
