@@ -1,7 +1,7 @@
 # Bevy World 与场景生命周期：闯关全清、场景图与引用计数
 
 > 建档（2026-09-29）：由两轮问答沉淀——"为什么 Vulkan 对象放 ECS World 而不是静态变量 / 对比 Unity 删 World 再开"与"闯关游戏每关全清场景内存怎么个做法"。API 均在仓库 0.20.0-dev 内核实（`DespawnOnExit` 见 `crates/bevy_state/src/state_scoped.rs:145`）。
-> 关联篇目：《场景三层含义：glTF scene、WorldAsset与引擎World》（3.1 文件夹）、[图形管线机制篇](../3-静态取数链路/3.4-管线与绘制/图形管线机制：打包清单、双集ABI与bindless下的角色.md)（渲染器作为系统的另一面）。
+> 关联篇目：《场景三层含义：glTF scene、WorldAsset与引擎World》（3.1 文件夹）、[图形管线机制篇](../../3-静态取数链路/3.4-管线与绘制/图形管线机制：打包清单、双集ABI与bindless下的角色.md)（渲染器作为系统的另一面）。
 
 ## §0 判定线
 
