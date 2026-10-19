@@ -10,6 +10,7 @@
 //! |---|---|
 //! | [`mouse`] | 虚拟鼠标：窗口无关鼠标输入源，注入 `Messages<WindowEvent>` 与 bevy_winit 同层 |
 //! | [`objects`] | 对象生命周期方法族：spawn 克隆/换柄写方法 + increment_stats 统计读数 |
+//! | [`shapes`] | 测试实体方法族（6.1.1）：spawn_shape 五形状 + 颜色 → Lambert 材质（遮挡对/墙体样本载具） |
 //! | [`generate`] | 常驻大场景方法族（5.4）：generate_scene 程序化铺实例；chunk 身份与整块增删（5.4.2） |
 //! | [`assets`] | 资产内容变更 + 运行期动态加载：mutate/load_mesh/load_image/reload |
 //! | [`cull`] | 剔除读数与开关（5.2）：cull_stats 对照 + cull_set_enabled 开关 |
@@ -28,6 +29,7 @@ pub mod generate;
 pub mod mouse;
 pub mod objects;
 pub mod perf;
+pub mod shapes;
 
 use std::collections::HashMap;
 
@@ -40,12 +42,13 @@ use serde_json::{json, Value};
 
 use self::{
     assets::{load_image_cmd, load_mesh_cmd, mutate_asset_cmd, reload_asset_cmd},
-    cull::{cull_set_enabled, cull_stats},
+    cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
     draw::draw_stats,
     generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     objects::{increment_stats, replace_handles, spawn_primitive},
     perf::{perf_samples, perf_stats, workload},
+    shapes::spawn_shape,
 };
 
 use crate::{
@@ -57,8 +60,8 @@ use ash_macros::system;
 
 /// BRP 远程通道插件：装协议 + HTTP 传输 + 场景语义
 /// 方法族（本模块三个 + mouse 虚拟鼠标四个 + objects 对象生命周期与统计 +
-/// assets 资产变更与动态加载）。宿主 main 照插件清单惯例只 `add_plugins`，
-/// 方法注册收在本插件内。
+/// shapes 测试实体 + assets 资产变更与动态加载）。宿主 main 照插件清单惯例
+/// 只 `add_plugins`，方法注册收在本插件内。
 pub struct AshRemotePlugin;
 
 impl Plugin for AshRemotePlugin {
@@ -69,6 +72,7 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/set_transform", set_transform)
                 .with_method_main("ash_renderer/set_camera", set_camera)
                 .with_method_main("ash_renderer/spawn_primitive", spawn_primitive)
+                .with_method_main("ash_renderer/spawn_shape", spawn_shape)
                 .with_method_main("ash_renderer/generate_scene", generate_scene)
                 .with_method_main("ash_renderer/generate_chunks", generate_chunks_cmd)
                 .with_method_main("ash_renderer/chunk_census", chunk_census)
@@ -84,6 +88,9 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/mouse_wheel", mouse_wheel)
                 .with_method_main("ash_renderer/mouse_status", mouse_status)
                 .with_method_main("ash_renderer/cull_stats", cull_stats)
+                .with_method_main("ash_renderer/hiz_census", hiz_census)
+                .with_method_main("ash_renderer/occlusion_probe", occlusion_probe)
+                .with_method_main("ash_renderer/occlusion_set_enabled", occlusion_set_enabled)
                 .with_method_main("ash_renderer/cull_set_enabled", cull_set_enabled)
                 .with_method_main("ash_renderer/draw_stats", draw_stats)
                 .with_method_main("ash_renderer/perf_stats", perf_stats)

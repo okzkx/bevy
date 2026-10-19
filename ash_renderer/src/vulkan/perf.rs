@@ -1,6 +1,7 @@
-//! GPU timestamp 计时与帧样本账（5.5.2）：统一口径 §3"GPU 用对应工作区间计时"
-//! 的落点——每帧槽一只 TIMESTAMP query pool（4 个查询位），帧内写 4 个
-//! timestamp，下一轮该槽 fence 等完（= 上轮提交执行完毕）后取回结果。
+//! GPU timestamp 计时与帧样本账（5.5.2，6.1.2 起五位）：统一口径 §3"GPU 用
+//! 对应工作区间计时"的落点——每帧槽一只 TIMESTAMP query pool（5 个查询位），
+//! 帧内写 5 个 timestamp，下一轮该槽 fence 等完（= 上轮提交执行完毕）后取回
+//! 结果。
 //!
 //! 时区划分（记录序 = 提交序，全按 TOP_OF_PIPE 采样——上一段的完成被段间
 //! 屏障与命令序强制先于下一段的 timestamp）：
@@ -8,9 +9,10 @@
 //! | 位 | 采样点 | 区间含义 |
 //! |---|---|---|
 //! | T0 | 进场屏障后、cull dispatch 前 | —（原点） |
-//! | T1 | indirect 组装屏障后、rendering 前 | compute 区间（cull+组装+间隙） |
+//! | T1 | indirect 组装屏障后、rendering 前 | compute 区间（cull+遮挡+组装+间隙） |
 //! | T2 | cmd_end_rendering 后 | 图形区间（清屏+场景+UI+间隙） |
-//! | T3 | end_command_buffer 前 | 全帧 GPU 区间（T0→T3） |
+//! | T3 | Hi-Z 归约链后（6.1.2） | 金字塔构建区间（深度屏障+逐级归约+间隙） |
+//! | T4 | end_command_buffer 前 | 全帧 GPU 区间（T0→T4） |
 //!
 //! 支持性前提不硬校验出局：timestamp 是诊断设施非渲染正确性，队列族
 //! `timestamp_valid_bits == 0` 时降级停用（warn 一次），CPU 半边照常工作。
@@ -30,8 +32,8 @@ use crate::common::error::Result;
 
 use super::Context;
 
-/// 每帧槽查询位数量（T0..T3，见模块注释时区表）。
-pub const QUERIES_PER_FRAME: u32 = 4;
+/// 每帧槽查询位数量（T0..T4，见模块注释时区表；6.1.2 起加 Hi-Z 归约区间）。
+pub const QUERIES_PER_FRAME: u32 = 5;
 
 /// 一帧的计量样本：CPU 分段（统一口径 §3 传播之外的四段——wait/acquire/
 /// 组装/双环/录制提交/present）+ GPU 区间 + 规模读数。全部毫秒。
@@ -51,7 +53,9 @@ pub struct FrameSample {
     pub cpu_total_ms: f32,
     pub gpu_compute_ms: f32,
     pub gpu_graphics_ms: f32,
-    /// T0→T3 全帧 GPU 区间。
+    /// Hi-Z 金字塔构建区间（深度屏障+逐级归约，6.1.2——A/B 账的构建开销单列）。
+    pub gpu_hiz_ms: f32,
+    /// T0→T4 全帧 GPU 区间。
     pub gpu_total_ms: f32,
     /// 规模读数：在场行数（= GPU 命令条数）与剔除后可见数。
     pub instance_rows: u32,
@@ -169,8 +173,8 @@ impl GpuTimer {
             Vec::new()
         };
         bevy::log::info!(
-            "GPU 计时就绪：每帧槽 4 位 timestamp（{valid_bits} 有效位，period {period_ns} ns）——\
-             compute/graphics/全帧三区间随 fence 取回"
+            "GPU 计时就绪：每帧槽 5 位 timestamp（{valid_bits} 有效位，period {period_ns} ns）——\
+             compute/graphics/Hi-Z/全帧四区间随 fence 取回"
         );
         Ok(Self {
             device: ctx.device.clone(),
@@ -218,17 +222,17 @@ impl GpuTimer {
         }
     }
 
-    /// 取本槽位上轮提交的时间戳并换算三区间（毫秒）。前提 = 本槽 fence
+    /// 取本槽位上轮提交的时间戳并换算四区间（毫秒）。前提 = 本槽 fence
     /// 已等完（`wait_for_slot` 之后调用）——fence 只证提交完成。停用、该槽
     /// 从未录制过（首帧空槽）或查询无可读结果（NOT_READY）返回 None。
     ///
     /// # Errors
     /// 查询结果取回失败（设备丢失等，Tier② 语义由调用方分流）。
-    pub fn fetch(&mut self, slot: usize) -> Result<Option<[f32; 3]>> {
+    pub fn fetch(&mut self, slot: usize) -> Result<Option<[f32; 4]>> {
         if !self.enabled || !self.recorded[slot].load(Ordering::Relaxed) {
             return Ok(None);
         }
-        // 可用性由 fence 保证（本槽 fence 已等完 = 上轮 4 个 timestamp 都已
+        // 可用性由 fence 保证（本槽 fence 已等完 = 上轮 5 个 timestamp 都已
         // 写入），不挂 QUERY_RESULT_WAIT——WAIT 对"reset 过但未执行"的查询
         // 会永久阻塞（首跑实抓的挂死根因）。NOT_READY = 空槽漏网，按无读数
         // 处理而非失败。
@@ -254,7 +258,8 @@ impl GpuTimer {
         Ok(Some([
             ticks_to_ms(raw[0], raw[1]),
             ticks_to_ms(raw[1], raw[2]),
-            ticks_to_ms(raw[0], raw[3]),
+            ticks_to_ms(raw[2], raw[3]),
+            ticks_to_ms(raw[0], raw[4]),
         ]))
     }
 }

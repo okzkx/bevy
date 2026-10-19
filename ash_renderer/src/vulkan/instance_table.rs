@@ -19,13 +19,16 @@
 //!
 //! 描述符：set2 = 三条只读 storage binding（b0 对象表 / b1 本帧模型环 /
 //! b2 本帧材质环）+ compute 专属 b3（剔除标记，read_write，5.2）+ compute
-//! 专属 b4（在场环，5.3）+ compute 专属 b5（indirect 命令环，5.3），按帧槽各
-//! 一套，**描述符 init 一次写入永不更新**（buffer 固定容量不重建——容量不够
-//! Init 出局，与 TABLE_CAPACITY 同纪律）。自建 pool 不占 BindlessTables 的
-//! UAB pool——生命周期与消费面都不同，分开建。layout 声明
-//! `VERTEX|FRAGMENT|COMPUTE` 超集（b0/b1/b2 图形+compute 共读；b3/b4/b5
+//! 专属 b4（在场环，5.3）+ compute 专属 b5（indirect 命令环，5.3）+ compute
+//! 专属 b6（遮挡标记，read_write，6.1——Hi-Z 遮挡判定的独立标记位，A/B 归因
+//! 读数口），按帧槽各一套，**描述符 init 一次写入永不更新**（buffer 固定容量
+//! 不重建——容量不够 Init 出局，与 TABLE_CAPACITY 同纪律）。自建 pool 不占
+//! BindlessTables 的 UAB pool——生命周期与消费面都不同，分开建。layout 声明
+//! `VERTEX|FRAGMENT|COMPUTE` 超集（b0/b1/b2 图形+compute 共读；b3/b4/b5/b6
 //! COMPUTE-only——b5 的另一读者是 cmd_draw_indexed_indirect，走命令参数不进
-//! 描述符 stage，图形 shader 不声明不使用）。
+//! 描述符 stage，图形 shader 不声明不使用）。Hi-Z 金字塔采样视图不进 set2：
+//! 它随 swapchain 重建整体换 image，"init 一次写入"纪律不为它开口，独立小
+//! 布局收在 hiz 模块（6.1.2 施工钉明）。
 //!
 //! push 常量从 96B 缩到 4B（实例槽号）：shader 按实例索引读表——逐对象绘制
 //! 参数不再走 CPU 推送（判定线 1 的结构前提）。
@@ -58,6 +61,8 @@ pub const MODEL_STRIDE: u64 = 64;
 pub const MATERIAL_RECORD_SIZE: u64 = 32;
 /// 剔除可见标记字节数（u32/实例槽，5.2）。
 pub const MARK_SIZE: u64 = 4;
+/// 遮挡标记字节数（u32/实例槽，6.1——遮挡独立标记位，A/B 归因读数）。
+pub const OCC_MARK_SIZE: u64 = 4;
 /// indirect 命令字节数（`VkDrawIndexedIndirectCommand`：indexCount/instanceCount/
 /// firstIndex/vertexOffset/firstInstance 五个 u32，5.3——与 WGSL `IndirectCommand`
 /// 布局互证，`vertex_offset` 为 i32 位型按 u32 存储）。
@@ -202,6 +207,9 @@ pub struct InstanceTables {
     /// 剔除标记环 ×`MAX_FRAMES_IN_FLIGHT`（HOST_VISIBLE，compute 每帧重写 /
     /// A/B 关闭时 host 填全可见；宿主诊断直读）。见 cull 模块文档。
     mark_rings: Vec<GpuBuffer>,
+    /// 遮挡标记环 ×`MAX_FRAMES_IN_FLIGHT`（HOST_VISIBLE，6.1：遮挡测试
+    /// compute 写 / fallback 时 host 填全可见 / 宿主诊断直读——A/B 归因读数口）。
+    occ_mark_rings: Vec<GpuBuffer>,
     /// 在场环 ×`MAX_FRAMES_IN_FLIGHT`（HOST_VISIBLE，draw_frame 每帧全量重写
     /// 可绘行槽号列表——DrawList 槽位枚举进 GPU 的通道，5.3）。
     presence_rings: Vec<GpuBuffer>,
@@ -249,6 +257,7 @@ impl InstanceTables {
         let material_bytes =
             align_up(u64::from(MATERIAL_TABLE_CAPACITY) * MATERIAL_RECORD_SIZE, 1024 * 1024);
         let mark_bytes = align_up(u64::from(OBJECT_TABLE_CAPACITY) * MARK_SIZE, 1024 * 1024);
+        let occ_mark_bytes = align_up(u64::from(OBJECT_TABLE_CAPACITY) * OCC_MARK_SIZE, 1024 * 1024);
         let presence_bytes =
             align_up(u64::from(OBJECT_TABLE_CAPACITY) * PRESENCE_ENTRY_SIZE, 1024 * 1024);
         let command_bytes =
@@ -265,6 +274,7 @@ impl InstanceTables {
         let mut model_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut material_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut mark_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut occ_mark_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut presence_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut command_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut fail = None;
@@ -285,6 +295,13 @@ impl InstanceTables {
             }
             match GpuBuffer::create(device, contract, mark_bytes, BufferRole::Storage) {
                 Ok(b) => mark_rings.push(b),
+                Err(e) => {
+                    fail = Some(e);
+                    break;
+                }
+            }
+            match GpuBuffer::create(device, contract, occ_mark_bytes, BufferRole::Storage) {
+                Ok(b) => occ_mark_rings.push(b),
                 Err(e) => {
                     fail = Some(e);
                     break;
@@ -316,6 +333,7 @@ impl InstanceTables {
                 &model_rings,
                 &material_rings,
                 &mark_rings,
+                &occ_mark_rings,
                 &presence_rings,
                 &command_rings,
             )
@@ -328,10 +346,11 @@ impl InstanceTables {
                      + 材质环 {MATERIAL_RECORD_SIZE}B ×{MAX_FRAMES_IN_FLIGHT}({material_bytes}B/槽,\
                      容量 {MATERIAL_TABLE_CAPACITY} 材质槽 bump-only)\
                      + 标记环 {MARK_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({mark_bytes}B/槽,5.2 剔除可见标记)\
+                     + 遮挡标记环 {OCC_MARK_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({occ_mark_bytes}B/槽,6.1 遮挡独立标记)\
                      + 在场环 {MARK_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({presence_bytes}B/槽,5.3 可绘行槽号列表)\
                      + 命令环 {INDIRECT_COMMAND_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({command_bytes}B/槽,\
                      5.3 indirect 命令,DEVICE_LOCAL);\
-                     set2 三条只读 storage + compute 专属 b3/b4/b5 ×{MAX_FRAMES_IN_FLIGHT} 帧,描述符 init 一次写入"
+                     set2 三条只读 storage + compute 专属 b3/b4/b5/b6 ×{MAX_FRAMES_IN_FLIGHT} 帧,描述符 init 一次写入"
                 );
                 Ok(Self {
                     device: device.clone(),
@@ -339,6 +358,7 @@ impl InstanceTables {
                     model_rings,
                     material_rings,
                     mark_rings,
+                    occ_mark_rings,
                     presence_rings,
                     command_rings,
                     capacity_objects: OBJECT_TABLE_CAPACITY,
@@ -363,12 +383,17 @@ impl InstanceTables {
     ///
     /// # Safety
     /// buffer 句柄须刚创建成功且寿命覆盖本函数。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "buffer 家族逐份传入是本函数的形态（每份一个 binding），拆参数束会藏掉与 set/binding 表的逐项对账"
+    )]
     unsafe fn create_descriptor_objects(
         device: &Device,
         object_buffer: &GpuBuffer,
         model_rings: &[GpuBuffer],
         material_rings: &[GpuBuffer],
         mark_rings: &[GpuBuffer],
+        occ_mark_rings: &[GpuBuffer],
         presence_rings: &[GpuBuffer],
         command_rings: &[GpuBuffer],
     ) -> Result<(vk::DescriptorSetLayout, Vec<vk::DescriptorSet>, vk::DescriptorPool)> {
@@ -383,10 +408,11 @@ impl InstanceTables {
                     .descriptor_count(1)
                     .stage_flags(stages)
             };
-            // b3/b4/b5 = 剔除标记(read_write)/在场环/命令环 storage：compute
-            // 专属——图形 shader 不声明不使用，stage 收窄到 COMPUTE（b0/b1/b2
-            // 的超集声明不动）。b5 的另一读者 cmd_draw_indexed_indirect 不经
-            // 描述符（命令参数直取 buffer），不在此 stage 面内。
+            // b3/b4/b5/b6 = 剔除标记(read_write)/在场环/命令环/遮挡标记
+            // (read_write, 6.1) storage：compute 专属——图形 shader 不声明不
+            // 使用，stage 收窄到 COMPUTE（b0/b1/b2 的超集声明不动）。b5 的
+            // 另一读者 cmd_draw_indexed_indirect 不经描述符（命令参数直取
+            // buffer），不在此 stage 面内。
             let compute_only = |binding: u32| {
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(binding)
@@ -394,7 +420,7 @@ impl InstanceTables {
                     .descriptor_count(1)
                     .stage_flags(vk::ShaderStageFlags::COMPUTE)
             };
-            let bindings = [storage(0), storage(1), storage(2), compute_only(3), compute_only(4), compute_only(5)];
+            let bindings = [storage(0), storage(1), storage(2), compute_only(3), compute_only(4), compute_only(5), compute_only(6)];
             let set2_layout = device
                 .create_descriptor_set_layout(
                     &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
@@ -406,7 +432,7 @@ impl InstanceTables {
                     .max_sets(MAX_FRAMES_IN_FLIGHT as u32)
                     .pool_sizes(&[vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count((MAX_FRAMES_IN_FLIGHT * 6) as u32)]),
+                        .descriptor_count((MAX_FRAMES_IN_FLIGHT * 7) as u32)]),
                 None,
             ) {
                 Ok(p) => p,
@@ -427,10 +453,10 @@ impl InstanceTables {
                     return Err(VulkanError::from(e));
                 }
             };
-            // 描述符一次写入:b0 对象表(全量)、b1/b2/b3/b4/b5 各帧槽自己的环(全量)。
+            // 描述符一次写入:b0 对象表(全量)、b1/b2/b3/b4/b5/b6 各帧槽自己的环(全量)。
             // info 先收齐再构造 write——write 持有 info 的引用,infos 之后不再变
-            let mut infos = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * 6);
-            let mut meta = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * 6);
+            let mut infos = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * 7);
+            let mut meta = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * 7);
             for (frame, set) in sets.iter().enumerate() {
                 for (binding, buffer, range) in [
                     (
@@ -462,6 +488,11 @@ impl InstanceTables {
                         5,
                         &command_rings[frame],
                         OBJECT_TABLE_CAPACITY as u64 * INDIRECT_COMMAND_SIZE,
+                    ),
+                    (
+                        6,
+                        &occ_mark_rings[frame],
+                        OBJECT_TABLE_CAPACITY as u64 * OCC_MARK_SIZE,
                     ),
                 ] {
                     infos.push(
@@ -524,6 +555,13 @@ impl InstanceTables {
     #[must_use]
     pub fn mark_ring(&mut self, frame: usize) -> &mut GpuBuffer {
         &mut self.mark_rings[frame]
+    }
+
+    /// 第 `frame` 帧槽的遮挡标记环（6.1：遮挡测试 compute 写 / fallback 时
+    /// host 填全可见 / 宿主诊断读——A/B 归因读数口，fence 纪律同上）。
+    #[must_use]
+    pub fn occ_mark_ring(&mut self, frame: usize) -> &mut GpuBuffer {
+        &mut self.occ_mark_rings[frame]
     }
 
     /// 第 `frame` 帧槽的在场环（draw_frame 全量重写可绘行槽号列表，

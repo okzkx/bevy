@@ -178,6 +178,21 @@ def cmd_spawn(args):
     out(rpc(args.host, args.port, "ash_renderer/spawn_primitive", params))
 
 
+def cmd_spawn_shape(args):
+    params = {"shape": args.shape}
+    if args.color:
+        params["color"] = args.color
+    if args.translation:
+        params["translation"] = args.translation
+    if args.rotation:
+        params["rotation_euler_deg"] = args.rotation
+    if args.scale:
+        params["scale"] = args.scale
+    if args.name:
+        params["name"] = args.name
+    out(rpc(args.host, args.port, "ash_renderer/spawn_shape", params))
+
+
 def cmd_generate_chunks(args):
     params = {
         "chunk_grid": args.chunk_grid,
@@ -259,6 +274,29 @@ def cmd_cull_stats(args):
 def cmd_cull_set(args):
     out(rpc(args.host, args.port, "ash_renderer/cull_set_enabled",
             {"enabled": args.enabled == "true"}))
+
+
+def cmd_occlusion_set(args):
+    out(rpc(args.host, args.port, "ash_renderer/occlusion_set_enabled",
+            {"enabled": args.enabled == "true"}))
+
+
+def cmd_hiz_census(args):
+    params = {}
+    if args.level is not None:
+        params["level"] = args.level
+    if args.slot is not None:
+        params["slot"] = args.slot
+    out(rpc(args.host, args.port, "ash_renderer/hiz_census", params))
+
+
+def cmd_occlusion_probe(args):
+    params = {}
+    if args.entity:
+        params["entity"] = args.entity
+    if args.slot is not None:
+        params["slot"] = args.slot
+    out(rpc(args.host, args.port, "ash_renderer/occlusion_probe", params))
 
 
 def cmd_draw_stats(args):
@@ -397,6 +435,15 @@ def main():
     p.add_argument("--name-suffix", help="Name 后缀（默认 （副本））")
     p.set_defaults(func=cmd_spawn)
 
+    p = sub.add_parser("spawn-shape", help="造测试体：五形状+颜色→Lambert 材质（ash_renderer/spawn_shape，6.1.1；mesh 按形状/材质按颜色缓存，同参共享零新上传）")
+    p.add_argument("shape", choices=["sphere", "cylinder", "capsule", "cone", "cuboid"], help="形状（cuboid 非均匀缩放 = 墙体遮挡样本）")
+    p.add_argument("--color", nargs=3, type=float, metavar=("R", "G", "B"), help="sRGB 颜色 [0,1]（默认 0.8 0.8 0.8）")
+    p.add_argument("--translation", nargs=3, type=float, metavar=("X", "Y", "Z"), help="世界坐标位置（默认原点）")
+    p.add_argument("--rotation", nargs=3, type=float, metavar=("YAW", "PITCH", "ROLL"), help="欧拉角 YXZ 度数（默认 0）")
+    p.add_argument("--scale", nargs=3, type=float, metavar=("X", "Y", "Z"), help="非均匀缩放（默认 1 1 1）")
+    p.add_argument("--name", help="树内 Name（默认 测试体-<shape>）")
+    p.set_defaults(func=cmd_spawn_shape)
+
     p = sub.add_parser("generate", help="程序化铺实例（ash_renderer/generate_scene，5.4 常驻大场景生成器：批量克隆共享资产，种子固定可复现）")
     p.add_argument("--count", type=int, required=True, help="实例总数")
     p.add_argument("--columns", type=int, required=True, help="横向列数（行数=count 向上取整除列数；方阵给 ceil(sqrt(count))）")
@@ -451,6 +498,20 @@ def main():
     p = sub.add_parser("cull-set", help="剔除开关（ash_renderer/cull_set_enabled；true=compute dispatch，false=host 全可见填充——数据层 A/B）")
     p.add_argument("--enabled", required=True, choices=["true", "false"], help="开关目标态")
     p.set_defaults(func=cmd_cull_set)
+
+    p = sub.add_parser("occlusion-set", help="Hi-Z 遮挡开关（ash_renderer/occlusion_set_enabled，6.1；true=遮挡测试 dispatch，false=host 填全可见——数据层 A/B）")
+    p.add_argument("--enabled", required=True, choices=["true", "false"], help="开关目标态")
+    p.set_defaults(func=cmd_occlusion_set)
+
+    p = sub.add_parser("hiz-census", help="Hi-Z 金字塔读回统计（ash_renderer/hiz_census，6.1 判定线 3 读数口：逐级 min/max/mean/背景占比）")
+    p.add_argument("--level", type=int, help="只读这一级（缺省全级）")
+    p.add_argument("--slot", type=int, help="帧槽（缺省 0）")
+    p.set_defaults(func=cmd_hiz_census)
+
+    p = sub.add_parser("occlusion-probe", help="遮挡判定 CPU 参照（ash_renderer/occlusion_probe，6.1：投屏/mip层/4tap/occluder 逐实体中间量，只进验证）")
+    p.add_argument("--entity", help="只探这一实体（缺省全部可绘行）")
+    p.add_argument("--slot", type=int, help="金字塔帧槽（缺省 0）")
+    p.set_defaults(func=cmd_occlusion_probe)
 
     sub.add_parser("draw-stats", help="indirect 闭环读数：绘制调用数/命令条数/零实例条数/在场走访行（ash_renderer/draw_stats；读数陈旧一帧）").set_defaults(func=cmd_draw_stats)
     p = sub.add_parser("workload", help="变更形态注入开关（5.5 压测：每帧旋转迭代序前 rows 个 primitive；rows 0 = 关）（ash_renderer/workload）")
