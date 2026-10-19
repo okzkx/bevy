@@ -32,6 +32,7 @@ use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
 use crate::vulkan::cull::CullDraw;
+use crate::vulkan::indirect::IndirectDraw;
 use crate::vulkan::overlay_pipeline::{pack_ui_push, UiPaint};
 use crate::vulkan::Context;
 
@@ -40,19 +41,9 @@ pub use super::depth::{DepthTarget, DEPTH_FORMAT};
 /// CPU 领先 GPU 的最大帧数：第 N 帧要等第 N-2 帧的组资源空出来才能重录。
 pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
-/// 一个 draw 的绘制引脚：实例槽号（push，4B——shader 按实例索引读 GPU 常驻
-/// 表取全部逐对象参数，见 instance_table 模块文档）+ 池内引脚。
-/// 录制层只消费；host 的 DrawList 组装（槽位枚举）在 `driver::host::drawlist`。
-#[derive(Clone, Copy, Debug)]
-pub struct DrawCall {
-    /// 实例槽号（对象表/模型环下标，push 4B）。
-    pub instance: u32,
-    /// `vkCmdDrawIndexed` 的 vertexOffset（字节偏移 ÷ 32，来自 MeshSlot）。
-    pub vertex_base: u32,
-    /// 索引池内首索引号（字节偏移 ÷ 4，来自 MeshSlot）。
-    pub first_index: u32,
-    pub index_count: u32,
-}
+/// indirect 命令字节步长（`VkDrawIndexedIndirectCommand` = 20B，instance_table
+/// 的 `INDIRECT_COMMAND_SIZE` 同源——draw 端 stride 与命令环步长钉同值）。
+pub const INDIRECT_COMMAND_STRIDE: u32 = 20;
 
 /// 一次绘制帧录制的全部输入（draw_frame 组装，`record_frame` 消费）。
 pub struct FrameDraw<'a> {
@@ -66,7 +57,12 @@ pub struct FrameDraw<'a> {
     pub set2: vk::DescriptorSet,
     pub vertex_buffer: Option<vk::Buffer>,
     pub index_buffer: Option<vk::Buffer>,
-    pub draws: &'a [DrawCall],
+    /// 在场行数（= GPU 侧命令条数；0 = 空场/全暂缓，场景绘制整段跳过）。
+    /// 逐对象参数在 GPU 常驻表——录制层零逐对象参数（push 与逐 draw 循环
+    /// 已随 5.3 退役），判定线 1 的代码面。
+    pub indirect_count: u32,
+    /// 本帧槽命令环 buffer（build_indirect 每帧重写，`count > 0` 时消费）。
+    pub indirect_buffer: vk::Buffer,
     /// overlay 管线（UI 半边的绘制入口；深度格式与实例对齐声明，读/写全关）。
     pub overlay_pipeline: vk::Pipeline,
     /// overlay 自有 pipeline layout（只借 set0，无 set1）——换管线后描述符绑定
@@ -80,6 +76,11 @@ pub struct FrameDraw<'a> {
     /// 槽标记填全可见，诊断读数仍有语义）。录制在渲染进场之前（compute 写 →
     /// 屏障 → 图形读的依赖形状，消费归 5.3）。
     pub cull: Option<CullDraw>,
+    /// indirect 命令组装 dispatch（5.3；在场行数为 0 为 None——空场无命令可
+    /// 组装，场景绘制整段跳过）。录制在 cull dispatch 之后（标记写 → 组装读
+    /// 的依赖由 cull::record 的预置屏障收口），命令 → 绘制的依赖由组装自带
+    /// 屏障收口（indirect::record）。
+    pub indirect: Option<IndirectDraw>,
     /// 上传票据等待值：图形提交在 GPU 侧等 timeline ≥ 此值——"上传完成才可使用"
     /// 的执法点（0 = 无上传过，跳过等待）。该等待同时收口 transfer 写的跨队列
     /// 内存可见性（池/贴图 CONCURRENT 双族共享，无所有权屏障，定案）。
@@ -243,7 +244,8 @@ impl FramePool {
     }
 
     /// 录制并提交一帧：进场屏障（颜色+深度）→ 待办 acquire（异族让渡）→
-    /// dynamic rendering（清屏 + DrawList 逐 draw + overlay UI 接画，同实例）→
+    /// 剔除 + indirect 命令组装 dispatch（compute，渲染进场之前）→
+    /// dynamic rendering（清屏 + 一次 indirect 提交 + overlay UI 接画，同实例）→
     /// 出场屏障（颜色）→ queue_submit。提交等 acquire 的 image_available + 上传
     /// 票据（GPU 侧），完成时发 render_finished + fence。
     /// `render_finished` 按 acquire 的 image index 从 Swapchain 取，不按帧槽轮转。
@@ -339,6 +341,14 @@ impl FramePool {
                 super::cull::record(device, frame.command_buffer, draw.set2, cull);
             }
 
+            // —— indirect 命令组装 dispatch（5.3，渲染进场之前）：compute 读
+            // 在场环（host 每帧写）+ 标记（cull 写或 host 全可见填充）+ 对象表，
+            // 逐在场行组装 VkDrawIndexedIndirectCommand 进命令环本帧槽；随后
+            // 自带屏障是命令写 → DRAW_INDIRECT 读的依赖形状。空场 = None。
+            if let Some(indirect) = &draw.indirect {
+                super::indirect::record(device, frame.command_buffer, draw.set2, indirect);
+            }
+
             // —— dynamic rendering：清屏 + 绘制。颜色 loadOp CLEAR（线性域清值，
             // SRGB view 的编码在 ROP 写出时做）；深度 loadOp CLEAR 清 0（reverse-Z
             // 近平面），storeOp DON'T CARE（深度从不读回）。
@@ -375,15 +385,19 @@ impl FramePool {
                     .depth_attachment(&depth_attachment),
             );
 
-            if !draw.draws.is_empty() {
-                // 面板定案：draws 非空时池 buffer 必在（upload 链先于帧循环驻留成功
-                // 才会有 draw），None 是状态矛盾——返回 Err 经统一通道按 Tier②
+            // —— 场景绘制（5.3 indirect 闭环）：一次 cmd_draw_indexed_indirect
+            // 消费命令环——绘制调用数不随在场对象数增长（判定线 1 的代码面）。
+            // 逐 draw 循环 + 逐对象 push 4B 已退役（firstInstance 携带实例槽号，
+            // VS 按 @builtin(instance_index) 读 set2）。
+            if draw.indirect_count > 0 {
+                // 在场行非空时池 buffer 必在（upload 链先于帧循环驻留成功才会有
+                // 在场行），None 是状态矛盾——返回 Err 经统一通道按 Tier②
                 // 优雅退出（比静默跳过整个场景诚实）
                 let vertex_buffer = draw.vertex_buffer.ok_or_else(|| {
-                    VulkanError::Upload("DrawList 非空但顶点池缺席——上传链与绘制链的状态矛盾".into())
+                    VulkanError::Upload("在场行非空但顶点池缺席——上传链与绘制链的状态矛盾".into())
                 })?;
                 let index_buffer = draw.index_buffer.ok_or_else(|| {
-                    VulkanError::Upload("DrawList 非空但索引池缺席——上传链与绘制链的状态矛盾".into())
+                    VulkanError::Upload("在场行非空但索引池缺席——上传链与绘制链的状态矛盾".into())
                 })?;
                 device.cmd_bind_pipeline(
                     frame.command_buffer,
@@ -425,7 +439,8 @@ impl FramePool {
                         extent,
                     }],
                 );
-                // 池整绑一次（offset 0），逐 draw 用 vertexOffset/firstIndex 定位
+                // 池整绑一次（offset 0），逐命令在 GPU 侧定位（vertexOffset/
+                // firstIndex 已进命令）
                 device.cmd_bind_vertex_buffers(frame.command_buffer, 0, &[vertex_buffer], &[0]);
                 device.cmd_bind_index_buffer(
                     frame.command_buffer,
@@ -433,28 +448,16 @@ impl FramePool {
                     0,
                     vk::IndexType::UINT32,
                 );
-                for call in draw.draws {
-                    // push 4B = 实例槽号：shader 按实例索引读 GPU 常驻表取
-                    // model/材质/范围（96B PushData 已随 5.1 退役）
-                    let push_bytes = call.instance.to_le_bytes();
-                    device.cmd_push_constants(
-                        frame.command_buffer,
-                        draw.layout,
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        0,
-                        &push_bytes,
-                    );
-                    device.cmd_draw_indexed(
-                        frame.command_buffer,
-                        call.index_count,
-                        1,
-                        call.first_index,
-                        // vertexOffset 的 SPIR-V 类型是带符号的（可负偏移做实例复用
-                        // 等技巧）；池引脚恒为正字节偏移÷32，值域安全
-                        call.vertex_base as i32,
-                        0,
-                    );
-                }
+                // 一次 indirect 提交：count = 在场行数（CPU 在账信息，非可见集
+                // 回读）；不可见行 instanceCount=0，GPU 零工作。stride = 20B
+                //（VkDrawIndexedIndirectCommand，命令环步长同源）。
+                device.cmd_draw_indexed_indirect(
+                    frame.command_buffer,
+                    draw.indirect_buffer,
+                    0,
+                    draw.indirect_count,
+                    INDIRECT_COMMAND_STRIDE,
+                );
             }
 
             // —— UI 半边：同一 dynamic rendering 实例内接画——raster order

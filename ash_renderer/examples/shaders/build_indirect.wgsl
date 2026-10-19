@@ -1,0 +1,75 @@
+// 5.3 indirect 闭环（compute 单入口）：读在场环（可绘行槽号列表）+ 剔除标记 +
+// 对象表，逐在场行组装一条 `VkDrawIndexedIndirectCommand`（不可见 →
+// instanceCount=0）——绘制调用数从此不随对象数增长，图形侧一次
+// cmd_draw_indexed_indirect 消费。CPU 参照语义 = vulkan/indirect.rs 的
+// assemble_command（与 5.2 的 cull CPU 参照同款验证纪律）。
+//
+// 与 Bevy 参照（crates/bevy_pbr/src/render/build_indirect_params.wesl）的取舍：
+// 同为"标记/计数 → indirect 参数"的 GPU 组装，我们不做批集与动态槽位分配
+//（MULTI_DRAW_INDIRECT_COUNT 路线、atomicAdd 抢槽都不要）——固定槽位起步，
+// 第 i 条命令恒对应在场环第 i 行（Bevy 的 1:1 分支同形状），命令条数 =
+// 在场行数 = CPU 在账信息（账本可绘行数，非可见集回读）。压缩合批归 5.4+。
+//
+// 接口（与 cull.wgsl 同一 set2 描述符集对象，compute 管线布局只挂这一个
+// set，故组号是 0——组号随管线布局走，5.2 首钉）：
+// - set0 b0：对象表（48B ObjectRecord）——三个池引脚 first_index/index_count/
+//   vertex_base 直接进命令，不新建表。
+// - set0 b3：剔除标记（u32/实例槽；cull.wgsl 写或 A/B 关闭时 host 全可见填充）。
+// - set0 b4：在场环（u32 可绘行槽号，draw_frame 全量重写——DrawList 槽位
+//   枚举进 GPU 的通道；退休槽/暂缓行不在列表 = 天然无命令，幽灵对象问题
+//   在列表源头关闭）。
+// - set0 b5：命令环（read_write storage，20B/条 IndirectCommand）。
+// - push（var<immediate>，4B）：count = 在场行数（dispatch 上界）。
+//
+// 并发语义：每 invocation 写互不重叠的 commands[i]，普通 store 无需原子；
+// instanceCount 取 marks[slot]（0/1），超出 bound 的槽不派不在场、无陈旧
+// 读取（marks 对在场槽恒新鲜：dispatch 上界 = bump bound ≥ 任何在场槽号）。
+
+struct ObjectRecord {
+    first_index: u32,
+    index_count: u32,
+    vertex_base: u32,
+    material_index: u32,
+    aabb_min: vec4f,
+    aabb_max: vec4f,
+}
+
+// VkDrawIndexedIndirectCommand 的字节镜像（5×u32 = 20B，字段序 = 规范定义序；
+// vertexOffset 在规范里是带符号 int32，位型差异不影响存储布局）。
+struct IndirectCommand {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+    first_instance: u32,
+}
+
+@group(0) @binding(0) var<storage, read> objects: array<ObjectRecord>;
+@group(0) @binding(3) var<storage, read> marks: array<u32>;
+@group(0) @binding(4) var<storage, read> presence: array<u32>;
+@group(0) @binding(5) var<storage, read_write> commands: array<IndirectCommand>;
+
+var<immediate> push: PushBuild;
+struct PushBuild {
+    // dispatch 上界 = 在场行数（draw_frame 从账本可绘行数取，CPU 在账信息）。
+    count: u32,
+}
+
+@compute @workgroup_size(64)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if i >= push.count {
+        return;
+    }
+    let slot = presence[i];
+    let rec = objects[slot];
+    commands[i] = IndirectCommand(
+        rec.index_count,
+        marks[slot],              // 不可见 → instanceCount = 0（判定线 2）
+        rec.first_index,
+        bitcast<i32>(rec.vertex_base), // vertexOffset 带符号（池引脚值域恒正）
+        slot,                     // firstInstance = 实例槽号：push 4B 退役，VS 按
+                                  // @builtin(instance_index) 读 set2（instanceCount=1 时
+                                  // instance_index == firstInstance）
+    );
+}

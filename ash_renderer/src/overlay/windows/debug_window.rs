@@ -6,7 +6,7 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::vulkan::{
-    BindlessTables, CullDiagnostics, CullSettings, Uploader, FRAME_MODE_LAMBERT,
+    BindlessTables, CullDiagnostics, CullSettings, IndirectStats, Uploader, FRAME_MODE_LAMBERT,
     FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
 };
 
@@ -116,13 +116,15 @@ pub(in crate::overlay) struct DebugWindow<'a> {
     pub(in crate::overlay) cull_settings: &'a mut CullSettings,
     /// 剔除诊断读数（draw_frame 每帧刷新；只进计量，不驱动绘制）。
     pub(in crate::overlay) cull_diag: &'a CullDiagnostics,
+    /// indirect 闭环读数（draw_frame 每帧刷新；只进计量，不驱动绘制）。
+    pub(in crate::overlay) indirect_stats: &'a IndirectStats,
 }
 
 impl DebugWindow<'_> {
     /// 面板本体：fps/窗口信息 + 着色模式单选 + 剔除开关与读数 + 渲染器内部统计
     ///（vulkan 侧资源只读）。
     pub(in crate::overlay) fn show(self) {
-        let Self { ctx, open, fps, window, ppp, mode, stats, cull_settings, cull_diag } = self;
+        let Self { ctx, open, fps, window, ppp, mode, stats, cull_settings, cull_diag, indirect_stats } = self;
         egui::Window::new("ash 调试")
             .open(open)
             .default_pos(egui::pos2(12.0, 12.0))
@@ -153,6 +155,16 @@ impl DebugWindow<'_> {
                     cull_diag.rows_compared,
                     cull_diag.bound,
                     cull_diag.marks_frame,
+                ));
+                // 5.3 indirect 闭环：绘制调用数恒 1（判定线 1 读数）、命令条数
+                // 与 instanceCount=0 条数（诊断标注，不驱动绘制）
+                ui.monospace(format!(
+                    "indirect 提交 {} 次 · 命令 {} 条（零实例 {}，在场走访 {} 行暂缓 {}）——诊断不驱动绘制",
+                    indirect_stats.draw_calls_recorded,
+                    indirect_stats.command_count,
+                    indirect_stats.zero_instance_count,
+                    indirect_stats.walk_rows,
+                    indirect_stats.pending_rows,
                 ));
                 ui.separator();
                 ui.monospace(format!(

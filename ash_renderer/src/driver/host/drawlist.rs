@@ -1,14 +1,19 @@
-//! DrawList 组装与双环写入（5.1）：从账本行到 `DrawCall` 的**槽位枚举**，
-//! 以及模型环/材质环的每帧写入。
+//! DrawList 组装与双环写入（5.1/5.3）：从账本行到**可绘行槽位枚举**，
+//! 以及模型环/材质环/在场环的每帧写入。
 //!
-//! 5.1 分工：本模块是"槽位枚举器"——逐行查实例槽与池引脚组 `DrawCall`
-//!（push 只剩 4B 实例槽号），逐对象绘制参数的组装职责已随 PushData 退役；
+//! 5.1 分工：本模块是"槽位枚举器"——逐行查实例槽与驻留账本/容器做可绘判定；
+//! 5.3 起 `DrawCall`（槽号 + 池引脚）退役，枚举产物只剩可绘行实例槽号列表
+//!（`slots`）——它写进在场环（GPU 侧 build_indirect 的行宇宙），录制层的
+//! 逐 draw 循环与逐对象 push 一并退役（判定线 1 的走访侧口径：槽位枚举 +
+//! 材质环写侧走访是账本在账信息，不是可见集回读；绘制调用与 push 字节恒定）。
 //! 行的 GPU 内容由对象表（写一次）+ 模型环/材质环（每帧重写）承载。
 //! hazard 纪律：环写入只发生在 `draw_frame` 的 `wait_for_slot` 之后
 //!（与本帧 UBO 同一条 fence 证据），详见 `vulkan::instance_table` 模块文档。
 //!
 //! 行级可绘判定与 4.x 语义一致：实例槽缺（未驻留成表）/mesh 未驻留/材质
 //! 容器缺席 = 该行暂缓（Tier①，自愈后消失）；缺贴图 = fallback 白图照画。
+//! 暂缓行不进在场环 = 自动无命令（5.3 待决 6 的钉明：暂缓语义由枚举源头
+//! 承载，GPU 侧零特判）。
 
 use bevy::asset::AssetId;
 use bevy::pbr::StandardMaterial;
@@ -18,14 +23,14 @@ use std::collections::HashSet;
 use crate::common::error::VulkanError;
 use crate::scene::InstanceLedger;
 use crate::vulkan::{
-    pack_material_record, pack_model, BindlessTables, DrawCall, ImageCache, InstanceTables,
+    pack_material_record, pack_model, BindlessTables, ImageCache, InstanceTables,
     MATERIAL_RECORD_SIZE, MODEL_STRIDE, MeshPool,
 };
 
 /// 一帧 DrawList 组装产物。
 pub(crate) struct DrawAssembly {
-    /// 槽位枚举（录制层逐 draw push 4B 实例槽号）。
-    pub draws: Vec<DrawCall>,
+    /// 可绘行实例槽号列表（在场环全量重写输入；录制层零逐对象消费）。
+    pub slots: Vec<u32>,
     /// 暂缓行数（实例槽缺/mesh 未驻留/材质缺席）。
     pub pending_rows: usize,
     /// alpha<1 的行数（不透明覆盖收账日志用）。
@@ -34,14 +39,14 @@ pub(crate) struct DrawAssembly {
     pub materials: Vec<AssetId<StandardMaterial>>,
 }
 
-/// 组装 DrawList：账本行 → 实例槽 + 驻留账本/资产容器 → 槽位 + 池引脚。
+/// 组装 DrawList：账本行 → 实例槽 + 驻留账本/资产容器 → 可绘行槽号列表。
 /// 账本读是纯 BTreeMap 走访——零组件扫描零 tick 比较（4.1 语义不变）。
 pub(crate) fn assemble(
     ledger: &InstanceLedger,
     pool: &MeshPool,
     std_materials: &Assets<StandardMaterial>,
 ) -> DrawAssembly {
-    let mut draws: Vec<DrawCall> = Vec::with_capacity(ledger.len());
+    let mut slots: Vec<u32> = Vec::with_capacity(ledger.len());
     let mut pending_rows = 0usize;
     let mut alpha_override = 0usize;
     let mut material_seen: HashSet<AssetId<StandardMaterial>> = HashSet::new();
@@ -50,10 +55,12 @@ pub(crate) fn assemble(
             pending_rows += 1;
             continue;
         };
-        let Some(mesh_slot) = pool.resident(row.mesh.id()) else {
+        // 池引脚不再需要（命令由 GPU 从对象记录自取）——驻留判定本身仍按
+        // MeshSlot 在账（mesh 未驻留 = 暂缓）
+        if pool.resident(row.mesh.id()).is_none() {
             pending_rows += 1;
             continue;
-        };
+        }
         let Some(material) = std_materials.get(&row.material) else {
             pending_rows += 1;
             continue;
@@ -63,15 +70,10 @@ pub(crate) fn assemble(
             alpha_override += 1;
         }
         material_seen.insert(row.material.id());
-        draws.push(DrawCall {
-            instance: slot,
-            vertex_base: mesh_slot.vertex_base(),
-            first_index: mesh_slot.first_index(),
-            index_count: mesh_slot.index_count,
-        });
+        slots.push(slot);
     }
     DrawAssembly {
-        draws,
+        slots,
         pending_rows,
         alpha_override,
         materials: material_seen.into_iter().collect(),
@@ -134,9 +136,25 @@ fn write_material_ring(
     Ok(())
 }
 
+/// 写在场环（全量重写）：可绘行槽号列表 → 本帧槽的环。5.3 的"逐 draw 循环"
+/// 退役通道——GPU 侧 build_indirect 以本列表为行宇宙（退休槽/暂缓行不在
+/// 列表 = 自动无命令），写发生条件与帧 UBO 同一条 fence 证据。
+fn write_presence_ring(
+    tables: &mut InstanceTables,
+    slots: &[u32],
+    frame: usize,
+) -> Result<(), VulkanError> {
+    if slots.is_empty() {
+        return Ok(()); // 空场：环内容无人读（dispatch 上界 = count = 0）
+    }
+    let bytes: Vec<u8> = slots.iter().flat_map(|s| s.to_le_bytes()).collect();
+    tables.presence_ring(frame).write(0, &bytes)?;
+    Ok(())
+}
+
 /// 双环写入入口（draw_frame 在 wait_for_slot 之后调用）：模型增量 + 材质
-/// 全量都落在本帧槽的环上。失败按 Tier② 冒泡（环写失败 = host-visible
-/// 契约被打破，帧循环无法继续）。
+/// 全量 + 在场环全量都落在本帧槽的环上。失败按 Tier② 冒泡（环写失败 =
+/// host-visible 契约被打破，帧循环无法继续）。
 ///
 /// # Errors
 /// 环 buffer 写失败（host-visible 缺席/越界，内部契约矛盾级）。
@@ -150,5 +168,6 @@ pub(crate) fn write_rings(
 ) -> Result<(), VulkanError> {
     write_model_ring(tables, ledger, frame)?;
     write_material_ring(tables, std_materials, image_cache, &assembly.materials, frame)?;
+    write_presence_ring(tables, &assembly.slots, frame)?;
     Ok(())
 }

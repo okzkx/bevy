@@ -1,9 +1,11 @@
-//! 图形管线：dynamic rendering 图形管线 + pipeline layout（set0/set1/set2 + push）。
+//! 图形管线：dynamic rendering 图形管线 + pipeline layout（set0/set1/set2）。
 //!
 //! 管线吃的是三方契约：set0/set1 layout 来自 [`super::BindlessTables`]、set2
-//! layout 来自 [`super::InstanceTables`]（"集与布局同源，不可另建"），push
-//! constant range 按 4B 冻结（实例槽号；5.1 起逐对象绘制参数进 GPU 常驻表，
-//! shader 按实例索引读——96B PushData 退役，见 instance_table 模块文档）。
+//! layout 来自 [`super::InstanceTables`]（"集与布局同源，不可另建"）。push
+//! constant 已**彻底退役**（5.3）：5.1 把 96B 逐对象参数缩到 4B 实例槽号，
+//! 5.3 起 firstInstance 携带槽号、VS 按 `@builtin(instance_index)` 读——
+//! pipeline layout 无 push range，逐对象标识也不再有 CPU 推送入口（判定线 1
+//! 的字节层面：场景绘制的 push 字节恒 0）。
 //!
 //! 状态选型（面板定案）：
 //! - **顶点输入**：交错 32B（pos12+normal12+uv8，[`super::VERTEX_STRIDE`]），与
@@ -30,12 +32,6 @@ use super::Context;
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与探针同一编译路径）。
 const DEBUG_DRAW_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/debug_draw.spv"));
-
-/// push constant 总长（pipeline layout 声明 + WGSL 侧 PushParams 同源）：
-/// 4B = 实例槽号（u32），逐对象绘制参数（model/材质/范围）已全部进 GPU
-/// 常驻表（判定线 1 的结构前提；push 字节数与对象数解耦在字节层面成立
-/// ——每 draw 只推一个 u32 标识，参数本体零推送）。
-pub const PUSH_CONSTANTS_SIZE: u32 = 4;
 
 /// 图形管线 + pipeline layout（dynamic rendering 形态，无 RenderPass）。
 #[derive(bevy::prelude::Resource)]
@@ -105,16 +101,10 @@ impl GraphicsPipeline {
         module: vk::ShaderModule,
     ) -> Result<Self> {
         unsafe {
-            // push range 覆盖 4B、双 stage：实例槽号 VS/FS 都用
-            let push_range = vk::PushConstantRange::default()
-                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-                .offset(0)
-                .size(PUSH_CONSTANTS_SIZE);
+            // push range 已退役（5.3：firstInstance 携带实例槽号，见模块注释）
             let set_layouts = [set0_layout, set1_layout, set2_layout];
             let layout = device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(&set_layouts)
-                    .push_constant_ranges(std::slice::from_ref(&push_range)),
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts),
                 None,
             )?;
             let result = Self::create_pipeline(device, color_format, depth_format, layout, module);
@@ -233,7 +223,7 @@ impl GraphicsPipeline {
             info!(
                 "图形管线就绪: dynamic rendering（color {color_format:?} / depth {depth_format:?}），\
                  顶点输入 32B 交错（pos/normal/uv @ 0/12/24），reverse-Z（clear 0 + GREATER），\
-                 viewport 正高度直出，剔除关，push 4B（实例槽号，参数进 GPU 常驻表），set0/set1/set2 同源绑定"
+                 viewport 正高度直出，剔除关，push 退役（5.3：firstInstance 携带槽号），set0/set1/set2 同源绑定"
             );
             Ok(Self {
                 device: device.clone(),
