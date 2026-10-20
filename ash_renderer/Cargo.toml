@@ -17,8 +17,11 @@ license = "MIT OR Apache-2.0"
 # 文件变更 → AssetServer 重载 → AssetEvent 链路；watch_for_changes_override 缺省
 # = cfg!("watch")，feature 开启即默认监听）。依赖面：notify-debouncer-full 进 lock
 # （multi_threaded 本就在 bevy 默认特征面内，无新增执行器）。
+# 7.1 起加开 jpeg：bevy 默认特征面只开 png/hdr，真实资产包贴图常为 .jpg
+#（Sponza 69 张全 jpg）——缺 feature 时 loader 按 invalid image extension 拒载，
+# 材质贴图槽挂着永不到货的 Handle，画面静默回退。
 [dependencies]
-bevy = { path = "..", features = ["debug", "bevy_remote", "file_watcher"] }
+bevy = { path = "..", features = ["debug", "bevy_remote", "file_watcher", "jpeg"] }
 ash = "0.38.0"
 # BRP 自定义方法的 params/响应都走 serde_json::Value（bevy_remote 同款形状）
 serde_json = "1.0.140"

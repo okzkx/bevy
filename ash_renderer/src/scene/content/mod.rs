@@ -23,7 +23,7 @@ impl Plugin for SceneEntryPlugin {
         app.add_systems(
             Startup,
             (
-                world_asset::load_flight_helmet,
+                world_asset::load_sponza,
                 camera::spawn_camera,
                 lights::spawn_lights,
             ),

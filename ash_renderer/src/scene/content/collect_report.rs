@@ -1,6 +1,6 @@
 //! 采集核验（业务侧）：一次性核验系统，报一次即歇，读
 //! [`crate::scene::mechanism::InstanceLedger`] 账本与资产容器做采集判定线——
-//! 期望值（"期望 6"等）随当前场景写死，账本机制本体不背这些数。
+//! 期望值（"期望 103"等）随当前场景写死，账本机制本体不背这些数。
 
 use std::collections::HashSet;
 
@@ -74,8 +74,8 @@ pub(super) fn report_scene_collected(
     let (mut max_dt, mut max_dev) = (0.0_f32, 0.0_f32);
     for (entity, row) in data.ledger.rows() {
         // 传播契约：子 GlobalTransform == 父 GlobalTransform × 本地 Transform（无父链
-        // 则 == 本地）。FlightHelmet 六节点全恒等——种子值与传播值重合，本核验守的
-        // 是"读在传播之后 + 数据合法"；非恒等父链的逐帧正确性由画面判定。
+        // 则 == 本地）。Sponza 单节点带 scale 0.008——非恒等父链，种子值≠传播值，本
+        // 核验第一次守真实传播；逐帧正确性由画面判定。
         let Ok((local, global, child_of)) = data.hierarchy.get(entity) else {
             resolved = false;
             continue;
@@ -150,7 +150,7 @@ pub(super) fn report_scene_collected(
 
     if resolved && max_dt <= 1e-4 && max_dev <= 0.01 {
         info!(
-            "场景采集：primitive {total}（期望 6，三样俱全 {joined}/{total}，带父链 {with_parent}/{total}）；传播契约全过（最大位移 {max_dt:.4}、最大前向夹角 {max_dev:.4}°——FlightHelmet 节点全恒等：种子即终值）；顶点合计 {verts_sum} / 索引合计 {idx_sum}；材质 {}（unlit {unlit}）贴图槽 {tex_slots} 去重 {}（容器 Image {}）\n{}",
+            "场景采集：primitive {total}（期望 103，三样俱全 {joined}/{total}，带父链 {with_parent}/{total}）；传播契约全过（最大位移 {max_dt:.4}、最大前向夹角 {max_dev:.4}°——Sponza 单节点 scale 0.008 非恒等：传播值覆盖种子值）；顶点合计 {verts_sum} / 索引合计 {idx_sum}；材质 {}（unlit {unlit}）贴图槽 {tex_slots} 去重 {}（容器 Image {}）\n{}",
             data.std_materials.len(),
             tex_ids.len(),
             data.images.len(),
