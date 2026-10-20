@@ -23,6 +23,7 @@ mod asset_events;
 mod asset_ops;
 mod asset_readiness;
 mod camera_aspect;
+mod camera_guard;
 mod camera_control;
 mod ledger;
 mod lod_registry;
@@ -37,6 +38,7 @@ pub use asset_events::{AshAssetEventPlugin, AssetInvalidations, AssetRetirements
 pub use asset_readiness::{AshReadinessPlugin, AssetReadiness, ReadinessStats};
 pub use asset_ops::{mutate_asset, AssetOpError, MutateAsset};
 pub use camera_aspect::AshCameraAspectPlugin;
+pub use camera_guard::AshCameraGuardPlugin;
 pub use camera_control::{AshCameraControlPlugin, CameraOrbit};
 pub(crate) use camera_control::{apply_camera_command, CameraCommandError, CameraOrbitCommand};
 pub use ledger::{AshLedgerPlugin, IncrementStats, InstanceLedger, InstanceRow};
