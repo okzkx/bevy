@@ -41,7 +41,7 @@ pub use camera_control::{AshCameraControlPlugin, CameraOrbit};
 pub(crate) use camera_control::{apply_camera_command, CameraCommandError, CameraOrbitCommand};
 pub use ledger::{AshLedgerPlugin, IncrementStats, InstanceLedger, InstanceRow};
 pub use lod_registry::{spawn_lod_ladder, LodGroups, LodLadderReadback};
-pub use residency::{AshResidencyPlugin, ResidencySettings, ResidencyStats};
+pub use residency::{anchor_level, AshResidencyPlugin, LodDemand, ResidencySettings, ResidencyStats};
 pub use workload::{AshWorkloadPlugin, WorkloadSettings};
 pub use material_hook::AshMaterialHookPlugin;
 pub use object_ops::{

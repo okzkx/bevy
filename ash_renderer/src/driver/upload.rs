@@ -41,10 +41,13 @@ use ash_macros::system;
 
 use crate::{
     common::syntax::{OnceLog, OptionTierExt, ResultTierExt},
-    scene::{AssetInvalidations, AssetReadiness, AssetRetirements, InstanceLedger, LodGroups},
+    scene::{
+        anchor_level, AssetInvalidations, AssetReadiness, AssetRetirements, InstanceLedger,
+        LodDemand, LodGroups,
+    },
     vulkan::{
         pack_object_record, sampler_key, FramePool, GpuImage, ImageCache, InstanceTables, MeshPool,
-        StagingCopy, StagingImageCopy, UploadBatch, Uploader, OBJECT_RECORD_SIZE,
+        StagingCopy, StagingImageCopy, UploadBatch, Uploader, MAX_LOD_LEVELS, OBJECT_RECORD_SIZE,
     },
 };
 
@@ -116,6 +119,9 @@ pub(crate) struct UploadData<'w> {
     /// LOD 组登记处（6.2.2，只读）：档位盘点与到货反查——AshLedgerPlugin
     /// init_resource 恒在账。
     lod_groups: Res<'w, LodGroups>,
+    /// 需求档位图（6.5.3，只读）：residency_tick 同帧发布（Last 排序先于本
+    /// 系统）——位图点名才盘点，非需求档不重传（上传按需）。
+    lod_demand: Res<'w, LodDemand>,
     /// overlay 图集账面:旧代停尸房并入本排空点;overlay 未装时
     /// 缺席 = None(no-op)。
     atlas: Option<ResMut<'w, crate::overlay::AtlasGpu>>,
@@ -149,6 +155,7 @@ pub(crate) fn flush_uploads(
         mut retirements,
         mut instance_tables,
         ref lod_groups,
+        ref lod_demand,
         mut atlas,
         ref ctx,
         ref frames,
@@ -242,22 +249,55 @@ pub(crate) fn flush_uploads(
         let mut pending_leg = false;
         let mut failed_leg = false;
         let mesh_id = row.mesh.id();
-        let mesh_replace = invalidations.mesh_pending(mesh_id);
-        let mesh_leg_done = pool.resident(mesh_id).is_some() && !mesh_replace;
+        // —— 6.5 锚腿：floor_anchor 过滤激活且行在登记组内 → 可绘锚 = 保底档
+        //（最粗变体）：锚腿决定实例槽/对象记录（记录引脚 = 锚槽位——GPU 端
+        // b7 全哨兵时的 rec 回退即保底引脚，shader 零改动）；基准档降为按需
+        // 高档，只由需求位图点名才进本批。过滤未激活/非组行 = 4.x/6.4 现状
+        //（锚 = 基准）。
+        let demand_bits = lod_demand
+            .active
+            .then(|| lod_demand.levels.get(&mesh_id).copied())
+            .flatten();
+        // 锚档解析（anchor_level 纯函数，与 tick 需求集/DrawList 同源）：
+        // floor_anchor 激活 ∧ 组在账 → 保底档（尾档缺席退回基准 level 0）
+        let anchor: Option<(AssetId<Mesh>, Handle<Mesh>)> = if lod_demand.active {
+            lod_groups.levels_of(mesh_id).and_then(|levels| {
+                let level =
+                    anchor_level(true, levels[(MAX_LOD_LEVELS - 1) as usize].is_some()) as usize;
+                levels[level].clone().map(|handle| (handle.id(), handle))
+            })
+        } else {
+            None
+        };
+        let (anchor_id, anchor_handle) = anchor.unwrap_or((mesh_id, row.mesh.clone()));
+        let anchor_replace = invalidations.mesh_pending(anchor_id);
+        let anchor_leg_done = pool.resident(anchor_id).is_some() && !anchor_replace;
         // —— LOD 组档位盘点（6.2.2）：行引用的 mesh 在登记组内 → 各档变体
         // 未驻留的进本批（档位不被实体引用，本扫描是它们的唯一上传触发点；
         // 失败档保持哨兵 0，消费端向更细档回退——降级画面语义）。**level 0
-        // = 基准 mesh 本身，必须跳过**——它由上面 mesh 腿正常处理，重复入
-        // fresh 会让 commit 撞"同身份重复登记"（运行实抓首钉）。异步未到货
-        // 的档位标 pending 进 readiness 账，重试通道 6.3 驻留管理器接管
-        //（6.2 范围钉明，见 lod_registry 模块注释）。
-        for handle in lod_groups
+        // = 基准 mesh 本身，必须跳过**——floor_anchor 下它由"基准高档腿"
+        // 处理，关闭时由锚腿（锚 = 基准）处理，重复入 fresh 会让 commit 撞
+        // "同身份重复登记"（运行实抓首钉）。异步未到货的档位标 pending 进
+        // readiness 账，重试通道 6.3 驻留管理器接管（6.2 范围钉明，见
+        // lod_registry 模块注释）。**需求位图过滤（6.5.3）**：位图在账时只
+        // 盘点点名的档位（保底档已由锚腿承担，跳过防重复入批）；位图缺席 =
+        // 不过滤（B面/管理器关闭，6.4 全档语义不变）。
+        for (level, handle) in lod_groups
             .levels_of(mesh_id)
-            .map(|levels| levels.iter().flatten().filter(|h| h.id() != mesh_id))
+            .map(|levels| levels.iter().enumerate().skip(1))
             .into_iter()
             .flatten()
         {
+            let Some(handle) = handle else { continue };
             let level_id = handle.id();
+            if level_id == anchor_id {
+                continue; // 锚腿承担（floor_anchor 下 = 保底档）
+            }
+            if let Some(bits) = demand_bits
+                && (bits >> level) & 1 == 0
+            {
+                continue; // 非需求档不盘点（6.5.3 上传按需）
+            }
             let level_replace = invalidations.mesh_pending(level_id);
             if pool.resident(level_id).is_some() && !level_replace {
                 continue; // 该档完成
@@ -270,15 +310,36 @@ pub(crate) fn flush_uploads(
                 fresh.push((level_id, handle.clone(), had_old));
             }
         }
-        if mesh_leg_done {
+        // —— 锚腿三态（6.5 下锚 = 保底档或基准）：完成/失败/待到货。
+        if anchor_leg_done {
             // 该腿完成
-        } else if readiness.mesh_failed(mesh_id) {
+        } else if readiness.mesh_failed(anchor_id) {
             failed_leg = true;
         } else {
             pending_leg = true;
-            if seen.insert(mesh_id) {
-                let had_old = pool.resident(mesh_id).is_some();
-                fresh.push((mesh_id, row.mesh.clone(), had_old));
+            if seen.insert(anchor_id) {
+                let had_old = pool.resident(anchor_id).is_some();
+                fresh.push((anchor_id, anchor_handle, had_old));
+            }
+        }
+        // —— 基准高档腿（6.5：锚 ≠ 基准时，基准降为按需高档）：需求位图
+        // 点名才进本批；未点名 = 跳过（不 pending——行可绘性已由锚腿承载，
+        // 重试通道由期望档位变化重新置脏触发）。
+        if anchor_id != mesh_id
+            && let Some(bits) = demand_bits
+            && bits & 1 != 0
+        {
+            let mesh_replace = invalidations.mesh_pending(mesh_id);
+            if pool.resident(mesh_id).is_some() && !mesh_replace {
+                // 该腿完成
+            } else if readiness.mesh_failed(mesh_id) {
+                failed_leg = true;
+            } else {
+                pending_leg = true;
+                if seen.insert(mesh_id) {
+                    let had_old = pool.resident(mesh_id).is_some();
+                    fresh.push((mesh_id, row.mesh.clone(), had_old));
+                }
             }
         }
         match std_materials.get(&row.material) {
@@ -310,18 +371,19 @@ pub(crate) fn flush_uploads(
                 }
             }
         }
-        // —— 实例槽与对象记录(5.1):mesh 腿完成才动(记录内容来自 MeshSlot)。
-        // 记录身份 (mesh 身份, 内容票据, 材质身份) 三者不变 = 内容不变,免重写;
+        // —— 实例槽与对象记录(5.1):锚腿完成才动(6.5 下记录引脚取锚槽位 =
+        // 保底档引脚,GPU 端 rec 回退即保底——shader 零改动;4.x/6.4 锚 = 基准)。
+        // 记录身份 (锚身份, 内容票据, 材质身份) 三者不变 = 内容不变,免重写;
         // 变化(首次驻留/换绑/换内容)走"新槽写 + 旧槽停尸房"(从不原地覆盖
         // ——在飞 draw 可能在读旧记录)。材质**内容**不进记录:材质环每帧
         // 全量重写,内容变化自动生效(材质槽索引跨帧稳定)。
         // 材质缺/贴图 pending 不拦记录(记录只持材质槽号,内容环里现读)。
-        if mesh_leg_done {
+        if anchor_leg_done {
             // 腿判定刚确认驻留,取不到是状态矛盾(与"容量保证后池缺席"同级)
-            let mesh_slot = pool
-                .resident(mesh_id)
-                .ok_or_fatal("mesh 腿判定完成后驻留条目消失,状态矛盾")?;
-            let bound = (mesh_id, mesh_slot.ticket, row.material.id());
+            let anchor_slot = pool
+                .resident(anchor_id)
+                .ok_or_fatal("锚腿判定完成后驻留条目消失,状态矛盾")?;
+            let bound = (anchor_id, anchor_slot.ticket, row.material.id());
             if row.instance_slot.is_none() || row.bound != Some(bound) {
                 let mat_index = instance_tables
                     .ensure_material_slot(row.material.id())
@@ -333,13 +395,13 @@ pub(crate) fn flush_uploads(
                 if let Some(old) = old_slot {
                     instance_tables.retire_object_slot(old);
                 }
-                let (aabb_min, aabb_max) = mesh_slot.local_aabb;
+                let (aabb_min, aabb_max) = anchor_slot.local_aabb;
                 staged_records.push((
                     slot,
                     pack_object_record(
-                        mesh_slot.first_index(),
-                        mesh_slot.index_count,
-                        mesh_slot.vertex_base(),
+                        anchor_slot.first_index(),
+                        anchor_slot.index_count,
+                        anchor_slot.vertex_base(),
                         mat_index,
                         aabb_min,
                         aabb_max,

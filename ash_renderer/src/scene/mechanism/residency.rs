@@ -47,6 +47,24 @@
 //!   材质五槽盘点（引用行 mark_dirty，与 mesh 请求同一次置脏 = 合并）。
 //!   **整图替换（粗/细双 GpuImage swap）不做**——整资产粒度压测未证伪，
 //!   替换式留待步骤 7 真实资产（待决 1 落定，见施工记录）。
+//!
+//! 6.5 低保真保底扩展（`floor_anchor` 开关，默认关 = 6.4 现状）：**可绘锚
+//! 从最细基准迁到组内保底档**（最粗变体，level MAX-1）——基准档降为按需
+//! 高档，高档/基准缺席时画面退到保底继续画而不是整行暂缓。三处联动：
+//! - 需求集改形（6.5.1）：`needed[floor] = true` 取代 `needed[0] = true`
+//!   （保底恒需求；基准只在有行期望 level 0 时进需求集）；档位淘汰循环
+//!   从 level 0 起步（floor_anchor 隐含细粒度语义，与 fine_grained 取或）。
+//! - 需求位图发布（6.5.3）：本 tick 把各组需求档算成位图挂 [`LodDemand`]，
+//!   flush_uploads 同帧盘点按位图过滤——非需求档不再被顺手整组重传
+//!   （6.4 遗留的"上传仅针对需求档"缺口在此闭合）；管理器关闭/B面 =
+//!   位图清空，盘点回到不过滤的全常驻语义。
+//! - 淘汰豁免：6.3 恒预算淘汰循环只按身份聚合（候选 = 引用行基准身份），
+//!   保底档（变体）天然不在候选集；fine 循环按需求集淘汰、保底恒需求
+//!   恒不淘汰——"淘汰永不触保底"由需求集结构性保证。
+//!
+//! 锚语义（6.5.2 施工钉明）：组的可绘锚 = 保底档驻留（DrawList 可绘判定与
+//! flush 锚腿同源）；组尾档缺席（登记不完整）时锚退回基准（6.4 语义）；
+//! 非 LOD 组资产锚恒为基准（本段不扩大范围——无变体即无保底可迁）。
 
 use std::collections::HashMap;
 
@@ -68,6 +86,19 @@ use crate::{
 
 use super::asset_events::AssetRetirements;
 
+/// 可绘锚档位（6.5.2 纯函数）：`floor_anchor` 开且保底档（最粗变体）在账 →
+/// 保底档位号（MAX-1）；否则 0（基准档）。DrawList 可绘判定 / flush 锚腿 /
+/// tick 需求集三处共用同一档位选择——锚解析不漂移；组尾档缺席（登记不
+/// 完整）与非组行锚退回基准（6.5 范围钉明）。
+#[must_use]
+pub fn anchor_level(floor_anchor: bool, floor_present: bool) -> u32 {
+    if floor_anchor && floor_present {
+        MAX_LOD_LEVELS - 1
+    } else {
+        0
+    }
+}
+
 /// 驻留管理器设置（BRP `residency_set` 写，residency_tick 读）。
 #[derive(Resource)]
 pub struct ResidencySettings {
@@ -84,6 +115,10 @@ pub struct ResidencySettings {
     /// 细粒度开关（6.4）：true = LOD 档逐档驻留/淘汰（6.2 fallback 正式被
     /// 驱动）；false = 6.3 整资产粒度（档位全驻留，判定线 4 的 A/B 面）。
     pub fine_grained: bool,
+    /// 低保真保底锚（6.5）：true = 组内行的可绘锚迁到最粗变体档（保底恒
+    /// 驻留、基准按需）；false = 6.4 现状（基准锚）。隐含细粒度语义——
+    /// 请求/淘汰/盘点过滤按 `fine_grained ∨ floor_anchor` 放行。
+    pub floor_anchor: bool,
 }
 
 impl Default for ResidencySettings {
@@ -95,6 +130,7 @@ impl Default for ResidencySettings {
             eject_cooldown_frames: 60,
             budget_image_bytes: 0,
             fine_grained: false,
+            floor_anchor: false,
         }
     }
 }
@@ -140,6 +176,21 @@ pub struct ResidencyStats {
     pub lod_levels_resident: usize,
     /// LOD 变体档淘汰累计（条目数）。
     pub lod_levels_ejected_total: u64,
+    /// 保底锚开关快照（6.5）。
+    pub floor_anchor: bool,
+    /// 保底档驻留的组数（登记组中保底变体在池的组数，判定线 1 的读数面）。
+    pub floor_groups_resident: usize,
+}
+
+/// 需求档位图（6.5.3）：residency_tick 每帧发布、flush_uploads 同帧盘点
+/// 过滤消费（tick 挂 Last 先于 flush——发布即同帧生效）。键缺席 = 该帧
+/// 不过滤（管理器关闭/B面——4.x 全常驻语义，盘点整组不过滤）。
+#[derive(Resource, Default)]
+pub struct LodDemand {
+    /// 过滤激活（floor_anchor ∧ 管理器 active）——false 时 levels 清空。
+    pub active: bool,
+    /// 基准身份 → 需求档位位图（bit L = level L 本帧需求；保底档位恒置位）。
+    pub levels: HashMap<AssetId<Mesh>, u32>,
 }
 
 /// 管理器内部状态（冷却表：mesh/贴图身份 → 剩余冷却帧——两张表，键型
@@ -165,6 +216,7 @@ pub(crate) fn residency_tick(
     mut cooldown: ResMut<EjectCooldown>,
     mut ledger: ResMut<InstanceLedger>,
     mut retirements: ResMut<AssetRetirements>,
+    mut lod_demand: ResMut<LodDemand>,
     pool: Res<MeshPool>,
     image_cache: Res<ImageCache>,
     std_materials: Res<Assets<StandardMaterial>>,
@@ -175,14 +227,31 @@ pub(crate) fn residency_tick(
     // 激活态下降沿检测（Local）：active→inactive 时全行置脏——被淘汰资产
     // 无请求者会永远缺席，关闭 B 面（全常驻基线）必须恢复全量（④ 判定线）
     mut prev_active: Local<bool>,
+    // 6.5 锚切换沿检测（Local）：floor_anchor 翻转 = 需求集与锚腿整体换形
+    mut prev_floor: Local<bool>,
 ) {
     stats.enabled = settings.enabled;
     stats.budget_mesh_bytes = settings.budget_mesh_bytes;
     stats.budget_image_bytes = settings.budget_image_bytes;
     stats.fine_grained = settings.fine_grained;
+    stats.floor_anchor = settings.floor_anchor;
     stats.rows = ledger.len();
     stats.ejected_last = 0;
     stats.requested_rows_last = 0;
+    stats.floor_groups_resident = 0;
+    // —— 6.5 锚切换沿：floor_anchor 翻转 = 全行置脏 + LOD 脏（记录引脚
+    // 基准↔保底换写、b7 表重写、盘点按新位图过滤）。不受 active 闸门约束
+    //——B面下全常驻，重标只多一次收敛盘点（bound 未变的行免换槽）。
+    if *prev_floor != settings.floor_anchor && !ledger.is_empty() {
+        let entities: Vec<Entity> = ledger.rows().map(|(e, _)| e).collect();
+        let count = entities.len();
+        for e in &entities {
+            ledger.mark_dirty(*e);
+            ledger.mark_lod_dirty(*e);
+        }
+        info!("保底锚切换为 {}：全行 {count} 行置脏 + LOD 脏（锚腿/需求位图换形）", settings.floor_anchor);
+    }
+    *prev_floor = settings.floor_anchor;
     let recycle = pool.recycle_ledger();
     let mut used = recycle.resident_vertex_bytes + recycle.resident_index_bytes;
     stats.used_mesh_bytes = used;
@@ -210,9 +279,15 @@ pub(crate) fn residency_tick(
         stats.requested = 0;
         stats.over_budget = false;
         stats.over_budget_image = false;
+        // B面：需求位图清空 = flush 盘点回到不过滤的全常驻语义（6.5.3）
+        lod_demand.active = false;
+        lod_demand.levels.clear();
         return; // B 面（全常驻基线）或空场：沿处理外零动作，读数照刷
     }
     *prev_active = true;
+    // 激活帧：过滤激活态随 floor_anchor 走，位图逐组重算（下翻）
+    lod_demand.active = settings.floor_anchor;
+    lod_demand.levels.clear();
     let Ok((projection, cam_global)) = cameras.single() else {
         return; // 相机缺席：场景装配问题，整帧让路不动作
     };
@@ -269,6 +344,11 @@ pub(crate) fn residency_tick(
         }
         if cooldown.meshes.contains_key(id) {
             continue; // 冷却期：刚淘汰的身份不重请求（防抖窗，钉明见模块注释）
+        }
+        // 6.5：组资产的供给归需求位图（基准 = 按需高档，按期望档进需求集；
+        // 按半径整档请求会把最贵基准档无条件拉回——上传按需的反面）
+        if settings.floor_anchor && lod_groups.levels_of(*id).is_some() {
+            continue;
         }
         requested_ids += 1;
         request_rows.extend(g.rows.iter().copied());
@@ -335,16 +415,26 @@ pub(crate) fn residency_tick(
             let (w, h) = (swapchain.extent.width, swapchain.extent.height);
             [w as f32, h as f32]
         };
+        let fine = settings.fine_grained || settings.floor_anchor;
+        let floor_level_idx = (MAX_LOD_LEVELS - 1) as usize;
         for (base_id, g) in groups.iter() {
             let Some(group_levels) = lod_groups.levels_of(*base_id) else { continue }; // 非阶梯 mesh 无档位账
             // 期望档位并集：粗档保底之外，每个引用行的目标档都应驻留
             let mut needed = [false; MAX_LOD_LEVELS as usize];
-            needed[0] = true; // 基准永驻（本段不 eject 它）
+            // 锚档恒需求（6.5）：floor_anchor = 保底档（最粗变体）常驻、基准
+            // 降为按需高档；组尾档缺席（登记不完整）锚退回基准 = 6.4 语义
+            needed[anchor_level(settings.floor_anchor, group_levels[floor_level_idx].is_some())
+                as usize] = true;
             for (entity, row) in ledger.rows() {
                 if !g.rows.contains(&entity) {
                     continue;
                 }
-                let Some(slot) = pool.resident(row.mesh.id()) else { continue };
+                // 期望档计算优先取基准槽位；基准缺席（6.5 按需高档被淘汰）
+                // 退锚槽位——保底变体与基准同源同界近似，跳过会让基准一旦
+                // 淘汰就永远算不出期望档（高档永不回流）
+                let Some(slot) = pool.resident(row.mesh.id()).or_else(|| {
+                    group_levels[floor_level_idx].as_ref().and_then(|h| pool.resident(h.id()))
+                }) else { continue };
                 if let Some((px_min, px_max, _)) = aabb_screen_rect(
                     &view_proj, &row.model, slot.local_aabb.0, slot.local_aabb.1, screen,
                 ) {
@@ -353,29 +443,52 @@ pub(crate) fn residency_tick(
                     needed[raw as usize] = true;
                 }
             }
-            // 请求合并：需求档未驻留 → 一次行置脏（盘点收集全部未驻留档）
+            // 需求位图发布（6.5.3）：tick 算好的需求集交同帧 flush 过滤盘点
+            if settings.floor_anchor {
+                let mut mask = 0u32;
+                for (level, needed_l) in needed.iter().enumerate() {
+                    if *needed_l {
+                        mask |= 1 << level;
+                    }
+                }
+                lod_demand.levels.insert(*base_id, mask);
+            }
+            // 保底驻留计数（判定线 1 读数面；与需求无关，只报账面事实）
+            if let Some(handle) = &group_levels[floor_level_idx]
+                && pool.resident(handle.id()).is_some()
+            {
+                stats.floor_groups_resident += 1;
+            }
+            // 请求合并：需求档未驻留 → 一次行置脏（盘点收集全部未驻留档）。
+            // **全档检查**（6.5 施工订正）：6.4 时 needed[0] 恒真且基准恒驻留
+            // 可以 skip(1)；floor_anchor 下基准降为可淘汰高档，level 0 缺失
+            // 也要触发请求（否则高档淘汰后永不回流）。驻留计数保持 6.4 口径
+            //（只计变体档，level 0 不入 lod_levels_resident）
             let mut any_needed_missing = false;
-            for (level, needed_l) in needed.iter().enumerate().skip(1) {
+            for (level, needed_l) in needed.iter().enumerate() {
                 if !*needed_l { continue; }
                 let Some(handle) = &group_levels[level] else { continue };
                 if pool.resident(handle.id()).is_none() {
                     any_needed_missing = true;
-                } else {
+                } else if level != 0 {
                     lod_levels_resident += 1;
                 }
             }
-            if settings.fine_grained
+            if fine
                 && any_needed_missing
                 && g.min_dist <= settings.request_radius
                 && !cooldown.meshes.contains_key(base_id)
             {
                 request_rows_all.extend(g.rows.iter().copied());
             }
-            // 非需求档淘汰（距离远优先；冷却窗同源；仅 fine_grained 开）
-            if !settings.fine_grained {
+            // 非需求档淘汰（距离远优先；冷却窗同源；fine ∨ floor_anchor 开）
+            if !fine {
                 continue;
             }
-            for (level, needed_l) in needed.iter().enumerate().skip(1) {
+            // floor_anchor 下淘汰从 level 0 起步——基准降为可淘汰高档（保底
+            // 恒需求恒不淘汰，"淘汰永不触保底"由需求集结构性保证）
+            let eject_start = usize::from(!settings.floor_anchor);
+            for (level, needed_l) in needed.iter().enumerate().skip(eject_start) {
                 if *needed_l { continue; }
                 let Some(handle) = &group_levels[level] else { continue };
                 let level_id = handle.id();
@@ -491,6 +604,7 @@ impl Plugin for AshResidencyPlugin {
         app.init_resource::<ResidencySettings>()
             .init_resource::<ResidencyStats>()
             .init_resource::<EjectCooldown>()
+            .init_resource::<LodDemand>()
             .add_systems(
                 Last,
                 residency_tick
@@ -501,5 +615,24 @@ impl Plugin for AshResidencyPlugin {
                     .run_if(resource_exists::<Swapchain>)
                     .run_if(resource_exists::<LodSettings>),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{anchor_level, MAX_LOD_LEVELS};
+
+    /// 可绘锚档位（6.5.2 判定前提的三处共用纯函数）：关闭 = 基准（6.4 语义）；
+    /// 开启 = 保底档（最粗变体）；组尾档缺席（登记不完整）退回基准。
+    #[test]
+    fn anchor_level_resolution() {
+        assert_eq!(anchor_level(false, true), 0, "锚关闭 = 基准档（6.4 语义）");
+        assert_eq!(anchor_level(false, false), 0);
+        assert_eq!(
+            anchor_level(true, true),
+            MAX_LOD_LEVELS - 1,
+            "锚开启 = 保底档（最粗变体）"
+        );
+        assert_eq!(anchor_level(true, false), 0, "尾档缺席退回基准（登记不完整）");
     }
 }

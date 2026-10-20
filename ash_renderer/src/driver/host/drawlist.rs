@@ -22,10 +22,11 @@ use bevy::prelude::*;
 use std::collections::HashSet;
 
 use crate::common::error::VulkanError;
-use crate::scene::{InstanceLedger, LodGroups};
+use crate::scene::{anchor_level, InstanceLedger, LodGroups};
 use crate::vulkan::{
     pack_lod_entry, pack_material_record, pack_model, BindlessTables, ImageCache, InstanceTables,
-    LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MATERIAL_RECORD_SIZE, MODEL_STRIDE, MeshPool,
+    LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS,
+    MODEL_STRIDE, MeshPool,
 };
 
 /// 一帧 DrawList 组装产物。
@@ -42,10 +43,17 @@ pub(crate) struct DrawAssembly {
 
 /// 组装 DrawList：账本行 → 实例槽 + 驻留账本/资产容器 → 可绘行槽号列表。
 /// 账本读是纯 BTreeMap 走访——零组件扫描零 tick 比较（4.1 语义不变）。
+///
+/// 可绘锚（6.5.2）：`floor_anchor` 开启时，LOD 组行的锚 = 组内保底档（最粗
+/// 变体，level MAX-1）驻留——基准降为按需高档，缺席不暂缓行；组尾档缺席
+/// （登记不完整）锚退回基准。关闭 = 6.4 现状（锚恒为基准）。非组行锚恒为
+/// 基准（无变体即无保底可迁，6.5 范围钉明）。
 pub(crate) fn assemble(
     ledger: &InstanceLedger,
     pool: &MeshPool,
     std_materials: &Assets<StandardMaterial>,
+    lod_groups: &LodGroups,
+    floor_anchor: bool,
 ) -> DrawAssembly {
     let mut slots: Vec<u32> = Vec::with_capacity(ledger.len());
     let mut pending_rows = 0usize;
@@ -57,8 +65,20 @@ pub(crate) fn assemble(
             continue;
         };
         // 池引脚不再需要（命令由 GPU 从对象记录自取）——驻留判定本身仍按
-        // MeshSlot 在账（mesh 未驻留 = 暂缓）
-        if pool.resident(row.mesh.id()).is_none() {
+        // MeshSlot 在账（锚未驻留 = 暂缓；锚身份按 6.5 开关解析，纯函数
+        // anchor_level 与 tick 需求集/flush 锚腿同源）
+        let mesh_id = row.mesh.id();
+        let anchor_id = match lod_groups.levels_of(mesh_id) {
+            Some(levels) => {
+                let level = anchor_level(floor_anchor, levels[(MAX_LOD_LEVELS - 1) as usize].is_some());
+                levels[level as usize]
+                    .as_ref()
+                    .map(|handle| handle.id())
+                    .unwrap_or(mesh_id)
+            }
+            None => mesh_id,
+        };
+        if pool.resident(anchor_id).is_none() {
             pending_rows += 1;
             continue;
         }
@@ -154,11 +174,11 @@ fn write_presence_ring(
 }
 
 /// 写 LOD 变体表环（6.2.2，增量）：LOD 脏行（换槽/档位资产到货）→ 本帧槽
-/// 的表环写该槽各档绘制引脚。level 0 = 本行基准 mesh 槽位（可绘判定保证
-/// 驻留；行恰在本帧暂缓时引脚查无 = 全哨兵，消费端回退对象记录——与
-/// 模型环"槽已清则跳过"同款防御）；level 1.. = 登记组变体引脚，未驻留
-/// = 哨兵 0。同槽的档位环一并写 0（换槽后迟滞状态从最细档重新收敛——
-/// 与描述符 init 零填充同语义）。
+/// 的表环写该槽各档绘制引脚。level 0 = 本行基准 mesh 槽位（6.5 保底锚开启
+/// 时基准降为按需高档，未驻留 = 哨兵保持 0，消费端 rec 回退引脚此时即保底
+/// 档引脚——flush 锚腿以保底槽写记录；6.4 语义下基准恒驻留）；level 1.. =
+/// 登记组变体引脚，未驻留 = 哨兵 0。同槽的档位环一并写 0（换槽后迟滞状态
+/// 从最细档重新收敛——与描述符 init 零填充同语义）。
 fn write_lod_table_ring(
     tables: &mut InstanceTables,
     ledger: &mut InstanceLedger,
