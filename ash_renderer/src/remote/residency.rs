@@ -87,6 +87,14 @@ pub(crate) fn residency_stats(In(_params): In<Option<Value>>, world: &mut World)
         "requested_rows_last": stats.requested_rows_last,
         "over_budget": stats.over_budget,
         "rows": stats.rows,
+        "fine": {
+            "fine_grained": stats.fine_grained,
+            "budget_image_bytes": stats.budget_image_bytes,
+            "used_image_bytes": stats.used_image_bytes,
+            "over_budget_image": stats.over_budget_image,
+            "lod_levels_resident": stats.lod_levels_resident,
+            "lod_levels_ejected_total": stats.lod_levels_ejected_total,
+        },
         "settings": {
             "request_radius": settings.request_radius,
             "eject_cooldown_frames": settings.eject_cooldown_frames,
@@ -107,6 +115,10 @@ struct ResidencySetParams {
     request_radius: Option<f32>,
     #[serde(default)]
     eject_cooldown_frames: Option<u32>,
+    #[serde(default)]
+    budget_image_bytes: Option<u64>,
+    #[serde(default)]
+    fine_grained: Option<bool>,
 }
 
 /// `ash_renderer/residency_set`：写驻留管理器设置（开关/预算/请求半径/
@@ -134,10 +146,18 @@ pub(crate) fn residency_set(In(params): In<Option<Value>>, world: &mut World) ->
     if let Some(cooldown) = p.eject_cooldown_frames {
         settings.eject_cooldown_frames = cooldown;
     }
+    if let Some(budget) = p.budget_image_bytes {
+        settings.budget_image_bytes = budget;
+    }
+    if let Some(fine) = p.fine_grained {
+        settings.fine_grained = fine;
+    }
     Ok(json!({
         "enabled": settings.enabled,
         "budget_mesh_bytes": settings.budget_mesh_bytes,
         "request_radius": settings.request_radius,
         "eject_cooldown_frames": settings.eject_cooldown_frames,
+        "budget_image_bytes": settings.budget_image_bytes,
+        "fine_grained": settings.fine_grained,
     }))
 }

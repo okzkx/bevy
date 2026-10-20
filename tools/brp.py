@@ -350,8 +350,12 @@ def cmd_residency_set(args):
         params["request_radius"] = float(args.radius)
     if args.cooldown is not None:
         params["eject_cooldown_frames"] = int(args.cooldown)
+    if args.image_budget is not None:
+        params["budget_image_bytes"] = int(args.image_budget)
+    if args.fine is not None:
+        params["fine_grained"] = args.fine == "true"
     if not params:
-        sys.exit("brp: residency-set 需要 --enabled/--budget/--radius/--cooldown 至少一项")
+        sys.exit("brp: residency-set 需要 --enabled/--budget/--radius/--cooldown/--image-budget/--fine 至少一项")
     out(rpc(args.host, args.port, "ash_renderer/residency_set", params))
 
 
@@ -528,6 +532,8 @@ def main():
     p.add_argument("--budget", type=int, help="mesh 驻留预算字节（0=不设限）")
     p.add_argument("--radius", type=float, help="请求半径（世界单位，>0）")
     p.add_argument("--cooldown", type=int, help="淘汰冷却帧数")
+    p.add_argument("--image-budget", type=int, help="贴图驻留预算字节（0=不设限，6.4）")
+    p.add_argument("--fine", choices=["true", "false"], help="细粒度开关（6.4：true=LOD 档逐档驻留/淘汰）")
     p.set_defaults(func=cmd_residency_set)
 
     p = sub.add_parser("generate", help="程序化铺实例（ash_renderer/generate_scene，5.4 常驻大场景生成器：批量克隆共享资产，种子固定可复现）")
