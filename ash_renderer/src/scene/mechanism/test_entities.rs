@@ -82,6 +82,10 @@ pub struct TestShapeReadback {
 ///
 /// # Errors
 /// 形状 mesh 构造失败（球体细分越限——单位口径下实际不可达，防御性上抛）。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "spawn 参数面即 BRP 请求字段的逐项镜像（形状/色/变换/命名/缓存旁路），收束会藏掉与协议面的逐项对账"
+)]
 pub fn spawn_test_shape(
     world: &mut World,
     shape: TestShape,
@@ -90,8 +94,15 @@ pub fn spawn_test_shape(
     rotation_euler_deg: Option<Vec3>,
     scale: Option<Vec3>,
     name: Option<&str>,
+    unique: bool,
 ) -> Result<TestShapeReadback, ObjectOpError> {
-    let (mesh_handle, mesh_created) = match world
+    // unique（6.3 流送测试基建）：绕过形状缓存直接造新资产——每实体独立
+    // mesh 身份（内容相同身份不同），"世界大于驻留"的压测前提；缺省 false
+    // 走缓存共享（同参零新上传的既有语义不变）。
+    let (mesh_handle, mesh_created) = if unique {
+        (world.resource_mut::<Assets<Mesh>>().add(build_shape_mesh(shape)?), true)
+    } else {
+    match world
         .get_resource::<TestShapeAssets>()
         .and_then(|a| a.meshes.get(&shape))
         .cloned()
@@ -107,6 +118,7 @@ pub fn spawn_test_shape(
                 .insert(shape, handle.clone());
             (handle, true)
         }
+    }
     };
     let key = ColorKey(color.map(f32::to_bits));
     let material_handle = match world

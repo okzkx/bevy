@@ -122,6 +122,7 @@ pub fn spawn_lod_ladder(
     translation: Option<Vec3>,
     scale: Option<Vec3>,
     name: Option<&str>,
+    unique: bool,
 ) -> Result<LodLadderReadback, ObjectOpError> {
     // 阶梯仅 sphere（四形状无细分参数面，形状口径见模块注释）
     if shape != TestShape::Sphere {
@@ -129,7 +130,7 @@ pub fn spawn_lod_ladder(
             "LOD 阶梯仅支持 sphere（ico 细分参数面 4/3/2/1）".into(),
         ));
     }
-    let readback = spawn_test_shape(world, shape, color, translation, None, scale, name)?;
+    let readback = spawn_test_shape(world, shape, color, translation, None, scale, name, unique)?;
     let base_handle = world
         .get::<Mesh3d>(readback.entity)
         .map(|m| m.0.clone())
@@ -139,14 +140,17 @@ pub fn spawn_lod_ladder(
     for level in 1..MAX_LOD_LEVELS {
         // 借用逐段独占：查缓存（只读）→ 构造 + 入容器（Assets 独占）→
         // 登记缓存（LodGroups 独占）——World 双可变借用不并存
+        // unique：变体同样绕缓存直造（每阶梯独立四档资产，6.3 压测前提）
         let handle = match world.resource::<LodGroups>().cached_variant(shape, level) {
-            Some(handle) => handle,
-            None => {
+            Some(handle) if !unique => handle,
+            _ => {
                 let mesh = build_lod_mesh(shape, level)?;
                 let handle = world.resource_mut::<Assets<Mesh>>().add(mesh);
-                world
-                    .resource_mut::<LodGroups>()
-                    .insert_variant(shape, level, handle.clone());
+                if !unique {
+                    world
+                        .resource_mut::<LodGroups>()
+                        .insert_variant(shape, level, handle.clone());
+                }
                 handle
             }
         };

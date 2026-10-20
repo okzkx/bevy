@@ -190,6 +190,8 @@ def cmd_spawn_shape(args):
         params["scale"] = args.scale
     if args.name:
         params["name"] = args.name
+    if getattr(args, "unique", False):
+        params["unique"] = True
     out(rpc(args.host, args.port, "ash_renderer/spawn_shape", params))
 
 
@@ -309,6 +311,8 @@ def cmd_spawn_lod(args):
         params["scale"] = [float(x) for x in args.scale]
     if args.name:
         params["name"] = args.name
+    if getattr(args, "unique", False):
+        params["unique"] = True
     out(rpc(args.host, args.port, "ash_renderer/spawn_lod", params))
 
 
@@ -330,6 +334,25 @@ def cmd_lod_params(args):
     if not params:
         sys.exit("brp: lod-params 需要 --threshold-px 与/或 --hysteresis 至少一项")
     out(rpc(args.host, args.port, "ash_renderer/lod_set_params", params))
+
+
+def cmd_residency_stats(args):
+    out(rpc(args.host, args.port, "ash_renderer/residency_stats"))
+
+
+def cmd_residency_set(args):
+    params = {}
+    if args.enabled is not None:
+        params["enabled"] = args.enabled == "true"
+    if args.budget is not None:
+        params["budget_mesh_bytes"] = int(args.budget)
+    if args.radius is not None:
+        params["request_radius"] = float(args.radius)
+    if args.cooldown is not None:
+        params["eject_cooldown_frames"] = int(args.cooldown)
+    if not params:
+        sys.exit("brp: residency-set 需要 --enabled/--budget/--radius/--cooldown 至少一项")
+    out(rpc(args.host, args.port, "ash_renderer/residency_set", params))
 
 
 def cmd_draw_stats(args):
@@ -476,6 +499,7 @@ def main():
     p.add_argument("--scale", nargs=3, type=float, metavar=("X", "Y", "Z"), help="非均匀缩放（默认 1 1 1）")
     p.add_argument("--name", help="树内 Name（默认 测试体-<shape>）")
     p.set_defaults(func=cmd_spawn_shape)
+    p.add_argument("--unique", action="store_true", help="绕过缓存直造新资产（6.3 流送压测：每实体独立 mesh 身份）")
 
     p = sub.add_parser("spawn-lod", help="造 LOD 阶梯测试体（ash_renderer/spawn_lod，6.2：sphere ico 细分 4/3/2/1 四档，档位资产随首盘点一并上传）")
     p.add_argument("shape", choices=["sphere"], help="形状（6.2 阶梯面仅 sphere）")
@@ -484,6 +508,7 @@ def main():
     p.add_argument("--scale", nargs=3, type=float, metavar=("X", "Y", "Z"), help="缩放（默认 1 1 1）")
     p.add_argument("--name", help="树内 Name")
     p.set_defaults(func=cmd_spawn_lod)
+    p.add_argument("--unique", action="store_true", help="绕过缓存直造新资产（6.3 流送压测）")
 
     sub.add_parser("lod-census", help="LOD 档位对照（ash_renderer/lod_census，只读：GPU 两帧前档位 vs CPU 参照逐实例 + 档位分布）").set_defaults(func=cmd_lod_census)
 
@@ -495,6 +520,15 @@ def main():
     p.add_argument("--threshold-px", type=float, help="档位阈值（像素，>0）")
     p.add_argument("--hysteresis", type=float, help="迟滞系数 [0,1)")
     p.set_defaults(func=cmd_lod_params)
+
+    sub.add_parser("residency-stats", help="驻留读数（ash_renderer/residency_stats，6.3：预算/实占/请求/淘汰累计+逐资产清单）").set_defaults(func=cmd_residency_stats)
+
+    p = sub.add_parser("residency-set", help="驻留管理器设置（ash_renderer/residency_set，6.3：开关/预算/请求半径/冷却窗；enabled false 或 budget 0 = 全常驻 A-B 基线）")
+    p.add_argument("--enabled", choices=["true", "false"])
+    p.add_argument("--budget", type=int, help="mesh 驻留预算字节（0=不设限）")
+    p.add_argument("--radius", type=float, help="请求半径（世界单位，>0）")
+    p.add_argument("--cooldown", type=int, help="淘汰冷却帧数")
+    p.set_defaults(func=cmd_residency_set)
 
     p = sub.add_parser("generate", help="程序化铺实例（ash_renderer/generate_scene，5.4 常驻大场景生成器：批量克隆共享资产，种子固定可复现）")
     p.add_argument("--count", type=int, required=True, help="实例总数")

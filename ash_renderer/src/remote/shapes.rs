@@ -31,6 +31,9 @@ struct SpawnShapeParams {
     scale: Option<[f32; 3]>,
     #[serde(default)]
     name: Option<String>,
+    /// 绕过形状缓存直造新资产（6.3 流送压测：每实体独立 mesh 身份）。
+    #[serde(default)]
+    unique: Option<bool>,
 }
 
 /// `ash_renderer/spawn_shape`：造一个测试体（五形状之一 + 颜色 →
@@ -51,6 +54,7 @@ pub(crate) fn spawn_shape(In(params): In<Option<Value>>, world: &mut World) -> B
         p.rotation_euler_deg.map(Vec3::from_array),
         p.scale.map(Vec3::from_array),
         p.name.as_deref(),
+        p.unique.unwrap_or(false),
     )
     .map_err(object_op_error)?;
     Ok(json!({
@@ -75,6 +79,9 @@ struct SpawnLodParams {
     scale: Option<[f32; 3]>,
     #[serde(default)]
     name: Option<String>,
+    /// 绕过形状/变体缓存直造新资产（6.3 流送压测）。
+    #[serde(default)]
+    unique: Option<bool>,
 }
 
 /// `ash_renderer/spawn_lod`：造一个 LOD 阶梯测试体（6.2.1 前置件——基准档
@@ -93,6 +100,7 @@ pub(crate) fn spawn_lod(In(params): In<Option<Value>>, world: &mut World) -> Brp
         p.translation.map(Vec3::from_array),
         p.scale.map(Vec3::from_array),
         p.name.as_deref(),
+        p.unique.unwrap_or(false),
     )
     .map_err(object_op_error)?;
     Ok(json!({

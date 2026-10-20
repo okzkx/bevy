@@ -26,6 +26,7 @@ mod camera_aspect;
 mod camera_control;
 mod ledger;
 mod lod_registry;
+mod residency;
 mod material_hook;
 mod object_ops;
 pub mod scene_gen;
@@ -40,6 +41,7 @@ pub use camera_control::{AshCameraControlPlugin, CameraOrbit};
 pub(crate) use camera_control::{apply_camera_command, CameraCommandError, CameraOrbitCommand};
 pub use ledger::{AshLedgerPlugin, IncrementStats, InstanceLedger, InstanceRow};
 pub use lod_registry::{spawn_lod_ladder, LodGroups, LodLadderReadback};
+pub use residency::{AshResidencyPlugin, ResidencySettings, ResidencyStats};
 pub use workload::{AshWorkloadPlugin, WorkloadSettings};
 pub use material_hook::AshMaterialHookPlugin;
 pub use object_ops::{
