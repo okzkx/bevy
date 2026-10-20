@@ -459,14 +459,18 @@ pub(crate) fn residency_tick(
             {
                 stats.floor_groups_resident += 1;
             }
-            // 请求合并：需求档未驻留 → 一次行置脏（盘点收集全部未驻留档）
+            // 请求合并：需求档未驻留 → 一次行置脏（盘点收集全部未驻留档）。
+            // **全档检查**（6.5 施工订正）：6.4 时 needed[0] 恒真且基准恒驻留
+            // 可以 skip(1)；floor_anchor 下基准降为可淘汰高档，level 0 缺失
+            // 也要触发请求（否则高档淘汰后永不回流）。驻留计数保持 6.4 口径
+            //（只计变体档，level 0 不入 lod_levels_resident）
             let mut any_needed_missing = false;
-            for (level, needed_l) in needed.iter().enumerate().skip(1) {
+            for (level, needed_l) in needed.iter().enumerate() {
                 if !*needed_l { continue; }
                 let Some(handle) = &group_levels[level] else { continue };
                 if pool.resident(handle.id()).is_none() {
                     any_needed_missing = true;
-                } else {
+                } else if level != 0 {
                     lod_levels_resident += 1;
                 }
             }
