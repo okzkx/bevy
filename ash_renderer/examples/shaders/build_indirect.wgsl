@@ -22,6 +22,10 @@
 // - set0 b7：LOD 变体表（6.2，48B/槽 = 4 条 LodEntry；index_count=0 = 该档
 //   未驻留哨兵——从选档结果向下找最近常驻档，判定线 3"不访问未驻留 LOD"）。
 // - set0 b8：LOD 档位环（u32/实例槽，6.2 选档 compute 写 / LOD 关闭 host 填 0）。
+// - set0 b9：缺口标记环（6.6，read_write，u32/实例槽位图）——本 pass 在查
+//   引脚处写缺口证据：选中档条目为哨兵 = "命中且未驻留"，写 `1u << level`；
+//   cull 已对本帧全部槽清零，此处只置位（不在场槽保持 0，无陈旧缺口）。
+//   宿主按帧奇偶纪律读本帧槽（= 两帧前输出），经驻留管理器合并裁决上传。
 // - push（var<immediate>，4B）：count = 在场行数（dispatch 上界）。
 //
 // 并发语义：每 invocation 写互不重叠的 commands[i]，普通 store 无需原子；
@@ -64,6 +68,7 @@ struct IndirectCommand {
 @group(0) @binding(5) var<storage, read_write> commands: array<IndirectCommand>;
 @group(0) @binding(7) var<storage, read> lod_table: array<LodEntry>;
 @group(0) @binding(8) var<storage, read> lod_levels: array<u32>;
+@group(0) @binding(9) var<storage, read_write> gap_marks: array<u32>;
 
 var<immediate> push: PushBuild;
 struct PushBuild {
@@ -104,6 +109,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let slot = presence[i];
     let rec = objects[slot];
+    // 缺口证据（6.6）：选中档条目为哨兵 = 本帧命中且未驻留——写档位位图，
+    // 回退（向细档找/rec 兜底）照旧执行，缺口只记录不改变绘制。
+    let selected = min(lod_levels[slot], MAX_LOD_LEVELS - 1u);
+    let selected_entry = lod_table[slot * MAX_LOD_LEVELS + selected];
+    gap_marks[slot] = select(0u, 1u << selected, selected_entry.index_count == 0u);
     let pins = pick_lod_entry(rec, slot);
     let visible = marks[slot];
     // 引脚全缺（理论上不可达：可绘行基准恒驻留）防御为 0 实例——不画不悬空

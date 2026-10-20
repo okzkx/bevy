@@ -17,6 +17,7 @@
 //! | [`draw`] | indirect 闭环读数（5.3）：draw_stats 绘制调用/命令条数/不可见计数 |
 //! | [`perf`] | 性能读数与变更形态（5.5）：perf_stats 分位数/分段/显存 + perf_samples 原始导出 + workload 变更形态开关 |
 //! | [`residency`] | 驻留管理器读数与设置（6.3）：residency_stats 预算/实占/逐资产清单 + residency_set 开关/预算/半径 |
+//! | [`gap`] | GPU 缺口请求读数与模式（6.6）：gap_stats 聚合 + gap_census 逐槽位图 + gap_set 三态模式 |
 //!
 //! 机制与边界（侦察笔记《bevy_remote：BRP远程协议与自定义方法》）：handler 本身
 //! 就是一个 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍执行——写值下一帧
@@ -27,6 +28,7 @@ pub mod assets;
 pub mod cull;
 pub mod draw;
 pub mod generate;
+pub mod gap;
 pub mod lod;
 pub mod mouse;
 pub mod objects;
@@ -48,6 +50,7 @@ use self::{
     cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
     draw::draw_stats,
     generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
+    gap::{gap_census, gap_set, gap_stats},
     lod::{lod_census, lod_set_enabled, lod_set_params},
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     objects::{increment_stats, replace_handles, spawn_primitive},
@@ -104,6 +107,9 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/draw_stats", draw_stats)
                 .with_method_main("ash_renderer/residency_stats", residency_stats)
                 .with_method_main("ash_renderer/residency_set", residency_set)
+                .with_method_main("ash_renderer/gap_stats", gap_stats)
+                .with_method_main("ash_renderer/gap_census", gap_census)
+                .with_method_main("ash_renderer/gap_set", gap_set)
                 .with_method_main("ash_renderer/perf_stats", perf_stats)
                 .with_method_main("ash_renderer/perf_samples", perf_samples)
                 .with_method_main("ash_renderer/workload", workload),

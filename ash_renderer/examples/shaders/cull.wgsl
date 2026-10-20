@@ -36,6 +36,11 @@ struct ObjectRecord {
 @group(0) @binding(0) var<storage, read> objects: array<ObjectRecord>;
 @group(0) @binding(1) var<storage, read> models: array<mat4x4f>;
 @group(0) @binding(3) var<storage, read_write> marks: array<u32>;
+// 缺口标记环（6.6）：本 pass 只负责清零——dispatch 上界 = 实例槽 bump bound
+// 覆盖全部槽，build_indirect（只派在场行）随后对缺口槽置位。"cull 清零 +
+// build_indirect 置位"两段合起来 = 缺口环每帧全量重写（标记环同款纪律，
+// 不在场槽不残留陈旧缺口）。
+@group(0) @binding(9) var<storage, read_write> gap_marks: array<u32>;
 
 var<immediate> push: PushCull;
 struct PushCull {
@@ -86,4 +91,5 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     marks[slot] = visible;
+    gap_marks[slot] = 0u;
 }

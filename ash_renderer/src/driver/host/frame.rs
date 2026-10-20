@@ -36,7 +36,9 @@ use crate::{
     common::error::{request_graceful_exit, VulkanError},
     common::syntax::{fatal, OnceLog, ResultTierExt},
     overlay::{paint_overlay, OverlayLogState, RenderMode, UiDrawData},
-    scene::{InstanceLedger, LodGroups, ResidencySettings},
+    scene::{
+        GapSnapshot, InstanceLedger, LodGroups, ResidencySettings,
+    },
     vulkan::{
         frustum_planes, pack_frame_uniforms, AcquireOutcome, BindlessTables, Context,
         CullDiagnostics, CullPass, CullSettings, FrameDraw, FramePool, FrameSample,
@@ -44,7 +46,7 @@ use crate::{
         IndirectStats, InstanceTables, LOD_LEVEL_SIZE, LodDiagnostics, LodPass,
         LodSettings, MAX_LOD_LEVELS, MeshPool, OcclusionDiagnostics, OcclusionPass,
         OcclusionSettings, OverlayPipeline, PerfLedger, Swapchain, Uploader,
-        MAX_FRAMES_IN_FLIGHT, MARK_SIZE,
+        GAP_MARK_SIZE, MAX_FRAMES_IN_FLIGHT, MARK_SIZE,
     },
 };
 
@@ -159,6 +161,9 @@ pub(crate) struct FrameInput<'w, 's> {
     lod_groups: Res<'w, LodGroups>,
     /// 驻留管理器设置（6.3/6.5；DrawList 可绘锚解析读 floor_anchor 开关）。
     residency_settings: Res<'w, ResidencySettings>,
+    /// GPU 缺口快照（6.6）：帧起在 fence 纪律内读缺口标记环的采样落点——
+    /// 驻留管理器 tick（Last，帧提交后）与 BRP census 经此消费，不直读环。
+    gap_snapshot: ResMut<'w, GapSnapshot>,
     /// GPU 帧计时器（5.5；停用时 enabled=false，GPU 区间读数缺席）。
     timer: ResMut<'w, GpuTimer>,
     /// 帧样本账（每帧 push 一份 CPU 分段 + GPU 区间 + 规模；只进计量）。
@@ -237,6 +242,7 @@ pub(crate) fn draw_frame(
         ref mut lod_diag,
         ref lod_groups,
         ref residency_settings,
+        ref mut gap_snapshot,
         ref mut timer,
         ref mut perf,
         ..
@@ -626,6 +632,12 @@ pub(crate) fn draw_frame(
                 .lod_level_ring(cull_frame)
                 .write(0, &zeros)
                 .or_fatal("LOD 档位环全最细档填充失败，渲染链无法继续")?;
+            // cull 关 = 清零段不跑，缺口环缺席槽会残留陈旧位图——host 补零
+            //（在场槽由本帧 build_indirect 照常写新鲜值）
+            instance_tables
+                .gap_mark_ring(cull_frame)
+                .write(0, &zeros)
+                .or_fatal("缺口标记环零填充失败，渲染链无法继续")?;
         }
         None
     };
@@ -652,6 +664,26 @@ pub(crate) fn draw_frame(
         lod_diag.rows_compared = assembly.slots.len();
         lod_diag.marks_frame = cull_frame;
     }
+
+    // 6.6 缺口快照采样：帧起读缺口标记环（本帧槽 = 两帧前 compute 输出，
+    // fence 纪律同档位环诊断）——驻留管理器 tick 挂 Last 在帧提交之后，直读
+    // 环会与在飞 compute 写竞争，消费口统一走本快照（tick 与 BRP census）。
+    if cull_bound > 0 {
+        let mut gap_bytes = vec![0u8; cull_bound as usize * GAP_MARK_SIZE as usize];
+        instance_tables
+            .gap_mark_ring(cull_frame)
+            .read(0, &mut gap_bytes)
+            .or_fatal("缺口标记环读数失败，渲染链无法继续")?;
+        gap_snapshot.bits = gap_bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
+            .collect();
+    } else {
+        gap_snapshot.bits.clear();
+    }
+    gap_snapshot.bound = cull_bound;
 
     // 4a-3) indirect 命令组装半边（5.3）：在场行数 = GPU 命令条数（CPU 在账
     // 信息，非可见集回读）；count > 0 才有命令可组装（空场 = None，场景绘制
