@@ -17,5 +17,6 @@ pub use mechanism::{
     AshMaterialHookPlugin, AshReadinessPlugin, AshResidencyPlugin, AshWorkloadPlugin,
     AssetInvalidations, AssetReadiness, AssetRetirements, IncrementStats, InstanceLedger,
     InstanceRow, LodDemand, LodGroups, LodLadderReadback, ReadinessStats, RecycleStats,
-    ResidencySettings, ResidencyStats, WorkloadSettings, anchor_level, spawn_lod_ladder,
+    ResidencySettings, ResidencyStats, WorkloadSettings, GapMode, GapSnapshot, anchor_level,
+    gap_asset_ids, spawn_lod_ladder,
 };

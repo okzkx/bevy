@@ -60,9 +60,9 @@ pub use frames::{DepthTarget, FrameDraw, Frame, FramePool, DEPTH_FORMAT, MAX_FRA
 pub use indirect::{IndirectDraw, IndirectPass, IndirectStats, INDIRECT_PUSH_SIZE};
 pub use instance_table::{
     conservative_world_aabb, pack_lod_entry, pack_material_record, pack_model, pack_object_record,
-    InstanceTables, INDIRECT_COMMAND_SIZE, LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE,
-    MARK_SIZE, MATERIAL_RECORD_SIZE, MATERIAL_TABLE_CAPACITY, MAX_LOD_LEVELS, MODEL_STRIDE,
-    OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY, OCC_MARK_SIZE, PRESENCE_ENTRY_SIZE,
+    InstanceTables, GAP_MARK_SIZE, INDIRECT_COMMAND_SIZE, LOD_ENTRY_SIZE, LOD_LEVEL_SIZE,
+    LOD_TABLE_STRIDE, MARK_SIZE, MATERIAL_RECORD_SIZE, MATERIAL_TABLE_CAPACITY, MAX_LOD_LEVELS,
+    MODEL_STRIDE, OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY, OCC_MARK_SIZE, PRESENCE_ENTRY_SIZE,
 };
 pub use lod::{
     lod_hysteresis_level, lod_raw_level, pack_lod_push, LodDiagnostics, LodDraw, LodPass,

@@ -65,6 +65,14 @@
 //! 锚语义（6.5.2 施工钉明）：组的可绘锚 = 保底档驻留（DrawList 可绘判定与
 //! flush 锚腿同源）；组尾档缺席（登记不完整）时锚退回基准（6.4 语义）；
 //! 非 LOD 组资产锚恒为基准（本段不扩大范围——无变体即无保底可迁）。
+//!
+//! 6.6 GPU 缺口请求扩展（`gap_mode`，默认 Off = 6.5 现状）：GPU 在查引脚处
+//! 写"本帧命中且未驻留"的档位位图（缺口标记环 b9），帧循环在 fence 纪律内
+//! 采样成 [`GapSnapshot`]，本 tick 消费合并——**GPU 出意见、CPU 拍板**：
+//! 缺口归并进需求位图（flush 过滤口）与请求行集，预算/冷却/淘汰裁决不变；
+//! 缺口请求豁免请求半径（缺口 = 已命中可见证据，半径是预测口径）但保留
+//! 冷却窗防抖。Off = 6.4/6.5 CPU 预测独走；GpuOnly = CPU 期望档预测请求
+//! 让位（锚/缺口仍供需求）；Merged = 双源合并（A/B 的对照形态）。
 
 use std::collections::HashMap;
 
@@ -119,6 +127,46 @@ pub struct ResidencySettings {
     /// 驻留、基准按需）；false = 6.4 现状（基准锚）。隐含细粒度语义——
     /// 请求/淘汰/盘点过滤按 `fine_grained ∨ floor_anchor` 放行。
     pub floor_anchor: bool,
+    /// GPU 缺口请求模式（6.6）：Off = CPU 预测独走（6.5 现状）；GpuOnly =
+    /// CPU 期望档预测请求让位（锚/缺口仍供需求）；Merged = 双源合并。
+    pub gap_mode: GapMode,
+}
+
+/// GPU 缺口请求模式（6.6）——见 [`ResidencySettings::gap_mode`]。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GapMode {
+    /// CPU 预测独走（6.5 现状，A/B 的对照面）。
+    #[default]
+    Off,
+    /// GPU 缺口独走：CPU 期望档预测请求关闭，缺口 + 锚供需求。
+    GpuOnly,
+    /// 双源合并：CPU 预测与 GPU 缺口都进请求集。
+    Merged,
+}
+
+impl GapMode {
+    /// BRP/读数面的形态名。
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::GpuOnly => "gpu_only",
+            Self::Merged => "merged",
+        }
+    }
+
+    /// BRP 参数解析（字符串形态）。
+    ///
+    /// # Errors
+    /// 未知形态名。
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "off" => Ok(Self::Off),
+            "gpu_only" => Ok(Self::GpuOnly),
+            "merged" => Ok(Self::Merged),
+            other => Err(format!("未知 gap_mode {other}（off/gpu_only/merged）")),
+        }
+    }
 }
 
 impl Default for ResidencySettings {
@@ -131,6 +179,7 @@ impl Default for ResidencySettings {
             budget_image_bytes: 0,
             fine_grained: false,
             floor_anchor: false,
+            gap_mode: GapMode::Off,
         }
     }
 }
@@ -180,6 +229,19 @@ pub struct ResidencyStats {
     pub floor_anchor: bool,
     /// 保底档驻留的组数（登记组中保底变体在池的组数，判定线 1 的读数面）。
     pub floor_groups_resident: usize,
+    // —— 6.6 GPU 缺口请求段（gap_mode != Off 时填充）——
+    /// 缺口模式快照（读数面字符串 = GapMode::as_str）。
+    pub gap_mode: &'static str,
+    /// 快照中非零缺口槽数（逐槽位图非零的槽，采样帧 = 两帧前）。
+    pub gap_slots_last: usize,
+    /// 缺口去重后的基准身份数（组级归并，判定线 1"同身份去重"读数）。
+    pub gap_assets_last: usize,
+    /// 本 tick 缺口触发的置脏行数。
+    pub gap_rows_last: usize,
+    /// 缺口触发置脏行累计。
+    pub gap_rows_total: u64,
+    /// 陈旧缺口丢弃累计（槽已无对应行——快照两帧延迟内的行清账/槽回收）。
+    pub gap_stale_total: u64,
 }
 
 /// 需求档位图（6.5.3）：residency_tick 每帧发布、flush_uploads 同帧盘点
@@ -191,6 +253,37 @@ pub struct LodDemand {
     pub active: bool,
     /// 基准身份 → 需求档位位图（bit L = level L 本帧需求；保底档位恒置位）。
     pub levels: HashMap<AssetId<Mesh>, u32>,
+}
+
+/// GPU 缺口快照（6.6）：帧循环在 fence 纪律内读缺口标记环（本帧槽 = 两帧前
+/// compute 输出）采样——residency_tick 与 BRP census 的读数源。tick 挂 Last
+/// 在帧提交之后，直读环会与在飞 compute 写竞争，故采样收口在帧起（frame.rs）。
+#[derive(Resource, Default)]
+pub struct GapSnapshot {
+    /// 采样覆盖的槽上界（= 采样帧的实例槽 bump bound）。
+    pub bound: u32,
+    /// 逐槽缺口位图（bit L = 该槽选中档 L 未驻留；索引 = 实例槽号）。
+    pub bits: Vec<u32>,
+}
+
+/// 缺口位图 → 请求身份集（6.6.4 纯函数）：逐置位档位映射到该组对应档位
+/// 资产身份（level 0 = 基准；越界位忽略——环内容异常不放大）。调用方做
+/// 驻留复核/冷却/裁决。
+#[must_use]
+pub fn gap_asset_ids(
+    bits: u32,
+    levels: &[Option<Handle<Mesh>>; MAX_LOD_LEVELS as usize],
+    base: AssetId<Mesh>,
+) -> Vec<AssetId<Mesh>> {
+    let mut out = Vec::new();
+    for (level, handle) in levels.iter().enumerate() {
+        if bits >> level & 1 == 0 {
+            continue;
+        }
+        let id = handle.as_ref().map(|h| h.id()).unwrap_or(base);
+        out.push(id);
+    }
+    out
 }
 
 /// 管理器内部状态（冷却表：mesh/贴图身份 → 剩余冷却帧——两张表，键型
@@ -217,6 +310,7 @@ pub(crate) fn residency_tick(
     mut ledger: ResMut<InstanceLedger>,
     mut retirements: ResMut<AssetRetirements>,
     mut lod_demand: ResMut<LodDemand>,
+    snapshot: Res<GapSnapshot>,
     pool: Res<MeshPool>,
     image_cache: Res<ImageCache>,
     std_materials: Res<Assets<StandardMaterial>>,
@@ -239,6 +333,10 @@ pub(crate) fn residency_tick(
     stats.ejected_last = 0;
     stats.requested_rows_last = 0;
     stats.floor_groups_resident = 0;
+    stats.gap_mode = settings.gap_mode.as_str();
+    stats.gap_slots_last = 0;
+    stats.gap_assets_last = 0;
+    stats.gap_rows_last = 0;
     // —— 6.5 锚切换沿：floor_anchor 翻转 = 全行置脏 + LOD 脏（记录引脚
     // 基准↔保底换写、b7 表重写、盘点按新位图过滤）。不受 active 闸门约束
     //——B面下全常驻，重标只多一次收敛盘点（bound 未变的行免换槽）。
@@ -334,6 +432,52 @@ pub(crate) fn residency_tick(
         *frames > 0
     });
 
+    // —— 6.6 缺口合并（GPU 一手证据读回）：快照由帧循环在 fence 纪律内采样
+    //（本帧槽 = 两帧前 compute 输出），tick 在此消费——逐槽位图经账本反查
+    // 行与 LOD 组，聚合到基准身份（同身份多实例去重 = 槽级位图 + 组级归并）。
+    // 缺口只出"建议"：进需求位图与请求行集，预算/冷却/淘汰裁决仍在 CPU
+    //（判定线 4）；快照两帧延迟内的行清账/槽回收 = 陈旧缺口如实计数丢弃。
+    let mut gap_by_base: HashMap<AssetId<Mesh>, u32> = HashMap::new();
+    if settings.gap_mode != GapMode::Off && !snapshot.bits.is_empty() {
+        let mut slot_bases: HashMap<u32, AssetId<Mesh>> = HashMap::new();
+        for (_entity, row) in ledger.rows() {
+            if let Some(slot) = row.instance_slot {
+                slot_bases.insert(slot, row.mesh.id());
+            }
+        }
+        for (slot, bits) in snapshot.bits.iter().enumerate() {
+            if *bits == 0 {
+                continue;
+            }
+            stats.gap_slots_last += 1;
+            let Some(&base) = slot_bases.get(&(slot as u32)) else {
+                stats.gap_stale_total += 1;
+                continue;
+            };
+            *gap_by_base.entry(base).or_insert(0u32) |= bits;
+        }
+    }
+    // 缺口请求裁决（CPU 拍板）：冷却窗仍适用（防抖）；请求半径不适用——缺口
+    // 是"本帧已命中可见"的证据，半径是相机预测口径；逐档复核驻留（两帧延迟
+    // 内可能已到货），仍缺的才触发行置脏。
+    let mut gap_rows: Vec<Entity> = Vec::new();
+    if !gap_by_base.is_empty() {
+        for (base_id, bits) in &gap_by_base {
+            let Some(g) = groups.get(base_id) else { continue };
+            let Some(levels) = lod_groups.levels_of(*base_id) else { continue };
+            if cooldown.meshes.contains_key(base_id) {
+                continue;
+            }
+            let any_missing = gap_asset_ids(*bits, levels, *base_id)
+                .iter()
+                .any(|id| pool.resident(*id).is_none());
+            if any_missing {
+                stats.gap_assets_last += 1;
+                gap_rows.extend(g.rows.iter().copied());
+            }
+        }
+    }
+
     // —— 请求侧：非驻留 ∧ 半径内 ∧ 冷却已过 → 全部引用行 mark_dirty（重传链
     // 复用；行已在脏集 = 幂等无成本）。
     let mut request_rows: Vec<Entity> = Vec::new();
@@ -419,34 +563,47 @@ pub(crate) fn residency_tick(
         let floor_level_idx = (MAX_LOD_LEVELS - 1) as usize;
         for (base_id, g) in groups.iter() {
             let Some(group_levels) = lod_groups.levels_of(*base_id) else { continue }; // 非阶梯 mesh 无档位账
-            // 期望档位并集：粗档保底之外，每个引用行的目标档都应驻留
+            // 期望档位并集：粗档保底之外，每个引用行的目标档都应驻留。
+            // GpuOnly（6.6）：CPU 期望档预测请求让位——期望档不进需求集，
+            // GPU 缺口 + 锚供需求（A/B 的 GPU 独走面）。
             let mut needed = [false; MAX_LOD_LEVELS as usize];
             // 锚档恒需求（6.5）：floor_anchor = 保底档（最粗变体）常驻、基准
             // 降为按需高档；组尾档缺席（登记不完整）锚退回基准 = 6.4 语义
             needed[anchor_level(settings.floor_anchor, group_levels[floor_level_idx].is_some())
                 as usize] = true;
-            for (entity, row) in ledger.rows() {
-                if !g.rows.contains(&entity) {
-                    continue;
-                }
-                // 期望档计算优先取基准槽位；基准缺席（6.5 按需高档被淘汰）
-                // 退锚槽位——保底变体与基准同源同界近似，跳过会让基准一旦
-                // 淘汰就永远算不出期望档（高档永不回流）
-                let Some(slot) = pool.resident(row.mesh.id()).or_else(|| {
-                    group_levels[floor_level_idx].as_ref().and_then(|h| pool.resident(h.id()))
-                }) else { continue };
-                if let Some((px_min, px_max, _)) = aabb_screen_rect(
-                    &view_proj, &row.model, slot.local_aabb.0, slot.local_aabb.1, screen,
-                ) {
-                    let size = (px_max.x - px_min.x).max(px_max.y - px_min.y);
-                    let raw = lod_raw_level(size, lod_settings.threshold_px, MAX_LOD_LEVELS);
-                    needed[raw as usize] = true;
+            if settings.gap_mode != GapMode::GpuOnly {
+                for (entity, row) in ledger.rows() {
+                    if !g.rows.contains(&entity) {
+                        continue;
+                    }
+                    // 期望档计算优先取基准槽位；基准缺席（6.5 按需高档被淘汰）
+                    // 退锚槽位——保底变体与基准同源同界近似，跳过会让基准一旦
+                    // 淘汰就永远算不出期望档（高档永不回流）
+                    let Some(slot) = pool.resident(row.mesh.id()).or_else(|| {
+                        group_levels[floor_level_idx].as_ref().and_then(|h| pool.resident(h.id()))
+                    }) else { continue };
+                    if let Some((px_min, px_max, _)) = aabb_screen_rect(
+                        &view_proj, &row.model, slot.local_aabb.0, slot.local_aabb.1, screen,
+                    ) {
+                        let size = (px_max.x - px_min.x).max(px_max.y - px_min.y);
+                        let raw = lod_raw_level(size, lod_settings.threshold_px, MAX_LOD_LEVELS);
+                        needed[raw as usize] = true;
+                    }
                 }
             }
-            // 需求位图发布（6.5.3）：tick 算好的需求集交同帧 flush 过滤盘点
+            // 6.6 缺口归并：GPU 选档缺口并入需求集（merged）——位图发布与
+            // 淘汰豁免都以 merged 为准（CPU 拍板 = 接受缺口进需求，裁决权与
+            // 预算不变）；merged[锚] 恒真（保底豁免结构性保持）。
+            let gap_mask = gap_by_base.get(base_id).copied().unwrap_or(0u32);
+            let mut merged = needed;
+            for (level, merged_l) in merged.iter_mut().enumerate() {
+                *merged_l |= gap_mask >> level & 1 == 1;
+            }
+            // 需求位图发布（6.5.3 + 6.6 归并）：tick 算好的需求集交同帧 flush
+            // 过滤盘点——缺口点名的档位由此获得上传通道
             if settings.floor_anchor {
                 let mut mask = 0u32;
-                for (level, needed_l) in needed.iter().enumerate() {
+                for (level, needed_l) in merged.iter().enumerate() {
                     if *needed_l {
                         mask |= 1 << level;
                     }
@@ -475,20 +632,23 @@ pub(crate) fn residency_tick(
                 }
             }
             if fine
+                && settings.gap_mode != GapMode::GpuOnly
                 && any_needed_missing
                 && g.min_dist <= settings.request_radius
                 && !cooldown.meshes.contains_key(base_id)
             {
                 request_rows_all.extend(g.rows.iter().copied());
             }
-            // 非需求档淘汰（距离远优先；冷却窗同源；fine ∨ floor_anchor 开）
+            // 非需求档淘汰（距离远优先；冷却窗同源；fine ∨ floor_anchor 开）。
+            // 6.6：以 merged 为"需求"口径——缺口点名的档位不进淘汰候选
+            //（GPU 要的 CPU 已接受进需求；淘汰权本身仍在 CPU，判定线 4）。
             if !fine {
                 continue;
             }
             // floor_anchor 下淘汰从 level 0 起步——基准降为可淘汰高档（保底
             // 恒需求恒不淘汰，"淘汰永不触保底"由需求集结构性保证）
             let eject_start = usize::from(!settings.floor_anchor);
-            for (level, needed_l) in needed.iter().enumerate().skip(eject_start) {
+            for (level, needed_l) in merged.iter().enumerate().skip(eject_start) {
                 if *needed_l { continue; }
                 let Some(handle) = &group_levels[level] else { continue };
                 let level_id = handle.id();
@@ -506,6 +666,11 @@ pub(crate) fn residency_tick(
         }
     }
     stats.lod_levels_resident = lod_levels_resident;
+    // 6.6 缺口请求行并入（缺口分支已做冷却/驻留复核/组级去重）——与 CPU
+    // 预测请求同一条置脏通道，幂等续期（行在脏集 = 免费）
+    request_rows_all.extend(gap_rows.iter().copied());
+    stats.gap_rows_last = gap_rows.len();
+    stats.gap_rows_total += gap_rows.len() as u64;
     for entity in &request_rows_all {
         ledger.mark_dirty(*entity);
     }
@@ -605,6 +770,7 @@ impl Plugin for AshResidencyPlugin {
             .init_resource::<ResidencyStats>()
             .init_resource::<EjectCooldown>()
             .init_resource::<LodDemand>()
+            .init_resource::<GapSnapshot>()
             .add_systems(
                 Last,
                 residency_tick
@@ -620,7 +786,8 @@ impl Plugin for AshResidencyPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{anchor_level, MAX_LOD_LEVELS};
+    use super::{anchor_level, gap_asset_ids, GapMode, MAX_LOD_LEVELS};
+    use bevy::prelude::*;
 
     /// 可绘锚档位（6.5.2 判定前提的三处共用纯函数）：关闭 = 基准（6.4 语义）；
     /// 开启 = 保底档（最粗变体）；组尾档缺席（登记不完整）退回基准。
@@ -634,5 +801,40 @@ mod tests {
             "锚开启 = 保底档（最粗变体）"
         );
         assert_eq!(anchor_level(true, false), 0, "尾档缺席退回基准（登记不完整）");
+    }
+
+    /// 缺口位图 → 请求身份集（6.6.4 判定线 1 的去重前）：逐置位档位映射
+    /// 资产身份（level 0 = 基准），零位图空集，越界位忽略（环内容异常不放大）。
+    #[test]
+    fn gap_asset_ids_unpack() {
+        let mut meshes = Assets::<Mesh>::default();
+        let sphere = || {
+            Sphere::new(0.5)
+                .mesh()
+                .ico(1)
+                .expect("细分上限内不失败")
+        };
+        let handles: Vec<Handle<Mesh>> = (0..MAX_LOD_LEVELS).map(|_| meshes.add(sphere())).collect();
+        let mut levels: [Option<Handle<Mesh>>; MAX_LOD_LEVELS as usize] = Default::default();
+        for (i, h) in handles.iter().enumerate() {
+            levels[i] = Some(h.clone());
+        }
+        let base = handles[0].id();
+        assert!(gap_asset_ids(0, &levels, base).is_empty(), "零位图 = 无缺口");
+        let ids = gap_asset_ids(0b1001, &levels, base);
+        assert_eq!(ids, vec![base, handles[3].id()], "bit0 与 bit3 → 基准与保底");
+        // 越界位忽略（bit 4.. 不在 MAX 内）
+        let only_inrange = gap_asset_ids(u32::MAX, &levels, base);
+        assert_eq!(only_inrange.len(), MAX_LOD_LEVELS as usize);
+    }
+
+    /// GapMode 字符串往返与默认（6.6 BRP 通道的解析纪律：未知形态报错不猜）。
+    #[test]
+    fn gap_mode_parse_roundtrip() {
+        assert_eq!(GapMode::default(), GapMode::Off);
+        for mode in [GapMode::Off, GapMode::GpuOnly, GapMode::Merged] {
+            assert_eq!(GapMode::parse(mode.as_str()), Ok(mode));
+        }
+        assert!(GapMode::parse("wat").is_err());
     }
 }
