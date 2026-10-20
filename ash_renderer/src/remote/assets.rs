@@ -218,3 +218,34 @@ fn asset_op_error(err: AssetOpError) -> BrpError {
         ),
     }
 }
+
+/// `ash_renderer/load_world` 的请求参数。
+#[derive(serde::Deserialize)]
+struct LoadWorldParams {
+    /// 场景资产路径（相对资产根，.gltf 或 .glb，如 `zero_day/zero_day_measure_one.glb`）。
+    path: String,
+}
+
+/// `ash_renderer/load_world`：整场景动态进场——load Scene0 并 spawn
+/// [`WorldAssetRoot`]，与 Startup 进场组（scene/content/world_asset）同链：
+/// 到货后由 bevy_world_serialization 的 `world_instance_spawner` 反射展开成
+/// primitive 实体树。多场景共存口：Startup 默认场景（Sponza）不动，其余
+/// 场景经此进（7.2 zero_day / 7.3 Poly Haven / 7.4 复验全走这里）。
+///
+/// 异步语义与 load_mesh 同款：受理即返回加载中，本方法族不等到货——
+/// 到货/失败看进场到货报告与 AssetLoadFailedEvent 读侧。
+pub(crate) fn load_world_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 path"))?;
+    let p: LoadWorldParams =
+        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let handle = world
+        .resource::<AssetServer>()
+        // load 收 AssetPath<'static>（柄内保存），&str 须转 owned（load_mesh_rebind 同款钉）
+        .load(bevy::gltf::GltfAssetLabel::Scene(0).from_asset(p.path.clone()));
+    let entity = world.spawn(bevy::world_serialization::WorldAssetRoot(handle)).id();
+    Ok(json!({
+        "entity": entity.to_string(),
+        "path": p.path,
+        "state": "loading",
+    }))
+}
