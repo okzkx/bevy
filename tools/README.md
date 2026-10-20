@@ -22,4 +22,5 @@
 
 ## 本项目 Python 工具（ash_renderer BRP 直控）
 
-- `brp.py`——BRP 薄客户端（3.12/3.13）：把宿主 HTTP JSON-RPC（127.0.0.1:15702）封装成十一个子命令——`tree`/`inspect`/`query`/`set-transform`/`camera`/`mouse-move`/`mouse-button`/`mouse-wheel`/`mouse-status`/`discover`/`raw`；组件短名自动展开，AI 免记协议。虚拟鼠标走应用层消息缓冲（与 bevy_winit 同层），不碰真实光标/焦点，不受无人模式纪律约束。逐命令用法与实战配方见 [BRP直控使用指南](../.agents/docs/3-静态取数链路/3.12-CLI直控/BRP直控使用指南：逐命令用法、与MCP的分界及Skill+CLI定位.md)。
+- `brp.py`——BRP 薄客户端（3.12/3.13）：把宿主 HTTP JSON-RPC（127.0.0.1:15702）封装成子命令族——`tree`/`inspect`/`query`/`set-transform`/`camera`/`mouse-move`/`mouse-button`/`mouse-wheel`/`mouse-status`/`discover`/`raw`；组件短名自动展开，AI 免记协议。虚拟鼠标走应用层消息缓冲（与 bevy_winit 同层），不碰真实光标/焦点，不受无人模式纪律约束。逐命令用法与实战配方见 [BRP直控使用指南](../.agents/docs/3-静态取数链路/3.12-CLI直控/BRP直控使用指南：逐命令用法、与MCP的分界及Skill+CLI定位.md)。
+- `scene_lod.py`——LOD 场景一键生成与判定线采证驱动（6.2）：场景生成持久化脚本——BRP `spawn_lod` 四距离阶梯样本 + 钉机位，同参数重跑同场景；`--build-only` 为 6.3/6.4 复用入口，默认采证六项（选档生效/CPU 参照零 mismatch/A-B 开关/迟滞单调/draw_calls 恒 1/零 VUID）。用法同 hiz_test.py（--no-close/--skip-launch）。

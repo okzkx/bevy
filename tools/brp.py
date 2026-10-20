@@ -299,6 +299,39 @@ def cmd_occlusion_probe(args):
     out(rpc(args.host, args.port, "ash_renderer/occlusion_probe", params))
 
 
+def cmd_spawn_lod(args):
+    params = {"shape": args.shape}
+    if args.color:
+        params["color"] = [float(x) for x in args.color]
+    if args.translation:
+        params["translation"] = [float(x) for x in args.translation]
+    if args.scale:
+        params["scale"] = [float(x) for x in args.scale]
+    if args.name:
+        params["name"] = args.name
+    out(rpc(args.host, args.port, "ash_renderer/spawn_lod", params))
+
+
+def cmd_lod_census(args):
+    out(rpc(args.host, args.port, "ash_renderer/lod_census"))
+
+
+def cmd_lod_set(args):
+    out(rpc(args.host, args.port, "ash_renderer/lod_set_enabled",
+            {"enabled": args.enabled == "true"}))
+
+
+def cmd_lod_params(args):
+    params = {}
+    if args.threshold_px is not None:
+        params["threshold_px"] = float(args.threshold_px)
+    if args.hysteresis is not None:
+        params["hysteresis"] = float(args.hysteresis)
+    if not params:
+        sys.exit("brp: lod-params 需要 --threshold-px 与/或 --hysteresis 至少一项")
+    out(rpc(args.host, args.port, "ash_renderer/lod_set_params", params))
+
+
 def cmd_draw_stats(args):
     out(rpc(args.host, args.port, "ash_renderer/draw_stats"))
 def cmd_workload(args):
@@ -443,6 +476,25 @@ def main():
     p.add_argument("--scale", nargs=3, type=float, metavar=("X", "Y", "Z"), help="非均匀缩放（默认 1 1 1）")
     p.add_argument("--name", help="树内 Name（默认 测试体-<shape>）")
     p.set_defaults(func=cmd_spawn_shape)
+
+    p = sub.add_parser("spawn-lod", help="造 LOD 阶梯测试体（ash_renderer/spawn_lod，6.2：sphere ico 细分 4/3/2/1 四档，档位资产随首盘点一并上传）")
+    p.add_argument("shape", choices=["sphere"], help="形状（6.2 阶梯面仅 sphere）")
+    p.add_argument("--color", nargs=3, type=float, metavar=("R", "G", "B"), help="sRGB 颜色 [0,1]（默认 0.8 0.8 0.8）")
+    p.add_argument("--translation", nargs=3, type=float, metavar=("X", "Y", "Z"), help="世界坐标位置（默认原点）")
+    p.add_argument("--scale", nargs=3, type=float, metavar=("X", "Y", "Z"), help="缩放（默认 1 1 1）")
+    p.add_argument("--name", help="树内 Name")
+    p.set_defaults(func=cmd_spawn_lod)
+
+    sub.add_parser("lod-census", help="LOD 档位对照（ash_renderer/lod_census，只读：GPU 两帧前档位 vs CPU 参照逐实例 + 档位分布）").set_defaults(func=cmd_lod_census)
+
+    p = sub.add_parser("lod-set", help="LOD 开关（ash_renderer/lod_set_enabled：false = host 填最细档，命令回 5.3 基准）")
+    p.add_argument("enabled", choices=["true", "false"])
+    p.set_defaults(func=cmd_lod_set)
+
+    p = sub.add_parser("lod-params", help="LOD 判据参数（ash_renderer/lod_set_params：阈值/迟滞随 96B push 每帧进 compute）")
+    p.add_argument("--threshold-px", type=float, help="档位阈值（像素，>0）")
+    p.add_argument("--hysteresis", type=float, help="迟滞系数 [0,1)")
+    p.set_defaults(func=cmd_lod_params)
 
     p = sub.add_parser("generate", help="程序化铺实例（ash_renderer/generate_scene，5.4 常驻大场景生成器：批量克隆共享资产，种子固定可复现）")
     p.add_argument("--count", type=int, required=True, help="实例总数")

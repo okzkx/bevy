@@ -41,7 +41,7 @@ use ash_macros::system;
 
 use crate::{
     common::syntax::{OnceLog, OptionTierExt, ResultTierExt},
-    scene::{AssetInvalidations, AssetReadiness, AssetRetirements, InstanceLedger},
+    scene::{AssetInvalidations, AssetReadiness, AssetRetirements, InstanceLedger, LodGroups},
     vulkan::{
         pack_object_record, sampler_key, FramePool, GpuImage, ImageCache, InstanceTables, MeshPool,
         StagingCopy, StagingImageCopy, UploadBatch, Uploader, OBJECT_RECORD_SIZE,
@@ -113,6 +113,9 @@ pub(crate) struct UploadData<'w> {
     /// GPU 常驻绘制数据(对象表/材质槽/停尸房):实例槽分配与记录换槽的
     /// 写点独占本系统(行盘点期间);环的写入在帧循环(draw_frame)。
     instance_tables: ResMut<'w, InstanceTables>,
+    /// LOD 组登记处（6.2.2，只读）：档位盘点与到货反查——AshLedgerPlugin
+    /// init_resource 恒在账。
+    lod_groups: Res<'w, LodGroups>,
     /// overlay 图集账面:旧代停尸房并入本排空点;overlay 未装时
     /// 缺席 = None(no-op)。
     atlas: Option<ResMut<'w, crate::overlay::AtlasGpu>>,
@@ -145,6 +148,7 @@ pub(crate) fn flush_uploads(
         mut readiness,
         mut retirements,
         mut instance_tables,
+        ref lod_groups,
         mut atlas,
         ref ctx,
         ref frames,
@@ -213,6 +217,9 @@ pub(crate) fn flush_uploads(
     let mut seen = HashSet::new();
     // (身份, 柄, 是否换条目重传)——第三位凭据决定 commit 走登记还是替换
     let mut fresh: Vec<(AssetId<Mesh>, Handle<Mesh>, bool)> = Vec::new();
+    // LOD 组档位身份去重集（6.2.2：登记组的档位资产随引用行首次盘点一并
+    // 进本批——档位不被实体直接引用，账本脏行扫描是它们唯一的上传触发点）
+    let mut lod_seen = HashSet::new();
     let mut img_seen = HashSet::new();
     let mut fresh_images: Vec<(AssetId<Image>, Handle<Image>, bool)> = Vec::new();
     let mut materials_pending = 0usize;
@@ -237,6 +244,32 @@ pub(crate) fn flush_uploads(
         let mesh_id = row.mesh.id();
         let mesh_replace = invalidations.mesh_pending(mesh_id);
         let mesh_leg_done = pool.resident(mesh_id).is_some() && !mesh_replace;
+        // —— LOD 组档位盘点（6.2.2）：行引用的 mesh 在登记组内 → 各档变体
+        // 未驻留的进本批（档位不被实体引用，本扫描是它们的唯一上传触发点；
+        // 失败档保持哨兵 0，消费端向更细档回退——降级画面语义）。**level 0
+        // = 基准 mesh 本身，必须跳过**——它由上面 mesh 腿正常处理，重复入
+        // fresh 会让 commit 撞"同身份重复登记"（运行实抓首钉）。异步未到货
+        // 的档位标 pending 进 readiness 账，重试通道 6.3 驻留管理器接管
+        //（6.2 范围钉明，见 lod_registry 模块注释）。
+        for handle in lod_groups
+            .levels_of(mesh_id)
+            .map(|levels| levels.iter().flatten().filter(|h| h.id() != mesh_id))
+            .into_iter()
+            .flatten()
+        {
+            let level_id = handle.id();
+            let level_replace = invalidations.mesh_pending(level_id);
+            if pool.resident(level_id).is_some() && !level_replace {
+                continue; // 该档完成
+            }
+            if readiness.mesh_failed(level_id) {
+                continue; // 失败档不再重试（哨兵回退兜底，行级判定不受影响）
+            }
+            if lod_seen.insert(level_id) {
+                let had_old = pool.resident(level_id).is_some();
+                fresh.push((level_id, handle.clone(), had_old));
+            }
+        }
         if mesh_leg_done {
             // 该腿完成
         } else if readiness.mesh_failed(mesh_id) {
@@ -314,6 +347,9 @@ pub(crate) fn flush_uploads(
                 ));
                 // 新槽的模型要写进两个帧槽的环(本帧 + 下帧各一写)
                 ledger.mark_model_dirty(entity);
+                // 新槽的 LOD 表条目同款两帧奇偶纪律(6.2.2:换槽 = 槽号变了,
+                // 表条目按槽直址必须重写;level 0 引脚取自本行基准 mesh 槽位)
+                ledger.mark_lod_dirty(entity);
             }
         }
         if !pending_leg {
@@ -599,9 +635,19 @@ pub(crate) fn flush_uploads(
     // 换内容成功的身份销账(凭据消费);未成功(未到货/被拒)的保留,
     // 行保持脏标下帧重试。到货销账——pending 身份离开账面,等待帧数
     // 计入到货计量(非 pending 身份的稳态重传无账可销,静默无动作)。
+    for id in &committed_meshes {
+        invalidations.consume_mesh(*id);
+        readiness.arrive_mesh(*id);
+    }
+    // LOD 组档位到货反查（6.2.2）：档位资产提交成功 → 重挂引用行的 LOD
+    // 脏标（draw_frame 下两帧把新引脚写进两个帧槽的表环；O(rows) 反查，
+    // 触发频率 = 档位提交，稀疏事件）
     for id in committed_meshes {
-        invalidations.consume_mesh(id);
-        readiness.arrive_mesh(id);
+        if let Some(base) = lod_groups.base_of(id) {
+            for entity in ledger.rows_with_mesh(base) {
+                ledger.mark_lod_dirty(entity);
+            }
+        }
     }
     for id in committed_images {
         invalidations.consume_image(id);

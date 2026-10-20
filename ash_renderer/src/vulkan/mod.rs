@@ -15,6 +15,7 @@
 //! | `descriptors` | 资产级 | 常驻描述符表(set0 双表/set1 每帧 UBO)+ 槽位发布 |
 //! | `cull` | 进程级+纯函数 | 视锥剔除 compute 半边(5.2):CullPass 管线 + 平面提取 + CPU 参照 + 诊断账面 |
 //! | `occlusion` | 进程级+纯函数 | Hi-Z 遮挡测试 compute 半边(6.1):OcclusionPass 管线 + 投屏参照 + fallback 账面 |
+//! | `lod` | 进程级+纯函数 | GPU LOD 选档 compute 半边(6.2):LodPass 管线 + 判据/迟滞纯函数 + 诊断账面 |
 //! | `hiz` | 进程级+纯函数 | Hi-Z 深度金字塔(6.1.2):HizPyramid ×2 帧槽 + 逐级归约管线 + reverse-Z 保守方向纯函数 |
 //! | `indirect` | 进程级+纯函数 | indirect 闭环 compute 半边(5.3):IndirectPass 命令组装管线 + 诊断账面 + 命令布局参照 |
 //! | `perf` | 进程级 | GPU timestamp 计时(GpuTimer 每帧槽 query pool)+ 帧样本账(PerfLedger 分位数,5.5) |
@@ -31,6 +32,7 @@ mod hiz;
 mod images;
 mod indirect;
 mod instance_table;
+mod lod;
 mod mesh_convert;
 mod occlusion;
 mod overlay_pipeline;
@@ -57,9 +59,14 @@ pub use frames::{DepthTarget, FrameDraw, Frame, FramePool, DEPTH_FORMAT, MAX_FRA
 };pub use images::{image_spec, sampler_key, GpuImage, ImageCache, ImageConvertError, ImageSpec, SamplerKey};
 pub use indirect::{IndirectDraw, IndirectPass, IndirectStats, INDIRECT_PUSH_SIZE};
 pub use instance_table::{
-    conservative_world_aabb, pack_material_record, pack_model, pack_object_record, InstanceTables,
-    INDIRECT_COMMAND_SIZE, MARK_SIZE, MATERIAL_RECORD_SIZE, MATERIAL_TABLE_CAPACITY, MODEL_STRIDE,
+    conservative_world_aabb, pack_lod_entry, pack_material_record, pack_model, pack_object_record,
+    InstanceTables, INDIRECT_COMMAND_SIZE, LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE,
+    MARK_SIZE, MATERIAL_RECORD_SIZE, MATERIAL_TABLE_CAPACITY, MAX_LOD_LEVELS, MODEL_STRIDE,
     OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY, OCC_MARK_SIZE, PRESENCE_ENTRY_SIZE,
+};
+pub use lod::{
+    lod_hysteresis_level, lod_raw_level, pack_lod_push, LodDiagnostics, LodDraw, LodPass,
+    LodSettings, LOD_PUSH_SIZE,
 };
 pub use occlusion::{
     aabb_screen_rect, pack_occlusion_push, OcclusionDiagnostics, OcclusionDraw, OcclusionFallback,

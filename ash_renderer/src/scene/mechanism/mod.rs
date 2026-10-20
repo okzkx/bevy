@@ -11,6 +11,7 @@
 //! | [`asset_ops`] | 资产写操作封装：mutate 材质参数/贴图槽/mesh 顶点/image 像素，BRP 薄壳的可复用实现 |
 //! | [`scene_gen`] | 常驻大场景生成器（5.4）：程序化批量铺实例（共享资产/规模参数化/种子复现）+ chunk 身份与整块增删 |
 //! | [`test_entities`] | 测试实体方法族（6.1.1）：五形状 + 颜色 → Lambert 材质的单个测试体（遮挡对/墙体样本载具），mesh 按形状/材质按颜色缓存 |
+//! | [`lod_registry`] | LOD 组登记处（6.2.2）：逻辑 mesh → 各档变体柄的 CPU 侧映射账（flush 盘点/draw_frame 表写/census 读数共用），LOD 阶梯 spawn 本体 |
 //! | [`camera_aspect`] | 宽高比补位：随窗口 resize 修正任意相机的 aspect_ratio |
 //! | [`camera_control`] | 相机轨道控制：左键拖拽环绕 + 滚轮推拉，目标点由组件携带 |
 //! | [`workload`] | 变更形态注入（5.5）：BRP 开关控制的每帧旋转工作源（压测矩阵的少量变化/全动态形态） |
@@ -24,6 +25,7 @@ mod asset_readiness;
 mod camera_aspect;
 mod camera_control;
 mod ledger;
+mod lod_registry;
 mod material_hook;
 mod object_ops;
 pub mod scene_gen;
@@ -37,6 +39,7 @@ pub use camera_aspect::AshCameraAspectPlugin;
 pub use camera_control::{AshCameraControlPlugin, CameraOrbit};
 pub(crate) use camera_control::{apply_camera_command, CameraCommandError, CameraOrbitCommand};
 pub use ledger::{AshLedgerPlugin, IncrementStats, InstanceLedger, InstanceRow};
+pub use lod_registry::{spawn_lod_ladder, LodGroups, LodLadderReadback};
 pub use workload::{AshWorkloadPlugin, WorkloadSettings};
 pub use material_hook::AshMaterialHookPlugin;
 pub use object_ops::{

@@ -59,6 +59,8 @@ impl Plugin for AshHostPlugin {
             .init_resource::<crate::vulkan::IndirectStats>()
             .init_resource::<crate::vulkan::OcclusionSettings>()
             .init_resource::<crate::vulkan::OcclusionDiagnostics>()
+            .init_resource::<crate::vulkan::LodSettings>()
+            .init_resource::<crate::vulkan::LodDiagnostics>()
             .init_resource::<crate::vulkan::PerfLedger>()
             // update 节流：MAILBOX 没有 vsync 背压，默认 Continuous 会空转烧 CPU；
             // Reactive(1/60) 让空闲时 update 按主屏刷新率封顶，事件（拖拽/输入）仍即时驱动。
