@@ -36,7 +36,7 @@ use crate::{
     common::error::{request_graceful_exit, VulkanError},
     common::syntax::{fatal, OnceLog, ResultTierExt},
     overlay::{paint_overlay, OverlayLogState, RenderMode, UiDrawData},
-    scene::{InstanceLedger, LodGroups},
+    scene::{InstanceLedger, LodGroups, ResidencySettings},
     vulkan::{
         frustum_planes, pack_frame_uniforms, AcquireOutcome, BindlessTables, Context,
         CullDiagnostics, CullPass, CullSettings, FrameDraw, FramePool, FrameSample,
@@ -157,6 +157,8 @@ pub(crate) struct FrameInput<'w, 's> {
     lod_diag: ResMut<'w, LodDiagnostics>,
     /// LOD 组登记处（6.2；只读——LOD 表环写入的变体柄来源）。
     lod_groups: Res<'w, LodGroups>,
+    /// 驻留管理器设置（6.3/6.5；DrawList 可绘锚解析读 floor_anchor 开关）。
+    residency_settings: Res<'w, ResidencySettings>,
     /// GPU 帧计时器（5.5；停用时 enabled=false，GPU 区间读数缺席）。
     timer: ResMut<'w, GpuTimer>,
     /// 帧样本账（每帧 push 一份 CPU 分段 + GPU 区间 + 规模；只进计量）。
@@ -234,6 +236,7 @@ pub(crate) fn draw_frame(
         ref lod_settings,
         ref mut lod_diag,
         ref lod_groups,
+        ref residency_settings,
         ref mut timer,
         ref mut perf,
         ..
@@ -327,7 +330,8 @@ pub(crate) fn draw_frame(
     // GPU 常驻表，push 只剩 4B 实例槽号——见 drawlist 模块文档）。可绘判定
     // 与 4.x 语义一致：实例槽缺/mesh 未驻留/材质缺席 = 暂缓（Tier① 自愈）。
     let assemble_clock = std::time::Instant::now();
-    let assembly = drawlist::assemble(ledger, pool, std_materials);
+    let assembly =
+        drawlist::assemble(ledger, pool, std_materials, lod_groups, residency_settings.floor_anchor);
     let assemble_ms = assemble_clock.elapsed().as_secs_f32() * 1000.0;
     if assembly.pending_rows > 0 {
         if !draw_state.warned_pending {

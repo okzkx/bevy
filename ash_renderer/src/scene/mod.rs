@@ -16,6 +16,6 @@ pub use mechanism::{
     AshAssetEventPlugin, AshCameraAspectPlugin, AshCameraControlPlugin, AshLedgerPlugin,
     AshMaterialHookPlugin, AshReadinessPlugin, AshResidencyPlugin, AshWorkloadPlugin,
     AssetInvalidations, AssetReadiness, AssetRetirements, IncrementStats, InstanceLedger,
-    InstanceRow, LodGroups, LodLadderReadback, ReadinessStats, RecycleStats, ResidencySettings,
-    ResidencyStats, WorkloadSettings, spawn_lod_ladder,
+    InstanceRow, LodDemand, LodGroups, LodLadderReadback, ReadinessStats, RecycleStats,
+    ResidencySettings, ResidencyStats, WorkloadSettings, anchor_level, spawn_lod_ladder,
 };

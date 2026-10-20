@@ -94,6 +94,8 @@ pub(crate) fn residency_stats(In(_params): In<Option<Value>>, world: &mut World)
             "over_budget_image": stats.over_budget_image,
             "lod_levels_resident": stats.lod_levels_resident,
             "lod_levels_ejected_total": stats.lod_levels_ejected_total,
+            "floor_anchor": stats.floor_anchor,
+            "floor_groups_resident": stats.floor_groups_resident,
         },
         "settings": {
             "request_radius": settings.request_radius,
@@ -119,6 +121,10 @@ struct ResidencySetParams {
     budget_image_bytes: Option<u64>,
     #[serde(default)]
     fine_grained: Option<bool>,
+    /// 低保真保底锚（6.5）：true = 组行可绘锚迁到最粗变体档（保底常驻、
+    /// 基准按需）；false = 6.4 现状（基准锚）。
+    #[serde(default)]
+    floor_anchor: Option<bool>,
 }
 
 /// `ash_renderer/residency_set`：写驻留管理器设置（开关/预算/请求半径/
@@ -152,6 +158,9 @@ pub(crate) fn residency_set(In(params): In<Option<Value>>, world: &mut World) ->
     if let Some(fine) = p.fine_grained {
         settings.fine_grained = fine;
     }
+    if let Some(floor) = p.floor_anchor {
+        settings.floor_anchor = floor;
+    }
     Ok(json!({
         "enabled": settings.enabled,
         "budget_mesh_bytes": settings.budget_mesh_bytes,
@@ -159,5 +168,6 @@ pub(crate) fn residency_set(In(params): In<Option<Value>>, world: &mut World) ->
         "eject_cooldown_frames": settings.eject_cooldown_frames,
         "budget_image_bytes": settings.budget_image_bytes,
         "fine_grained": settings.fine_grained,
+        "floor_anchor": settings.floor_anchor,
     }))
 }
