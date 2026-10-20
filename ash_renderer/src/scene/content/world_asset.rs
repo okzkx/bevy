@@ -14,19 +14,20 @@ use bevy::{
 
 use ash_macros::system;
 
-/// FlightHelmet 在 assets/ 下的相对路径（1 gltf + 1 bin + 15 png；
-/// 6 材质 = Hose/RubberWood/GlassPlastic/MetalParts/LeatherParts/Lenses）。
-const FLIGHT_HELMET: &str = "models/FlightHelmet/FlightHelmet.gltf";
+/// Sponza 在 assets/ 下的相对路径（1 gltf + 1 bin + 69 贴图；节点 scale 0.008
+/// 把 ~3700 单位的源模型缩到 ~30×12×18 米世界尺寸；1 mesh 拆 103 primitive，
+/// 25 材质全带 baseColor+metallicRoughness，69 张贴图全部被引用）。
+const SPONZA: &str = "sponza/glTF/Sponza.gltf";
 
 /// 场景进场请求（Startup）：`load` 立即返回占位 Handle、数据异步到货；
 /// [`WorldAssetRoot`] 组件到货后由 bevy_world_serialization 的
 /// `world_instance_spawner` 轮询系统（Changed 触发，非组件 Add hook）
 /// 把整棵实体树反射展开进主 World——这里只发"进场请求"，不等数据。
 #[system]
-pub(super) fn load_flight_helmet(mut commands: Commands, server: Res<AssetServer>) {
-    let scene = server.load(GltfAssetLabel::Scene(0).from_asset(FLIGHT_HELMET));
+pub(super) fn load_sponza(mut commands: Commands, server: Res<AssetServer>) {
+    let scene = server.load(GltfAssetLabel::Scene(0).from_asset(SPONZA));
     commands.spawn(WorldAssetRoot(scene));
-    info!("场景进场：已请求 {FLIGHT_HELMET}#Scene0，实体树待依赖就绪后异步展开");
+    info!("场景进场：已请求 {SPONZA}#Scene0，实体树待依赖就绪后异步展开");
 }
 
 /// 到货报告（Update，报一次即歇）：primitive 实体出现 = 实体树已展开，
@@ -62,7 +63,7 @@ pub(super) fn report_scene_arrival(
     }
     let with_material = with_material.iter().count();
     info!(
-        "场景进场到货：primitive 实体 {total}（期望 6），带 MeshMaterial3d {with_material}/{total}（期望 6/6）；容器——Mesh {}（期望 6）、StandardMaterial {}（期望 6 = 每材质一份，兜底 DefaultMaterial 无人持柄不驻留）、Image {}（期望 17 = 内置 2 + 文件 15）",
+        "场景进场到货：primitive 实体 {total}（期望 103），带 MeshMaterial3d {with_material}/{total}（期望 103/103）；容器——Mesh {}（期望 103 = 每 primitive 一份）、StandardMaterial {}（期望 25 = 每材质一份，兜底 DefaultMaterial 无人持柄不驻留）、Image {}（期望 71 = 内置 2 + 文件 69）",
         meshes.len(),
         std_materials.len(),
         images.len(),

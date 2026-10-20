@@ -16,10 +16,12 @@ use ash_macros::system;
 use crate::scene::mechanism::CameraOrbit;
 use crate::scene::util::fmt_vec3;
 
-/// 相机取景参数：与官方对照进程（examples/official_reference.rs）用同一组
-/// 参数——并排对照时几何与光照方向判定才同源可比。
-const CAMERA_POS: Vec3 = Vec3::new(0.7, 0.7, 1.0);
-const CAMERA_TARGET: Vec3 = Vec3::new(0.0, 0.3, 0.0);
+/// 相机取景参数：Sponza 中庭机位（BRP 现场四候选实拍选型，读图证据
+/// .temp/7.1/cam_C.png——彩旗拱廊狮头喷泉全景）。Sponza 世界 AABB ≈
+/// 30×12.4×18.3 米（节点 scale 0.008），中庭中心 ≈ (0, 3, 0)：机位在
+/// 中庭东端沿长轴向西看（球坐标 yaw 90°/pitch 5°/radius 5 的直角反解）。
+const CAMERA_POS: Vec3 = Vec3::new(4.98, 3.44, 0.0);
+const CAMERA_TARGET: Vec3 = Vec3::new(0.0, 3.0, 0.0);
 
 /// 相机进场（Startup）：裸 [`Camera`] + [`Projection`] + [`Transform`]。
 ///
@@ -58,7 +60,7 @@ pub(super) fn spawn_camera(
         CameraOrbit::from_pose(CAMERA_POS, CAMERA_TARGET),
     ));
     info!(
-        "相机进场：Camera+Projection+Transform @ {} 看向 {}（官方示例取景，宽高比{aspect_note}）",
+        "相机进场：Camera+Projection+Transform @ {} 看向 {}（Sponza 中庭取景，宽高比{aspect_note}）",
         fmt_vec3(CAMERA_POS),
         fmt_vec3(CAMERA_TARGET),
     );
