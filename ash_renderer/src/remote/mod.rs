@@ -46,7 +46,7 @@ use bevy::{
 use serde_json::{json, Value};
 
 use self::{
-    assets::{load_image_cmd, load_mesh_cmd, mutate_asset_cmd, reload_asset_cmd},
+    assets::{load_image_cmd, load_mesh_cmd, load_world_cmd, mutate_asset_cmd, reload_asset_cmd},
     cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
     draw::draw_stats,
     generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
@@ -90,6 +90,7 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/mutate_asset", mutate_asset_cmd)
                 .with_method_main("ash_renderer/load_mesh", load_mesh_cmd)
                 .with_method_main("ash_renderer/load_image", load_image_cmd)
+                .with_method_main("ash_renderer/load_world", load_world_cmd)
                 .with_method_main("ash_renderer/reload_asset", reload_asset_cmd)
                 .with_method_main("ash_renderer/increment_stats", increment_stats)
                 .with_method_main("ash_renderer/mouse_move", mouse_move)
