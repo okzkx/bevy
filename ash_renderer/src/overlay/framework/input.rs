@@ -53,6 +53,41 @@ pub(crate) struct EguiInput {
     buttons_down: [bool; egui::NUM_POINTER_BUTTONS],
     /// 上一帧的修饰键快照：变化时补发 `ModifiersChanged`。
     last_modifiers: egui::Modifiers,
+    /// 面板 pass 跳过帧积压的事件（7.8）：桥侧每帧照常排水（簿记无条件
+    /// 更新，读取器每帧排空——bevy Messages 双缓冲纪律），面板 pass 不跑时
+    /// 事件攒在这里，下次 pass 合并喂入（旧事件在前）。
+    pending: Vec<egui::Event>,
+}
+
+impl EguiInput {
+    /// 最新指针位置（points）；离窗后 None。
+    pub(crate) fn pointer_pos(&self) -> Option<egui::Pos2> {
+        self.pointer_pos
+    }
+
+    /// 任一指针按键处于按下态（拖拽进行中的判定源）。
+    pub(crate) fn any_button_down(&self) -> bool {
+        self.buttons_down.iter().any(|down| *down)
+    }
+
+    /// 积压一帧的事件：连续的 `PointerMoved` 折叠成最后一条（指针位置用
+    /// 最新值；`PointerGone` 与其余事件原样保留——顺序携带语义）。
+    pub(crate) fn stash_events(&mut self, events: Vec<egui::Event>) {
+        for ev in events {
+            if matches!(ev, egui::Event::PointerMoved(_))
+                && matches!(self.pending.last(), Some(egui::Event::PointerMoved(_)))
+            {
+                *self.pending.last_mut().expect("last 已判 Some") = ev;
+            } else {
+                self.pending.push(ev);
+            }
+        }
+    }
+
+    /// 取走全部积压事件（下次面板 pass 合并喂入）。
+    pub(crate) fn drain_pending(&mut self) -> Vec<egui::Event> {
+        std::mem::take(&mut self.pending)
+    }
 }
 
 /// 组一帧的 egui `RawInput`。事件读取器由调用方（egui pass 系统）持有并传入。
