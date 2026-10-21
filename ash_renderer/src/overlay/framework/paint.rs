@@ -28,7 +28,7 @@ use crate::{
     },
 };
 
-use super::ui::{EguiFrame, EguiState};
+use super::ui::{EguiFrame, EguiLayer, EguiState};
 
 /// 单槽 UI 顶点容量（个数；×20B = 1.25MB/槽）。调试 UI 单帧数百万顶点不可能，
 /// 超容 = Tier① 丢当帧 UI（可交互性损失不拦帧循环）。
@@ -288,6 +288,12 @@ pub(crate) struct OverlayLogState {
     pub warned_callback: bool,
     pub warned_no_atlas: bool,
     pub painted_logged: bool,
+    /// 两层镶嵌缓存（7.8 节拍化）：(shapes 代数, 镶嵌产物)——代数未变的帧
+    /// 直接复用，跳过帧零重镶嵌。egui 官方评估过"shapes 相等即复用"但没做
+    ///（逐形状比较占 tessellate 一半成本，context.rs tessellate 注释）；本缓
+    /// 存按 pass 代数判等，零比较成本。
+    pub(crate) panel_meshes: (u64, Vec<egui::epaint::ClippedPrimitive>),
+    pub(crate) gizmo_meshes: (u64, Vec<egui::epaint::ClippedPrimitive>),
 }
 
 /// overlay 绘制半边本体：图集整传（有新代时）→ 镶嵌 → 顶点环写入 → [`UiPaint`]。
@@ -398,51 +404,46 @@ pub(crate) fn paint_overlay(
             }
         }
     }
-    // —— 2) 镶嵌：shapes（未镶嵌）→ ClippedPrimitive（本帧消费，mem::take 后
-    // 下个 Update 重填）——
-    if frame.shapes.is_empty() {
+    // —— 2) 镶嵌：两层 shapes（未镶嵌）→ ClippedPrimitive。代数未变的帧
+    // 直接复用缓存产物（7.8 跳过帧零重镶嵌；pass 帧取走当帧 shapes 重镶嵌）——
+    tessellate_layer(
+        &egui.ctx,
+        &mut frame.panel,
+        &mut log.panel_meshes,
+        frame.pixels_per_point,
+    );
+    tessellate_layer(
+        &egui.ctx,
+        &mut frame.gizmo,
+        &mut log.gizmo_meshes,
+        frame.pixels_per_point,
+    );
+    if log.panel_meshes.1.is_empty() && log.gizmo_meshes.1.is_empty() {
         return Ok(None); // 本帧无 UI（首个 pass 前的空帧）
     }
-    let clipped = egui
-        .ctx
-        .tessellate(std::mem::take(&mut frame.shapes), frame.pixels_per_point);
-    // —— 3) 摊平：逐 clip 的 mesh → 连续顶点/索引流 + draw 引脚 ——
+    // —— 3) 摊平：逐 clip 的 mesh → 连续顶点/索引流 + draw 引脚（面板层先、
+    // gizmo 层后 = gizmo 压顶，与单 pass 时代的画家序一致）——
     let mut vertices: Vec<UiVertex> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     let mut draws: Vec<UiDrawCall> = Vec::new();
-    for clip in clipped {
-        let mesh = match clip.primitive {
-            egui::epaint::Primitive::Mesh(mesh) => mesh,
-            // 回调图元（PaintCallback）不实现：调试窗口不用，显式边界
-            egui::epaint::Primitive::Callback(_) => {
-                if !log.warned_callback {
-                    log.warned_callback = true;
-                    warn!("egui 回调图元（PaintCallback）不实现，该 clip 跳过");
-                }
-                continue;
-            }
-        };
-        if mesh.texture_id != egui::TextureId::Managed(0) {
-            // 用户贴图（fold 已按同边界告警过，这里静默跳过）
-            continue;
-        }
-        if mesh.indices.is_empty() || mesh.vertices.is_empty() {
-            continue;
-        }
-        let draw = UiDrawCall {
-            vertex_base: vertices.len() as u32,
-            first_index: indices.len() as u32,
-            index_count: mesh.indices.len() as u32,
-            scissor: scissor_pixels(clip.clip_rect, frame.pixels_per_point, screen_px),
-        };
-        vertices.extend(mesh.vertices.iter().map(|v| UiVertex {
-            pos: [v.pos.x, v.pos.y],
-            uv: [v.uv.x, v.uv.y],
-            color: v.color.to_array(),
-        }));
-        indices.extend_from_slice(&mesh.indices);
-        draws.push(draw);
-    }
+    flatten_meshes(
+        &mut log.panel_meshes,
+        &mut vertices,
+        &mut indices,
+        &mut draws,
+        frame.pixels_per_point,
+        screen_px,
+        &mut log.warned_callback,
+    );
+    flatten_meshes(
+        &mut log.gizmo_meshes,
+        &mut vertices,
+        &mut indices,
+        &mut draws,
+        frame.pixels_per_point,
+        screen_px,
+        &mut log.warned_callback,
+    );
     if draws.is_empty() {
         return Ok(None);
     }
@@ -496,6 +497,66 @@ pub(crate) fn paint_overlay(
         ],
         draws,
     }))
+}
+
+/// 单层镶嵌（按代数缓存）：shapes 代数领先缓存才重镶嵌（并取走 shapes），
+/// 否则跳过帧原样复用。镶嵌与 ppp 绑定——ppp 变化必经窗口尺寸变化，而尺寸
+/// 变化在 Update 侧强制两层 pass 重跑（代数 +1），故代数相等蕴含 ppp 相等。
+fn tessellate_layer(
+    ctx: &egui::Context,
+    layer: &mut EguiLayer,
+    stored: &mut (u64, Vec<egui::epaint::ClippedPrimitive>),
+    ppp: f32,
+) {
+    if layer.generation != stored.0 {
+        let meshes = ctx.tessellate(std::mem::take(&mut layer.shapes), ppp);
+        *stored = (layer.generation, meshes);
+    }
+}
+
+/// 单层摊平：逐 clip 的 mesh → 连续顶点/索引流 + draw 引脚。
+fn flatten_meshes(
+    meshes: &mut (u64, Vec<egui::epaint::ClippedPrimitive>),
+    vertices: &mut Vec<UiVertex>,
+    indices: &mut Vec<u32>,
+    draws: &mut Vec<UiDrawCall>,
+    ppp: f32,
+    screen_px: vk::Extent2D,
+    warned_callback: &mut bool,
+) {
+    for clip in &meshes.1 {
+        let mesh = match &clip.primitive {
+            egui::epaint::Primitive::Mesh(mesh) => mesh,
+            // 回调图元（PaintCallback）不实现：调试窗口不用，显式边界
+            egui::epaint::Primitive::Callback(_) => {
+                if !*warned_callback {
+                    *warned_callback = true;
+                    warn!("egui 回调图元（PaintCallback）不实现，该 clip 跳过");
+                }
+                continue;
+            }
+        };
+        if mesh.texture_id != egui::TextureId::Managed(0) {
+            // 用户贴图（fold 已按同边界告警过，这里静默跳过）
+            continue;
+        }
+        if mesh.indices.is_empty() || mesh.vertices.is_empty() {
+            continue;
+        }
+        let draw = UiDrawCall {
+            vertex_base: vertices.len() as u32,
+            first_index: indices.len() as u32,
+            index_count: mesh.indices.len() as u32,
+            scissor: scissor_pixels(clip.clip_rect, ppp, screen_px),
+        };
+        vertices.extend(mesh.vertices.iter().map(|v| UiVertex {
+            pos: [v.pos.x, v.pos.y],
+            uv: [v.uv.x, v.uv.y],
+            color: v.color.to_array(),
+        }));
+        indices.extend_from_slice(&mesh.indices);
+        draws.push(draw);
+    }
 }
 
 /// clip 矩形（points，左上原点）→ scissor（物理像素），裁剪到屏幕内。
