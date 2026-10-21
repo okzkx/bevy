@@ -7,7 +7,7 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::scene::mechanism::scene_gen::SceneChunk;
 use crate::vulkan::{
-    BindlessTables, CullDiagnostics, CullSettings, FrameSample, ImageCache, IndirectStats,
+    BindlessTables, CullDiagnostics, CullSettings, ImageCache, IndirectStats,
     MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics, OcclusionSettings, PerfLedger, Uploader, FRAME_MODE_LAMBERT,
     FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
 };
@@ -90,7 +90,8 @@ impl FpsMeter {
     const UPDATE_INTERVAL: f32 = 0.5;
 
     /// pass 每帧喂一次本帧 delta；累计满一个 interval 出一次新快照。
-    pub(in crate::overlay) fn tick(&mut self, delta_secs: f32) {
+    /// 返回本次是否刚刷新了快照（7.5 监控采样复用同一节奏：新快照才入历史）。
+    pub(in crate::overlay) fn tick(&mut self, delta_secs: f32) -> bool {
         self.acc_secs += delta_secs;
         self.acc_frames += 1;
         if self.acc_secs >= Self::UPDATE_INTERVAL {
@@ -98,7 +99,41 @@ impl FpsMeter {
             self.snapshot = FpsSnapshot { fps: 1.0 / avg.max(1e-6), ms: avg * 1000.0 };
             self.acc_secs = 0.0;
             self.acc_frames = 0;
+            true
+        } else {
+            false
         }
+    }
+}
+
+/// 分位数面板缓存（7.5）：跟 fps 快照同节奏（0.5s）重算三分位数 × 三字段，
+/// 每帧只读展示——逐帧九次全量 sort 已随 [`PerfLedger::percentiles`] 收敛为
+/// 每字段一趟，且文本 0.5s 才变一次（egui galley 缓存可命中，不再逐帧重塑）。
+#[derive(Resource, Default)]
+pub(in crate::overlay) struct PerfPanelCache {
+    /// (p50, p95, p99, 样本数) 逐字段。
+    pub(in crate::overlay) cpu: (f32, f32, f32, usize),
+    pub(in crate::overlay) gpu_total: (f32, f32, f32, usize),
+    pub(in crate::overlay) gpu_graphics: (f32, f32, f32, usize),
+}
+
+const PANEL_PS: [f32; 3] = [0.50, 0.95, 0.99];
+
+impl PerfPanelCache {
+    /// fps 快照刷新时调用（0.5s 一次），整块重算。
+    pub(in crate::overlay) fn refresh(&mut self, perf: &PerfLedger) {
+        let take = |v: Vec<Option<f32>>| {
+            let n = v.iter().filter(|x| x.is_some()).count();
+            (
+                v.first().copied().flatten().unwrap_or(0.0),
+                v.get(1).copied().flatten().unwrap_or(0.0),
+                v.get(2).copied().flatten().unwrap_or(0.0),
+                n,
+            )
+        };
+        self.cpu = take(perf.percentiles(&PANEL_PS, |s| s.cpu_total_ms));
+        self.gpu_total = take(perf.percentiles(&PANEL_PS, |s| s.gpu_total_ms));
+        self.gpu_graphics = take(perf.percentiles(&PANEL_PS, |s| s.gpu_graphics_ms));
     }
 }
 
@@ -134,8 +169,8 @@ pub(in crate::overlay) struct DebugWindow<'a> {
     pub(in crate::overlay) lod_diag: &'a LodDiagnostics,
     /// indirect 闭环读数（draw_frame 每帧刷新；只进计量，不驱动绘制）。
     pub(in crate::overlay) indirect_stats: &'a IndirectStats,
-    /// 帧样本账（5.5：分位数在构建时现算，环形窗口）。
-    pub(in crate::overlay) perf: &'a PerfLedger,
+    /// 分位数面板缓存（pass 侧 0.5s 重算，本窗口只读）。
+    pub(in crate::overlay) pct: &'a PerfPanelCache,
     /// 变更形态开关（5.5：注入读数，BRP workload 与此同源）。
     pub(in crate::overlay) workload: &'a WorkloadSettings,
     /// 贴图缓存（5.5：显存字节读数）。
@@ -150,7 +185,7 @@ impl DebugWindow<'_> {
     /// 面板本体：fps/窗口信息 + 着色模式单选 + 剔除开关与读数 + 渲染器内部统计
     ///（vulkan 侧资源只读）。
     pub(in crate::overlay) fn show(self) {
-        let Self { ctx, open, fps, window, ppp, mode, stats, cull_settings, cull_diag, occlusion_settings, occlusion_diag, lod_settings, lod_diag, indirect_stats, perf, workload, image_cache, mesh_pool, chunks } = self;
+        let Self { ctx, open, fps, window, ppp, mode, stats, cull_settings, cull_diag, occlusion_settings, occlusion_diag, lod_settings, lod_diag, indirect_stats, pct, workload, image_cache, mesh_pool, chunks } = self;
         egui::Window::new("ash 调试")
             .open(open)
             .default_pos(egui::pos2(12.0, 12.0))
@@ -226,22 +261,17 @@ impl DebugWindow<'_> {
                     indirect_stats.walk_rows,
                     indirect_stats.pending_rows,
                 ));
-                // 5.5 分档压测：帧时间分位数 + 注入开关 + 显存字节（环形窗口
-                // 现算；GPU 区间 = 本槽两帧前的提交，混合口径）
-                // 三个字段的分位数各算各的（闭包异型不成数组，逐行展开）
-                let show_pct = |ui: &mut egui::Ui, label: &str, field: &dyn Fn(&FrameSample) -> f32| {
-                    let pct = |p: f32| perf.percentile(p, field).unwrap_or(0.0);
+                // 5.5 分档压测：帧时间分位数（7.5 起读 0.5s 重算的面板缓存，
+                // 不再逐帧全量 sort；GPU 区间 = 本槽两帧前的提交，混合口径）
+                let show_pct = |ui: &mut egui::Ui, label: &str, row: (f32, f32, f32, usize)| {
                     ui.monospace(format!(
                         "{label} p50 {:.2} · p95 {:.2} · p99 {:.2} ms（{n} 样本）",
-                        pct(0.50),
-                        pct(0.95),
-                        pct(0.99),
-                        n = perf.len(),
+                        row.0, row.1, row.2, n = row.3,
                     ));
                 };
-                show_pct(ui, "CPU", &|s| s.cpu_total_ms);
-                show_pct(ui, "GPU 全帧", &|s| s.gpu_total_ms);
-                show_pct(ui, "GPU 图形", &|s| s.gpu_graphics_ms);
+                show_pct(ui, "CPU", pct.cpu);
+                show_pct(ui, "GPU 全帧", pct.gpu_total);
+                show_pct(ui, "GPU 图形", pct.gpu_graphics);
                 ui.monospace(format!(
                     "变更注入 {}（rows {}）——只进计量，诊断不驱动绘制",
                     if workload.enabled { "开" } else { "关" },

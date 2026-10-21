@@ -13,6 +13,8 @@ use bevy::prelude::*;
 pub(in crate::overlay) struct DebugWindowsOpen {
     /// 帧统计/着色模式/渲染器统计窗口（[`super::debug_window`]）
     pub(in crate::overlay) stats: bool,
+    /// 持续监控窗口（[`super::monitor_window`]）
+    pub(in crate::overlay) monitor: bool,
     /// 实体层级树窗口（[`super::entity_tree_window`]）
     pub(in crate::overlay) entity_tree: bool,
     /// 右上角坐标轴指示器（[`crate::overlay::widgets::axis_gizmo`]，纯显示不可交互）
@@ -22,7 +24,7 @@ pub(in crate::overlay) struct DebugWindowsOpen {
 impl Default for DebugWindowsOpen {
     fn default() -> Self {
         // 默认全开：新窗直接可见可验；关了从总控再开
-        Self { stats: true, entity_tree: true, axis_gizmo: true }
+        Self { stats: true, monitor: true, entity_tree: true, axis_gizmo: true }
     }
 }
 
@@ -42,6 +44,7 @@ impl DebugHubWindow<'_> {
             .default_width(170.0)
             .show(ctx, |ui| {
                 ui.checkbox(&mut open.stats, "帧统计（ash 调试）");
+                ui.checkbox(&mut open.monitor, "持续监控");
                 ui.checkbox(&mut open.entity_tree, "实体层级树");
                 ui.checkbox(&mut open.axis_gizmo, "坐标轴指示器");
             });

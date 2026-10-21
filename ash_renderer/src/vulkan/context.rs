@@ -62,6 +62,17 @@ unsafe extern "system" fn debug_callback(
     vk::FALSE
 }
 
+/// 一个内存堆的预算读数（VK_EXT_memory_budget 查询展开）。
+#[derive(Clone, Copy, Debug)]
+pub struct HeapBudgetReading {
+    /// 是否设备局部堆（显存）；宿主堆为 `false`（PCIe 上传常见）。
+    pub device_local: bool,
+    /// 堆可用预算（字节，驱动会留余量，小于堆真实容量）。
+    pub budget: u64,
+    /// 堆当前用量（字节）——**系统级**语义（含其他进程），非本进程显存。
+    pub usage: u64,
+}
+
 /// 进程级 Vulkan 上下文。字段顺序即声明层级；`Drop` 手动反序（ash 无自动 Drop）。
 #[derive(bevy::prelude::Resource)]
 pub struct Context {
@@ -85,6 +96,8 @@ pub struct Context {
     /// 内存契约（设备侧事实一次查询冻结：类型/堆表 + nonCoherentAtomSize），
     /// 选型唯一裁判。池/上传按引用取用，不各自重查。
     memory_contract: crate::vulkan::MemoryContract,
+    /// VK_EXT_memory_budget 是否已加挂（设备创建时按支持情况决定）。
+    budget_enabled: bool,
 }
 
 impl Context {
@@ -392,10 +405,22 @@ impl Context {
             ));
         }
 
-        let dev_exts = [
+        // 显存预算读数（7.5）：设备扩展按支持情况加挂，缺席降级为隐藏读数
+        //（监控面板显存行不可用，不报错不阻塞帧循环）。
+        let budget_enabled = unsafe { instance.enumerate_device_extension_properties(physical_device) }
+            .unwrap_or_default()
+            .iter()
+            .any(|props| unsafe { std::ffi::CStr::from_ptr(props.extension_name.as_ptr()) }
+                == ash::ext::memory_budget::NAME);
+        let mut dev_exts = vec![
             ash::khr::swapchain::NAME.as_ptr(),
             ash::khr::swapchain_mutable_format::NAME.as_ptr(),
         ];
+        if budget_enabled {
+            dev_exts.push(ash::ext::memory_budget::NAME.as_ptr());
+        } else {
+            info!("VK_EXT_memory_budget 设备不支持：显存 budget/usage 读数不可用（监控面板隐藏该行）");
+        }
         let device = unsafe {
             instance.create_device(
                 physical_device,
@@ -455,6 +480,7 @@ impl Context {
             transfer_queue_family_index,
             transfer_queue,
             memory_contract,
+            budget_enabled,
         })
     }
 
@@ -462,6 +488,33 @@ impl Context {
     #[must_use]
     pub fn memory_contract(&self) -> &crate::vulkan::MemoryContract {
         &self.memory_contract
+    }
+
+    /// 各内存堆的 budget/usage 一次读（VK_EXT_memory_budget；7.5 持续监控数据源）。
+    /// 扩展未加挂时返回 `None`。每次调用现查（properties2 纯查询，0.5s 采样节奏
+    /// 下开销可忽略）；`heap_usage` 是堆的系统级用量（含其他进程），不是本进程
+    /// 显存——进程自身占用看渲染器内部账（MeshPool/ImageCache）并列呈现。
+    pub fn memory_budget(&self) -> Option<Vec<HeapBudgetReading>> {
+        if !self.budget_enabled {
+            return None;
+        }
+        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut props = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+        // # Safety:physical_device 来自成功枚举、instance 未销毁(同 memory_contract)
+        unsafe { self.instance.get_physical_device_memory_properties2(self.physical_device, &mut props) };
+        let heaps = &props.memory_properties;
+        Some(
+            heaps.memory_heaps[..heaps.memory_heap_count as usize]
+                .iter()
+                .zip(&budget.heap_budget)
+                .zip(&budget.heap_usage)
+                .map(|((heap, &budget), &usage)| HeapBudgetReading {
+                    device_local: heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL),
+                    budget,
+                    usage,
+                })
+                .collect(),
+        )
     }
 
     /// 物理设备 limits(进程级事实,设备存活期恒定;indirect 上界等留痕口)。

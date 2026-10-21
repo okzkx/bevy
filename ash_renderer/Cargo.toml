@@ -38,6 +38,17 @@ egui = { version = "0.36.2", default-features = false, features = ["default_font
 # #[system] 透明标注：具名系统函数的阅读路标 + 编译期校验（不能带 self），零运行时成本
 ash_macros = { path = "../ash_macros" }
 
+# 7.5 持续监控的进程/系统内存读数（Windows 专用）：GetProcessMemoryInfo +
+# GlobalMemoryStatusEx，按最小 feature 面声明（Foundation = HANDLE、Threading =
+# GetCurrentProcess）。版本对齐 lock（bevy 传递依赖已带 0.62）。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
 # WGSL → SPIR-V 编译（3.3 前置闸门）：精确锁版锁行为（选型记录 2026-09-24），
 # lock 内已有 30.0.1（wgpu 传递依赖），features 恰为 wgsl-in/spv-out 两个方向。
 # build-dependencies = 正式编译路径（build.rs 编译 examples/shaders/*.wgsl，3.3.3
