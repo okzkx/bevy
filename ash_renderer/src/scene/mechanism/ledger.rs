@@ -485,8 +485,6 @@ pub(crate) fn update_ledger(
     assets: ChangedAssets,
     // 矩阵入口：只写行的 model（传播后才跑，终值直读）。
     moved: MovedTransforms,
-    // 扫描数口径：Changed 过滤之前 tick 比较的候选全集（三样俱全实体总数）。
-    candidates: Query<(), (With<Mesh3d>, With<MeshMaterial3d<StandardMaterial>>)>,
 ) {
     // 计量先落局部变量（stats 经 ResMut 的 DerefMut 借用会锁整个账本，
     // 不能与 rows/dirty 的修改并存），循环收口后一次性写回。
@@ -572,8 +570,13 @@ pub(crate) fn update_ledger(
         }
     }
     let dirty_len = ledger.dirty.len();
+    let self_rows_len = ledger.rows.len();
     let stats = &mut ledger.stats;
-    stats.scan_candidates = candidates.iter().count();
+    // 扫描数口径 = 三样俱全实体总数 = 账本行集（update_ledger ②对每个持有
+    // 两组件的实体入行，集合恒等）——7.10 治理：替换每帧 O(N) 的 iter().count()
+    // 走访（trace 归因 update_ledger 0.97ms/帧的一分子）
+    stats.scan_candidates = self_rows_len;
+
     stats.added_rows = added;
     stats.removed_rows = removed;
     stats.rebound_rows = rebound;

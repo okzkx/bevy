@@ -14,6 +14,7 @@
 //! | [`lod_registry`] | LOD 组登记处（6.2.2）：逻辑 mesh → 各档变体柄的 CPU 侧映射账（flush 盘点/draw_frame 表写/census 读数共用），LOD 阶梯 spawn 本体 |
 //! | [`camera_aspect`] | 宽高比补位：随窗口 resize 修正任意相机的 aspect_ratio |
 //! | [`camera_control`] | 相机轨道控制：左键拖拽环绕 + 滚轮推拉，目标点由组件携带 |
+//! | [`visibility_exempt`] | 可见性集群豁免（7.10）：移除场景实体可见性三件套，bevy PostUpdate 可见性集群整体失明（零消费者治理） |
 //! | [`workload`] | 变更形态注入（5.5）：BRP 开关控制的每帧旋转工作源（压测矩阵的少量变化/全动态形态） |
 //!
 //! 判定线：driver（上传、帧循环）只依赖本层，业务半边（[`crate::scene::content`]）
@@ -32,6 +33,7 @@ mod material_hook;
 mod object_ops;
 pub mod scene_gen;
 pub mod test_entities;
+mod visibility_exempt;
 mod workload;
 
 pub use asset_events::{AshAssetEventPlugin, AssetInvalidations, AssetRetirements, RecycleStats};
@@ -50,6 +52,7 @@ pub use residency::{
     gap_asset_ids, anchor_level, AshResidencyPlugin, GapMode, GapSnapshot, LodDemand,
     ResidencySettings, ResidencyStats,
 };
+pub use visibility_exempt::{AshVisibilityExemptPlugin, VisibilityExemptStats};
 pub use workload::{AshWorkloadPlugin, WorkloadSettings};
 pub use material_hook::AshMaterialHookPlugin;
 pub use object_ops::{

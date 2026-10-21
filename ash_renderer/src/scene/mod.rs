@@ -15,8 +15,9 @@ pub use content::SceneEntryPlugin;
 pub use mechanism::{
     AshAssetEventPlugin, AshCameraAspectPlugin, AshCameraControlPlugin, AshCameraGuardPlugin,
     AshLedgerPlugin,
-    AshMaterialHookPlugin, AshReadinessPlugin, AshResidencyPlugin, AshWorkloadPlugin,
-    AssetInvalidations, AssetReadiness, AssetRetirements, IncrementStats, InstanceLedger,
+    AshMaterialHookPlugin, AshReadinessPlugin, AshResidencyPlugin, AshVisibilityExemptPlugin,
+    AshWorkloadPlugin, AssetInvalidations, AssetReadiness, AssetRetirements, IncrementStats,
+    InstanceLedger,
     InstanceRow, LodDemand, LodGroups, LodLadderReadback, ReadinessStats, RecycleStats,
     ResidencySettings, ResidencyStats, WorkloadSettings, GapMode, GapSnapshot, anchor_level,
     gap_asset_ids, spawn_lod_ladder,
