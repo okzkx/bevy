@@ -295,6 +295,7 @@ pub(crate) fn draw_frame(
     // 1) 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在下方提交前一刻）。
     // 失败 = 等待/重置层面坏掉（设备丢失、内存枯竭），继续帧循环只会撞上未知的
     // fence 状态——Tier②
+    let frame_wall_ms = perf.mark_frame_start();
     let frame_clock = std::time::Instant::now();
     frames
         .wait_for_slot()
@@ -813,6 +814,7 @@ pub(crate) fn draw_frame(
     // 过时）不经过此处，不进样本。
     let cpu_total_ms = wait_slot_ms + acquire_ms + assemble_ms + rings_ms + record_submit_ms + present_ms;
     perf.push(FrameSample {
+        frame_wall_ms,
         wait_slot_ms,
         acquire_ms,
         assemble_ms,

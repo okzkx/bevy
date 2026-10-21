@@ -37,7 +37,7 @@ use crate::overlay::transform_edit::{TransformEditQueue, apply_transform_edits};
 use crate::overlay::widgets::axis_gizmo::AxisGizmo;
 use crate::overlay::windows::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
 use crate::overlay::windows::debug_window::{
-    ChunkRows, DebugWindow, FpsMeter, RenderMode, RendererStats,
+    ChunkRows, DebugWindow, FpsMeter, PerfPanelCache, RenderMode, RendererStats,
 };
 use crate::overlay::windows::entity_tree_window::{
     EntityTreeData, EntityTreeWindow, SelectedDetails, SelectedEntity, TransformDragCache,
@@ -91,6 +91,14 @@ pub struct EguiFrame {
     pub screen_points: Vec2,
 }
 
+/// egui pass 自计时（7.5）：最近一次 pass 的墙钟耗时——Update 侧在
+/// draw_frame 计量之外，FPS 恶化取证的 Update 半边仪器。
+#[derive(Resource, Default)]
+pub struct EguiPassTiming {
+    /// 最近一次 run_egui_pass 的墙钟毫秒。
+    pub last_ms: f32,
+}
+
 /// Startup：建 egui Context + 装字体 + 插状态资源。
 #[system]
 fn init_egui(mut commands: Commands) {
@@ -121,6 +129,10 @@ fn init_egui(mut commands: Commands) {
     commands.insert_resource(FpsMeter::default());
     // 持续监控历史（7.5）：随 fps 快照节奏采样，窗口显隐不影响记账
     commands.insert_resource(MonitorHistory::default());
+    // egui pass 自计时（7.5）：Update 侧墙钟读数
+    commands.insert_resource(EguiPassTiming::default());
+    // 分位数面板缓存（7.5）：0.5s 重算，调试窗只读
+    commands.insert_resource(PerfPanelCache::default());
     // 图集镜像（Update 折入）与 GPU 代（Last 整传；空建——首帧有整图增量才落图）。
     // AtlasGpu 的拆除在 teardown_vulkan（graveyard 与表同寿的拆除序）
     commands.insert_resource(AtlasMirror::default());
@@ -167,6 +179,10 @@ struct DebugUiParams<'w, 's> {
     windows_open: ResMut<'w, DebugWindowsOpen>,
     selected: ResMut<'w, SelectedEntity>,
     fps: ResMut<'w, FpsMeter>,
+    /// egui pass 自计时（7.5）
+    timing: ResMut<'w, EguiPassTiming>,
+    /// 分位数面板缓存（7.5）：0.5s 重算
+    pct_cache: ResMut<'w, PerfPanelCache>,
     /// 持续监控历史（7.5）：fps 快照刷新时采样入账
     history: ResMut<'w, MonitorHistory>,
     /// Vulkan 上下文（7.5 显存堆级读数；init 前空帧缺席）
@@ -230,6 +246,7 @@ fn run_egui_pass(
     let Some(window) = window.iter().next() else {
         return; // 主窗未建（Startup 前的空帧）：egui 无屏幕域，整帧让路
     };
+    let pass_clock = std::time::Instant::now();
     let ppp = window.scale_factor();
     let screen_points = Vec2::new(window.width(), window.height());
     let raw =
@@ -265,6 +282,8 @@ fn run_egui_pass(
     // 帧率快照先喂再显示：0.5s 一刷，间隔内读数稳定；刷新即采样入监控历史
     if ui.fps.tick(time.delta_secs()) {
         ui.history.sample(ui.fps.snapshot.fps, ui.fps.snapshot.ms, ui.vulkan.as_deref());
+        // 分位数面板缓存同节奏重算（调试窗逐帧只读，不再逐帧全量 sort）
+        ui.pct_cache.refresh(&ui.perf);
     }
     // 总控先行（自身不可关），其余窗口按开关显隐；[×] 与 checkbox 写同一字段
     DebugHubWindow { ctx: &state.ctx, open: &mut ui.windows_open }.show();
@@ -295,7 +314,7 @@ fn run_egui_pass(
             lod_settings: &mut ui.lod_settings,
             lod_diag: &ui.lod_diag,
             indirect_stats: &ui.indirect_stats,
-            perf: &ui.perf,
+            pct: &ui.pct_cache,
             workload: &ui.workload,
             image_cache: &ui.image_cache,
             mesh_pool: &ui.mesh_pool,
@@ -332,6 +351,8 @@ fn run_egui_pass(
         egui::Plugin::on_end_pass(&mut *plugin, &mut plugin_host);
     }
     let mut output = state.ctx.end_pass();
+    // pass 自计时落账（7.5）：Update 侧墙钟，FPS 恶化取证的 Update 半边仪器
+    ui.timing.last_ms = pass_clock.elapsed().as_secs_f32() * 1000.0;
     // 纹理增量（字体图集 dirty-rect）在 pass 出口就地消费：折进图集 CPU 镜像
     //（Update 侧——最小化帧 Update 照跑而 draw_frame 让路，折入不丢数据），折完
     // clear 满足 TexturesDelta 的 Drop 审查。镜像整传/新槽发布由绘制半边按

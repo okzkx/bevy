@@ -39,6 +39,9 @@ pub const QUERIES_PER_FRAME: u32 = 5;
 /// 组装/双环/录制提交/present）+ GPU 区间 + 规模读数。全部毫秒。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameSample {
+    /// 相邻两次 draw_frame 起点的墙钟间隔（= Update 调度 + winit + draw_frame
+    /// 全帧）——draw_frame 内部各段之外的"未计时区"读数（F26 方向的仪器）。
+    pub frame_wall_ms: f32,
     pub wait_slot_ms: f32,
     pub acquire_ms: f32,
     /// DrawList 槽位枚举组装（`drawlist::assemble`）。
@@ -63,10 +66,23 @@ pub struct FrameSample {
 }
 
 /// 帧样本环形账（draw_frame 每帧 push，取样时排序副本取分位数）。
-#[derive(bevy::prelude::Resource, Default)]
+///
+/// `Default` 必须等于 [`Self::new`]（宿主 `init_resource` 走 Default 装配）：
+/// capacity 归 0 时 `push` 的裁剪条件永不成立，环形账退化无界增长，调试窗
+/// 的逐帧分位数排序随窗口线性变慢（7.5 FPS 恶化根因，实抓实修）。
+#[derive(bevy::prelude::Resource)]
 pub struct PerfLedger {
     samples: VecDeque<FrameSample>,
     capacity: usize,
+    /// 上一帧 draw_frame 起点（frame_wall_ms 分母；仅首帧为 None 记 0）。
+    last_frame_start: Option<std::time::Instant>,
+}
+
+impl Default for PerfLedger {
+    /// 与 [`PerfLedger::new`] 全等——无界账教训见结构体注释。
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PerfLedger {
@@ -77,7 +93,17 @@ impl PerfLedger {
         Self {
             samples: VecDeque::with_capacity(Self::CAPACITY),
             capacity: Self::CAPACITY,
+            last_frame_start: None,
         }
+    }
+
+    /// draw_frame 开头调用：与上一帧起点的墙钟间隔入账并刷新起点（首帧 0）。
+    pub fn mark_frame_start(&mut self) -> f32 {
+        let now = std::time::Instant::now();
+        let wall =
+            self.last_frame_start.map_or(0.0, |t| (now - t).as_secs_f32() * 1000.0);
+        self.last_frame_start = Some(now);
+        wall
     }
 
     pub fn push(&mut self, sample: FrameSample) {
@@ -111,6 +137,28 @@ impl PerfLedger {
         values.sort_by(|a, b| a.partial_cmp(b).expect("毫秒计时无 NaN"));
         let rank = ((p * values.len() as f32).ceil() as usize).clamp(1, values.len());
         Some(values[rank - 1])
+    }
+
+    /// 同一字段多分位数一次读：一遍 clone + 一趟排序取全部秩（调试窗每帧
+    /// 三分位数 × 三字段的重复排序口——每帧九次全量 sort 是 7.5 恶化修复后
+    /// 的残余热点，收敛为每字段一次）。
+    pub fn percentiles(
+        &self,
+        ps: &[f32],
+        field: impl Fn(&FrameSample) -> f32,
+    ) -> Vec<Option<f32>> {
+        let mut values: Vec<f32> = self.samples.iter().map(field).collect();
+        if values.is_empty() {
+            return vec![None; ps.len()];
+        }
+        values.sort_by(|a, b| a.partial_cmp(b).expect("毫秒计时无 NaN"));
+        ps.iter()
+            .map(|&p| {
+                let rank =
+                    ((p * values.len() as f32).ceil() as usize).clamp(1, values.len());
+                Some(values[rank - 1])
+            })
+            .collect()
     }
 }
 

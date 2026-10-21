@@ -11,8 +11,8 @@ use serde_json::{json, Value};
 use ash_macros::system;
 
 use crate::{
-    overlay::MonitorHistory,
-    vulkan::{Context, ImageCache, MeshPool},
+    overlay::{EguiPassTiming, MonitorHistory},
+    vulkan::{Context, ImageCache, MeshPool, PerfLedger},
 };
 
 use super::BrpResult;
@@ -30,8 +30,11 @@ pub(crate) fn monitor_stats(
     ctx: Option<Res<Context>>,
     mesh_pool: Res<MeshPool>,
     image_cache: Res<ImageCache>,
+    perf: Res<PerfLedger>,
+    egui_timing: Res<EguiPassTiming>,
 ) -> BrpResult {
     let last = history.samples.last().copied();
+    let frame_wall = perf.snapshot().pop().map(|s| s.frame_wall_ms);
     let vram = ctx.as_deref().and_then(Context::memory_budget).map(|heaps| {
         // 设备局部堆 usage/budget 求和（监控窗口同款口径）
         heaps
@@ -42,6 +45,8 @@ pub(crate) fn monitor_stats(
     let ((v_used, v_cap), (i_used, i_cap)) = mesh_pool.usage();
     Ok(json!({
         "fps": last.map(|s| s.fps),
+        "frame_wall_ms": frame_wall,
+        "egui_pass_ms": egui_timing.last_ms,
         "ms": last.map(|s| s.ms),
         "elapsed_secs": last.map(|s| s.elapsed),
         "history_len": history.samples.len(),

@@ -27,7 +27,7 @@ mod widgets;
 mod windows;
 
 pub use framework::paint::{AtlasGpu, AtlasMirror, UiVertexRing};
-pub use framework::ui::{EguiFrame, EguiState, OverlayPlugin};
+pub use framework::ui::{EguiFrame, EguiPassTiming, EguiState, OverlayPlugin};
 pub use windows::debug_window::RenderMode;
 
 pub(crate) use framework::paint::{paint_overlay, OverlayLogState, UiDrawData};
