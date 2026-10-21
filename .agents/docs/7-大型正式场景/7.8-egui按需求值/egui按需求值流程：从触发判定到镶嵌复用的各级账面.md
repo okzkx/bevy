@@ -9,7 +9,7 @@
 | 输入积压账 `EguiInput.pending` | framework/input.rs | 面板 pass 跳过帧攒下的 egui 事件（连续移动折叠成一条） | 桥每帧无条件排水写簿记；面板 pass 合并取走 |
 | 帧产出 `EguiFrame` | framework/ui.rs | 两层 shapes + 各自代数 + ppp/屏幕尺寸 | pass 运行帧填充；绘制半边每帧消费 |
 | 镶嵌缓存 `OverlayLogState.{panel,gizmo}_meshes` | framework/paint.rs | (shapes 代数, 镶嵌产物) 两层各一份 | 代数不等才重镶嵌；等则原样复用 |
-| 门控账 `PassGate` | framework/ui.rs | 7 个跨帧 Local：首帧旗/拖拽旗/尺寸快照/相机旋转快照/gizmo 显隐快照/跳帧旗/egui 重绘请求旗 | run_egui_pass 独占读写 |
+| 门控账 `PassGate` | framework/ui.rs | 8 个跨帧 Local：首帧旗/拖拽旗/尺寸快照/相机旋转快照/gizmo 显隐快照/跳帧旗/egui 重绘请求旗/面板层清单（gizmo pass 补记可见性用） | run_egui_pass 独占读写 |
 
 不变量：事件只被 egui 消费一次（面板 pass 吃，gizmo pass 永远空事件）；桥簿记（pointer_pos/buttons_down/修饰键）每帧无条件更新，与 pass 是否运行无关；纹理增量（`textures_delta`）只在 pass 帧产生、产生即就地折进图集镜像。
 
@@ -35,6 +35,7 @@
 - **显隐切换**：`windows_open` 写点在 pass 内（checkbox/[×]），出口对比进 force_next，下帧重建即生效；gizmo 关闭走 shapes 清空、代数照推进。
 - **BRP 写选中实体/外部改实体**：`SelectedEntity`/`EntityTreeState` Changed → 下帧面板 due；点选链接力一帧内可见（实测）。
 - **egui 动画**：靠 repaint_delay==0 的 force_next 续帧，动画跑完自动回落稳态。
+- **层可见性补记（面板消失修复）**：egui 按"上一个 pass 画过谁"记账窗口可见性——gizmo 子 pass 不画窗口会让面板层从账面蒸发，下个面板 pass 被视为"窗口刚重现"而重触发淡入（移动中面板只剩半透明残影的根因）。修复：面板 pass 出口记 `visible_layer_ids` 进 PassGate.panel_layers，gizmo pass begin 后逐层 `move_to_top` 补记，换道即保留。新增子 pass 一律照此补记。
 
 ## 4. 代码改动简要解析（`git show --stat`：3 文件，+423/−156）
 
