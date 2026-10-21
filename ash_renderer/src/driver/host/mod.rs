@@ -38,6 +38,7 @@ mod init;
 ///（"先上传后画"的编排契约以 host 为锚点）。
 pub(crate) use frame::draw_frame;
 pub(crate) use frame_sync::{apply_frame_sync, FrameSyncSettings};
+pub(crate) use drawlist::DrawListVerify;
 use init::{init_vulkan, teardown_vulkan};
 
 /// 宿主桥插件：禁渲染补位（`CompressedImageFormatSupport` 自报）+ Vulkan 三系统进调度。
@@ -64,6 +65,8 @@ impl Plugin for AshHostPlugin {
             .init_resource::<crate::vulkan::LodSettings>()
             .init_resource::<crate::vulkan::LodDiagnostics>()
             .init_resource::<crate::vulkan::PerfLedger>()
+            // DrawList 组装对照账面（7.9 判定线 2 的 BRP 开关对照模式）
+            .init_resource::<drawlist::DrawListVerify>()
             // 帧率同步设置（7.6）：开关默认 true（首次运行自动同步）+ 刷新率读数
             .init_resource::<FrameSyncSettings>()
             // update 节流：MAILBOX 没有 vsync 背压，默认 Continuous 会空转烧 CPU；

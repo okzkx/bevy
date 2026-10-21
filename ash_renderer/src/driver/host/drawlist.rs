@@ -1,4 +1,4 @@
-//! DrawList 组装与双环写入（5.1/5.3）：从账本行到**可绘行槽位枚举**，
+//! DrawList 组装与双环写入（5.1/5.3/7.9）：从账本行到**可绘行槽位枚举**，
 //! 以及模型环/材质环/在场环的每帧写入。
 //!
 //! 5.1 分工：本模块是"槽位枚举器"——逐行查实例槽与驻留账本/容器做可绘判定；
@@ -15,58 +15,55 @@
 //! 暂缓行不进在场环 = 自动无命令（5.3 待决 6 的钉明：暂缓语义由枚举源头
 //! 承载，GPU 侧零特判）。6.2 起 LOD 变体表环的脏行增量写也在本模块
 //!（write_lod_table_ring——模型环同款两帧奇偶纪律，输入 = 账本 LOD 脏集）。
+//!
+//! 7.9 增量组装：`assemble` 的 O(账本行) 全走访改为账本侧
+//! [`crate::scene::InstanceLedger`] 的组装缓存维护——本模块只注入可绘判定
+//! 闭包（`drawability_eval`，锚解析与 6.5 flush 锚腿同源）并触发
+//! `assembly_update`；产物经 `AssemblyView` 借用，行宇宙稳定帧零走访零重建。
+//! 判定面全量参照（`assemble_reference`）保留为对照模式的比对基准，
+//! 供 BRP verify 开关逐帧核对（判定线 2）。
 
 use bevy::asset::AssetId;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use crate::common::error::VulkanError;
-use crate::scene::{anchor_level, InstanceLedger, LodGroups};
+use crate::scene::{
+    anchor_level, InstanceLedger, InstanceRow, LodGroups,
+};
 use crate::vulkan::{
     pack_lod_entry, pack_material_record, pack_model, BindlessTables, ImageCache, InstanceTables,
     LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS,
     MODEL_STRIDE, MeshPool,
 };
 
-/// 一帧 DrawList 组装产物。
-pub(crate) struct DrawAssembly {
-    /// 可绘行实例槽号列表（在场环全量重写输入；录制层零逐对象消费）。
-    pub slots: Vec<u32>,
-    /// 暂缓行数（实例槽缺/mesh 未驻留/材质缺席）。
-    pub pending_rows: usize,
-    /// alpha<1 的行数（不透明覆盖收账日志用）。
-    pub alpha_override: usize,
-    /// 可绘行的去重材质身份（材质环全量重写的输入）。
-    pub materials: Vec<AssetId<StandardMaterial>>,
+/// 组装对照账面（7.9 判定线 2 的 BRP 开关对照模式）：开启时帧循环逐帧跑
+/// 全量参照走访与增量缓存比对——只进计量，**不驱动绘制**（诊断性回读边界
+/// 照 5.2 拍板）。默认关，稳态零成本。
+#[derive(Resource, Default)]
+pub struct DrawListVerify {
+    /// 对照开关（BRP `drawlist_verify_set` 写）。
+    pub enabled: bool,
+    /// 已比对帧数累计。
+    pub frames_compared_total: u64,
+    /// 不一致帧数累计（判定线 2 的证据读数，非零 = 增量路径有缺陷）。
+    pub mismatches_total: u64,
+    /// 最近一次不一致的摘要（行数差/首差位/字段名）。
+    pub last_mismatch: Option<String>,
 }
 
-/// 组装 DrawList：账本行 → 实例槽 + 驻留账本/资产容器 → 可绘行槽号列表。
-/// 账本读是纯 BTreeMap 走访——零组件扫描零 tick 比较（4.1 语义不变）。
-///
-/// 可绘锚（6.5.2）：`floor_anchor` 开启时，LOD 组行的锚 = 组内保底档（最粗
-/// 变体，level MAX-1）驻留——基准降为按需高档，缺席不暂缓行；组尾档缺席
-/// （登记不完整）锚退回基准。关闭 = 6.4 现状（锚恒为基准）。非组行锚恒为
-/// 基准（无变体即无保底可迁，6.5 范围钉明）。
-pub(crate) fn assemble(
-    ledger: &InstanceLedger,
-    pool: &MeshPool,
-    std_materials: &Assets<StandardMaterial>,
-    lod_groups: &LodGroups,
+/// 可绘判定闭包（7.9）：与原全量走访逐行同判定——实例槽缺 / 锚未驻留 /
+/// 材质容器缺席 = None（暂缓）；命中 = (槽号, 材质身份, alpha<1)。
+/// 锚解析按 6.5 纯函数（floor_anchor 开启 = 组内保底档，尾档缺席退回基准）。
+pub(crate) fn drawability_eval<'a>(
+    pool: &'a MeshPool,
+    std_materials: &'a Assets<StandardMaterial>,
+    lod_groups: &'a LodGroups,
     floor_anchor: bool,
-) -> DrawAssembly {
-    let mut slots: Vec<u32> = Vec::with_capacity(ledger.len());
-    let mut pending_rows = 0usize;
-    let mut alpha_override = 0usize;
-    let mut material_seen: HashSet<AssetId<StandardMaterial>> = HashSet::new();
-    for (_entity, row) in ledger.rows() {
-        let Some(slot) = row.instance_slot else {
-            pending_rows += 1;
-            continue;
-        };
-        // 池引脚不再需要（命令由 GPU 从对象记录自取）——驻留判定本身仍按
-        // MeshSlot 在账（锚未驻留 = 暂缓；锚身份按 6.5 开关解析，纯函数
-        // anchor_level 与 tick 需求集/flush 锚腿同源）
+) -> impl FnMut(&InstanceRow) -> Option<(u32, AssetId<StandardMaterial>, bool)> + 'a {
+    move |row| {
+        let slot = row.instance_slot?;
         let mesh_id = row.mesh.id();
         let anchor_id = match lod_groups.levels_of(mesh_id) {
             Some(levels) => {
@@ -78,26 +75,114 @@ pub(crate) fn assemble(
             }
             None => mesh_id,
         };
-        if pool.resident(anchor_id).is_none() {
-            pending_rows += 1;
-            continue;
-        }
-        let Some(material) = std_materials.get(&row.material) else {
-            pending_rows += 1;
-            continue;
-        };
-        let color = material.base_color.to_linear();
-        if color.alpha < 1.0 {
-            alpha_override += 1;
-        }
-        material_seen.insert(row.material.id());
-        slots.push(slot);
+        pool.resident(anchor_id)?;
+        let material = std_materials.get(&row.material)?;
+        let alpha = material.base_color.to_linear().alpha < 1.0;
+        Some((slot, row.material.id(), alpha))
     }
-    DrawAssembly {
-        slots,
-        pending_rows,
-        alpha_override,
-        materials: material_seen.into_iter().collect(),
+}
+
+/// 组装 DrawList（7.9 增量入口）：触发账本组装缓存的重估/重建（判定闭包
+/// 注入），产物经 `ledger.assembly_view()` 供帧循环全程只读。账本行宇宙
+/// 不变帧零走访零 Vec 重建（缓存容量复用）；变更帧成本 O(重估行)。
+///
+/// 可绘锚（6.5.2）：`floor_anchor` 开启时，LOD 组行的锚 = 组内保底档（最粗
+/// 变体，level MAX-1）驻留——判定闭包与全量路径同源（`drawability_eval`）。
+pub(crate) fn assemble_update(
+    ledger: &mut InstanceLedger,
+    pool: &MeshPool,
+    std_materials: &Assets<StandardMaterial>,
+    lod_groups: &LodGroups,
+    floor_anchor: bool,
+) {
+    ledger.assembly_update(
+        &mut drawability_eval(pool, std_materials, lod_groups, floor_anchor),
+        floor_anchor,
+        lod_groups.generation(),
+    );
+}
+
+/// 全量参照走访（7.9 对照模式的真值面）：与旧版 `assemble` 逐行同判定的
+/// O(账本行) 枚举——只进比对，不进绘制。返回（槽号列表 Entity 序，去重
+/// 材质身份，暂缓行数，alpha<1 行数）。
+pub(crate) fn assemble_reference(
+    ledger: &InstanceLedger,
+    pool: &MeshPool,
+    std_materials: &Assets<StandardMaterial>,
+    lod_groups: &LodGroups,
+    floor_anchor: bool,
+) -> (Vec<u32>, BTreeSet<AssetId<StandardMaterial>>, usize, usize) {
+    let mut eval = drawability_eval(pool, std_materials, lod_groups, floor_anchor);
+    let mut slots = Vec::with_capacity(ledger.len());
+    let mut pending_rows = 0usize;
+    let mut alpha_override = 0usize;
+    let mut materials = BTreeSet::new();
+    for (_entity, row) in ledger.rows() {
+        match eval(row) {
+            Some((slot, mat, alpha)) => {
+                if alpha {
+                    alpha_override += 1;
+                }
+                materials.insert(mat);
+                slots.push(slot);
+            }
+            None => pending_rows += 1,
+        }
+    }
+    (slots, materials, pending_rows, alpha_override)
+}
+
+/// 对照模式逐帧比对（7.9 判定线 2）：全量参照 vs 增量缓存，逐字段核对
+///（槽号列表逐行、暂缓数、材质集、alpha<1 计数），不一致进账面（不中断
+/// 渲染——诊断面只记账）。
+pub(crate) fn verify_assembly(
+    ledger: &InstanceLedger,
+    pool: &MeshPool,
+    std_materials: &Assets<StandardMaterial>,
+    lod_groups: &LodGroups,
+    floor_anchor: bool,
+    pending_rows: usize,
+    verify: &mut DrawListVerify,
+) {
+    let (ref_slots, ref_materials, ref_pending, ref_alpha) =
+        assemble_reference(ledger, pool, std_materials, lod_groups, floor_anchor);
+    let view = ledger.assembly_view();
+    verify.frames_compared_total += 1;
+    let mut mismatch: Option<String> = None;
+    if view.slots != ref_slots.as_slice() {
+        let first_diff = view
+            .slots
+            .iter()
+            .zip(ref_slots.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| view.slots.len().min(ref_slots.len()));
+        mismatch = Some(format!(
+            "槽号列表不一致（增量 {} 行 vs 全量 {} 行，首差异位 {first_diff}）",
+            view.slots.len(),
+            ref_slots.len(),
+        ));
+    } else if pending_rows != ref_pending {
+        mismatch = Some(format!("暂缓行数不一致（增量 {pending_rows} vs 全量 {ref_pending}）"));
+    } else {
+        let mut inc_mats: Vec<AssetId<StandardMaterial>> = view.materials.to_vec();
+        inc_mats.sort_unstable();
+        let ref_mats: Vec<AssetId<StandardMaterial>> = ref_materials.into_iter().collect();
+        if inc_mats != ref_mats {
+            mismatch = Some(format!(
+                "材质集不一致（增量 {} 个 vs 全量 {} 个）",
+                inc_mats.len(),
+                ref_mats.len(),
+            ));
+        } else if view.alpha_override != ref_alpha {
+            mismatch = Some(format!(
+                "alpha<1 行数不一致（增量 {} vs 全量 {ref_alpha}）",
+                view.alpha_override,
+            ));
+        }
+    }
+    if let Some(m) = mismatch {
+        verify.mismatches_total += 1;
+        verify.last_mismatch = Some(m);
     }
 }
 
@@ -106,11 +191,12 @@ pub(crate) fn assemble(
 /// 跳过（槽位在停尸房途中或从未分配，环内容无人读）。
 fn write_model_ring(
     tables: &mut InstanceTables,
-    ledger: &mut InstanceLedger,
+    ledger: &InstanceLedger,
+    model_dirty: &[Entity],
     frame: usize,
 ) -> Result<(), VulkanError> {
-    for entity in ledger.take_model_dirty(frame) {
-        let Some(row) = ledger.row(entity) else {
+    for entity in model_dirty {
+        let Some(row) = ledger.row(*entity) else {
             continue;
         };
         let Some(slot) = row.instance_slot else {
@@ -125,6 +211,10 @@ fn write_model_ring(
 /// 写材质环（全量重写）：可绘行的去重材质 → 本帧槽的环。内容每帧从资产
 /// 容器/驻留缓存现读——材质参数变化与贴图槽换指自动次帧生效（4.2 的
 /// 材质半边语义由本环吸收，flush 无需任何材质内容通道）。
+///
+/// 7.9 评估留全量（裁决与实数入施工记录）：全量重写 = 4.2 材质内容变更
+/// 通道的本体（增量写会把参数变化冻结在旧记录里，需另开内容变更通道才能
+/// 补齐语义）；占比实测 ~4% 帧墙（rings 段 0.93ms/21ms），简单性优先留全量。
 fn write_material_ring(
     tables: &mut InstanceTables,
     std_materials: &Assets<StandardMaterial>,
@@ -159,7 +249,8 @@ fn write_material_ring(
 
 /// 写在场环（全量重写）：可绘行槽号列表 → 本帧槽的环。5.3 的"逐 draw 循环"
 /// 退役通道——GPU 侧 build_indirect 以本列表为行宇宙（退休槽/暂缓行不在
-/// 列表 = 自动无命令），写发生条件与帧 UBO 同一条 fence 证据。
+/// 列表 = 自动无命令），写发生条件与帧 UBO 同一条 fence 证据。列表本身是
+/// 组装缓存的产物（7.9），本环每帧照写（环按帧槽双缓冲，快照语义不可省）。
 fn write_presence_ring(
     tables: &mut InstanceTables,
     slots: &[u32],
@@ -181,13 +272,14 @@ fn write_presence_ring(
 /// 从最细档重新收敛——与描述符 init 零填充同语义）。
 fn write_lod_table_ring(
     tables: &mut InstanceTables,
-    ledger: &mut InstanceLedger,
+    ledger: &InstanceLedger,
     pool: &MeshPool,
     lod_groups: &LodGroups,
+    lod_dirty: &[Entity],
     frame: usize,
 ) -> Result<(), VulkanError> {
-    for entity in ledger.take_lod_dirty(frame) {
-        let Some(row) = ledger.row(entity) else {
+    for entity in lod_dirty {
+        let Some(row) = ledger.row(*entity) else {
             continue; // 行已清：槽位在停尸房途中或从未分配，表内容无人读
         };
         let Some(slot) = row.instance_slot else {
@@ -221,25 +313,31 @@ fn write_lod_table_ring(
 /// 全量 + 在场环全量 + LOD 表增量都落在本帧槽的环上。失败按 Tier② 冒泡
 ///（环写失败 = host-visible 契约被打破，帧循环无法继续）。
 ///
+/// 借用纪律（7.9）：`ledger` 与 `assembly` 都是账本的共享借用（组装产物住
+/// 账本缓存）——奇偶集（model/lod dirty）由调用方在取视图之前先行取走，
+/// 本函数对账本零可变访问。
+///
 /// # Errors
 /// 环 buffer 写失败（host-visible 缺席/越界，内部契约矛盾级）。
 #[expect(
     clippy::too_many_arguments,
-    reason = "环写入的输入即四族账本来源（账本/材质容器/贴图缓存/LOD 组/池），逐项声明与 instance_table 的 hazard 纪律表逐项对账，拆束会藏掉写点清单"
+    reason = "环写入的输入即四族账本来源（账本/材质容器/贴图缓存/LOD 组/池）+ 7.9 借用纪律的奇偶集与产物视图，逐项声明与 instance_table 的 hazard 纪律表逐项对账，拆束会藏掉写点清单"
 )]
 pub(crate) fn write_rings(
     tables: &mut InstanceTables,
-    ledger: &mut InstanceLedger,
+    ledger: &InstanceLedger,
     std_materials: &Assets<StandardMaterial>,
     image_cache: &ImageCache,
-    assembly: &DrawAssembly,
+    model_dirty: &[Entity],
+    lod_dirty: &[Entity],
+    assembly: &crate::scene::mechanism::AssemblyView<'_>,
     frame: usize,
     lod_groups: &LodGroups,
     pool: &MeshPool,
 ) -> Result<(), VulkanError> {
-    write_model_ring(tables, ledger, frame)?;
-    write_material_ring(tables, std_materials, image_cache, &assembly.materials, frame)?;
-    write_presence_ring(tables, &assembly.slots, frame)?;
-    write_lod_table_ring(tables, ledger, pool, lod_groups, frame)?;
+    write_model_ring(tables, ledger, model_dirty, frame)?;
+    write_material_ring(tables, std_materials, image_cache, assembly.materials, frame)?;
+    write_presence_ring(tables, assembly.slots, frame)?;
+    write_lod_table_ring(tables, ledger, pool, lod_groups, lod_dirty, frame)?;
     Ok(())
 }

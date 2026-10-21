@@ -168,6 +168,8 @@ pub(crate) struct FrameInput<'w, 's> {
     timer: ResMut<'w, GpuTimer>,
     /// 帧样本账（每帧 push 一份 CPU 分段 + GPU 区间 + 规模；只进计量）。
     perf: ResMut<'w, PerfLedger>,
+    /// 组装对照账面（7.9 判定线 2 的 BRP 开关；关闭时零成本）。
+    verify: ResMut<'w, super::drawlist::DrawListVerify>,
 }
 
 /// DrawList 消费状态（跨帧 `Local`）：缺资源/相机告警去重 + 材质覆盖一次性收账。
@@ -245,6 +247,7 @@ pub(crate) fn draw_frame(
         ref mut gap_snapshot,
         ref mut timer,
         ref mut perf,
+        ref mut verify,
         ..
     } = input;
     // —— 闸门①：读 resize 消息。一次 update 可能积压多条（拖拽 125Hz 输入 vs 60fps
@@ -333,26 +336,45 @@ pub(crate) fn draw_frame(
     };
     let acquire_ms = acquire_clock.elapsed().as_secs_f32() * 1000.0;
 
-    // 3) 组装 DrawList：槽位枚举（账本行 → 实例槽 + 池引脚；逐对象参数已进
-    // GPU 常驻表，push 只剩 4B 实例槽号——见 drawlist 模块文档）。可绘判定
-    // 与 4.x 语义一致：实例槽缺/mesh 未驻留/材质缺席 = 暂缓（Tier① 自愈）。
+    // 3) 组装 DrawList（7.9 增量维护）：账本组装缓存消费重估集（变更点 =
+    // 行增删/换绑/置脏/槽位交接/驻留出账的各钩子），行宇宙稳定帧零走访。
+    // 可绘判定与 4.x 语义一致：实例槽缺/mesh 未驻留/材质缺席 = 暂缓
+    //（Tier① 自愈）。暂缓行数 = 行总数 − 可绘数（缓存维护后恒成立）。
     let assemble_clock = std::time::Instant::now();
-    let assembly =
-        drawlist::assemble(ledger, pool, std_materials, lod_groups, residency_settings.floor_anchor);
+    drawlist::assemble_update(ledger, pool, std_materials, lod_groups, residency_settings.floor_anchor);
     let assemble_ms = assemble_clock.elapsed().as_secs_f32() * 1000.0;
-    if assembly.pending_rows > 0 {
+    // 对照模式（7.9 判定线 2）：BRP 开关开启时逐帧跑全量参照走访与增量
+    // 缓存逐字段比对——只进计量，不驱动绘制（诊断性回读边界照 5.2 拍板）。
+    if verify.enabled {
+        drawlist::verify_assembly(
+            ledger,
+            pool,
+            std_materials,
+            lod_groups,
+            residency_settings.floor_anchor,
+            ledger.assembly_pending(),
+            verify,
+        );
+    }
+    // —— 奇偶集先于视图取走（写侧的账本可变消费点收口），此后 assembly
+    // 视图对账本共享借用，环写入与诊断读数全程零可变访问。
+    let model_dirty = ledger.take_model_dirty(frames.current_index());
+    let lod_dirty = ledger.take_lod_dirty(frames.current_index());
+    let assembly = ledger.assembly_view();
+    let pending_rows = ledger.len() - assembly.slots.len();
+    if pending_rows > 0 {
         if !draw_state.warned_pending {
             draw_state.warned_pending = true;
             info!(
                 "DrawList 暂缓 {}/{} 行（实例槽/mesh/材质未就绪，上传链自愈后消失）",
-                assembly.pending_rows,
+                pending_rows,
                 ledger.len(),
             );
         }
     } else {
         draw_state.warned_pending = false;
     }
-    if !ledger.is_empty() && assembly.pending_rows == 0 {
+    if !ledger.is_empty() && pending_rows == 0 {
         draw_state.override_logged.log(|| info!(
             "材质调试覆盖：{} 个 primitive 全部按不透明绘制——blend 关闭（alpha<1 的 {} 行照常画出，glTF BLEND 镜片在此列）；材质参数/贴图槽走材质环（每帧从容器现读）；着色模式按 ASH_RENDER_MODE（三态，见灯光收账日志）",
             ledger.len(),
@@ -458,13 +480,16 @@ pub(crate) fn draw_frame(
 
     // 4a) 双环写入（wait_for_slot 之后，与帧 UBO 同一条 fence 证据）：模型环
     // 增量重写（本帧奇偶集的改动行）+ 材质环全量重写（可绘行的材质从容器
-    // 现读）。见 instance_table 模块文档的 hazard 纪律表。
+    // 现读）。见 instance_table 模块文档的 hazard 纪律表。奇偶集在组装段
+    // 之后取走（借用纪律见步骤 3 注释），assembly 视图 = 账本共享借用。
     let rings_clock = std::time::Instant::now();
     drawlist::write_rings(
         instance_tables,
         ledger,
         std_materials,
         image_cache,
+        &model_dirty,
+        &lod_dirty,
         &assembly,
         frames.current_index(),
         lod_groups,
@@ -651,7 +676,7 @@ pub(crate) fn draw_frame(
             .read(0, &mut lod_bytes)
             .or_fatal("LOD 档位环读数失败，渲染链无法继续")?;
         let mut counts = [0u32; MAX_LOD_LEVELS as usize];
-        for slot in &assembly.slots {
+        for slot in assembly.slots {
             let level = u32::from_le_bytes(
                 lod_bytes[*slot as usize * 4..*slot as usize * 4 + 4].try_into().expect("4B"),
             );
@@ -712,7 +737,7 @@ pub(crate) fn draw_frame(
     indirect_stats.command_count = indirect_count;
     indirect_stats.zero_instance_count = indirect_count - visible_among_live;
     indirect_stats.walk_rows = ledger.len();
-    indirect_stats.pending_rows = assembly.pending_rows;
+    indirect_stats.pending_rows = pending_rows;
 
     // 4b) overlay 绘制半边：图集整传（可能多出一张 transfer 票据——本帧
     // 图形提交的 wait_ticket 在此后快照，flush_uploads 批与图集批都被等待）→

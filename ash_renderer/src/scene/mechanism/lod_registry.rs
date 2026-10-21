@@ -24,14 +24,25 @@ use crate::vulkan::MAX_LOD_LEVELS;
 /// LOD 组登记处：基准 mesh 身份 → 各档变体柄（level 0 = 基准自身），加
 /// level → base 反查（档位资产到货时重挂引用行 LOD 脏标用）与变体网格
 /// 缓存（形状 × 档位 → 柄，同参共享零新资产）。
+///
+/// 换代号（7.9）：每次 `register` 递增——DrawList 组装的锚解析以
+/// `levels_of` 为输入，换组 = 锚解析变，组装缓存凭换代号触发全量重建
+///（消费端 [`crate::scene::InstanceLedger`] 比对上次组装的换代号）。
 #[derive(Resource, Default)]
 pub struct LodGroups {
     by_base: HashMap<AssetId<Mesh>, [Option<Handle<Mesh>>; MAX_LOD_LEVELS as usize]>,
     level_to_base: HashMap<AssetId<Mesh>, AssetId<Mesh>>,
     variants: HashMap<(TestShape, u32), Handle<Mesh>>,
+    generation: u64,
 }
 
 impl LodGroups {
+    /// 登记换代号（每次 register 递增；组装缓存换形触发键）。
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// 登记一组 LOD：`levels[0]` = 基准柄自身（与实体 Mesh3d 同柄），
     /// `levels[1..]` = 渐粗变体；不足 [`MAX_LOD_LEVELS`] 的尾档留 None
     ///（哨兵，消费端向更细档回退）。同基准重复登记以新组为准（换组语义）。
@@ -47,6 +58,7 @@ impl LodGroups {
             }
         }
         self.by_base.insert(base, group);
+        self.generation += 1;
     }
 
     /// 基准 mesh 的各档变体柄（查无 = 该 mesh 不在 LOD 组内——非阶梯实体，

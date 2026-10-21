@@ -21,10 +21,16 @@
 //! 总数，O(匹配实体) 是 Changed 语义的已知成本）与**处理数**（真实动手的行）
 //! 分开报——不把"零上传"说成"零 CPU 每对象成本"。
 //!
+//! 7.9 组装增量账（[`AssemblyCache`]）：DrawList 可绘行集合的增量缓存与账本
+//! 同体维护——可绘判定（实例槽 ∧ 锚驻留 ∧ 材质在容器）的全部输入变化都经过
+//! 本账本的行增删/换绑/置脏/槽位交接路径，各变更点顺带标记组装重估（不做第二
+//! 套变更发现）。行宇宙不变帧的组装零走访零产物重建，缓存视图由
+//! [`InstanceLedger::assembly_view`] 供帧循环全程只读。
+//!
 //! 零 Vulkan 代码：账本只有 ECS 侧事实；GPU 足迹（池区间/贴图槽）按资产身份
 //! 去驻留缓存（MeshPool/ImageCache）现查，不进账本行。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bevy::{
     asset::AssetId,
@@ -52,6 +58,80 @@ pub struct InstanceRow {
     /// mesh 内容票据取自 MeshSlot.ticket：同身份内容变化（Modified）必然
     /// 换票据，记录随身份比对失效。
     pub bound: Option<(AssetId<Mesh>, u64, AssetId<StandardMaterial>)>,
+}
+
+/// DrawList 组装缓存（7.9）：可绘行集合的增量账——行宇宙不变帧零走访。
+/// 判定输入全部来自账本自身的行状态变化（增删/换绑/置脏/槽位交接），各变更点
+/// 标记重估；全量重建只在首帧播种与换形（锚开关翻转 / LOD 登记换代）发生。
+#[derive(Default)]
+pub(crate) struct AssemblyCache {
+    /// 首帧全量播种旗（重建后复位重估通道照常）。
+    seeded: bool,
+    /// 外部请求的全量重建（预留全局失效口，当前无写入点——键比对兜底换形）。
+    rebuild_all: bool,
+    /// 上次组装的锚开关（翻转 = 锚解析换形，全量重建）。
+    last_floor_anchor: Option<bool>,
+    /// 上次组装的 LOD 登记换代号（登记处 register 换组 = 锚解析变，全量重建）。
+    last_lod_generation: u64,
+    /// 可绘行 → (实例槽, 材质身份, alpha<1)。BTreeMap 保 Entity 序——与全量
+    /// 走访（rows() 迭代序）的产物逐行一致（判定线 2 的对照面）。
+    drawable: BTreeMap<Entity, (u32, AssetId<StandardMaterial>, bool)>,
+    /// 材质身份 → 可绘引用行数（材质集增量的引用计数；减到 0 出表）。
+    material_refs: HashMap<AssetId<StandardMaterial>, usize>,
+    /// 待重估行集（各变更点的输入侧，`assembly_update` 消费后清空）。
+    stale: BTreeSet<Entity>,
+    /// 产物缓存（行宇宙稳定帧零重建，容量复用）。
+    slots: Vec<u32>,
+    materials: Vec<AssetId<StandardMaterial>>,
+    /// alpha<1 的可绘行数（不透明覆盖收账日志用，随可绘行增删增量维护）。
+    alpha_override: usize,
+    /// 全量重建累计（计量）。
+    pub rebuilds_total: u64,
+    /// 行级重估累计（计量）。
+    pub reevals_total: u64,
+    /// 重估标记排水累计（行次；mark 与 drain 的对账读数）。
+    pub drained_rows_total: u64,
+    /// 最近一次排水消费的标记行数（计量）。
+    pub last_drain_rows: u64,
+}
+
+/// 组装可绘判定闭包（7.9）：行 → (槽号, 材质身份, alpha<1)；None = 暂缓。
+type AssemblyEval<'a> = &'a mut dyn FnMut(&InstanceRow) -> Option<(u32, AssetId<StandardMaterial>, bool)>;
+
+impl AssemblyCache {
+    /// 产物重建（可绘集变化后调用）：slots 按 Entity 序展开、materials 按
+    /// 材质表展开。变化帧 O(可绘行)，稳定帧不进此路（容量复用）。
+    fn rebuild_products(&mut self) {
+        self.slots.clear();
+        self.slots.extend(self.drawable.values().map(|(slot, _, _)| *slot));
+        self.materials.clear();
+        self.materials.extend(self.material_refs.keys().copied());
+    }
+}
+
+/// 材质引用计数递减（0 出表）：可绘行退场时收账。
+fn release_material_ref(
+    refs: &mut HashMap<AssetId<StandardMaterial>, usize>,
+    mat: AssetId<StandardMaterial>,
+) {
+    if let Some(count) = refs.get_mut(&mat) {
+        *count -= 1;
+        if *count == 0 {
+            refs.remove(&mat);
+        }
+    }
+}
+
+/// 组装产物只读视图（7.9）：draw_frame 在组装维护与奇偶集取走之后创建，
+/// 供环写入与诊断读数全程借用——`pending_rows` 由调用方按 `账本行数 −
+/// slots.len()` 现算（缓存维护后恒成立）。
+pub(crate) struct AssemblyView<'a> {
+    /// 可绘行实例槽号列表（Entity 序，与全量走访产物逐行一致）。
+    pub slots: &'a [u32],
+    /// 可绘行的去重材质身份（材质环全量重写的输入；迭代序不指定）。
+    pub materials: &'a [AssetId<StandardMaterial>],
+    /// alpha<1 的可绘行数。
+    pub alpha_override: usize,
 }
 
 /// 增量计量：发现侧逐帧刷新，上传侧累计（BRP `increment_stats` 的读数源）。
@@ -122,6 +202,8 @@ pub struct InstanceLedger {
     /// 到货时置位，draw_frame 消费本帧奇偶集（写该槽的 LOD 表条目进本帧
     /// 槽环）——纪律与 model_dirty 相同（两帧后两个环都新鲜）。
     lod_dirty: [BTreeSet<Entity>; 2],
+    /// DrawList 组装缓存（7.9）：可绘行集合增量账，见 [`AssemblyCache`]。
+    assembly: AssemblyCache,
     pub stats: IncrementStats,
 }
 
@@ -167,8 +249,10 @@ impl InstanceLedger {
 
     /// 重挂一行脏标（资产失效联动：资产内容变化波及的引用者重新进盘点；
     /// 发现侧第二条入口，与 update_ledger 的 Changed/Removed 通道并轨同一脏集）。
+    /// 组装联动（7.9）：置脏行的可绘输入可能随重传翻面，一并标记重估。
     pub(crate) fn mark_dirty(&mut self, entity: Entity) {
         self.dirty.insert(entity);
+        self.assembly.stale.insert(entity);
     }
 
     /// 落一行实例槽与记录身份（flush_uploads 换槽时调用），返回旧槽
@@ -186,6 +270,8 @@ impl InstanceLedger {
         if let Some(row) = self.rows.get_mut(&entity) {
             row.bound = Some(bound);
         }
+        // 槽位交接 = 组装可绘判定输入变化（7.9）
+        self.mark_assembly_stale(entity);
         old
     }
 
@@ -232,6 +318,114 @@ impl InstanceLedger {
             .filter(|(_, row)| row.mesh.id() == id)
             .map(|(entity, _)| *entity)
             .collect()
+    }
+
+    /// 全部引用给定材质身份的行（7.9：材质资产离容器时反查引用行重估组装；
+    /// O(rows) 走访，触发频率 = 资产移除，稀疏事件）。
+    pub(crate) fn rows_with_material(&self, id: AssetId<StandardMaterial>) -> Vec<Entity> {
+        self.rows
+            .iter()
+            .filter(|(_, row)| row.material.id() == id)
+            .map(|(entity, _)| *entity)
+            .collect()
+    }
+
+    /// 标记一行待组装重估（7.9 变更点钩子：行增删/换绑、`mark_dirty`、
+    /// 槽位交接、驻留出账反查各调用点；幂等——重复标记零成本）。
+    pub(crate) fn mark_assembly_stale(&mut self, entity: Entity) {
+        self.assembly.stale.insert(entity);
+    }
+
+    /// DrawList 组装增量维护（7.9）：消费重估集，按 `eval`（可绘判定闭包，
+    /// 由帧循环注入 pool/材质容器/LOD 组的读取）维护可绘行缓存。全量重建
+    /// 仅在首帧播种或换形（锚开关翻转 / LOD 登记换代）发生；其余帧只重估
+    /// 重估集——行宇宙不变帧零走访、产物零重建（容量复用）。
+    pub(crate) fn assembly_update(
+        &mut self,
+        eval: AssemblyEval<'_>,
+        floor_anchor: bool,
+        lod_generation: u64,
+    ) {
+        let rebuild = !self.assembly.seeded
+            || self.assembly.rebuild_all
+            || self.assembly.last_floor_anchor != Some(floor_anchor)
+            || self.assembly.last_lod_generation != lod_generation;
+        if rebuild {
+            self.assembly.drawable.clear();
+            self.assembly.material_refs.clear();
+            self.assembly.stale.clear();
+            self.assembly.alpha_override = 0;
+            for (entity, row) in &self.rows {
+                if let Some((slot, mat, alpha)) = eval(row) {
+                    *self.assembly.material_refs.entry(mat).or_insert(0) += 1;
+                    if alpha {
+                        self.assembly.alpha_override += 1;
+                    }
+                    self.assembly.drawable.insert(*entity, (slot, mat, alpha));
+                }
+            }
+            self.assembly.seeded = true;
+            self.assembly.rebuild_all = false;
+            self.assembly.last_floor_anchor = Some(floor_anchor);
+            self.assembly.last_lod_generation = lod_generation;
+            self.assembly.rebuilds_total += 1;
+            self.assembly.rebuild_products();
+            return;
+        }
+        let stale: Vec<Entity> = self.assembly.stale.iter().copied().collect();
+        self.assembly.stale.clear();
+        self.assembly.drained_rows_total += stale.len() as u64;
+        self.assembly.last_drain_rows = stale.len() as u64;
+        let mut changed = false;
+        for entity in stale {
+            self.assembly.reevals_total += 1;
+            // 旧可绘态先退场（引用计数/alpha 收账）；行已清 = 只退场不重估
+            if let Some((_, mat, alpha)) = self.assembly.drawable.remove(&entity) {
+                changed = true;
+                release_material_ref(&mut self.assembly.material_refs, mat);
+                if alpha {
+                    self.assembly.alpha_override -= 1;
+                }
+            }
+            let Some(row) = self.rows.get(&entity) else {
+                continue;
+            };
+            if let Some((slot, mat, alpha)) = eval(row) {
+                *self.assembly.material_refs.entry(mat).or_insert(0) += 1;
+                if alpha {
+                    self.assembly.alpha_override += 1;
+                }
+                self.assembly.drawable.insert(entity, (slot, mat, alpha));
+                changed = true;
+            }
+            // 仍暂缓：可绘集无此行（pending = 行总数 − 可绘数，现算）
+        }
+        if changed {
+            self.assembly.rebuild_products();
+        }
+    }
+
+    /// 组装产物只读视图（draw_frame 组装段之后全程借用；与 `&mut` 消费点
+    /// （奇偶集取走）在取视图之前收口，借用纪律见 draw_frame）。
+    #[must_use]
+    pub(crate) fn assembly_view(&self) -> AssemblyView<'_> {
+        AssemblyView {
+            slots: &self.assembly.slots,
+            materials: &self.assembly.materials,
+            alpha_override: self.assembly.alpha_override,
+        }
+    }
+
+    /// 组装缓存只读访问（BRP 读数面：重建/重估计量）。
+    #[must_use]
+    pub(crate) fn assembly(&self) -> &AssemblyCache {
+        &self.assembly
+    }
+
+    /// 暂缓行数（行总数 − 可绘数；缓存维护后恒与全量走访的暂缓口径一致）。
+    #[must_use]
+    pub(crate) fn assembly_pending(&self) -> usize {
+        self.rows.len() - self.assembly.drawable.len()
     }
 }
 
@@ -312,6 +506,8 @@ pub(crate) fn update_ledger(
             }
             removed += 1;
             processed += 1;
+            // 组装联动（7.9）：行退场，重估把可绘态撤出缓存（含材质引用计数）
+            ledger.mark_assembly_stale(entity);
             info!(
                 "账本清行 {entity:?}（Mesh3d/材质被摘或 despawn，剩 {} 行）",
                 ledger.rows.len()
@@ -358,6 +554,8 @@ pub(crate) fn update_ledger(
         }
         ledger.dirty.insert(entity);
         ledger.rows.insert(entity, new_row);
+        // 组装联动（7.9）：入行/换绑都改可绘判定输入（槽位/柄），标记重估
+        ledger.mark_assembly_stale(entity);
     }
 
     // —— ③ 矩阵：只写 model，不进脏集（模型走模型环，不过上传链）；
@@ -386,4 +584,166 @@ pub(crate) fn update_ledger(
     stats.rebound_rows_total += rebound as u64;
     stats.transform_updates_total += transform_updates as u64;
     stats.dirty_rows = dirty_len;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::math::Mat4;
+
+    /// 合成行：柄按真实容器生成（身份唯一、无渲染依赖），可绘判定由测试
+    /// eval 闭包以 instance_slot 直接决定——缓存语义与真实判定解耦。
+    struct Fixture {
+        world: World,
+        meshes: Assets<Mesh>,
+        materials: Assets<StandardMaterial>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self {
+                world: World::default(),
+                meshes: Assets::<Mesh>::default(),
+                materials: Assets::<StandardMaterial>::default(),
+            }
+        }
+
+        /// n 个单调递增的测试实体（升序保证 = Entity 分配序）。
+        fn entities(&mut self, n: usize) -> Vec<Entity> {
+            (0..n).map(|_| self.world.spawn_empty().id()).collect()
+        }
+
+        fn row(&mut self, mat: Handle<StandardMaterial>, slot: Option<u32>) -> InstanceRow {
+            InstanceRow {
+                mesh: self.meshes.add(Mesh::from(Sphere::new(0.5))),
+                material: mat,
+                model: Mat4::IDENTITY,
+                instance_slot: slot,
+                bound: None,
+            }
+        }
+    }
+
+    /// 测试 eval：槽位在 = 可绘（材质身份取自行柄，alpha 恒 false）。
+    fn eval(row: &InstanceRow) -> Option<(u32, AssetId<StandardMaterial>, bool)> {
+        row.instance_slot.map(|s| (s, row.material.id(), false))
+    }
+
+    fn insert_row(ledger: &mut InstanceLedger, entity: Entity, row: InstanceRow) {
+        ledger.rows.insert(entity, row);
+        ledger.mark_assembly_stale(entity);
+    }
+
+    #[test]
+    fn assembly_seed_order_and_pending() {
+        let mut fx = Fixture::new();
+        let mat = fx.materials.add(StandardMaterial::default());
+        let [e1, e2, e3] = {
+            let mut es = fx.entities(3);
+            [es.remove(0), es.remove(0), es.remove(0)]
+        };
+        let mut ledger = InstanceLedger::default();
+        insert_row(&mut ledger, e1, fx.row(mat.clone(), Some(10)));
+        insert_row(&mut ledger, e2, fx.row(mat.clone(), Some(20)));
+        // 一行缺槽（暂缓）
+        insert_row(&mut ledger, e3, fx.row(mat, None));
+        ledger.assembly_update(&mut eval, false, 0);
+        let view = ledger.assembly_view();
+        // 槽号序 = 账本行序（同一个 BTreeMap 的迭代序）——与全量走访逐行一致
+        let expected: Vec<u32> = ledger.rows().filter_map(|(_, r)| r.instance_slot).collect();
+        assert_eq!(view.slots, expected.as_slice(), "可绘槽与账本行序一致");
+        assert_eq!(ledger.len() - view.slots.len(), 1, "缺槽行 = 暂缓 1 行");
+        assert_eq!(ledger.assembly().rebuilds_total, 1, "首帧全量播种");
+    }
+
+    #[test]
+    fn assembly_stale_transitions() {
+        let mut fx = Fixture::new();
+        let mat = fx.materials.add(StandardMaterial::default());
+        let e = fx.entities(1).remove(0);
+        let mesh_id = fx.meshes.iter().next().map(|(id, _)| id);
+        let mut ledger = InstanceLedger::default();
+        insert_row(&mut ledger, e, fx.row(mat.clone(), None));
+        ledger.assembly_update(&mut eval, false, 0);
+        assert!(ledger.assembly_view().slots.is_empty(), "缺槽 = 不可绘");
+        // 槽位到账 → 重估后进入可绘集（bound 的 mesh 身份本测试不消费，占位即可）
+        ledger
+            .set_instance_slot(e, 7, (mesh_id.unwrap_or_default(), 0, mat.id()));
+        ledger.assembly_update(&mut eval, false, 0);
+        assert_eq!(ledger.assembly_view().slots, &[7], "槽位到账进入可绘集");
+        // 无变化帧：重估集为空 = 零重估，产物保持
+        let reevals_before = ledger.assembly().reevals_total;
+        ledger.assembly_update(&mut eval, false, 0);
+        assert_eq!(ledger.assembly().reevals_total, reevals_before, "稳定帧零重估");
+        assert_eq!(ledger.assembly_view().slots, &[7]);
+    }
+
+    #[test]
+    fn assembly_material_refcount() {
+        let mut fx = Fixture::new();
+        let mat = fx.materials.add(StandardMaterial::default());
+        let other = fx.materials.add(StandardMaterial::default());
+        let [e1, e2, e3] = {
+            let mut es = fx.entities(3);
+            [es.remove(0), es.remove(0), es.remove(0)]
+        };
+        let mut ledger = InstanceLedger::default();
+        // e1/e2 共享同一材质（引用计数 2），e3 独占 another
+        insert_row(&mut ledger, e1, fx.row(mat.clone(), Some(1)));
+        insert_row(&mut ledger, e2, fx.row(mat.clone(), Some(2)));
+        insert_row(&mut ledger, e3, fx.row(other, Some(3)));
+        ledger.assembly_update(&mut eval, false, 0);
+        assert_eq!(ledger.assembly_view().materials.len(), 2);
+        // 一行退场：共享材质仍留表（另一行还引用）
+        ledger.rows.remove(&e1);
+        ledger.mark_assembly_stale(e1);
+        ledger.assembly_update(&mut eval, false, 0);
+        assert_eq!(ledger.assembly_view().materials.len(), 2, "共享材质随剩余行保留");
+        let expected: Vec<u32> = ledger.rows().filter_map(|(_, r)| r.instance_slot).collect();
+        assert_eq!(ledger.assembly_view().slots, expected, "退场行撤出可绘集（序 = 账本行序）");
+        // 共享材质的最后一行退场：该材质出表，独占材质保留
+        ledger.rows.remove(&e2);
+        ledger.mark_assembly_stale(e2);
+        ledger.assembly_update(&mut eval, false, 0);
+        assert_eq!(ledger.assembly_view().materials.len(), 1, "引用清零的材质出表");
+        let expected: Vec<u32> = ledger.rows().filter_map(|(_, r)| r.instance_slot).collect();
+        assert_eq!(ledger.assembly_view().slots, expected, "剩余可绘行与账本行序一致");
+        assert_eq!(ledger.len() - ledger.assembly_view().slots.len(), 0, "可绘行零暂缓");
+    }
+
+    #[test]
+    fn assembly_rebuild_triggers() {
+        let mut fx = Fixture::new();
+        let mat = fx.materials.add(StandardMaterial::default());
+        let e = fx.entities(1).remove(0);
+        let mut ledger = InstanceLedger::default();
+        insert_row(&mut ledger, e, fx.row(mat, Some(5)));
+        ledger.assembly_update(&mut eval, false, 0);
+        let rebuilds = ledger.assembly().rebuilds_total;
+        // 锚开关翻转 = 换形重建
+        ledger.assembly_update(&mut eval, true, 0);
+        assert_eq!(ledger.assembly().rebuilds_total, rebuilds + 1, "锚开关翻转触发全量重建");
+        // 同参数稳定帧不重建
+        ledger.assembly_update(&mut eval, true, 0);
+        assert_eq!(ledger.assembly().rebuilds_total, rebuilds + 1);
+        // LOD 登记换代 = 锚解析变，重建
+        ledger.assembly_update(&mut eval, true, 1);
+        assert_eq!(ledger.assembly().rebuilds_total, rebuilds + 2);
+    }
+
+    #[test]
+    fn assembly_alpha_counter() {
+        let mut fx = Fixture::new();
+        let mat = fx.materials.add(StandardMaterial::default());
+        let e = fx.entities(1).remove(0);
+        let mut ledger = InstanceLedger::default();
+        insert_row(&mut ledger, e, fx.row(mat, Some(3)));
+        let mut alpha_eval = |row: &InstanceRow| row.instance_slot.map(|s| (s, row.material.id(), true));
+        ledger.assembly_update(&mut alpha_eval, false, 0);
+        assert_eq!(ledger.assembly_view().alpha_override, 1);
+        ledger.rows.remove(&e);
+        ledger.mark_assembly_stale(e);
+        ledger.assembly_update(&mut alpha_eval, false, 0);
+        assert_eq!(ledger.assembly_view().alpha_override, 0, "退场行 alpha 收账");
+    }
 }
