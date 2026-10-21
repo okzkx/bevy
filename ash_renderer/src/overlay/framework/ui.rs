@@ -42,6 +42,7 @@ use super::paint::{AtlasGpu, AtlasMirror};
 use crate::driver::host::FrameSyncSettings;
 use crate::overlay::transform_edit::{TransformEditQueue, apply_transform_edits};
 use crate::overlay::widgets::axis_gizmo::AxisGizmo;
+use crate::overlay::widgets::load_popup::{load_activity_tick, AssetLoadPopup, LoadActivity};
 use crate::overlay::windows::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
 use crate::overlay::windows::debug_window::{
     ChunkRows, DebugWindow, FpsMeter, PerfPanelCache, RenderMode, RendererStats,
@@ -81,6 +82,7 @@ impl Plugin for OverlayPlugin {
                 (
                     maintain_entity_tree,
                     collect_selected_details,
+                    load_activity_tick,
                     run_egui_pass,
                     apply_transform_edits,
                 )
@@ -165,6 +167,8 @@ fn init_egui(mut commands: Commands) {
     commands.insert_resource(EguiPassTiming::default());
     // 分位数面板缓存（7.5）：0.5s 重算，调试窗只读
     commands.insert_resource(PerfPanelCache::default());
+    // 资产加载活跃 latch（7.12）：默认 active（覆盖 Startup 解析窗口）
+    commands.insert_resource(LoadActivity::default());
     // 图集镜像（Update 折入）与 GPU 代（Last 整传；空建——首帧有整图增量才落图）。
     // AtlasGpu 的拆除在 teardown_vulkan（graveyard 与表同寿的拆除序）
     commands.insert_resource(AtlasMirror::default());
@@ -252,6 +256,8 @@ struct DebugUiParams<'w, 's> {
     image_cache: Res<'w, ImageCache>,
     mesh_pool: Res<'w, MeshPool>,
     workload: Res<'w, WorkloadSettings>,
+    /// 资产加载活跃 latch（7.12：菊花弹窗显示与面板直跑触发源）
+    load_activity: Res<'w, LoadActivity>,
 }
 
 /// 节拍化的跨帧门控账（7.8）：pass 触发判定的全部 Local 状态收拢成束——
@@ -378,6 +384,9 @@ fn run_egui_pass(
         || snapshot_ticked
         || size_changed
         || *gate.force_next
+        // 加载期直跑（7.12）：菊花相位逐帧推进（0.5s 快照节拍会看着卡顿）；
+        // 加载完成弹窗隐藏后触发自然消失回落节拍
+        || ui.load_activity.active
         || ui.windows_open.is_changed()
         || ui.selected.is_changed()
         || ui.tree_state.is_changed()
@@ -452,6 +461,11 @@ fn run_egui_pass(
             if let Some(edit) = edit {
                 ui.edit_queue.0.push(edit);
             }
+        }
+        // 加载指示弹窗（7.12）：最后画（右下角浮在窗区之上）；Background 层
+        // 纯显示零交互，不进 panel_layers 之外的仲裁面
+        if ui.load_activity.active {
+            AssetLoadPopup { ctx: &state.ctx }.show();
         }
         let egui::FullOutput {
             shapes,
