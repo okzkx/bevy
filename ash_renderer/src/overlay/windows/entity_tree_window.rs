@@ -275,7 +275,7 @@ impl EntityTreeWindow<'_> {
                                 ui.set_height(row_height);
                                 ui.add_space(indent.x);
                                 if *has_children {
-                                    let arrow = if *expanded { "▾ " } else { "▸ " };
+                                    let arrow = if *expanded { "▼ " } else { "▶ " };
                                     if ui
                                         .selectable_label(is_selected, format!("{arrow}{label}"))
                                         .clicked()
