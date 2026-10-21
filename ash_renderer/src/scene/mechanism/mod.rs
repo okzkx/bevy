@@ -52,7 +52,7 @@ pub use residency::{
     gap_asset_ids, anchor_level, AshResidencyPlugin, GapMode, GapSnapshot, LodDemand,
     ResidencySettings, ResidencyStats,
 };
-pub use visibility_exempt::{AshVisibilityExemptPlugin, VisibilityExemptStats};
+pub use visibility_exempt::AshVisibilityExemptPlugin;
 pub use workload::{AshWorkloadPlugin, WorkloadSettings};
 pub use material_hook::AshMaterialHookPlugin;
 pub use object_ops::{
