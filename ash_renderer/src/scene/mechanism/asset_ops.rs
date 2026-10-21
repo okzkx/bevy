@@ -29,6 +29,8 @@ use bevy::{
 };
 use wgpu_types::TextureFormat;
 
+use super::ledger::InstanceLedger;
+
 /// 资产操作被拒的原因（Tier②外泄给调用方分级：BRP 映射协议错误码）。
 #[derive(Debug)]
 pub enum AssetOpError {
@@ -175,7 +177,7 @@ pub fn mutate_asset(
         readback.material = Some(material_handle.id());
     }
 
-    if let Some(source_slot) = new_slot {
+    if let Some(source_slot) = new_slot.clone() {
         let mut assets = world.get_resource_mut::<Assets<StandardMaterial>>().ok_or(
             AssetOpError::AssetMissing("Assets<StandardMaterial> 容器缺席"),
         )?;
@@ -219,6 +221,18 @@ pub fn mutate_asset(
             .ok_or(AssetOpError::AssetMissing("Image"))?;
         tint_rgba8(&mut image, tint)?;
         readback.image = Some(texture_handle.id());
+    }
+
+    // 组装联动（7.9）：BRP 内容写入落在 RemoteLast——资产事件读侧隔帧才可读，
+    // 等事件链标记重估会让组装缓存对全量路径晚一帧（对照模式实抓）。写入点
+    // 直接标记材质引用行重估，同帧 draw_frame 即收敛（材质内容进组装判定
+    // 的是 alpha 计数；贴图槽/mesh 内容不进元组，重估幂等无害）。
+    if p.base_color.is_some() || new_slot.is_some() {
+        if let Some(mut ledger) = world.get_resource_mut::<InstanceLedger>() {
+            for entity in ledger.rows_with_material(material_handle.id()) {
+                ledger.mark_assembly_stale(entity);
+            }
+        }
     }
 
     Ok(readback)

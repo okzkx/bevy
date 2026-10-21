@@ -12,17 +12,27 @@ use serde_json::{json, Value};
 
 use ash_macros::system;
 
+use crate::driver::host::DrawListVerify;
+use crate::scene::InstanceLedger;
 use crate::vulkan::{CullDiagnostics, IndirectStats};
 
-use super::BrpResult;
+use super::{invalid_params, BrpResult};
 
 /// `ash_renderer/draw_stats`：indirect 闭环读数（只读）。返回绘制调用数、命令
-/// 条数、不可见命令条数与 CPU 走访/暂缓口径，附剔除读数快照。
+/// 条数、不可见命令条数与 CPU 走访/暂缓口径，附剔除读数快照与 7.9 组装增量
+/// 账的计量（重建/重估/对照模式）。
 ///
 /// # Errors
 /// 诊断资源缺席（宿主未装配，组件错误级）。
 #[system]
-pub(crate) fn draw_stats(In(_params): In<Option<Value>>, cull_diag: Res<CullDiagnostics>, indirect: Res<IndirectStats>) -> BrpResult {
+pub(crate) fn draw_stats(
+    In(_params): In<Option<Value>>,
+    cull_diag: Res<CullDiagnostics>,
+    indirect: Res<IndirectStats>,
+    ledger: Res<InstanceLedger>,
+    verify: Res<DrawListVerify>,
+) -> BrpResult {
+    let assembly = ledger.assembly();
     Ok(json!({
         "draw_calls_recorded": indirect.draw_calls_recorded,
         "command_count": indirect.command_count,
@@ -30,6 +40,18 @@ pub(crate) fn draw_stats(In(_params): In<Option<Value>>, cull_diag: Res<CullDiag
         "zero_instance_note": "诊断性读数，不驱动绘制（5.2 拍板口径）",
         "walk_rows": indirect.walk_rows,
         "pending_rows": indirect.pending_rows,
+        "assembly": {
+            "rebuilds_total": assembly.rebuilds_total,
+            "reevals_total": assembly.reevals_total,
+            "drained_rows_total": assembly.drained_rows_total,
+            "last_drain_rows": assembly.last_drain_rows,
+        },
+        "verify": {
+            "enabled": verify.enabled,
+            "frames_compared_total": verify.frames_compared_total,
+            "mismatches_total": verify.mismatches_total,
+            "last_mismatch": verify.last_mismatch,
+        },
         "cull": {
             "enabled": cull_diag.enabled,
             "bound": cull_diag.bound,
@@ -37,5 +59,34 @@ pub(crate) fn draw_stats(In(_params): In<Option<Value>>, cull_diag: Res<CullDiag
             "marks_frame": cull_diag.marks_frame,
         },
         "staleness_note": "读数 = draw_frame 上一帧快照（RemoteLast 读取，陈旧一帧）",
+    }))
+}
+
+/// `ash_renderer/drawlist_verify_set`：组装对照模式开关写（7.9 判定线 2）。
+/// 开启后帧循环逐帧跑全量参照走访与增量缓存比对——只进计量，不驱动绘制。
+/// 返回写后读回（对账用）。
+///
+/// # Errors
+/// 参数缺失/不合法。
+#[system]
+pub(crate) fn drawlist_verify_set(
+    In(params): In<Option<Value>>,
+    mut verify: ResMut<DrawListVerify>,
+) -> BrpResult {
+    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 enabled"))?;
+    #[derive(serde::Deserialize)]
+    struct VerifyParams {
+        enabled: bool,
+    }
+    let p: VerifyParams = serde_json::from_value(value)
+        .map_err(|e| invalid_params(format!("params 不合法：{e}")))?;
+    verify.enabled = p.enabled;
+    Ok(json!({
+        "verify": {
+            "enabled": verify.enabled,
+            "frames_compared_total": verify.frames_compared_total,
+            "mismatches_total": verify.mismatches_total,
+            "last_mismatch": verify.last_mismatch,
+        },
     }))
 }

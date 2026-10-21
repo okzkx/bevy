@@ -41,7 +41,10 @@ pub use camera_aspect::AshCameraAspectPlugin;
 pub use camera_guard::AshCameraGuardPlugin;
 pub use camera_control::{AshCameraControlPlugin, CameraOrbit};
 pub(crate) use camera_control::{apply_camera_command, CameraCommandError, CameraOrbitCommand};
-pub use ledger::{AshLedgerPlugin, IncrementStats, InstanceLedger, InstanceRow};
+pub use ledger::{
+    AshLedgerPlugin, IncrementStats, InstanceLedger, InstanceRow,
+};
+pub(crate) use ledger::AssemblyView;
 pub use lod_registry::{spawn_lod_ladder, LodGroups, LodLadderReadback};
 pub use residency::{
     gap_asset_ids, anchor_level, AshResidencyPlugin, GapMode, GapSnapshot, LodDemand,

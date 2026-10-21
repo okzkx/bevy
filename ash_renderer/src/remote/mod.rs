@@ -50,7 +50,7 @@ use serde_json::{json, Value};
 use self::{
     assets::{load_image_cmd, load_mesh_cmd, load_world_cmd, mutate_asset_cmd, reload_asset_cmd},
     cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
-    draw::draw_stats,
+    draw::{draw_stats, drawlist_verify_set},
     generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
     gap::{gap_census, gap_set, gap_stats},
     lod::{lod_census, lod_set_enabled, lod_set_params},
@@ -109,6 +109,7 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/lod_set_enabled", lod_set_enabled)
                 .with_method_main("ash_renderer/lod_set_params", lod_set_params)
                 .with_method_main("ash_renderer/draw_stats", draw_stats)
+                .with_method_main("ash_renderer/drawlist_verify_set", drawlist_verify_set)
                 .with_method_main("ash_renderer/residency_stats", residency_stats)
                 .with_method_main("ash_renderer/residency_set", residency_set)
                 .with_method_main("ash_renderer/gap_stats", gap_stats)

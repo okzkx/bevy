@@ -187,11 +187,22 @@ pub(crate) fn flush_uploads(
     // 盘点**——同帧"卸载又重载同身份"的行要看到驻留已出账(查无 → 进本批),
     // 不能被旧条目的"驻留命中"误判完成。
     let mut reclaimed = 0u64;
-    for id in retirements.take_meshes() {
-        if pool.retire(id).is_some() {
+    let retired_meshes = retirements.take_meshes();
+    for id in &retired_meshes {
+        if pool.retire(*id).is_some() {
             reclaimed += 1;
         }
-        invalidations.consume_mesh(id);
+        invalidations.consume_mesh(*id);
+        // 组装联动（7.9）：驻留出账 → 以该身份为锚的行可绘性可能翻暂缓
+        //（基准锚直引 + 保底档锚经组反查），反查引用行标记组装重估。
+        for entity in ledger.rows_with_mesh(*id) {
+            ledger.mark_assembly_stale(entity);
+        }
+        if let Some(base) = lod_groups.base_of(*id) {
+            for entity in ledger.rows_with_mesh(base) {
+                ledger.mark_assembly_stale(entity);
+            }
+        }
     }
     for id in retirements.take_images() {
         if image_cache.retire(id, &mut tables) {
@@ -238,6 +249,9 @@ pub(crate) fn flush_uploads(
     // 对象记录待写集（行扫描收集,排批段并入 staging）:(实例槽, 记录 48B)。
     let mut staged_records: Vec<(u32, [u8; OBJECT_RECORD_SIZE as usize])> = Vec::new();
     for entity in dirty_entities {
+        // 组装联动（7.9）：被盘点的行其可绘输入（槽位/驻留/材质在容器）本帧
+        // 可能翻面，逐行标记组装重估（draw_frame 组装段消费，幂等零成本）
+        ledger.mark_assembly_stale(entity);
         let Some(row) = ledger.row(entity).cloned() else {
             // 行已清(同帧先摘后挂等时序):脏标一并清,不留悬空脏标
             settled_rows.push(entity);

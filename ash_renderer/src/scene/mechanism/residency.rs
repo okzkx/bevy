@@ -78,6 +78,7 @@ use std::collections::HashMap;
 
 use bevy::{
     camera::{Camera, Projection},
+    ecs::system::SystemParam,
     pbr::StandardMaterial,
     prelude::*,
 };
@@ -286,6 +287,24 @@ pub fn gap_asset_ids(
     out
 }
 
+/// 全静闸门输入键（7.9）：tick 输出的全部决定量——机位/投影（view_proj 一并
+/// 覆盖 FOV/宽高比变化）、屏尺寸、LOD 判据、管理器预算/半径/开关。浮点量按
+/// 位比较（NaN 不静——非数参数不通过闸门）。键全同 ∧ 账本无脏 ∧ 缺口全零
+/// = 本 tick 输出与上 tick 逐字段相同。
+#[derive(Clone, PartialEq)]
+pub(crate) struct TickGateKey {
+    view_proj: Mat4,
+    extent: [u32; 2],
+    threshold_bits: u32,
+    hysteresis_bits: u32,
+    budget_mesh_bytes: u64,
+    budget_image_bytes: u64,
+    request_radius_bits: u32,
+    fine_grained: bool,
+    floor_anchor: bool,
+    gap_mode_off: bool,
+}
+
 /// 管理器内部状态（冷却表：mesh/贴图身份 → 剩余冷却帧——两张表，键型
 /// 不同分列，防抖语义同源）。
 #[derive(Resource, Default)]
@@ -294,13 +313,25 @@ pub(crate) struct EjectCooldown {
     images: HashMap<AssetId<Image>, u32>,
 }
 
+/// tick 的只读资源束（SystemParam）：tick 参数原有 16 个已顶满系统参数
+/// 元组上限（7.9 加相机键历史触顶），成排只读 Res 收进一束，签名保持精简
+///——与 upload.rs 的 UploadData / frame.rs 的 FrameInput 同款惯例。
+#[derive(SystemParam)]
+pub(crate) struct TickResources<'w> {
+    pool: Res<'w, MeshPool>,
+    image_cache: Res<'w, ImageCache>,
+    lod_settings: Res<'w, LodSettings>,
+    swapchain: Res<'w, Swapchain>,
+    snapshot: Res<'w, GapSnapshot>,
+}
+
 /// 驻留管理器 tick（Last，先于 flush_uploads——请求/淘汰动作要进同一帧的
 /// 上传账）：预算读数 → 请求侧（半径内非驻留身份重挂引用行）→ 淘汰侧
 /// （超预算按视锥外∧距离远逐个出账）→ 冷却走账。相机缺席 = 整帧让路
 ///（场景装配问题，不动作）。
 #[expect(
     clippy::too_many_arguments,
-    reason = "bevy 系统的参数表即依赖注入清单（设置/读数/冷却/账本/回收账/两池/相机），逐项声明是框架惯例"
+    reason = "bevy 系统的参数表即依赖注入清单（设置/读数/冷却/账本/回收账/相机），逐项声明是框架惯例"
 )]
 #[system]
 pub(crate) fn residency_tick(
@@ -310,33 +341,34 @@ pub(crate) fn residency_tick(
     mut ledger: ResMut<InstanceLedger>,
     mut retirements: ResMut<AssetRetirements>,
     mut lod_demand: ResMut<LodDemand>,
-    snapshot: Res<GapSnapshot>,
-    pool: Res<MeshPool>,
-    image_cache: Res<ImageCache>,
+    resources: TickResources,
     std_materials: Res<Assets<StandardMaterial>>,
     lod_groups: Res<LodGroups>,
-    lod_settings: Res<LodSettings>,
-    swapchain: Res<Swapchain>,
     cameras: Query<(&Projection, &GlobalTransform), With<Camera>>,
     // 激活态下降沿检测（Local）：active→inactive 时全行置脏——被淘汰资产
     // 无请求者会永远缺席，关闭 B 面（全常驻基线）必须恢复全量（④ 判定线）
     mut prev_active: Local<bool>,
     // 6.5 锚切换沿检测（Local）：floor_anchor 翻转 = 需求集与锚腿整体换形
     mut prev_floor: Local<bool>,
+    // 7.9 全静闸门的相机键历史（Local）：None = 无历史（首激活 tick 必全量）
+    mut prev_cam_key: Local<Option<TickGateKey>>,
 ) {
+    let TickResources {
+        ref pool,
+        ref image_cache,
+        ref lod_settings,
+        ref swapchain,
+        ref snapshot,
+    } = resources;
     stats.enabled = settings.enabled;
     stats.budget_mesh_bytes = settings.budget_mesh_bytes;
     stats.budget_image_bytes = settings.budget_image_bytes;
     stats.fine_grained = settings.fine_grained;
     stats.floor_anchor = settings.floor_anchor;
     stats.rows = ledger.len();
-    stats.ejected_last = 0;
-    stats.requested_rows_last = 0;
-    stats.floor_groups_resident = 0;
     stats.gap_mode = settings.gap_mode.as_str();
-    stats.gap_slots_last = 0;
-    stats.gap_assets_last = 0;
-    stats.gap_rows_last = 0;
+    // 动作字段不在此清零：早退路径（B面/全静闸门）沿用语义化清零或上 tick
+    // 值，全量路径在闸门后统一清零（floor_groups_resident 等累计字段靠它）
     // —— 6.5 锚切换沿：floor_anchor 翻转 = 全行置脏 + LOD 脏（记录引脚
     // 基准↔保底换写、b7 表重写、盘点按新位图过滤）。不受 active 闸门约束
     //——B面下全常驻，重标只多一次收敛盘点（bound 未变的行免换槽）。
@@ -375,6 +407,12 @@ pub(crate) fn residency_tick(
         }
         *prev_active = active;
         stats.requested = 0;
+        stats.requested_rows_last = 0;
+        stats.ejected_last = 0;
+        stats.gap_slots_last = 0;
+        stats.gap_assets_last = 0;
+        stats.gap_rows_last = 0;
+        stats.floor_groups_resident = 0;
         stats.over_budget = false;
         stats.over_budget_image = false;
         // B面：需求位图清空 = flush 盘点回到不过滤的全常驻语义（6.5.3）
@@ -382,7 +420,54 @@ pub(crate) fn residency_tick(
         lod_demand.levels.clear();
         return; // B 面（全常驻基线）或空场：沿处理外零动作，读数照刷
     }
+    let was_active = *prev_active;
     *prev_active = true;
+    // —— 全静早退闸门（7.9 同族走访纪律："输出不变才早退"）：tick 输出的
+    // 全部决定输入（相机键 = 机位/投影/屏尺寸/LOD 判据/管理器设置）与上
+    // tick 全同 ∧ 账本无脏 ∧ 缺口快照无新增 ∧ 冷却表空 → 分组聚合/请求/
+    // 淘汰/档位需求/位图发布整段跳过，输出与全量路径逐字段相同（lod_demand
+    // 沿用上 tick 位图——输入全同则位图逐位相同）。**冷却表非空禁止早退**：
+    // 冷却到期→重请求→资产重驻留是时间驱动的可观测状态转移（静态相机下
+    // 基准回流依赖它，scene_floor ③ 对照实抓），全量 tick 每帧走账到排空。
+    // 首个激活 tick（was_active=false 或相机键无历史）不走闸门——需求位图
+    // 必须先发布一次。
+    let cam_key = cameras.single().ok().map(|(projection, global)| TickGateKey {
+        view_proj: projection.get_clip_from_view() * global.affine().inverse(),
+        extent: [swapchain.extent.width, swapchain.extent.height],
+        threshold_bits: lod_settings.threshold_px.to_bits(),
+        hysteresis_bits: lod_settings.hysteresis.to_bits(),
+        budget_mesh_bytes: settings.budget_mesh_bytes,
+        budget_image_bytes: settings.budget_image_bytes,
+        request_radius_bits: settings.request_radius.to_bits(),
+        fine_grained: settings.fine_grained,
+        floor_anchor: settings.floor_anchor,
+        gap_mode_off: matches!(settings.gap_mode, GapMode::Off),
+    });
+    let gap_quiet =
+        settings.gap_mode == GapMode::Off || snapshot.bits.iter().all(|&b| b == 0);
+    if was_active
+        && prev_cam_key.is_some()
+        && *prev_cam_key == cam_key
+        && ledger.dirty_count() == 0
+        && gap_quiet
+        && cooldown.meshes.is_empty()
+        && cooldown.images.is_empty()
+    {
+        stats.requested = 0;
+        stats.requested_rows_last = 0;
+        stats.ejected_last = 0;
+        stats.gap_slots_last = 0;
+        stats.gap_assets_last = 0;
+        stats.gap_rows_last = 0;
+        return; // 全静：O(rows) 走访整段早退（读数/位图沿用上 tick）
+    }
+    *prev_cam_key = cam_key;
+    stats.requested_rows_last = 0;
+    stats.ejected_last = 0;
+    stats.gap_slots_last = 0;
+    stats.gap_assets_last = 0;
+    stats.gap_rows_last = 0;
+    stats.floor_groups_resident = 0;
     // 激活帧：过滤激活态随 floor_anchor 走，位图逐组重算（下翻）
     lod_demand.active = settings.floor_anchor;
     lod_demand.levels.clear();
