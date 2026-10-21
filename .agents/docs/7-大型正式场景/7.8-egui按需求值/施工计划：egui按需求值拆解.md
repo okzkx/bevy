@@ -11,6 +11,12 @@
 - **字符串每帧重排版属实**：调试面板几十行 `ui.monospace(format!(…))` 每帧生成新字符串，egui 文本 shaping 缓存按内容命中——ms/fps 数字逐帧变化使缓存全 miss；快照未变的行本可命中（7.5 修复后这些值 0.5s 才变）。
 - **复用前提成立（属实）**：`EguiFrame`（shapes + ppp + screen_points）是独立产出资源，draw_frame 逐帧消费；egui Context 状态（记忆/图集/层）在两次 pass 之间自持；3.13 仲裁 `layer_id_at` 读 Context 状态不依赖当帧 pass 已跑（施工时以拖拽实测钉明）。
 - **触发源清单在案**：输入事件（键/鼠/滚轮/窗口焦点尺寸）经 EguiInput 桥逐帧喂入；面板内容节拍=0.5s 快照；窗口开闭=总控/✕ 事件。三者之外的帧都是纯复用候选。
+- **两层 pass 设计（7.8.2 核心形状，源码复读定案）**：面板层（总控/监控/调试窗/实体树）与 gizmo 层（`AxisGizmo` 纯显示 widget）拆开——漫游环视时相机每帧变化，若"相机变化"触发全量重求值则优化在主场景下白做；gizmo 独立成子 pass（几个 widget，~0.2ms 量级），两层 shapes 缓存合并写 `EguiFrame`。**绘制半边 `paint_overlay` 逐帧 `mem::take` 消费 shapes**（源码核实）——跳过帧必须由缓存原样补齐，否则 UI 整帧消失。
+- **指针门控仲裁源统一（3.13 兼容，源码核实）**：虚拟鼠标经官方 `WindowEvent` 拆分通路注入，`CursorMoved` 分支会同步 `Window` 内部光标位——`window.cursor_position() + ctx.layer_id_at()` 对真实/虚拟鼠标同源有效，与 camera_control 现行仲裁同式。
+- **输入桥状态纪律不可破（3.7/3.13 钉子）**：按键事件恒收集（欠 Release 必补报，否则 egui 永久卡"按住"）；指针移动/滚轮/键盘按门控发放但桥侧簿记（pointer_pos/buttons_down/修饰键）无条件更新；**门控翻转帧必须补发一次当前位置**——进面板建悬停、出面板清悬停，缺了悬停高亮冻结在旧形状里。
+- **事件读取器每帧必须排空**（属实，bevy Messages 双缓冲）——跳过帧收集照跑（门控发放），只跳"组装+重求值"。
+- **逐帧写资源的两枚陷阱（触发集选择时必查）**：①`apply_frame_sync` 的 `refresh_millihertz` 每帧无条件赋值（Changed 每帧真）——须改条件写或移出触发集；②`collect_selected_details` 每帧 insert_resource——不能作触发源（属性区刷新走 2Hz 快照/交互事件，如实记边界）。
+- **插件钩子成对纪律**：面板 pass 与 gizmo 子 pass 各自完整配对 on_begin/on_end（跳过帧 = 整个 pass 不存在，无钩子可配）。
 
 ## 1. 任务拆解
 
@@ -18,7 +24,7 @@
 
 - 已有实数钉入施工记录（立案期 A/B：全关 0.55/全开 5.5、墙钟 28→22.4）；补一组"面板开着但无输入"的稳态分布（egui_pass_ms 逐帧），作 7.8.2 节拍化的对照面。
 
-### 7.8.2 pass 节拍化（按需重求值 + shapes 复用）
+### 7.8.2 两层 pass 节拍化（面板层 + gizmo 层 + shapes 复用）
 
 - 触发条件成形：输入桥有未消费事件 ∨ 任一快照到期（0.5s）∨ 窗口开闭变化 ∨ 首帧；其余帧跳过 pass，`EguiFrame` 保持上一帧产物（draw_frame 照常消费，画面静止即正确）。
 - 积压语义：跳过帧攒下的事件在下一次 pass 一次性喂入（RawInput 合并），指针位置用最新值；拖拽/滚轮等连续交互天然逐帧触发，不丢帧。
