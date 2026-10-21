@@ -31,11 +31,13 @@ use crate::vulkan::Context;
 
 mod drawlist;
 mod frame;
+mod frame_sync;
 mod init;
 
 /// 帧循环系统经宿主桥重导出：upload 的排序引用走 `crate::driver::host::draw_frame`
 ///（"先上传后画"的编排契约以 host 为锚点）。
 pub(crate) use frame::draw_frame;
+pub(crate) use frame_sync::{apply_frame_sync, FrameSyncSettings};
 use init::{init_vulkan, teardown_vulkan};
 
 /// 宿主桥插件：禁渲染补位（`CompressedImageFormatSupport` 自报）+ Vulkan 三系统进调度。
@@ -62,8 +64,12 @@ impl Plugin for AshHostPlugin {
             .init_resource::<crate::vulkan::LodSettings>()
             .init_resource::<crate::vulkan::LodDiagnostics>()
             .init_resource::<crate::vulkan::PerfLedger>()
+            // 帧率同步设置（7.6）：开关默认 true（首次运行自动同步）+ 刷新率读数
+            .init_resource::<FrameSyncSettings>()
             // update 节流：MAILBOX 没有 vsync 背压，默认 Continuous 会空转烧 CPU；
             // Reactive(1/60) 让空闲时 update 按主屏刷新率封顶，事件（拖拽/输入）仍即时驱动。
+            // 7.6 起此值由 apply_frame_sync 按同步开关/显示器刷新率每帧维护——
+            // 这里只是显示器信息就绪前的初值。
             .insert_resource(bevy::winit::WinitSettings {
                 focused_mode: bevy::winit::UpdateMode::reactive(
                     std::time::Duration::from_secs_f64(1.0 / 60.0),
@@ -73,6 +79,8 @@ impl Plugin for AshHostPlugin {
                 ),
             })
             .add_systems(Startup, (announce, init_vulkan))
+            // 帧率同步应用系统（7.6）：回填刷新率读数 + 按开关维护 WinitSettings
+            .add_systems(Update, apply_frame_sync)
             // 守卫：初始化失败时资源不插入（全有或全无），缺 Context 直接跳过，
             // 等 AppExit 走退出链——否则 Res<Context> 会在帧循环里 panic，优雅退出前功尽弃
             .add_systems(
