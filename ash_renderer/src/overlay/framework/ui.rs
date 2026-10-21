@@ -276,6 +276,8 @@ struct PassGate<'w, 's> {
     skipped_since_pass: Local<'s, bool>,
     /// egui 自身请求的立即重绘（动画/悬停渐变/光标闪烁）→ 下帧强制重跑
     force_next: Local<'s, bool>,
+    /// 最近一次面板 pass 画过的层（gizmo 子 pass 据此补记可见性，防淡入重置）
+    panel_layers: Local<'s, Vec<egui::LayerId>>,
 }
 
 /// Update：组 RawInput（每帧排水，桥簿记无条件）→ 触发判定 → 面板 pass
@@ -460,6 +462,12 @@ fn run_egui_pass(
         mirror.fold(&mut textures_delta);
         frame.panel.shapes = shapes;
         frame.panel.generation += 1;
+        // 本 pass 画过的层清单：gizmo 子 pass 期间用它补记可见性（见 gizmo 分支）
+        *gate.panel_layers = state
+            .ctx
+            .memory(|m| m.areas().visible_layer_ids())
+            .into_iter()
+            .collect();
         // egui 自管的重绘请求（动画/悬停渐变/文本光标闪烁）：delay == 0 即
         // "下帧立刻要重画"——官方集成同款消费，否则动画在跳过帧里冻结
         *gate.force_next = viewport_output
@@ -481,6 +489,19 @@ fn run_egui_pass(
                 time: raw_time,
                 focused: raw_focused,
                 ..Default::default()
+            });
+            // 面板层可见性补记（7.8 面板消失修复）：egui 按"上一个 pass 画过谁"
+            // 记账窗口可见性（Areas::end_pass 换道 visible_areas_last_frame）——
+            // 本子 pass 不画任何窗口，若不补记，面板层会从账面蒸发，下个面板
+            // pass 被 egui 视为"窗口刚重新出现"而重触发淡入动画（Area::content_ui
+            // 的 multiply_opacity，~0.08s 爬升），该帧 shapes 带低 alpha 进冻结
+            // 缓存——表现即"相机移动中面板消失只剩阴影，停下后几十毫秒恢复"。
+            // move_to_top 顺带置 wants_to_be_on_top，但同 Order 桶内稳定排序不
+            // 改变面板间相对层序（副作用无害）。
+            state.ctx.memory_mut(|m| {
+                for layer in gate.panel_layers.iter() {
+                    m.areas_mut().move_to_top(*layer);
+                }
             });
             let plugin_host = plugin_hooks_begin(&state);
             AxisGizmo {
