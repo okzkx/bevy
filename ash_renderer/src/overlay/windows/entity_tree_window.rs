@@ -11,11 +11,13 @@
 //! `.agents/docs/3-静态取数链路/3.10-egui实体层级树/`、`3.11-egui实体编辑/`。
 
 use std::any::TypeId;
+use std::collections::{HashMap, HashSet};
 
 use bevy::{
     asset::AssetId,
     camera::Camera,
     ecs::{
+        lifecycle::{DespawnEvent, InsertEvent, RemoveEvent},
         reflect::{AppTypeRegistry, ReflectComponent},
         system::SystemParam,
         world::EntityRef,
@@ -58,9 +60,168 @@ pub(crate) type EntityRow = (
 /// 层级树一次取数（SystemParam 束）：全部实体的层级与呈现要素一次查询拿全。
 /// 逐项 Option/Has——非场景实体（窗口/相机/灯光/资产根）也进树，缺什么降级什么；
 /// 单查询即可完成根定位（`Has<ChildOf>`）与按实体号取行（`.get`），无需第二查询。
+/// 7.7 起只被树拍平维护系统消费（重建时全量走访）；egui pass 不再逐帧查询。
 #[derive(SystemParam)]
 pub(in crate::overlay) struct EntityTreeData<'w, 's> {
     entities: Query<'w, 's, EntityRow>,
+}
+
+/// 拍平树一行：等高行数组元素。`depth` 只用于缩进，`expanded` 在重建时
+/// 从展开态账读出（行渲染不再自持折叠状态）。
+pub(in crate::overlay) struct TreeRow {
+    entity: Entity,
+    depth: usize,
+    label: String,
+    /// 有子节点（渲染折叠形态；点击 = 展开/收起 + 选中，与历史一致）。
+    has_children: bool,
+    /// 展开态（has_children 时有意义）。
+    expanded: bool,
+}
+
+/// 树拍平缓存（7.7）：展开状态自持 + 脏信号才重建。稳态每帧零重建，
+/// egui pass 只读 [`EntityTreeState::rows`] 切片（`ScrollArea::show_rows`
+/// 只构建视口内的行）——pass 成本与实体总数解耦。
+///
+/// 脏信号三观测器（Insert/Remove/Despawn 裸事件 = 实体增删/换柄/层级/标签
+/// 形态任一变化）置 [`EntityTreeState::dirty`]；展开/收起由 UI 写展开态账
+/// 后同样置脏。Name 的 Mut 改写不走 Insert，不触发重建（本工程 Name 只在
+/// 进场/BRP spawn 时写入，均走 Insert）。
+#[derive(Resource)]
+pub(in crate::overlay) struct EntityTreeState {
+    rows: Vec<TreeRow>,
+    relevant: usize,
+    total: usize,
+    dirty: bool,
+    /// 展开态账（按实体）：首次见到按历史默认（深度 < 2 展开）落账，
+    /// 之后跨重建保持。死实体在重建时清扫。
+    expanded: HashMap<Entity, bool>,
+}
+
+impl Default for EntityTreeState {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            relevant: 0,
+            total: 0,
+            dirty: true,
+            expanded: HashMap::new(),
+        }
+    }
+}
+
+impl EntityTreeState {
+    /// 重建拍平行数组：全量走访相关实体（形状同 BRP `scene_tree` 的
+    /// relevant 表），只收展开节点成等高行。与 scene_tree 共用
+    /// `is_relevant`/`node_label`——单实现，CLI 树与面板树同源。
+    fn rebuild(&mut self, rows: &Query<EntityRow>) {
+        // 相关实体表：entity → (节点文本, 子实体清单, 是否有父)
+        let mut relevant: HashMap<Entity, (String, Vec<Entity>, bool)> = HashMap::new();
+        let mut total = 0usize;
+        for (entity, name, children, has_parent, cam, light, mesh, mat, root, local, global) in rows
+        {
+            total += 1;
+            if is_relevant(name, children, has_parent, cam, light, mesh, mat, root, local, global)
+            {
+                relevant.insert(
+                    entity,
+                    (
+                        node_label(entity, name, cam, light, mesh.is_some(), mat.is_some(), root),
+                        children.map(|c| c.iter().collect()).unwrap_or_default(),
+                        has_parent,
+                    ),
+                );
+            }
+        }
+        let mut roots: Vec<Entity> = relevant
+            .iter()
+            .filter(|(_, (_, _, has_parent))| !*has_parent)
+            .map(|(entity, _)| *entity)
+            .collect();
+        roots.sort_by_key(|e| e.index());
+        self.rows.clear();
+        let mut seen: HashSet<Entity> = HashSet::new();
+        for root in &roots {
+            self.flatten_row(*root, 0, &relevant, &mut seen);
+        }
+        self.expanded.retain(|e, _| seen.contains(e));
+        self.relevant = relevant.len();
+        self.total = total;
+    }
+
+    /// 递归拍平一个相关子树：只收展开节点；不相关子树整枝跳过（与
+    /// egui 树/CLI 树同语义）。深度越限按病态深树拒绝续走（同 scene_tree
+    /// 的栈防线理由）。
+    fn flatten_row(
+        &mut self,
+        entity: Entity,
+        depth: usize,
+        relevant: &HashMap<Entity, (String, Vec<Entity>, bool)>,
+        seen: &mut HashSet<Entity>,
+    ) {
+        if depth > TREE_MAX_DEPTH || !seen.insert(entity) {
+            return;
+        }
+        let Some((label, children, _)) = relevant.get(&entity) else {
+            return;
+        };
+        let has_children = !children.is_empty();
+        let expanded = if has_children {
+            *self.expanded.entry(entity).or_insert(depth < 2)
+        } else {
+            false
+        };
+        self.rows.push(TreeRow {
+            entity,
+            depth,
+            label: label.clone(),
+            has_children,
+            expanded,
+        });
+        if expanded {
+            for &child in children {
+                self.flatten_row(child, depth + 1, relevant, seen);
+            }
+        }
+    }
+}
+
+/// 递归深度上限：病态深树在栈溢出前显式停走（理由同 BRP `scene_tree`
+/// 的 `TREE_MAX_DEPTH`，栈溢出走 abort 是"禁 panic"规则下唯一不可兜底路径）。
+const TREE_MAX_DEPTH: usize = 1024;
+
+/// 脏信号观测器（7.7）：任一组件 Insert（含实体 spawn 与换柄）/Remove/
+/// Despawn 都可能改树形态（增删/层级/标签/相关性）——置脏即收，重建交给
+/// 维护系统统一做。稳态（无事件）零成本。
+pub(in crate::overlay) fn mark_tree_dirty_insert(_: On<InsertEvent>, st: Option<ResMut<EntityTreeState>>) {
+    if let Some(mut st) = st {
+        st.dirty = true;
+    }
+}
+
+pub(in crate::overlay) fn mark_tree_dirty_remove(_: On<RemoveEvent>, st: Option<ResMut<EntityTreeState>>) {
+    if let Some(mut st) = st {
+        st.dirty = true;
+    }
+}
+
+pub(in crate::overlay) fn mark_tree_dirty_despawn(_: On<DespawnEvent>, st: Option<ResMut<EntityTreeState>>) {
+    if let Some(mut st) = st {
+        st.dirty = true;
+    }
+}
+
+/// 树拍平维护系统（Update，egui pass 前）：脏信号才全量重建，稳态直接
+/// 返回——`Query` 不迭代、零分配，每帧成本与实体总数解耦。
+#[system]
+pub(in crate::overlay) fn maintain_entity_tree(
+    mut st: ResMut<EntityTreeState>,
+    rows: EntityTreeData,
+) {
+    if !st.dirty {
+        return;
+    }
+    st.rebuild(&rows.entities);
+    st.dirty = false;
 }
 
 /// 层级树窗口的一次构建输入：框架 pass 每帧组好（借用样式照 [`super::debug_window`]）。
@@ -70,8 +231,8 @@ pub(in crate::overlay) struct EntityTreeWindow<'a> {
     pub(in crate::overlay) open: &'a mut bool,
     /// 点选状态（资源借用，点选就地落账）。
     pub(in crate::overlay) selected: &'a mut SelectedEntity,
-    /// 本帧 World 查询束。
-    pub(in crate::overlay) data: &'a EntityTreeData<'a, 'a>,
+    /// 树拍平缓存（7.7）：维护系统产，pass 只读行切片；展开/收起写回。
+    pub(in crate::overlay) state: &'a mut EntityTreeState,
     /// 属性区快照（采集系统产）。
     pub(in crate::overlay) details: &'a SelectedDetails,
     /// 旋转拖拽缓存（拖拽期内冻结欧拉表示分支）。
@@ -79,45 +240,68 @@ pub(in crate::overlay) struct EntityTreeWindow<'a> {
 }
 
 impl EntityTreeWindow<'_> {
-    /// 面板本体：递归层级树（滚动区）+ 属性区。返回一次 Transform 编辑
-    /// （有拖改时），由 pass 落进编辑队列——本函数不碰写路径。
+    /// 面板本体：拍平行数组的视口裁剪渲染（`show_rows` 只构建可见行，
+    /// 与实体总数解耦）+ 属性区。返回一次 Transform 编辑（有拖改时），
+    /// 由 pass 落进编辑队列——本函数不碰写路径（展开态账与本缓存除外）。
     pub(in crate::overlay) fn show(self) -> Option<(Entity, TransformEdit)> {
-        let Self { ctx, open, selected, data, details, drag } = self;
+        let Self { ctx, open, selected, state, details, drag } = self;
         let mut edit = None;
         egui::Window::new("实体层级树")
             .open(open)
             .default_pos(egui::pos2(250.0, 12.0))
             .default_width(360.0)
             .show(ctx, |ui| {
+                ui.monospace(format!("相关 {} / 全部 {}", state.relevant, state.total));
+                // 等高行高：可交互行（selectable_label）以 interact_size 为下限，
+                // 取两者大者保证逐行 stride 与声明一致（滚动算术不失真）。
+                let row_height = ui
+                    .spacing()
+                    .interact_size
+                    .y
+                    .max(ui.text_style_height(&egui::TextStyle::Monospace));
+                // 本帧点中的折叠行（展开/收起）——闭包只读行切片，写回在
+                // 闭包外做（展开态账 + 置脏，下帧重建生效）。
+                let mut toggles: Vec<Entity> = Vec::new();
                 egui::ScrollArea::vertical()
                     .id_salt("实体层级树")
                     .max_height(380.0)
-                    .show(ui, |ui| {
-                    // 根 = 无 ChildOf 的相关实体；查询序随 archetype 波动，按实体号排稳
-                    let mut roots: Vec<Entity> = Vec::new();
-                    let (mut relevant, mut total) = (0usize, 0usize);
-                    for (entity, name, children, has_parent, cam, light, mesh, mat, root, local, global) in
-                        &data.entities
-                    {
-                        total += 1;
-                        if is_relevant(name, children, has_parent, cam, light, mesh, mat, root, local, global) {
-                            relevant += 1;
-                            if !has_parent {
-                                roots.push(entity);
-                            }
+                    .show_rows(ui, row_height, state.rows.len(), |ui, range| {
+                        for i in range {
+                            let TreeRow { entity, depth, label, has_children, expanded } =
+                                &state.rows[i];
+                            let is_selected = selected.0 == Some(*entity);
+                            let indent = egui::vec2(*depth as f32 * ROW_INDENT, 0.0);
+                            ui.horizontal(|ui| {
+                                ui.set_height(row_height);
+                                ui.add_space(indent.x);
+                                if *has_children {
+                                    let arrow = if *expanded { "▼ " } else { "▶ " };
+                                    if ui
+                                        .selectable_label(is_selected, format!("{arrow}{label}"))
+                                        .clicked()
+                                    {
+                                        selected.0 = Some(*entity);
+                                        toggles.push(*entity);
+                                    }
+                                } else if ui.selectable_label(is_selected, label).clicked() {
+                                    selected.0 = Some(*entity);
+                                }
+                            });
                         }
-                    }
-                    ui.monospace(format!("相关 {relevant} / 全部 {total}"));
-                    roots.sort_by_key(|e| e.index());
-                    for root in roots {
-                        draw_entity(ui, root, data, &mut selected.0, 0);
-                    }
-                });
+                    });
+                for entity in toggles {
+                    let open = state.expanded.entry(entity).or_insert(true);
+                    *open = !*open;
+                    state.dirty = true;
+                }
                 edit = show_details(ui, details, selected, drag);
             });
         edit
     }
 }
+
+/// 每层缩进宽度（points 域，照历史 CollapsingHeader 的视觉层级感）。
+const ROW_INDENT: f32 = 14.0;
 
 /// 相关性过滤：至少带一个被关注组件（名字/层级/相机/灯/mesh/材质/变换）才进树。
 /// DefaultPlugins 注册的数百个 observer 等内部裸实体会淹没场景树，不显示；
@@ -148,43 +332,6 @@ pub(crate) fn is_relevant(
         || root
         || local.is_some()
         || global.is_some()
-}
-
-/// 递归画一个节点：有子挂折叠头（点击头 = 展开/收起 + 选中），无子挂可选行。
-/// 折叠状态由 egui 按 `id_salt(entity)` 逐实体记忆，跨帧稳定。
-fn draw_entity(
-    ui: &mut egui::Ui,
-    entity: Entity,
-    data: &EntityTreeData,
-    selected: &mut Option<Entity>,
-    depth: usize,
-) {
-    // 悬空引用兜底：despawn 会同步从父链摘除，正常到不了这里
-    let Ok((e, name, children, has_parent, cam, light, mesh, mat, root, local, global)) =
-        data.entities.get(entity)
-    else {
-        return;
-    };
-    if !is_relevant(name, children, has_parent, cam, light, mesh, mat, root, local, global) {
-        return; // 不相关子树（无被关注组件，也无子可递归）整枝跳过
-    }
-    let label = node_label(e, name, cam, light, mesh.is_some(), mat.is_some(), root);
-    let is_selected = *selected == Some(entity);
-    if let Some(children) = children {
-        let resp = egui::CollapsingHeader::new(header_text(&label, is_selected))
-            .id_salt(entity)
-            .default_open(depth < 2)
-            .show(ui, |ui| {
-                for child in children.iter() {
-                    draw_entity(ui, child, data, selected, depth + 1);
-                }
-            });
-        if resp.header_response.clicked() {
-            *selected = Some(entity);
-        }
-    } else if ui.selectable_label(is_selected, &label).clicked() {
-        *selected = Some(entity);
-    }
 }
 
 /// 节点行文本：Name 优先，无名按组件角色命名（相机/方向光/资产根），实体号
@@ -218,15 +365,6 @@ pub(crate) fn node_label(
         label.push_str("  [mat]");
     }
     label
-}
-
-/// 折叠头文本：选中项染色（叶子行走 selectable_label 自带高亮）。
-fn header_text(label: &str, is_selected: bool) -> egui::RichText {
-    if is_selected {
-        egui::RichText::new(label).color(egui::Color32::from_rgb(0x82, 0xC4, 0xE8))
-    } else {
-        egui::RichText::new(label)
-    }
 }
 
 /// 选中实体属性快照：采集系统每帧对选中实体产一份纯数据，属性区
