@@ -43,7 +43,7 @@ mod resources;
 mod swapchain;
 mod uploader;
 
-pub use context::Context;
+pub use context::{Context, HeapBudgetReading};
 pub use cull::{
     aabb_outside_plane, aabb_visible, frustum_planes, pack_cull_push, CullDiagnostics, CullDraw,
     CullPass, CullSettings, CULL_PUSH_SIZE,

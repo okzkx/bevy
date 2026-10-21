@@ -16,6 +16,7 @@
 //! | [`cull`] | 剔除读数与开关（5.2）：cull_stats 对照 + cull_set_enabled 开关 |
 //! | [`draw`] | indirect 闭环读数（5.3）：draw_stats 绘制调用/命令条数/不可见计数 |
 //! | [`perf`] | 性能读数与变更形态（5.5）：perf_stats 分位数/分段/显存 + perf_samples 原始导出 + workload 变更形态开关 |
+//! | [`monitor`] | 持续监控读数（7.5）：monitor_stats fps/内存/显存堆级预算 + 内部账，与 egui 监控窗口同账 |
 //! | [`residency`] | 驻留管理器读数与设置（6.3）：residency_stats 预算/实占/逐资产清单 + residency_set 开关/预算/半径 |
 //! | [`gap`] | GPU 缺口请求读数与模式（6.6）：gap_stats 聚合 + gap_census 逐槽位图 + gap_set 三态模式 |
 //!
@@ -30,6 +31,7 @@ pub mod draw;
 pub mod generate;
 pub mod gap;
 pub mod lod;
+pub mod monitor;
 pub mod mouse;
 pub mod objects;
 pub mod perf;
@@ -52,6 +54,7 @@ use self::{
     generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
     gap::{gap_census, gap_set, gap_stats},
     lod::{lod_census, lod_set_enabled, lod_set_params},
+    monitor::monitor_stats,
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     objects::{increment_stats, replace_handles, spawn_primitive},
     residency::{residency_set, residency_stats},
@@ -113,7 +116,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/gap_set", gap_set)
                 .with_method_main("ash_renderer/perf_stats", perf_stats)
                 .with_method_main("ash_renderer/perf_samples", perf_samples)
-                .with_method_main("ash_renderer/workload", workload),
+                .with_method_main("ash_renderer/workload", workload)
+                .with_method_main("ash_renderer/monitor_stats", monitor_stats),
             RemoteHttpPlugin::default(),
         ));
     }

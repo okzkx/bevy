@@ -43,9 +43,10 @@ use crate::overlay::windows::entity_tree_window::{
     EntityTreeData, EntityTreeWindow, SelectedDetails, SelectedEntity, TransformDragCache,
     collect_selected_details,
 };
+use crate::overlay::windows::monitor_window::{MonitorHistory, MonitorWindow};
 use crate::scene::mechanism::WorkloadSettings;
 use crate::vulkan::{
-    CullDiagnostics, CullSettings, ImageCache, IndirectStats, MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics,
+    CullDiagnostics, CullSettings, Context, ImageCache, IndirectStats, MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics,
     OcclusionSettings, PerfLedger,
 };
 
@@ -118,6 +119,8 @@ fn init_egui(mut commands: Commands) {
     commands.insert_resource(TransformEditQueue::default());
     // 帧率显示平滑：0.5s 出一次平均快照
     commands.insert_resource(FpsMeter::default());
+    // 持续监控历史（7.5）：随 fps 快照节奏采样，窗口显隐不影响记账
+    commands.insert_resource(MonitorHistory::default());
     // 图集镜像（Update 折入）与 GPU 代（Last 整传；空建——首帧有整图增量才落图）。
     // AtlasGpu 的拆除在 teardown_vulkan（graveyard 与表同寿的拆除序）
     commands.insert_resource(AtlasMirror::default());
@@ -164,6 +167,10 @@ struct DebugUiParams<'w, 's> {
     windows_open: ResMut<'w, DebugWindowsOpen>,
     selected: ResMut<'w, SelectedEntity>,
     fps: ResMut<'w, FpsMeter>,
+    /// 持续监控历史（7.5）：fps 快照刷新时采样入账
+    history: ResMut<'w, MonitorHistory>,
+    /// Vulkan 上下文（7.5 显存堆级读数；init 前空帧缺席）
+    vulkan: Option<Res<'w, Context>>,
     tree: EntityTreeData<'w, 's>,
     /// 属性快照（采集系统产，只读消费）
     details: Res<'w, SelectedDetails>,
@@ -255,10 +262,23 @@ fn run_egui_pass(
         let mut plugin = label_selection.lock();
         egui::Plugin::on_begin_pass(&mut *plugin, &mut plugin_host);
     }
-    // 帧率快照先喂再显示：0.5s 一刷，间隔内读数稳定
-    ui.fps.tick(time.delta_secs());
+    // 帧率快照先喂再显示：0.5s 一刷，间隔内读数稳定；刷新即采样入监控历史
+    if ui.fps.tick(time.delta_secs()) {
+        ui.history.sample(ui.fps.snapshot.fps, ui.fps.snapshot.ms, ui.vulkan.as_deref());
+    }
     // 总控先行（自身不可关），其余窗口按开关显隐；[×] 与 checkbox 写同一字段
     DebugHubWindow { ctx: &state.ctx, open: &mut ui.windows_open }.show();
+    if ui.windows_open.monitor {
+        MonitorWindow {
+            ctx: &state.ctx,
+            open: &mut ui.windows_open.monitor,
+            history: &ui.history,
+            fps: ui.fps.snapshot,
+            mesh_pool: &ui.mesh_pool,
+            image_cache: &ui.image_cache,
+        }
+        .show();
+    }
     if ui.windows_open.stats {
         DebugWindow {
             ctx: &state.ctx,

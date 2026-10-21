@@ -90,7 +90,8 @@ impl FpsMeter {
     const UPDATE_INTERVAL: f32 = 0.5;
 
     /// pass 每帧喂一次本帧 delta；累计满一个 interval 出一次新快照。
-    pub(in crate::overlay) fn tick(&mut self, delta_secs: f32) {
+    /// 返回本次是否刚刷新了快照（7.5 监控采样复用同一节奏：新快照才入历史）。
+    pub(in crate::overlay) fn tick(&mut self, delta_secs: f32) -> bool {
         self.acc_secs += delta_secs;
         self.acc_frames += 1;
         if self.acc_secs >= Self::UPDATE_INTERVAL {
@@ -98,6 +99,9 @@ impl FpsMeter {
             self.snapshot = FpsSnapshot { fps: 1.0 / avg.max(1e-6), ms: avg * 1000.0 };
             self.acc_secs = 0.0;
             self.acc_frames = 0;
+            true
+        } else {
+            false
         }
     }
 }

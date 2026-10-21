@@ -5,3 +5,4 @@
 pub(super) mod debug_hub_window;
 pub(super) mod debug_window;
 pub(super) mod entity_tree_window;
+pub(super) mod monitor_window;
