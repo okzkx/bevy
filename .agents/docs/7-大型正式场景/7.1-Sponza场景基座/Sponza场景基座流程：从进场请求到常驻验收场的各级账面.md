@@ -19,7 +19,7 @@ Startup 发一个 load 请求 → bevy glTF loader 拉齐 bin+69 张 jpg 依赖 
 
 ## 逐时刻走读
 
-**① 进场（Startup）**：`load_sponza` 调 `server.load(GltfAssetLabel::Scene(0).from_asset("sponza/glTF/Sponza.gltf"))` 并 spawn `WorldAssetRoot`——只发请求不等待。AssetServer 依赖链：Sponza.gltf → Sponza.bin（几何）→ 69 张 jpg（材质贴图，**经 jpeg feature 门**）。
+**① 进场（Startup）**：`load_scene` 调 `server.load(GltfAssetLabel::Scene(0).from_asset(...))` 并 spawn `WorldAssetRoot`——只发请求不等待。场景路径默认 Sponza（"sponza/glTF/Sponza.gltf"），启动参数 `--scene <路径>`（相对 assets/）可指定任意 .gltf/.glb 进场、跳过 Sponza；BRP `load_world` 则是运行期叠加口。Sponza 的 AssetServer 依赖链：Sponza.gltf → Sponza.bin（几何）→ 69 张 jpg（材质贴图，**经 jpeg feature 门**）。
 
 **② 展开（Update，Changed 触发）**：WorldAssetRoot 组件到货，bevy_world_serialization 的 `world_instance_spawner` 把实体树反射展开：GltfNode（scale 0.008）→ 103 个 primitive 子实体，各持 `Mesh3d` + `MeshMaterial3d<StandardMaterial>`（25 份材质按 glTF 材质去重）。
 
