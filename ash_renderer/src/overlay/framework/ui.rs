@@ -41,8 +41,9 @@ use crate::overlay::windows::debug_window::{
     ChunkRows, DebugWindow, FpsMeter, PerfPanelCache, RenderMode, RendererStats,
 };
 use crate::overlay::windows::entity_tree_window::{
-    EntityTreeData, EntityTreeWindow, SelectedDetails, SelectedEntity, TransformDragCache,
-    collect_selected_details,
+    EntityTreeState, EntityTreeWindow, SelectedDetails, SelectedEntity, TransformDragCache,
+    collect_selected_details, maintain_entity_tree, mark_tree_dirty_despawn,
+    mark_tree_dirty_insert, mark_tree_dirty_remove,
 };
 use crate::overlay::windows::monitor_window::{MonitorHistory, MonitorWindow};
 use crate::scene::mechanism::WorkloadSettings;
@@ -61,11 +62,18 @@ impl Plugin for OverlayPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, init_egui)
             .init_resource::<EguiInput>()
-            // 属性链：采集（产快照）→ egui pass（显示 + 组编辑）→ 编辑清账，
-            // 链式定序；清账完 PostUpdate 传播才读 Transform，同帧 relay 保画面跟随
+            // 树拍平脏信号（7.7）：任一组件 Insert/Remove/Despawn 都可能改树
+            // 形态——观测器只置脏，重建归维护系统统一做（稳态零成本）
+            .add_observer(mark_tree_dirty_insert)
+            .add_observer(mark_tree_dirty_remove)
+            .add_observer(mark_tree_dirty_despawn)
+            // 属性链：树拍平维护（脏才重建）→ 采集（产快照）→ egui pass
+            //（显示 + 组编辑）→ 编辑清账，链式定序；清账完 PostUpdate 传播
+            // 才读 Transform，同帧 relay 保画面跟随
             .add_systems(
                 Update,
                 (
+                    maintain_entity_tree,
                     collect_selected_details,
                     run_egui_pass,
                     apply_transform_edits,
@@ -120,6 +128,8 @@ fn init_egui(mut commands: Commands) {
     commands.insert_resource(DebugWindowsOpen::default());
     // 层级树点选：属性面板的编辑目标来源
     commands.insert_resource(SelectedEntity::default());
+    // 树拍平缓存（7.7）：脏信号观测器 + 维护系统重建，默认脏 = 首帧立树
+    commands.insert_resource(EntityTreeState::default());
     // 属性快照：采集系统每帧重写，Startup 先落空壳
     commands.insert_resource(SelectedDetails::default());
     // 旋转拖拽缓存：拖拽期内冻结欧拉表示分支（防跨分支混写闪烁）
@@ -188,7 +198,8 @@ struct DebugUiParams<'w, 's> {
     history: ResMut<'w, MonitorHistory>,
     /// Vulkan 上下文（7.5 显存堆级读数；init 前空帧缺席）
     vulkan: Option<Res<'w, Context>>,
-    tree: EntityTreeData<'w, 's>,
+    /// 树拍平缓存（7.7）：维护系统产，pass 只读；展开/收起写回
+    tree_state: ResMut<'w, EntityTreeState>,
     /// 属性快照（采集系统产，只读消费）
     details: Res<'w, SelectedDetails>,
     /// 旋转拖拽缓存（拖拽期内冻结欧拉表示分支）
@@ -331,7 +342,7 @@ fn run_egui_pass(
             ctx: &state.ctx,
             open: &mut ui.windows_open.entity_tree,
             selected: &mut ui.selected,
-            data: &ui.tree,
+            state: &mut ui.tree_state,
             details: &ui.details,
             drag: &mut ui.drag_cache,
         }
