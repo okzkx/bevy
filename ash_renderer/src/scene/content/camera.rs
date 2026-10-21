@@ -20,6 +20,8 @@ use crate::scene::util::fmt_vec3;
 /// .temp/7.1/cam_C.png——彩旗拱廊狮头喷泉全景）。Sponza 世界 AABB ≈
 /// 30×12.4×18.3 米（节点 scale 0.008），中庭中心 ≈ (0, 3, 0)：机位在
 /// 中庭东端沿长轴向西看（球坐标 yaw 90°/pitch 5°/radius 5 的直角反解）。
+/// `--scene` 指定其他场景时机位不适配（可能埋进几何里），用 WASDQE 漫游/
+/// 右键环视或 BRP `set_camera` 调整。
 const CAMERA_POS: Vec3 = Vec3::new(4.98, 3.44, 0.0);
 const CAMERA_TARGET: Vec3 = Vec3::new(0.0, 3.0, 0.0);
 

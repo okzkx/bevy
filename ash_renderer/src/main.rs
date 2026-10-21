@@ -71,7 +71,8 @@ fn main() -> AppExit {
         .add_plugins(AshMaterialHookPlugin)
         // 宽高比补位（机制半边）：随窗口 resize 修正相机 aspect_ratio
         .add_plugins(AshCameraAspectPlugin)
-        // .add_plugins(AshCameraGuardPlugin) // BISECT
+        // 相机卫兵（机制半边）：Update 幂等清扫不带 CameraOrbit 的外来相机（glTF 内嵌相机等）
+        .add_plugins(AshCameraGuardPlugin)
         // 相机轨道控制（机制半边）：左键拖拽环绕 + 滚轮推拉，驱动带 CameraOrbit 的相机
         .add_plugins(AshCameraControlPlugin)
         // 场景进场（业务半边）：load FlightHelmet + spawn WorldAssetRoot + 到货统计
