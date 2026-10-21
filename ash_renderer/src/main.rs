@@ -29,6 +29,7 @@ use bevy::{
     prelude::*,
     render::{pipelined_rendering::PipelinedRenderingPlugin, RenderPlugin},
     sprite_render::SpriteRenderPlugin,
+    ui::UiPlugin,
     ui_render::UiRenderPlugin,
 };
 
@@ -62,6 +63,15 @@ fn main() -> AppExit {
                 .disable::<SpriteRenderPlugin>()
                 .disable::<UiRenderPlugin>()
                 .disable::<GizmoRenderPlugin>()
+                // 7.11 帧残余区治理：ECS 侧零消费者插件禁用（归因实数：
+                // ui_focus/ui_layout ~0.1ms/帧，本宿主交互全走 egui 裸接与
+                // BRP，bevy_ui 零消费）——与 7.10 可见性豁免同款"零消费者
+                // 治理"。摘除 GizmoPlugin 实抓受挫（update_gizmo_meshes 由
+                // per-config 内部插件注册，禁主插件后 LightGizmoConfigGroup
+                // 残注册报 Resource 缺席进 Tier 通道）——gizmo 空转 ~0.09ms
+                // 如实立账；picking 家族（~0.23ms）同理：DefaultPickingPlugins
+                // 是 PluginGroup 非 Plugin，装配面无法整族摘除，立账。
+                .disable::<UiPlugin>()
                 // 连带禁项（0.20.0-dev 实测）：PbrPlugin::build 无条件 load_shader_library!
                 // 分配 Handle<Shader>，而 Assets<Shader> 的注册在 RenderPlugin::build（bevy_render/src/lib.rs:385）
                 // ——禁 RenderPlugin 后无人注册，PbrPlugin 必炸。材质容器（Assets<StandardMaterial>）

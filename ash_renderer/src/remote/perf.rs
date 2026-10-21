@@ -55,6 +55,7 @@ pub(crate) fn perf_stats(
     let last = perf.snapshot().pop();
     Ok(json!({
         "cpu_total_ms": percentile_block(&perf, |s| s.cpu_total_ms),
+        "frame_wall_ms": percentile_block(&perf, |s| s.frame_wall_ms),
         "gpu_total_ms": percentile_block(&perf, |s| s.gpu_total_ms),
         "gpu_graphics_ms": percentile_block(&perf, |s| s.gpu_graphics_ms),
         "gpu_compute_ms": percentile_block(&perf, |s| s.gpu_compute_ms),
@@ -68,6 +69,7 @@ pub(crate) fn perf_stats(
             "present_ms": mean_of(&perf, |s| s.present_ms),
         },
         "latest": last.map(|s| json!({
+            "frame_wall_ms": s.frame_wall_ms,
             "cpu_total_ms": s.cpu_total_ms,
             "gpu_total_ms": s.gpu_total_ms,
             "instance_rows": s.instance_rows,
@@ -121,6 +123,7 @@ pub(crate) fn perf_samples(In(params): In<Option<Value>>, perf: Res<PerfLedger>)
         .iter()
         .map(|s| {
             json!({
+                "frame_wall_ms": s.frame_wall_ms,
                 "cpu_total_ms": s.cpu_total_ms,
                 "wait_slot_ms": s.wait_slot_ms,
                 "acquire_ms": s.acquire_ms,
