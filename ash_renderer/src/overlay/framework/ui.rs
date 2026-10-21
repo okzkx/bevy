@@ -33,6 +33,7 @@ use bevy::{
 
 use super::input::{egui_raw_input, EguiInput};
 use super::paint::{AtlasGpu, AtlasMirror};
+use crate::driver::host::FrameSyncSettings;
 use crate::overlay::transform_edit::{TransformEditQueue, apply_transform_edits};
 use crate::overlay::widgets::axis_gizmo::AxisGizmo;
 use crate::overlay::windows::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
@@ -214,6 +215,8 @@ struct DebugUiParams<'w, 's> {
     chunks: ChunkRows<'w, 's>,
     /// 帧样本账（5.5：分位数/显存/注入读数）
     perf: Res<'w, PerfLedger>,
+    /// 帧率同步开关与刷新率读数（7.6：checkbox 写，apply_frame_sync 读）
+    frame_sync: ResMut<'w, FrameSyncSettings>,
     image_cache: Res<'w, ImageCache>,
     mesh_pool: Res<'w, MeshPool>,
     workload: Res<'w, WorkloadSettings>,
@@ -295,6 +298,7 @@ fn run_egui_pass(
             fps: ui.fps.snapshot,
             mesh_pool: &ui.mesh_pool,
             image_cache: &ui.image_cache,
+            frame_sync: &mut ui.frame_sync,
         }
         .show();
     }

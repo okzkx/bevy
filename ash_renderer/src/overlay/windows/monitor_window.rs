@@ -11,6 +11,7 @@
 use bevy::prelude::*;
 
 use super::debug_window::FpsSnapshot;
+use crate::driver::host::FrameSyncSettings;
 use crate::vulkan::{Context, ImageCache, MeshPool};
 
 /// 一个监控采样点（fps 快照刷新节奏入账，约 0.5s 一个）。
@@ -150,6 +151,9 @@ pub(crate) struct MonitorWindow<'a> {
     /// 渲染器内部显存账（MeshPool/ImageCache，进程自身口径）。
     pub(crate) mesh_pool: &'a MeshPool,
     pub(crate) image_cache: &'a ImageCache,
+    /// 帧率同步（7.6）：刷新率读数只读展示，checkbox 写开关
+    ///（即时生效——apply_frame_sync 同帧读、下轮循环生效）。
+    pub(crate) frame_sync: &'a mut FrameSyncSettings,
 }
 
 /// 曲线与统计的时间窗（秒）：面板聚焦近期形态，全史看导出样本。
@@ -158,7 +162,7 @@ const SPAN_SECS: f32 = 600.0;
 impl MonitorWindow<'_> {
     /// 面板本体：fps 曲线 + 窗内统计 + 内存/显存读数行。
     pub(crate) fn show(self) {
-        let Self { ctx, open, history, fps, mesh_pool, image_cache } = self;
+        let Self { ctx, open, history, fps, mesh_pool, image_cache, frame_sync } = self;
         egui::Window::new("持续监控")
             .open(open)
             .default_pos(egui::pos2(200.0, 12.0))
@@ -173,6 +177,15 @@ impl MonitorWindow<'_> {
                     .collect();
 
                 ui.monospace(format!("fps 当前 {:.0}（{:.1} ms）· 样本 {} · 已采 {:.0}s", fps.fps, fps.ms, history.samples.len(), now));
+
+                // 帧率同步（7.6）：刷新率读数 + "同步 vsync"开关
+                //（语义 = 帧循环节奏对齐显示器刷新率，非 present mode 切换）
+                match frame_sync.refresh_millihertz {
+                    Some(mhz) => ui.monospace(format!("屏幕刷新率 {:.0} Hz", f64::from(mhz) / 1000.0)),
+                    None => ui.monospace("屏幕刷新率 不可用"),
+                };
+                ui.checkbox(&mut frame_sync.enabled, "同步 vsync")
+                    .on_hover_text("帧循环节奏对齐显示器刷新率（winit wait），非 present mode 切换；关闭后聚焦时全速跑满");
 
                 // fps 曲线（窗内）：y 轴 0 到窗内 max × 1.15 留头
                 let (response, painter) =

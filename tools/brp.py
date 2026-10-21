@@ -361,6 +361,14 @@ def cmd_residency_set(args):
 
 def cmd_draw_stats(args):
     out(rpc(args.host, args.port, "ash_renderer/draw_stats"))
+
+
+def cmd_frame_sync(args):
+    params = {}
+    if args.enabled is not None:
+        params["enabled"] = args.enabled == "true"
+    out(rpc(args.host, args.port, "ash_renderer/frame_sync", params or None))
+
 def cmd_workload(args):
     if args.on and args.off:
         sys.exit("brp: --on 与 --off 互斥")
@@ -621,6 +629,10 @@ def main():
     p = sub.add_parser("perf-samples", help="原始帧样本导出（离线汇总用；ash_renderer/perf_samples）")
     p.add_argument("--last", type=int, help="取最近 N 条（缺省 256，上限 2048）")
     p.set_defaults(func=cmd_perf_samples)
+
+    p = sub.add_parser("frame-sync", help="帧率同步开关读写（ash_renderer/frame_sync，7.6：缺省只读返回 {enabled, refresh_millihertz}；--enabled 写开关。语义=帧循环节奏对齐显示器刷新率，非 present mode 切换）")
+    p.add_argument("--enabled", choices=["true", "false"], help="开关目标态（缺省只读）")
+    p.set_defaults(func=cmd_frame_sync)
 
     p = sub.add_parser("load-mesh", help="异步加载新 mesh：entity=换到既有实体 / source=克隆挂新实体（ash_renderer/load_mesh）")
     p.add_argument("--path", required=True, help='资产路径（如 "models/FlightHelmet/FlightHelmet.gltf#Mesh0/Primitive1"）')
