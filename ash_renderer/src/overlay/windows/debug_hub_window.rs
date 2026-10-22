@@ -9,7 +9,10 @@ use bevy::prelude::*;
 
 /// 各调试 UI 窗口的显隐开关（总控面板写，`run_egui_pass` 的显示门读；窗口 [×]
 /// 经 egui `Window::open` 借用同字段写回）。bool = 显示中。
-#[derive(Resource)]
+///
+/// 默认全关（derive bool = false）：屏幕上只留总控——其余窗口需要时从总控
+/// 勾开，首次可见可验的职责交给总控开关，不靠默认摊开。
+#[derive(Resource, Default)]
 pub(in crate::overlay) struct DebugWindowsOpen {
     /// 帧统计/着色模式/渲染器统计窗口（[`super::debug_window`]）
     pub(in crate::overlay) stats: bool,
@@ -19,13 +22,6 @@ pub(in crate::overlay) struct DebugWindowsOpen {
     pub(in crate::overlay) entity_tree: bool,
     /// 右上角坐标轴指示器（[`crate::overlay::widgets::axis_gizmo`]，纯显示不可交互）
     pub(in crate::overlay) axis_gizmo: bool,
-}
-
-impl Default for DebugWindowsOpen {
-    fn default() -> Self {
-        // 默认全开：新窗直接可见可验；关了从总控再开
-        Self { stats: true, monitor: true, entity_tree: true, axis_gizmo: true }
-    }
 }
 
 /// 总控窗口的一次构建输入：框架 pass 每帧组好。
