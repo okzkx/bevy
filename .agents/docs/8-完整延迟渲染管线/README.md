@@ -14,7 +14,7 @@
 |---|---|---|---|
 | 8.1 | [8.1-G-buffer与不透明几何](8.1-G-buffer与不透明几何/) | G-buffer 布局与世界位置取法（=深度重建）、motion vectors 留位、透明拆 Clustered Forward 层（开工即 3D cluster）+ GPU bitonic 排序；为 8.2 光照累积与步骤 9 SCGI 供原料 | ✅ 收官（2026-10-22，[验收记录](8.1-G-buffer与不透明几何/8.1.5-施工记录：判定线总验收与计量.md)，待并回拍板） |
 | 8.2 | [8.2-FilamentBRDF与多光源](8.2-FilamentBRDF与多光源/) | 材质参数面扩容（metallic/roughness/normal/AO）、光照累积 pass、多光源列表 GPU 驻留（预留 shadow 标志位；驻留形态=✅ 常驻表 2026-10-22 拍板） | ✅ 收官（2026-10-22，[总验收账](8.2-FilamentBRDF与多光源/8.2.5-施工记录：判定线总验收与计量.md)，尾款分支 `goal/8.2.4-8.2.5` 待并回拍板） |
-| 8.3 | [8.3-CSM与PCSS级联阴影](8.3-CSM与PCSS级联阴影/) | shadow depth pass 逐 cascade 走 GPU-driven（标记链 + build_indirect，CPU 只发矩阵）、级联划分、PCSS 滤波半径、阴影采样进光照累积 | ⬜ 已立案（2026-10-21）；段目录已预立（2026-10-22） |
+| 8.3 | [8.3-CSM与PCSS级联阴影](8.3-CSM与PCSS级联阴影/) | shadow depth pass 逐 cascade 走 GPU-driven（标记链 + build_indirect，CPU 只发矩阵）、级联划分、PCSS 滤波半径、阴影采样进光照累积 | 🔧 施工中（2026-10-22 `$plan-execute 8.3` 开工，分支 `goal/8.3`；[段施工计划](8.3-CSM与PCSS级联阴影/施工计划：CSM级联阴影与PCSS软阴影.md)已立案） |
 | 8.4 | [8.4-HDR与ToneMapping](8.4-HDR与ToneMapping/) | 不透明+透明合成进 HDR 契约、Bloom（HDR 域）、ToneMapping、输出编码恰好一次（终结 swapchain 编码判定线悬案） | ⬜ 已立案（2026-10-21）；段目录已预立（2026-10-22） |
 | 8.5 | [8.5-SMAA抗锯齿](8.5-SMAA抗锯齿/) | 边缘检测/权重计算/邻域混合三 pass（LDR 域、tonemap 后），延迟管线不用 MSAA 的标准搭档 | ⬜ 已立案（2026-10-21）；段目录已预立（2026-10-22） |
 

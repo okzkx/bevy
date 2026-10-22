@@ -6,7 +6,7 @@
 
 **一句话说明**：本段给多光源里的方向光接 CSM 级联 shadow map + PCSS 软阴影，shadow depth pass 走 GPU-driven（逐 cascade 复用标记链与 build_indirect，CPU 只发 cascade 矩阵）；本段不主张 VSM（外置条目 7）、不做阴影降噪时域滤波。
 
-**当前状态：⬜ 已立案（2026-10-21）**；段目录与段 README 预立（2026-10-22 用户增补，预施工文件夹先行）——段施工计划与任务编号仍随段开工立案，判定线以[步骤级施工计划 §1 8.3 节](../施工计划：完整延迟渲染管线五段拆解.md)为准。
+**当前状态：🔧 施工中（2026-10-22 `$plan-execute 8.3` 开工，分支 `goal/8.3`）**；段施工计划已立案（[施工计划：CSM级联阴影与PCSS软阴影](施工计划：CSM级联阴影与PCSS软阴影.md)——立案期裁决钉明：4 级 log 分割 0.5→80m、D32 2048²×4、cull 单 dispatch 内联四 cascade、shadow_build 独立 pass、4 小 render pass、PCSS texture_load 路线、shadow UBO 新族、两枚语义钉照抄）；任务编号与逐任务状态以[段施工计划 §1](施工计划：CSM级联阴影与PCSS软阴影.md)为准（下表已同步）。
 
 ## 代码落点（提案）
 
