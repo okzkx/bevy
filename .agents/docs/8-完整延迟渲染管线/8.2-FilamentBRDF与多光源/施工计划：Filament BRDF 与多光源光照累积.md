@@ -2,7 +2,7 @@
 
 > 2026-10-22 立案（用户拍板光源驻留形态=常驻表后立案，纯文档）。对应[步骤级施工计划 §1 8.2 节](../施工计划：完整延迟渲染管线五段拆解.md)与[段 README](README.md)：把 Lambert 换成 Filament BRDF、把光照从"绘制时直算"改成"全屏光照累积 pass 读 G-buffer"。本文管 8.2 段做什么、按什么顺序、验收什么；"实际做了什么"开工后另立施工记录，不回写本文。
 >
-> **当前状态：🔧 施工中（2026-10-22 `$plan-execute 8.2` 开工，临时分支 `goal/8.2-filament-ref` 续工）**。
+> **当前状态：✅ 收官（2026-10-22，六任务全过；总验收账=[8.2.5 施工记录](8.2.5-施工记录：判定线总验收与计量.md)；尾款分支 `goal/8.2.4-8.2.5`）**。
 
 **一句话说明**：本段把材质参数面扩成 PBR 四件（metallic/roughness/normal/AO）、把光源立成常驻表、把 8.1 合成 pass 的单方向光 Lambert 换成读 G-buffer × 逐灯累加的 Filament BRDF 光照累积——多光源自此与光源数解耦着色成本，为 8.3 阴影采样（shadow 标志位）与步骤 9 间接光注入（间接项只立接口）立接口；本段不主张阴影本体、IBL 与 GI，代码落 `render/shading/` 与既有 `render/pipeline/`/`render/assets/` 扩展。
 
@@ -20,7 +20,7 @@
 | 8.2.2 | 光源常驻表：LightTable（storage，槽位+增量账本+free list，4.1 先例）；记录含 pos/radius、color×intensity、type、**shadow 标志位**；BRP 灯方法族扩（spawn/参数改/stats，`tools/brp.py` 子命令）；方向光归属钉明（set1 UBO 单光保留 vs 并表）；8.1 光源环（`TestPointLights` 每帧环）与 cluster 逐 tile 列表切表接线 | ⬜ |
 | 8.2.3 | 光照累积 pass：`gbuffer_composite.wgsl` 的 Lambert 换**照抄 Filament surfaceShading**（函数级移植：lobe 函数保留原名，NoL 折尾部、occlusion 乘光源贡献）；读 G-buffer（albedo/normal/深度重建世界位置）× 常驻灯表逐灯累加；输出直写 HDR 中间目标（8.1 HDR blending 前置闸门已实测通过）；间接光注入项立空接口不填内容（步骤 9） | ⬜ |
 | 8.2.4 | 多光源判定线：多光源开关 A/B（BRP 灯族驱动）；金属/粗糙度梯度读图（MetalRoughSpheres 式梯度球）；Khronos MetalRoughSpheres/DamagedHelmet 单体对照（3.5 受控对照法，漫反射项收敛口径见参考篇 §0/§3）——资产用 filament 仓库自带 + **编译 filament 本体做参照渲染**（gltf_viewer 同 glb 同参数对照，编译待实测）；透明层与不透明累积同光源同 BRDF 一致性 | ✅（2026-10-22，[施工记录](8.2.4-施工记录：多光源判定线.md)；主体+收尾全过：A/B/census/mutate ✅、梯度球读图 ✅、DamagedHelmet 参照渲染对照 ✅） |
-| 8.2.5 | 判定线总验收与计量：回归总跑（resize/最小化）、性能成组记录（光照累积计时并入 8.1 七位区间，5.5 计量底座复用）、既有判定线零回退 | ⬜ |
+| 8.2.5 | 判定线总验收与计量：回归总跑（resize/最小化）、性能成组记录（光照累积计时并入 8.1 七位区间，5.5 计量底座复用）、既有判定线零回退 | ✅（2026-10-22，[施工记录](8.2.5-施工记录：判定线总验收与计量.md)；hiz 7/7×5（⑤=脚本标定漂移已修）/stream 7/7/fine 8/8/sponza 10/10/lod 6/7（F25）；resize/最小化 census 零 mismatch；零 VUID/exit 0/clippy/库测试 39/39/draw_calls=1） |
 | 8.2.6 | spawn 增量链缺陷修复（2026-10-22 用户指令追加，**施工顺序先于 8.2.5**）：缺陷②（运行期 spawn 无片元）与缺陷①（primitive 材质记录全零）定责+修复+判定线回归——8.2.5 调试仪器验收轮受控复现定案（证据 `.temp/8.2-gbuffer-sphere/`），详见[施工计划](施工计划：spawn增量链缺陷修复（8.2.6）.md) | ✅（2026-10-22，[施工记录](8.2.6-施工记录：spawn增量链缺陷修复.md)；根因=MaterialRecord WGSL 步长 80≠宿主 64，缺陷①②同根，build.rs 布局互证闸门防复发） |
 
 ## 2. 判定线草案（段级）
