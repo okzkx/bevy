@@ -546,6 +546,15 @@ pub(crate) fn draw_frame(
             .write(0, &packed)
             .or_fatal("光源环写失败，渲染链无法继续")?;
     }
+    // prev 透明计数先读后清（本帧槽两帧前输出，fence 纪律）——bitonic 排序
+    // 的空排让路判据（prev = 0 的帧数组未排，gather 尾部反向读取仍覆盖全部
+    // 真实行，只丢一帧排序；读数不决定画什么，只决定是否跑空排序）
+    let mut prev_t_bytes = [0u8; 4];
+    cluster_targets
+        .t_count(slot_now)
+        .read(0, &mut prev_t_bytes)
+        .or_fatal("透明行计数读失败，渲染链无法继续")?;
+    let prev_transparent_rows = u32::from_le_bytes(prev_t_bytes);
     cluster_targets
         .t_count(slot_now)
         .write(0, &0u32.to_le_bytes())
@@ -858,10 +867,12 @@ pub(crate) fn draw_frame(
                     .or_fatal("透明行收集 dispatch 输入组装失败，渲染链无法继续")?,
             ),
             gather: Some(transparent_passes.gather(indirect_count)),
+            sort: (prev_transparent_rows > 0).then(|| transparent_passes.sort_plan()),
             set2: instance_tables.frame_set2(slot_now),
             pipeline: transparent_pipeline.pipeline(),
             layout: transparent_pipeline.layout(),
             t_commands: cluster_targets.t_command_buffer(slot_now),
+            t_keys: cluster_targets.t_key_buffer(slot_now),
             command_count: indirect_count,
         })
     } else {

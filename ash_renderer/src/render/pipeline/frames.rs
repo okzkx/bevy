@@ -423,6 +423,31 @@ impl FramePool {
             // 在 transfer 提交内完成，跨队列可见性由下方票据等待收口。
             // EXCLUSIVE 成对语义保留在 image_probe 组 C 作机制实证。
 
+            // —— 透明键 -inf 预填充（8.1.4）：bitonic 全容量升序排把真实条目
+            // 推到数组尾部（gather 反向取）——padding 键必须是 -inf。fill 在
+            // 所有 compute dispatch 之前（TRANSFER 写 → compute 读屏障收口）。
+            if let Some(t) = draw.transparent.as_ref() {
+                device.cmd_fill_buffer(
+                    frame.command_buffer,
+                    t.t_keys,
+                    0,
+                    vk::WHOLE_SIZE,
+                    0xFF80_0000, // f32::NEG_INFINITY 位型
+                );
+                let fill_barrier = vk::MemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+                device.cmd_pipeline_barrier(
+                    frame.command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    slice::from_ref(&fill_barrier),
+                    &[],
+                    &[],
+                );
+            }
+
             // —— 视锥剔除 dispatch（5.2，渲染进场之前）：compute 读 set2 三表
             // + push 平面，写标记环本帧槽；随后的屏障是 compute 写→图形读的
             // 依赖形状（消费归 5.3，判定线 3）。空场/关闭 = None（host 已把
@@ -473,6 +498,16 @@ impl FramePool {
                         draw.set2,
                         t.cluster_set,
                         collect,
+                    );
+                }
+                // bitonic 排序链（8.1.4，collect 与 gather 之间；prev 透明
+                // 计数 0 的让路帧 None——未排序尾部反向读取仍覆盖全部真实行）
+                if let Some(sort) = &t.sort {
+                    crate::render::pipeline::cluster::record_transparent_sort(
+                        device,
+                        frame.command_buffer,
+                        t.cluster_set,
+                        sort,
                     );
                 }
                 if let Some(gather) = &t.gather {

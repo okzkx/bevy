@@ -70,13 +70,17 @@ fn pick_lod_entry(rec: ObjectRecord, slot: u32) -> LodEntry {
     return chosen;
 }
 
+const TRANSPARENT_CAPACITY: u32 = 16384u;
+
 @compute @workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
-    if i >= push.count || i >= t_count[0] {
+    let count = min(t_count[0], TRANSPARENT_CAPACITY);
+    if i >= push.count || i >= count {
         return;
     }
-    let slot = t_index_list[i];
+    // 升序数组尾部反向取（8.1.4：最远先画；未排帧仍覆盖全部真实行）
+    let slot = t_index_list[count - 1u - i];
     let rec = objects[slot];
     let pins = pick_lod_entry(rec, slot);
     let visible = marks[slot];

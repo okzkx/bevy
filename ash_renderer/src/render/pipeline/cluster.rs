@@ -39,6 +39,8 @@ const TRANSPARENT_COLLECT_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/transparent_collect.spv"));
 const TRANSPARENT_GATHER_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/transparent_gather.spv"));
+const TRANSPARENT_SORT_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/transparent_sort.spv"));
 const TRANSPARENT_FORWARD_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/transparent_forward.spv"));
 
@@ -505,6 +507,36 @@ impl ClusterTargets {
         self.t_commands[slot % self.t_commands.len()].buffer()
     }
 
+    /// 第 `slot` 帧槽的深度键 buffer 句柄（帧首 -inf fill 的目标，8.1.4）。
+    #[must_use]
+    pub fn t_key_buffer(&self, slot: usize) -> vk::Buffer {
+        self.t_keys[slot % self.t_keys.len()].buffer()
+    }
+
+    /// 第 `slot` 帧槽的透明索引/键列表回读（判定线③对照面；诊断一次性
+    /// staging，低频 BRP 调用）。
+    ///
+    /// # Errors
+    /// 读回提交失败（设备丢失等）。
+    pub fn readback_sort(
+        &self,
+        ctx: &Context,
+        slot: usize,
+        indices: &mut [u8],
+        keys: &mut [u8],
+    ) -> Result<()> {
+        crate::render::gpu::hiz::readback_buffer(
+            ctx,
+            self.t_index_lists[slot % self.t_index_lists.len()].buffer(),
+            indices,
+        )?;
+        crate::render::gpu::hiz::readback_buffer(
+            ctx,
+            self.t_keys[slot % self.t_keys.len()].buffer(),
+            keys,
+        )
+    }
+
     /// 第 `slot` 帧槽的透明计数（BRP 直读面：本帧槽 = 两帧前输出，fence 纪律）。
     #[must_use]
     pub fn t_count(&mut self, slot: usize) -> &mut GpuBuffer {
@@ -607,6 +639,9 @@ pub struct TransparentFrame {
     /// 透明行收集 + 命令组装 dispatch（count = 在场行数 > 0 才 Some）。
     pub collect: Option<TransparentCollectDraw>,
     pub gather: Option<TransparentGatherDraw>,
+    /// bitonic 排序计划（8.1.4；prev 透明计数 = 0 的让路帧 None——数组未排，
+    /// gather 尾部反向读取仍覆盖全部真实行，只丢一帧排序）。
+    pub sort: Option<TransparentSortPlan>,
     /// set2（常驻表，gather 读；透明绘制也绑）。
     pub set2: vk::DescriptorSet,
     /// 透明前向绘制管线（layout 四集）。
@@ -614,6 +649,8 @@ pub struct TransparentFrame {
     pub layout: vk::PipelineLayout,
     /// 本帧槽透明命令环（`command_count` 上界内有效）。
     pub t_commands: vk::Buffer,
+    /// 本帧槽深度键 buffer（帧首 -inf fill 目标，8.1.4）。
+    pub t_keys: vk::Buffer,
     /// 命令上界 = 在场行数（CPU 在账；非透明行 instanceCount=0）。
     pub command_count: u32,
 }
@@ -644,11 +681,29 @@ pub struct TransparentGatherDraw {
     pub groups: u32,
 }
 
+/// bitonic 排序 push 步长：(k, j) 段参数 = 8B。
+pub const TRANSPARENT_SORT_PUSH: u32 = 8;
+
+/// bitonic 排序 dispatch 输入（管线 + 组数 + 预生成 (k,j) 派发序列）。
+pub struct TransparentSortPlan {
+    pub pipeline: vk::Pipeline,
+    pub layout: vk::PipelineLayout,
+    /// 每派发组数 = CAPACITY/2 取整到 workgroup（容量恒定，序列恒定）。
+    pub groups: u32,
+    /// (k, j) 段参数序列（建管线时预生成，恒 105 项；逐帧 clone 840B——
+    /// 生命周期独立于 TransparentPasses，FrameDraw 组装免借用纠缠）。
+    pub passes: Vec<[u8; TRANSPARENT_SORT_PUSH as usize]>,
+}
+
 /// compute 半边三件：build（[cluster_set] 单集）/ collect + gather（[set2,
 /// cluster_set] 双集）——与 hiz/occlusion 的双集先例同形状。
 #[derive(bevy::prelude::Resource)]
 pub struct TransparentPasses {
     device: Device,
+    sort_layout: vk::PipelineLayout,
+    sort_pipeline: vk::Pipeline,
+    /// bitonic (k, j) 派发序列（容量恒定 → 建成时一次生成）。
+    sort_passes: Vec<[u8; TRANSPARENT_SORT_PUSH as usize]>,
     build_layout: vk::PipelineLayout,
     build_pipeline: vk::Pipeline,
     collect_layout: vk::PipelineLayout,
@@ -670,6 +725,9 @@ impl TransparentPasses {
     ) -> Result<Self> {
         let mut this = Self {
             device: ctx.device.clone(),
+            sort_layout: vk::PipelineLayout::null(),
+            sort_pipeline: vk::Pipeline::null(),
+            sort_passes: bitonic_sequence(TRANSPARENT_CAPACITY),
             build_layout: vk::PipelineLayout::null(),
             build_pipeline: vk::Pipeline::null(),
             collect_layout: vk::PipelineLayout::null(),
@@ -683,6 +741,10 @@ impl TransparentPasses {
                 make_compute(ctx, CLUSTER_BUILD_SPV, &[cluster_set_layout], 0)?;
             this.build_pipeline = build_pipeline;
             this.build_layout = build_layout;
+            let (sort_pipeline, sort_layout) =
+                make_compute(ctx, TRANSPARENT_SORT_SPV, &[cluster_set_layout], TRANSPARENT_SORT_PUSH)?;
+            this.sort_pipeline = sort_pipeline;
+            this.sort_layout = sort_layout;
             let (collect_pipeline, collect_layout) = make_compute(
                 ctx,
                 TRANSPARENT_COLLECT_SPV,
@@ -713,6 +775,7 @@ impl TransparentPasses {
 
     fn drop_pipelines(&mut self) {
         for (pipeline, layout) in [
+            (self.sort_pipeline, self.sort_layout),
             (self.build_pipeline, self.build_layout),
             (self.collect_pipeline, self.collect_layout),
             (self.gather_pipeline, self.gather_layout),
@@ -724,6 +787,8 @@ impl TransparentPasses {
                 unsafe { self.device.destroy_pipeline_layout(layout, None) };
             }
         }
+        self.sort_pipeline = vk::Pipeline::null();
+        self.sort_layout = vk::PipelineLayout::null();
         self.build_pipeline = vk::Pipeline::null();
         self.build_layout = vk::PipelineLayout::null();
         self.collect_pipeline = vk::Pipeline::null();
@@ -774,6 +839,38 @@ impl TransparentPasses {
             groups: count.div_ceil(64),
         }
     }
+
+    /// bitonic 排序计划（8.1.4）：管线 + 组数 + 恒定 (k, j) 序列（逐帧
+    /// clone——840B，免借用纠缠）。序列在建管线时预生成（容量恒 16384）。
+    #[must_use]
+    pub fn sort_plan(&self) -> TransparentSortPlan {
+        TransparentSortPlan {
+            pipeline: self.sort_pipeline,
+            layout: self.sort_layout,
+            groups: (TRANSPARENT_CAPACITY / 2).div_ceil(64),
+            passes: self.sort_passes.clone(),
+        }
+    }
+}
+
+/// bitonic (k, j) 派发序列：`for k in 2..=N { for j in k/2..=1 { (k, j) } }`
+/// （升序网络；N 必须为 2 的幂——容量常量由调用方保证）。
+fn bitonic_sequence(n: u32) -> Vec<[u8; TRANSPARENT_SORT_PUSH as usize]> {
+    assert!(n.is_power_of_two(), "bitonic 容量必须是 2 的幂");
+    let mut passes = Vec::new();
+    let mut k = 2u32;
+    while k <= n {
+        let mut j = k / 2;
+        while j >= 1 {
+            let mut push = [0u8; TRANSPARENT_SORT_PUSH as usize];
+            push[0..4].copy_from_slice(&k.to_le_bytes());
+            push[4..8].copy_from_slice(&j.to_le_bytes());
+            passes.push(push);
+            j /= 2;
+        }
+        k <<= 1;
+    }
+    passes
 }
 
 /// compute 管线制式件（与 cull.rs 同形状；`push_size` = 0 表示无 push range）。
@@ -916,6 +1013,49 @@ pub(crate) fn record_transparent_collect(
             &[],
             &[],
         );
+    }
+}
+
+/// 录制 bitonic 排序链（8.1.4，collect 与 gather 之间）：逐 (k, j) 派发 +
+/// 派发间 compute rw 屏障（上一段的排序写 → 下一段的排序读写）。
+pub(crate) fn record_transparent_sort(
+    device: &Device,
+    command_buffer: vk::CommandBuffer,
+    cluster_set: vk::DescriptorSet,
+    plan: &TransparentSortPlan,
+) {
+    unsafe {
+        device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, plan.pipeline);
+        device.cmd_bind_descriptor_sets(
+            command_buffer,
+            vk::PipelineBindPoint::COMPUTE,
+            plan.layout,
+            0,
+            std::slice::from_ref(&cluster_set),
+            &[],
+        );
+        let barrier = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+        for pass in &plan.passes {
+            device.cmd_push_constants(
+                command_buffer,
+                plan.layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                pass,
+            );
+            device.cmd_dispatch(command_buffer, plan.groups, 1, 1);
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                std::slice::from_ref(&barrier),
+                &[],
+                &[],
+            );
+        }
     }
 }
 
