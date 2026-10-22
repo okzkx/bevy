@@ -46,6 +46,9 @@ pub use gpu::hiz::{
     occluded_reverse_z, occlusion_mip_level, reduce_tile_reverse_z, HizCensus, HizPyramid,
     HIZ_FORMAT,
 };
+// 诊断回读助手（8.1.3 透明族判定线③立的面）：BRP 读数方法族（remote/）与
+// render 内部同频复用，crate 级重出口。
+pub(crate) use gpu::hiz::readback_buffer;
 pub use gpu::indirect::{IndirectDraw, IndirectPass, IndirectStats, INDIRECT_PUSH_SIZE};
 pub use gpu::lod::{
     lod_hysteresis_level, lod_raw_level, pack_lod_push, LodDiagnostics, LodDraw, LodPass,

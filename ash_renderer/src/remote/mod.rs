@@ -37,6 +37,7 @@ pub mod mouse;
 pub mod objects;
 pub mod perf;
 pub mod residency;
+pub mod ring_census;
 pub mod shapes;
 
 use std::collections::HashMap;
@@ -60,6 +61,7 @@ use self::{
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     objects::{increment_stats, replace_handles, spawn_primitive},
     residency::{residency_set, residency_stats},
+    ring_census::ring_census,
     perf::{perf_samples, perf_stats, workload},
     shapes::{spawn_lod, spawn_shape},
 };
@@ -128,7 +130,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/workload", workload)
                 .with_method_main("ash_renderer/monitor_stats", monitor_stats)
                 .with_method_main("ash_renderer/frame_sync", frame_sync_cmd)
-                .with_method_main("ash_renderer/set_render_mode", set_render_mode),
+                .with_method_main("ash_renderer/set_render_mode", set_render_mode)
+                .with_method_main("ash_renderer/ring_census", ring_census),
             RemoteHttpPlugin::default(),
         ));
     }

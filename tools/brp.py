@@ -209,6 +209,11 @@ def cmd_generate_chunks(args):
     out(rpc(args.host, args.port, "ash_renderer/generate_chunks", params))
 
 
+def cmd_ring_census(args):
+    params = {"slot": args.slot} if args.slot is not None else None
+    out(rpc(args.host, args.port, "ash_renderer/ring_census", params))
+
+
 def cmd_chunk_census(args):
     out(rpc(args.host, args.port, "ash_renderer/chunk_census"))
 
@@ -607,6 +612,9 @@ def main():
     p.set_defaults(func=cmd_generate_chunks)
 
     sub.add_parser("chunk-census", help="chunk 盘点（ash_renderer/chunk_census，只读：在场块 id/原点/边长/成员数）").set_defaults(func=cmd_chunk_census)
+    p = sub.add_parser("ring-census", help="环内容对账（ash_renderer/ring_census，8.2.6 定责仪器：模型环/材质环双帧槽逐槽字节 vs 宿主期望 + 在场环；--slot 限单槽）")
+    p.add_argument("--slot", type=int, help="限定实例槽（缺省盘点全部已驻留行）")
+    p.set_defaults(func=cmd_ring_census)
 
     p = sub.add_parser("chunk-despawn", help="整块删除（ash_renderer/chunk_despawn，按 id 找根递归 despawn；removed_rows 次帧对账）")
     p.add_argument("--id", type=int, required=True, help="目标 chunk id（chunk-census 可查）")

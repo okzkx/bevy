@@ -115,6 +115,10 @@ impl BufferRole {
             Self::IndirectCommands => {
                 vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::INDIRECT_BUFFER
+                    // BRP 环内容对账（ring_census，8.2.6）经 staging 读回命令环：
+                    // 与 DevicePool/DeviceStorage 同款"内容抽查以本 buffer 为拷贝源"
+                    // 纪律，TRANSFER_SRC 一并冻结（VUID-vkCmdCopyBuffer-srcBuffer-00118）
+                    | vk::BufferUsageFlags::TRANSFER_SRC
             }
             Self::Storage => {
                 vk::BufferUsageFlags::STORAGE_BUFFER

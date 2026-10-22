@@ -57,7 +57,12 @@ struct MaterialRecord {
     tex_metallic_roughness: u32,
     tex_occlusion: u32,
     sampler_index: u32,
-    _pad: vec3<u32>,
+    // 垫至 64 用标量（8.2.6 实抓：vec3<u32> 对齐 16 被排到 64..76，把步长
+    // 撑到 80 ≠ 宿主 MATERIAL_RECORD_SIZE 64——材质槽 ≥1 全体错位，缺陷①②
+    // 同根；build.rs 布局互证闸门防复发）
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
 }
 
 @group(0) @binding(0) var textures: binding_array<texture_2d<f32>>;
