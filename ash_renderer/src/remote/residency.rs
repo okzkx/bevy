@@ -16,7 +16,7 @@ use ash_macros::system;
 
 use crate::{
     scene::{AssetInvalidations, InstanceLedger, ResidencySettings, ResidencyStats},
-    vulkan::MeshPool,
+    render::MeshPool,
 };
 
 use super::{error_codes, invalid_params, BrpError, BrpResult};

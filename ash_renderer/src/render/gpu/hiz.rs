@@ -29,7 +29,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::common::error::{Result, VulkanError};
 
-use super::{images::full_mip_chain, Context};
+use crate::render::assets::images::full_mip_chain;
+use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物；spirv-val 已过，naga textureLoad/
 /// textureDimensions/textureNumLevels 的 mip 层参数发射已实证）。
@@ -352,8 +353,8 @@ impl HizPyramid {
             device: ctx.device.clone(),
             slots: Vec::new(),
             views: Vec::new(),
-            initialized: (0..super::MAX_FRAMES_IN_FLIGHT).map(|_| AtomicBool::new(false)).collect(),
-            warmup: super::MAX_FRAMES_IN_FLIGHT as u32,
+            initialized: (0..crate::render::MAX_FRAMES_IN_FLIGHT).map(|_| AtomicBool::new(false)).collect(),
+            warmup: crate::render::MAX_FRAMES_IN_FLIGHT as u32,
             levels,
             extent,
             reduction: ReductionPass {
@@ -376,7 +377,7 @@ impl HizPyramid {
              遮挡测试读同槽两帧前输出——fence 纪律零新同步形状；重建 warmup {MAX} 帧）",
             extent.width,
             extent.height,
-            MAX = super::MAX_FRAMES_IN_FLIGHT,
+            MAX = crate::render::MAX_FRAMES_IN_FLIGHT,
         );
         Ok(this)
     }
@@ -425,7 +426,7 @@ impl HizPyramid {
         self.extent = extent;
         self.levels = full_mip_chain(extent.width, extent.height);
         self.initialized = (0..self.slots_capacity()).map(|_| AtomicBool::new(false)).collect();
-        self.warmup = super::MAX_FRAMES_IN_FLIGHT as u32;
+        self.warmup = crate::render::MAX_FRAMES_IN_FLIGHT as u32;
         self.build_images_and_views(ctx, depth_images)?;
         self.build_reduction(ctx)?;
         self.build_occlusion_sets(ctx, depth_images)?;
@@ -440,7 +441,7 @@ impl HizPyramid {
     }
 
     fn slots_capacity(&self) -> usize {
-        super::MAX_FRAMES_IN_FLIGHT
+        crate::render::MAX_FRAMES_IN_FLIGHT
     }
 
     /// 录制一帧的归约链（渲染进场收口后调用）：每级绑 (slot, level) set →
@@ -545,7 +546,7 @@ impl HizPyramid {
     fn build_images_and_views(&mut self, ctx: &Context, depth_images: &[vk::Image]) -> Result<()> {
         let device = &ctx.device;
         let mut slots = Vec::new();
-        for _ in 0..super::MAX_FRAMES_IN_FLIGHT {
+        for _ in 0..crate::render::MAX_FRAMES_IN_FLIGHT {
             let image = unsafe {
                 device.create_image(
                     &vk::ImageCreateInfo::default()
@@ -739,7 +740,7 @@ impl HizPyramid {
         }
         self.reduction.set_layout = set_layout;
         // —— pool + sets + 写入（重建路径先 reset 旧 pool 复用）
-        let sets_total = super::MAX_FRAMES_IN_FLIGHT * self.levels as usize;
+        let sets_total = crate::render::MAX_FRAMES_IN_FLIGHT * self.levels as usize;
         if self.reduction.pool != vk::DescriptorPool::null() {
             unsafe { device.reset_descriptor_pool(self.reduction.pool, vk::DescriptorPoolResetFlags::empty()) }
                 .map_err(VulkanError::from)?;
@@ -776,7 +777,7 @@ impl HizPyramid {
         // [0] 槽位不派发），其余 = 金字塔（恒 GENERAL）
         let mut image_infos = Vec::with_capacity(sets_total * 2);
         let mut meta = Vec::with_capacity(sets_total * 2);
-        for slot in 0..super::MAX_FRAMES_IN_FLIGHT {
+        for slot in 0..crate::render::MAX_FRAMES_IN_FLIGHT {
             for level in 0..self.levels as usize {
                 let set = sets[slot * self.levels as usize + level];
                 image_infos.push(
@@ -838,10 +839,10 @@ impl HizPyramid {
             self.occlusion_pool = unsafe {
                 device.create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
-                        .max_sets(super::MAX_FRAMES_IN_FLIGHT as u32)
+                        .max_sets(crate::render::MAX_FRAMES_IN_FLIGHT as u32)
                         .pool_sizes(&[vk::DescriptorPoolSize::default()
                             .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                            .descriptor_count(super::MAX_FRAMES_IN_FLIGHT as u32)]),
+                            .descriptor_count(crate::render::MAX_FRAMES_IN_FLIGHT as u32)]),
                     None,
                 )
             }
@@ -853,7 +854,7 @@ impl HizPyramid {
             .map_err(VulkanError::from)?;
         }
         let occlusion_layouts =
-            std::iter::repeat_n(self.occlusion_layout, super::MAX_FRAMES_IN_FLIGHT).collect::<Vec<_>>();
+            std::iter::repeat_n(self.occlusion_layout, crate::render::MAX_FRAMES_IN_FLIGHT).collect::<Vec<_>>();
         self.occlusion_sets = unsafe {
             device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
@@ -1009,7 +1010,7 @@ unsafe fn create_depth_sample_view(device: &Device, image: vk::Image) -> Result<
                 &vk::ImageViewCreateInfo::default()
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(super::DEPTH_FORMAT)
+                    .format(crate::render::DEPTH_FORMAT)
                     .subresource_range(
                         vk::ImageSubresourceRange::default()
                             .aspect_mask(vk::ImageAspectFlags::DEPTH)

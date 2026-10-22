@@ -22,7 +22,7 @@ use bevy::prelude::*;
 use ash_macros::system;
 
 use crate::scene::AssetReadiness;
-use crate::vulkan::Uploader;
+use crate::render::Uploader;
 
 /// 完成判据的稳态确认窗（帧）：pending/票据清零后持续满足的帧数——加载末期
 /// 逐行到货的抖动不闪窗。

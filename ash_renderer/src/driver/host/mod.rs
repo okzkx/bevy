@@ -10,7 +10,7 @@
 //! | `Last` | `teardown_vulkan.in_set(OnAppExitSystems)` | [`init`] | AppExit 写入后、窗口销毁前反序拆除 |
 //!
 //! 本模块不持有 Vulkan 状态，只做接线（禁渲染补位见 build 内注释）与系统注册；
-//! 创建链细节在 [`crate::vulkan`]，子模块只消费重出口类型。
+//! 创建链细节在 [`crate::render`]，子模块只消费重出口类型。
 //!
 //! 失败策略（两 Tier，**非必要不 panic**；[`init`]/[`frame`] 各失败分支按此分流）：
 //! ① 不影响运行 → warn 后丢弃继续（OUT_OF_DATE/SUBOPTIMAL 这类"重建后重试"属这层）；
@@ -27,7 +27,7 @@ use bevy::{
 };
 
 use ash_macros::system;
-use crate::vulkan::Context;
+use crate::render::Context;
 
 mod drawlist;
 mod frame;
@@ -57,14 +57,14 @@ impl Plugin for AshHostPlugin {
             // 剔除开关与诊断账面（5.2）+ indirect 诊断账面（5.3）+ 帧样本账
             //（5.5）+ 遮挡开关与诊断账面（6.1）：纯 ECS 侧状态，overlay 缺席时
             // BRP 仍可用
-            .init_resource::<crate::vulkan::CullSettings>()
-            .init_resource::<crate::vulkan::CullDiagnostics>()
-            .init_resource::<crate::vulkan::IndirectStats>()
-            .init_resource::<crate::vulkan::OcclusionSettings>()
-            .init_resource::<crate::vulkan::OcclusionDiagnostics>()
-            .init_resource::<crate::vulkan::LodSettings>()
-            .init_resource::<crate::vulkan::LodDiagnostics>()
-            .init_resource::<crate::vulkan::PerfLedger>()
+            .init_resource::<crate::render::CullSettings>()
+            .init_resource::<crate::render::CullDiagnostics>()
+            .init_resource::<crate::render::IndirectStats>()
+            .init_resource::<crate::render::OcclusionSettings>()
+            .init_resource::<crate::render::OcclusionDiagnostics>()
+            .init_resource::<crate::render::LodSettings>()
+            .init_resource::<crate::render::LodDiagnostics>()
+            .init_resource::<crate::render::PerfLedger>()
             // DrawList 组装对照账面（7.9 判定线 2 的 BRP 开关对照模式）
             .init_resource::<drawlist::DrawListVerify>()
             // 帧率同步设置（7.6）：开关默认 true（首次运行自动同步）+ 刷新率读数

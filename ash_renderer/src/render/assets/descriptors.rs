@@ -8,7 +8,7 @@
 //!    SAMPLER×容量，UAB+PARTIALLY_BOUND）+ set1 每帧 UBO。三层配套（特性族篇 §3）
 //!    在此收齐后两层：binding 旗标 + layout 创建旗标（`UPDATE_AFTER_BIND_POOL`，
 //!    VUID-03000）+ pool 旗标（`UPDATE_AFTER_BIND`）；feature 位第一层在
-//!    [`super::context`]。
+//!    [`crate::render::context`]。
 //! 3. **槽位分配与发布**：free list 分槽、采样器按 [`sampler_key`]
 //!    功能参数去重、fallback 槽 0（白 1×1 + 线性采样器）、发布接上传票据。
 //!
@@ -36,9 +36,9 @@ use bevy::log::info;
 use crate::common::error::{Result, VulkanError};
 
 use super::images::{sampler_key, GpuImage, ImageSpec};
-use super::resources::{BufferRole, GpuBuffer, MemoryContract};
+use crate::render::resources::{BufferRole, GpuBuffer, MemoryContract};
 use super::uploader::{StagingImageCopy, Ticket, UploadBatch, Uploader};
-use super::MAX_FRAMES_IN_FLIGHT;
+use crate::render::MAX_FRAMES_IN_FLIGHT;
 
 /// 常驻表容量（候选定案值）。`BindlessTables::new` 按设备 UAB 轨五项限额
 /// 核对，不够即报错——不静默降容量。纹理表与采样器表同容量（闸门冻结的双数组

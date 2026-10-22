@@ -95,7 +95,7 @@ pub struct Context {
     pub transfer_queue: vk::Queue,
     /// 内存契约（设备侧事实一次查询冻结：类型/堆表 + nonCoherentAtomSize），
     /// 选型唯一裁判。池/上传按引用取用，不各自重查。
-    memory_contract: crate::vulkan::MemoryContract,
+    memory_contract: crate::render::MemoryContract,
     /// VK_EXT_memory_budget 是否已加挂（设备创建时按支持情况决定）。
     budget_enabled: bool,
 }
@@ -452,7 +452,7 @@ impl Context {
         // # Safety:physical_device 来自成功枚举、instance 未销毁(ash 约定参数
         // 合法性由调用方担保);契约在设备存活期内恒定
         let memory_contract =
-            unsafe { crate::vulkan::MemoryContract::new(&instance, physical_device) };
+            unsafe { crate::render::MemoryContract::new(&instance, physical_device) };
         info!(
             "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}（GRAPHICS+COMPUTE+PRESENT，5.2 前置闸门①实测钉明）  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  features[支持→已启用]: timelineSemaphore {}→on  dynamicRendering {}→on  descriptorIndexing+4 位 {}→on  multiDrawIndirect {}→on（5.3 闸门①）  maxDrawIndirectCount {}（5.3 闸门③留痕）  swapchain_mutable_format on  synchronization2 off（屏障走传统形状）  验证层 {}",
             vk::api_version_major(dev_props.api_version),
@@ -486,7 +486,7 @@ impl Context {
 
     /// 冻结的内存契约(类型选择/atom 舍入的唯一裁判)。
     #[must_use]
-    pub fn memory_contract(&self) -> &crate::vulkan::MemoryContract {
+    pub fn memory_contract(&self) -> &crate::render::MemoryContract {
         &self.memory_contract
     }
 

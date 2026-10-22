@@ -1,7 +1,7 @@
 //! 上传编排:消费 [`InstanceLedger`] 的**待盘点行**(新增/换柄的增量,非全量快照),
 //! 把未驻留的 `Assets<Mesh>` 去重转换、未驻留的贴图经材质五槽去重建图,合成
 //! **一个批次**送进 GPU(网格进池、贴图进 dedicated memory)。零裸 Vulkan 调用——
-//! 资源操作全部走 [`crate::vulkan`] 的 pool/uploader/images 出口。
+//! 资源操作全部走 [`crate::render`] 的 pool/uploader/images 出口。
 //!
 //! 时序:PostUpdate 账本对账 → **Last:准备+上传提交** →
 //! 同帧图形提交(图形侧等票据=draw 挂 ticket 信号量等待,见 frames.rs)。
@@ -45,7 +45,7 @@ use crate::{
         anchor_level, AssetInvalidations, AssetReadiness, AssetRetirements, InstanceLedger,
         LodDemand, LodGroups,
     },
-    vulkan::{
+    render::{
         pack_object_record, sampler_key, FramePool, GpuImage, ImageCache, InstanceTables, MeshPool,
         StagingCopy, StagingImageCopy, UploadBatch, Uploader, MAX_LOD_LEVELS, OBJECT_RECORD_SIZE,
     },
@@ -74,7 +74,7 @@ impl Plugin for AshUploadPlugin {
             flush_uploads
                 .run_if(resource_exists::<MeshPool>)
                 .run_if(resource_exists::<ImageCache>)
-                .run_if(resource_exists::<crate::vulkan::BindlessTables>)
+                .run_if(resource_exists::<crate::render::BindlessTables>)
                 .run_if(resource_exists::<AssetInvalidations>)
                 .run_if(resource_exists::<AssetReadiness>)
                 .run_if(resource_exists::<AssetRetirements>)
@@ -125,7 +125,7 @@ pub(crate) struct UploadData<'w> {
     /// overlay 图集账面:旧代停尸房并入本排空点;overlay 未装时
     /// 缺席 = None(no-op)。
     atlas: Option<ResMut<'w, crate::overlay::AtlasGpu>>,
-    ctx: Res<'w, crate::vulkan::Context>,
+    ctx: Res<'w, crate::render::Context>,
     /// 帧槽:池迁移销毁旧池前的"图形最后使用"等待经此接线。
     frames: Res<'w, FramePool>,
 }
@@ -141,7 +141,7 @@ pub(crate) fn flush_uploads(
     data: UploadData,
     mut pool: ResMut<MeshPool>,
     mut image_cache: ResMut<ImageCache>,
-    mut tables: ResMut<crate::vulkan::BindlessTables>,
+    mut tables: ResMut<crate::render::BindlessTables>,
     mut uploader: ResMut<Uploader>,
     mut state: Local<UploadState>,
 ) -> Result<(), BevyError> {
@@ -455,7 +455,7 @@ pub(crate) fn flush_uploads(
     // —— 2) 转换/规格映射(Tier①:未到货跳过重试,拒绝 warn 一次)——
     // 查无 → pending 记账(身份 → 等待帧数,跨帧累计);拒绝 → 进
     // failed 集不再重试(僵尸行由盘点段出队)。
-    let mut converted: Vec<(AssetId<Mesh>, crate::vulkan::ConvertedMesh, bool)> = Vec::new();
+    let mut converted: Vec<(AssetId<Mesh>, crate::render::ConvertedMesh, bool)> = Vec::new();
     let mut pending = 0usize;
     let mut marked_meshes: HashSet<AssetId<Mesh>> = HashSet::new();
     for (id, handle, replace) in fresh {
@@ -465,7 +465,7 @@ pub(crate) fn flush_uploads(
                 readiness.mark_pending_mesh(id);
                 marked_meshes.insert(id);
             }
-            Some(mesh) => match crate::vulkan::convert_mesh(mesh) {
+            Some(mesh) => match crate::render::convert_mesh(mesh) {
                 Ok(c) => converted.push((id, c, replace)),
                 Err(e) => {
                     // expel 必须在日志去重条件之外——拒绝必须每次记账,
@@ -479,7 +479,7 @@ pub(crate) fn flush_uploads(
             },
         }
     }
-    let mut image_specs: Vec<(AssetId<Image>, Handle<Image>, crate::vulkan::ImageSpec, bool)> =
+    let mut image_specs: Vec<(AssetId<Image>, Handle<Image>, crate::render::ImageSpec, bool)> =
         Vec::new();
     let mut pending_images = 0usize;
     let mut marked_images: HashSet<AssetId<Image>> = HashSet::new();
@@ -490,7 +490,7 @@ pub(crate) fn flush_uploads(
                 readiness.mark_pending_image(id);
                 marked_images.insert(id);
             }
-            Some(image) => match crate::vulkan::image_spec(image) {
+            Some(image) => match crate::render::image_spec(image) {
                 Ok(spec) => image_specs.push((id, handle, spec, replace)),
                 Err(e) => {
                     // 与 mesh 同口径:expel 在日志去重条件之外,拒绝每次记账
@@ -564,15 +564,15 @@ pub(crate) fn flush_uploads(
     let mut planned: Vec<(
         AssetId<Mesh>,
         bool,
-        crate::vulkan::ConvertedMesh,
-        crate::vulkan::PoolRange,
-        crate::vulkan::PoolRange,
+        crate::render::ConvertedMesh,
+        crate::render::PoolRange,
+        crate::render::PoolRange,
     )> = Vec::with_capacity(converted.len());
     for (id, c, replace) in converted {
         let (vertex, index) = pool.alloc(c.vertices.len() as u64, c.indices.len() as u64);
         let v_src = staging.len() as u64;
         staging.extend_from_slice(&c.vertices);
-        uploads.push(crate::vulkan::StagingCopy {
+        uploads.push(crate::render::StagingCopy {
             dst: vertex_buffer,
             src_offset: v_src,
             dst_offset: vertex.offset,
@@ -580,7 +580,7 @@ pub(crate) fn flush_uploads(
         });
         let i_src = staging.len() as u64;
         staging.extend_from_slice(&c.indices);
-        uploads.push(crate::vulkan::StagingCopy {
+        uploads.push(crate::render::StagingCopy {
             dst: index_buffer,
             src_offset: i_src,
             dst_offset: index.offset,

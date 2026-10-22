@@ -26,7 +26,7 @@ use std::sync::Mutex;
 use ash::ext::debug_utils;
 use ash::vk;
 use ash::{Device, Entry};
-use ash_renderer::vulkan::{
+use ash_renderer::render::{
     sampler_key, BindlessTables, BufferRole, GpuBuffer, GpuImage, ImageSpec, MemoryContract,
     SamplerKey, StagingImageCopy, UploadBatch, Uploader, TABLE_CAPACITY,
 };

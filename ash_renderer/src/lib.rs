@@ -35,7 +35,7 @@
 //!   总控,各窗口显隐开关 DebugWindowsOpen)、`entity_tree_window`(业务半边:
 //!   实体层级树 + 点选 SelectedEntity)、`paint`(draw_frame 内的绘制半边:
 //!   图集 CPU 镜像/整传新槽/顶点环,paint_overlay→UiPaint);
-//!   overlay 管线与 UI 录制契约住 `vulkan::overlay_pipeline`(`OverlayPipeline`
+//!   overlay 管线与 UI 录制契约住 `render::pipeline::overlay_pipeline`(`OverlayPipeline`
 //!   共享 set0、`UiPaint`/`UiDrawCall` 供 `frames` 接画);
 //! - [`remote`]:BRP 远程直控通道(HTTP JSON-RPC @ 127.0.0.1:15702)——AI
 //!   免开 UI 查询/改值/推拉相机。框架半边在 mod 根:[`remote::AshRemotePlugin`]
@@ -57,4 +57,4 @@ pub mod driver;
 pub mod overlay;
 pub mod remote;
 pub mod scene;
-pub mod vulkan;
+pub mod render;

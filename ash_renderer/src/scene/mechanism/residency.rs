@@ -87,7 +87,7 @@ use ash_macros::system;
 use crate::{
     driver::upload::flush_uploads,
     scene::{InstanceLedger, LodGroups},
-    vulkan::{
+    render::{
         aabb_screen_rect, aabb_visible, conservative_world_aabb, frustum_planes, lod_raw_level,
         ImageCache, LodSettings, MAX_LOD_LEVELS, MeshPool, Swapchain,
     },
@@ -861,7 +861,7 @@ impl Plugin for AshResidencyPlugin {
                 residency_tick
                     .before(flush_uploads)
                     .run_if(resource_exists::<MeshPool>)
-                    .run_if(resource_exists::<crate::vulkan::BindlessTables>)
+                    .run_if(resource_exists::<crate::render::BindlessTables>)
                     .run_if(resource_exists::<AssetRetirements>)
                     .run_if(resource_exists::<Swapchain>)
                     .run_if(resource_exists::<LodSettings>),

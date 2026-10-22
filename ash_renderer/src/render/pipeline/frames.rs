@@ -17,7 +17,7 @@
 //!   不存在是由 fence + 槽位隔离证出来的。尺寸随 swapchain 重建（[`Self::rebuild_depth`]，
 //!   extent 不变即空手而归），销毁前自带 device_wait_idle 与 swapchain 重建同纪律。
 //!
-//! 清屏+绘制走 Vulkan 1.3 动态渲染（feature 在 `super::context` 设备创建时已开）：
+//! 清屏+绘制走 Vulkan 1.3 动态渲染（feature 在 `crate::render::context` 设备创建时已开）：
 //! 无 RenderPass/Framebuffer，`loadOp=CLEAR` 就是清屏。每帧的布局纪律：
 //! - 颜色：acquire 后布局不确定 → UNDEFINED→COLOR_ATTACHMENT_OPTIMAL（进场），
 //!   画完 → PRESENT_SRC_KHR（出场）；
@@ -33,16 +33,16 @@ use ash::{vk, Device};
 use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
-use crate::vulkan::cull::CullDraw;
-use crate::vulkan::hiz::HizPyramid;
-use crate::vulkan::indirect::IndirectDraw;
-use crate::vulkan::lod::LodDraw;
-use crate::vulkan::occlusion::OcclusionDraw;
-use crate::vulkan::overlay_pipeline::{pack_ui_push, UiPaint};
-use crate::vulkan::perf::GpuTimer;
-use crate::vulkan::Context;
+use crate::render::gpu::cull::CullDraw;
+use crate::render::gpu::hiz::HizPyramid;
+use crate::render::gpu::indirect::IndirectDraw;
+use crate::render::gpu::lod::LodDraw;
+use crate::render::gpu::occlusion::OcclusionDraw;
+use crate::render::pipeline::overlay_pipeline::{pack_ui_push, UiPaint};
+use crate::render::perf::GpuTimer;
+use crate::render::Context;
+use super::depth::DepthTarget;
 
-pub use super::depth::{DepthTarget, DEPTH_FORMAT};
 
 /// CPU 领先 GPU 的最大帧数：第 N 帧要等第 N-2 帧的组资源空出来才能重录。
 pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
@@ -372,14 +372,14 @@ impl FramePool {
             // 依赖形状（消费归 5.3，判定线 3）。空场/关闭 = None（host 已把
             // 本帧槽标记填全可见，诊断语义不断）。
             if let Some(cull) = &draw.cull {
-                super::cull::record(device, frame.command_buffer, draw.set2, cull);
+                crate::render::gpu::cull::record(device, frame.command_buffer, draw.set2, cull);
             }
 
             // —— Hi-Z 遮挡测试 dispatch（6.1，渲染进场之前、视锥之后）：读
             // set2 三表 + 视锥标记 + 本帧槽金字塔（两帧前归约输出，fence 纪律
             // 内），合并写回标记并落遮挡独立标记。fallback/关闭 = None。
             if let Some(occlusion) = &draw.occlusion {
-                super::occlusion::record(device, frame.command_buffer, draw.set2, occlusion);
+                crate::render::gpu::occlusion::record(device, frame.command_buffer, draw.set2, occlusion);
             }
 
             // —— GPU LOD 选档 dispatch（6.2，渲染进场之前、遮挡之后）：读
@@ -387,7 +387,7 @@ impl FramePool {
             // 读旧写新，2 帧滞后由迟滞带吸收）。关闭/空场 = None（host 已把
             // 本帧槽档位环填 0 = 最细档，命令引脚回到 5.3 基准）。
             if let Some(lod) = &draw.lod {
-                super::lod::record(device, frame.command_buffer, draw.set2, lod);
+                crate::render::gpu::lod::record(device, frame.command_buffer, draw.set2, lod);
             }
 
             // —— indirect 命令组装 dispatch（5.3，渲染进场之前）：compute 读
@@ -395,7 +395,7 @@ impl FramePool {
             // 逐在场行组装 VkDrawIndexedIndirectCommand 进命令环本帧槽；随后
             // 自带屏障是命令写 → DRAW_INDIRECT 读的依赖形状。空场 = None。
             if let Some(indirect) = &draw.indirect {
-                super::indirect::record(device, frame.command_buffer, draw.set2, indirect);
+                crate::render::gpu::indirect::record(device, frame.command_buffer, draw.set2, indirect);
             }
 
             // —— 帧计时 T1：compute 区间（cull+组装）结束点位。

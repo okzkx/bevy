@@ -6,7 +6,7 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::scene::mechanism::scene_gen::SceneChunk;
-use crate::vulkan::{
+use crate::render::{
     BindlessTables, CullDiagnostics, CullSettings, ImageCache, IndirectStats,
     MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics, OcclusionSettings, PerfLedger, Uploader, FRAME_MODE_LAMBERT,
     FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
@@ -227,10 +227,10 @@ impl DebugWindow<'_> {
                     } else {
                         match occlusion_diag.fallback {
                             Some(fallback) => match fallback {
-                                crate::vulkan::OcclusionFallback::Disabled => "关（A/B）",
-                                crate::vulkan::OcclusionFallback::CullOff => "关（视锥关闭）",
-                                crate::vulkan::OcclusionFallback::PyramidWarmup => "warmup",
-                                crate::vulkan::OcclusionFallback::CameraJump => "相机跳变",
+                                crate::render::OcclusionFallback::Disabled => "关（A/B）",
+                                crate::render::OcclusionFallback::CullOff => "关（视锥关闭）",
+                                crate::render::OcclusionFallback::PyramidWarmup => "warmup",
+                                crate::render::OcclusionFallback::CameraJump => "相机跳变",
                             },
                             None => "空场",
                         }

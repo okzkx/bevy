@@ -48,8 +48,8 @@ use bevy::pbr::StandardMaterial;
 
 use crate::common::error::{Result, VulkanError};
 
-use super::resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
-use super::MAX_FRAMES_IN_FLIGHT;
+use crate::render::resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
+use crate::render::MAX_FRAMES_IN_FLIGHT;
 
 /// 对象表容量（实例槽数）。覆盖步骤 5 压测的 10 万档（131072 ≥ 100000）；
 /// 用尽报错出局不静默截断（TABLE_CAPACITY 同纪律）。48B/记录。

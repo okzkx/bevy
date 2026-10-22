@@ -8,7 +8,7 @@
 //! 的字节层面：场景绘制的 push 字节恒 0）。
 //!
 //! 状态选型（面板定案）：
-//! - **顶点输入**：交错 32B（pos12+normal12+uv8，[`super::VERTEX_STRIDE`]），与
+//! - **顶点输入**：交错 32B（pos12+normal12+uv8，[`crate::render::VERTEX_STRIDE`]），与
 //!   mesh_convert 是同一份契约；vertex-input 布局不默认等同 storage 布局。
 //! - **reverse-Z 成套**：bevy 透视投影是无限反向 Z（`get_clip_from_view`），
 //!   深度清值 0 + `GREATER` 比较成套使用，不混正向 Z 的 LESS 模板。
@@ -28,7 +28,7 @@ use bevy::log::info;
 
 use crate::common::error::Result;
 
-use super::Context;
+use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与探针同一编译路径）。
 const DEBUG_DRAW_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/debug_draw.spv"));
@@ -142,7 +142,7 @@ impl GraphicsPipeline {
             // 顶点输入 = mesh_convert 的同一份 32B 交错契约（三属性偏移 0/12/24）
             let vertex_binding = [vk::VertexInputBindingDescription::default()
                 .binding(0)
-                .stride(super::VERTEX_STRIDE as u32)
+                .stride(crate::render::VERTEX_STRIDE as u32)
                 .input_rate(vk::VertexInputRate::VERTEX)];
             let vertex_attributes = [
                 vk::VertexInputAttributeDescription::default()

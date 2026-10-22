@@ -13,13 +13,13 @@ use ash_macros::system;
 
 use crate::{
     scene::{InstanceLedger, mechanism::WorkloadSettings},
-    vulkan::{GpuTimer, ImageCache, MeshPool, PerfLedger},
+    render::{GpuTimer, ImageCache, MeshPool, PerfLedger},
 };
 
 use super::{invalid_params, BrpResult};
 
 /// 分位数三元组（p50/p95/p99）+ 均值，从 PerfLedger 现算。
-fn percentile_block(ledger: &PerfLedger, field: impl Fn(&crate::vulkan::FrameSample) -> f32) -> Value {
+fn percentile_block(ledger: &PerfLedger, field: impl Fn(&crate::render::FrameSample) -> f32) -> Value {
     let values: Vec<f32> = ledger.snapshot().iter().map(&field).collect();
     let pick = |p: f32| ledger.percentile(p, &field).map(|v| (v * 1000.0).round() / 1000.0);
     let mean = if values.is_empty() {
@@ -169,7 +169,7 @@ pub(crate) fn workload(In(params): In<Option<Value>>, world: &mut World) -> BrpR
 }
 
 /// 字段均值（两位小数；空窗口返回 0）。
-fn mean_of(ledger: &PerfLedger, field: impl Fn(&crate::vulkan::FrameSample) -> f32) -> f64 {
+fn mean_of(ledger: &PerfLedger, field: impl Fn(&crate::render::FrameSample) -> f32) -> f64 {
     let values: Vec<f32> = ledger.snapshot().iter().map(field).collect();
     if values.is_empty() {
         return 0.0;

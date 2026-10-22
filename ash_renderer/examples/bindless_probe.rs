@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use ash::{ext::debug_utils, vk, Device, Entry};
-use ash_renderer::vulkan::{BufferRole, GpuBuffer, MemoryContract};
+use ash_renderer::render::{BufferRole, GpuBuffer, MemoryContract};
 
 const VALIDATION_LAYER: &std::ffi::CStr = c"VK_LAYER_KHRONOS_validation";
 const RUNTIME_WGSL: &str = include_str!("shaders/bindless_probe_runtime.wgsl");

@@ -1,7 +1,7 @@
 //! 资产大池:顶点/索引两条
 //! DEVICE_LOCAL 池 + bump 偏移分配 + 按资产身份去重的驻留缓存。
 //!
-//! 内存类型/usage/绑定/对齐的规则全部引用 [`super::resources`] 的契约
+//! 内存类型/usage/绑定/对齐的规则全部引用 [`crate::render::resources`] 的契约
 //! ([`BufferRole::DevicePool`] 定案 + [`align_up`]),本模块只做三件事:
 //!
 //! 1. **bump 分配**:`used` 游标单调推进,顶点区间按 [`VERTEX_STRIDE`](32B)对齐、
@@ -42,9 +42,9 @@ use bevy::mesh::Mesh;
 
 use crate::common::error::{Result, VulkanError};
 
-use super::resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
+use crate::render::resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
 use super::uploader::{CopyRegion, UploadBatch, Uploader};
-use super::VERTEX_STRIDE;
+use crate::render::VERTEX_STRIDE;
 
 /// 池内一段已分配区间(字节)。
 #[derive(Clone, Copy, Debug)]

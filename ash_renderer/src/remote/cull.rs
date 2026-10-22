@@ -21,7 +21,7 @@ use ash_macros::system;
 use crate::{
     common::error::VulkanError,
     scene::InstanceLedger,
-    vulkan::{
+    render::{
         aabb_screen_rect, aabb_visible, conservative_world_aabb, frustum_planes,
         occluded_reverse_z, occlusion_mip_level, CullDiagnostics, CullSettings, HizPyramid,
         InstanceTables, MARK_SIZE, MeshPool, OcclusionDiagnostics, OcclusionFallback,
@@ -238,10 +238,10 @@ pub(crate) fn hiz_census(In(params): In<Option<Value>>, world: &mut World) -> Br
     let p: HizCensusParams = serde_json::from_value(params.unwrap_or(Value::Null))
         .map_err(|e| invalid_params(format!("params: {e}")))?;
     let ctx = world
-        .get_resource::<crate::vulkan::Context>()
+        .get_resource::<crate::render::Context>()
         .ok_or_else(|| BrpError::internal("Context 缺席——Vulkan 未初始化"))?;
     let hiz = world
-        .get_resource::<crate::vulkan::HizPyramid>()
+        .get_resource::<crate::render::HizPyramid>()
         .ok_or_else(|| BrpError::internal("HizPyramid 资源缺席"))?;
     let slot = p.slot.unwrap_or(0) as usize;
     let levels = hiz.levels();
@@ -315,7 +315,7 @@ pub(crate) fn occlusion_probe(In(params): In<Option<Value>>, world: &mut World) 
         .get_resource::<HizPyramid>()
         .ok_or_else(|| BrpError::internal("HizPyramid 资源缺席"))?;
     let ctx = world
-        .get_resource::<crate::vulkan::Context>()
+        .get_resource::<crate::render::Context>()
         .ok_or_else(|| BrpError::internal("Context 缺席——Vulkan 未初始化"))?;
     let slot = p.slot.unwrap_or(0) as usize;
     let levels = hiz.levels();

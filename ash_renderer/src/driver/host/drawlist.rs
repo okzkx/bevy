@@ -8,7 +8,7 @@
 //! 材质环写侧走访是账本在账信息，不是可见集回读；绘制调用与 push 字节恒定）。
 //! 行的 GPU 内容由对象表（写一次）+ 模型环/材质环（每帧重写）承载。
 //! hazard 纪律：环写入只发生在 `draw_frame` 的 `wait_for_slot` 之后
-//!（与本帧 UBO 同一条 fence 证据），详见 `vulkan::instance_table` 模块文档。
+//!（与本帧 UBO 同一条 fence 证据），详见 `render::assets::instance_table` 模块文档。
 //!
 //! 行级可绘判定与 4.x 语义一致：实例槽缺（未驻留成表）/mesh 未驻留/材质
 //! 容器缺席 = 该行暂缓（Tier①，自愈后消失）；缺贴图 = fallback 白图照画。
@@ -32,7 +32,7 @@ use crate::common::error::VulkanError;
 use crate::scene::{
     anchor_level, InstanceLedger, InstanceRow, LodGroups,
 };
-use crate::vulkan::{
+use crate::render::{
     pack_lod_entry, pack_material_record, pack_model, BindlessTables, ImageCache, InstanceTables,
     LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS,
     MODEL_STRIDE, MeshPool,

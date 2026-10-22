@@ -1,6 +1,6 @@
 //! overlay 图形管线：egui 镶嵌顶点的第二 GraphicsPipeline。
 //!
-//! 与场景管线（[`super::pipeline`]）的关系是"**布局共享、状态各管**"：
+//! 与场景管线（[`crate::render::pipeline::pipeline`]）的关系是"**布局共享、状态各管**"：
 //! - **set0 共享**：layout 只声明常驻表 set0（UI 无 UBO，不声明 set1），表在飞
 //!   更新对两管线同时生效——"布局=未来管线公共 ABI"的兑现位。切换管线后 set0
 //!   需按本布局对象重绑（同句柄、不同 layout 对象）。
@@ -19,7 +19,7 @@
 //!   色是预乘，src 因子 ONE 即成；alpha 通式让 alpha 通道走出"预乘 over"。
 //! - **剔除 NONE**：epaint 明言 UI 顶点绕向不保证一致（官方同款）。
 //!
-//! UI 录制契约 [`UiPaint`]/[`UiDrawCall`] 也住本模块：录制层 [`super::frames`]
+//! UI 录制契约 [`UiPaint`]/[`UiDrawCall`] 也住本模块：录制层 [`crate::render::pipeline::frames`]
 //! 与生产方 `overlay::framework::paint` 同层消费，vulkan 不引上层类型。
 
 use ash::{vk, Device};
@@ -27,14 +27,14 @@ use bevy::log::info;
 
 use crate::common::error::Result;
 
-use super::Context;
+use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与场景管线同一编译路径）。
 const OVERLAY_DRAW_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/overlay_draw.spv"));
 
 /// push constant 冻结布局（16B）的 Rust 镜像：不参与运行时（字节由 [`pack_ui_push`]
 /// 按偏移常量手工排布），存在的意义是让 `offset_of!` 静态断言把 WGSL/管线/CPU
-/// 三方钉在一起（同 [`super::pipeline::PushLayout`] 的纪律）。
+/// 三方钉在一起（同 [`crate::render::pipeline::pipeline::PushLayout`] 的纪律）。
 #[repr(C)]
 #[allow(dead_code)]
 struct UiPushLayout {
@@ -74,7 +74,7 @@ pub fn pack_ui_push(
     out
 }
 
-/// 一个 UI clip 的 draw 参数（overlay 版 [`super::frames::DrawCall`]）：UI 环内
+/// 一个 UI clip 的 draw 参数（overlay 版 [`crate::render::pipeline::frames::DrawCall`]）：UI 环内
 /// 引脚 + scissor（物理像素）。宿主侧的组装形态，录制层只消费。
 #[derive(Clone, Copy, Debug)]
 pub struct UiDrawCall {
@@ -85,7 +85,7 @@ pub struct UiDrawCall {
     pub scissor: [u32; 4],
 }
 
-/// 一次 UI 绘制的全部产物（`overlay::framework::paint` 组装，[`super::frames`] 消费）：
+/// 一次 UI 绘制的全部产物（`overlay::framework::paint` 组装，[`crate::render::pipeline::frames`] 消费）：
 /// 图集槽位 + 屏幕 points 尺寸 + 逐 clip draw 列表；顶点/索引已由生产方写入 UI 环
 /// 本帧槽 buffer，draw 用环内引脚定位。
 pub struct UiPaint {

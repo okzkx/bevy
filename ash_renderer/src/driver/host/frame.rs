@@ -39,7 +39,7 @@ use crate::{
     scene::{
         GapSnapshot, InstanceLedger, LodGroups, ResidencySettings,
     },
-    vulkan::{
+    render::{
         frustum_planes, pack_frame_uniforms, AcquireOutcome, BindlessTables, Context,
         CullDiagnostics, CullPass, CullSettings, FrameDraw, FramePool, FrameSample,
         FrameUniformsData, GraphicsPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
@@ -425,7 +425,7 @@ pub(crate) fn draw_frame(
             )
         }
         None => (
-            crate::vulkan::PLACEHOLDER_DIR_TO_LIGHT,
+            crate::render::PLACEHOLDER_DIR_TO_LIGHT,
             [0.0; 4],
         ), // 无灯：直射项归零，方向留合法占位（共享常量见 descriptors.rs）
     };
@@ -613,15 +613,15 @@ pub(crate) fn draw_frame(
     occlusion_diag.fallback = if occl_dispatch.is_some() {
         None
     } else if !occlusion_settings.enabled {
-        Some(crate::vulkan::OcclusionFallback::Disabled)
+        Some(crate::render::OcclusionFallback::Disabled)
     } else if !cull_settings.enabled {
-        Some(crate::vulkan::OcclusionFallback::CullOff)
+        Some(crate::render::OcclusionFallback::CullOff)
     } else if cull_bound == 0 {
         None // 空场：无可判行，不算 fallback（画面语义 = 本来就无对象）
     } else if !hiz.ready() {
-        Some(crate::vulkan::OcclusionFallback::PyramidWarmup)
+        Some(crate::render::OcclusionFallback::PyramidWarmup)
     } else if camera_jumped {
-        Some(crate::vulkan::OcclusionFallback::CameraJump)
+        Some(crate::render::OcclusionFallback::CameraJump)
     } else {
         None
     };
@@ -721,7 +721,7 @@ pub(crate) fn draw_frame(
             info!(
                 "indirect 提交首跑（前置闸门②）：在场行 {indirect_count}，命令环 {}B/条，\
                  图形侧一次 cmd_draw_indexed_indirect（push 已退役，firstInstance 携带槽号）",
-                crate::vulkan::INDIRECT_COMMAND_SIZE,
+                crate::render::INDIRECT_COMMAND_SIZE,
             );
             indirect_stats.first_run_logged = true;
         }

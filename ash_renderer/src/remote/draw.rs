@@ -14,7 +14,7 @@ use ash_macros::system;
 
 use crate::driver::host::DrawListVerify;
 use crate::scene::InstanceLedger;
-use crate::vulkan::{CullDiagnostics, IndirectStats};
+use crate::render::{CullDiagnostics, IndirectStats};
 
 use super::{invalid_params, BrpResult};
 

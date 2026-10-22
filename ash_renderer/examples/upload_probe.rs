@@ -29,7 +29,7 @@ use std::sync::Mutex;
 
 use ash::{ext::debug_utils, vk, Device, Entry};
 use ash_renderer::common::error::VulkanError;
-use ash_renderer::vulkan::{
+use ash_renderer::render::{
     convert_mesh, BufferRole, CopyRegion, GpuBuffer, MemoryContract, MeshConvertError, MeshPool,
     PoolRange, StagingCopy, UploadBatch, Uploader, VERTEX_STRIDE,
 };
@@ -358,7 +358,7 @@ fn upload_asset(
     pool: &mut MeshPool,
     uploader: &mut Uploader,
     id: AssetId<Mesh>,
-    converted: ash_renderer::vulkan::ConvertedMesh,
+    converted: ash_renderer::render::ConvertedMesh,
     wait_draws: &mut dyn FnMut() -> Result<(), VulkanError>,
 ) -> u64 {
     if pool.resident(id).is_some() {
@@ -750,7 +750,7 @@ fn group_d_cross_family(
                     size: index.size,
                 },
             ],
-            releases: vec![ash_renderer::vulkan::Release {
+            releases: vec![ash_renderer::render::Release {
                 buffer: vertex_pool,
                 to_family: gfx_family,
             }],

@@ -14,7 +14,7 @@ use ash_macros::system;
 use crate::{
     driver::host::FrameSyncSettings,
     overlay::{EguiPassTiming, MonitorHistory},
-    vulkan::{Context, ImageCache, MeshPool, PerfLedger},
+    render::{Context, ImageCache, MeshPool, PerfLedger},
 };
 
 use super::{BrpResult, invalid_params};

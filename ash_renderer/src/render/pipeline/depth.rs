@@ -10,7 +10,7 @@ use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
 
-use super::Context;
+use crate::render::Context;
 
 /// 深度附件格式（D32_SFLOAT，reverse-Z 深度链的载体）。支持查询在
 /// [`DepthTarget::new`]；管线的深度附件格式声明与这里同一常量

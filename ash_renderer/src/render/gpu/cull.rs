@@ -32,7 +32,7 @@ use bevy::prelude::Resource;
 
 use crate::common::error::Result;
 
-use super::Context;
+use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下；compute 编译链与图形同一闸门）。
 const CULL_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cull.spv"));
@@ -343,7 +343,7 @@ mod tests {
     /// 语义——真实相机的 view_proj 走 BRP 对照验）。
     #[test]
     fn world_aabb_vs_frustum_matches_conservative_box() {
-        use crate::vulkan::conservative_world_aabb;
+        use crate::render::conservative_world_aabb;
         // 相机在原点看 -Z：view = 平移 (0,0,-3)；正交半宽 2、view Z[-10,0] →
         // clip Z[0,1]（D3D 型深度，与帧 UBO 同一 clip volume 约定——矩阵手构
         // 避免 glam 投影 API 的型别往返，行组合在 identity 测试里已钉）

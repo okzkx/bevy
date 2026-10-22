@@ -23,7 +23,7 @@ use crate::{
     common::error::{Result, VulkanError},
     common::syntax::ResultTierExt,
     overlay::{AtlasGpu, UiVertexRing},
-    vulkan::{
+    render::{
         BindlessTables, Context, CullPass, FramePool, GraphicsPipeline, GpuTimer, HizPyramid,
         ImageCache, IndirectPass, InstanceTables, LodPass, MeshPool, OcclusionPass,
         OverlayPipeline, Swapchain, Uploader, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
