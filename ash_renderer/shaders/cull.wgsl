@@ -41,6 +41,20 @@ struct ObjectRecord {
 // build_indirect 置位"两段合起来 = 缺口环每帧全量重写（标记环同款纪律，
 // 不在场槽不残留陈旧缺口）。
 @group(0) @binding(9) var<storage, read_write> gap_marks: array<u32>;
+// 8.3 shadow 域（第二集，组号随管线布局走）：b0 shadow UBO（四 cascade 平面
+// + 矩阵族，384B 平面超 push 上限故走 UBO）/ b5 交错标记环（[槽][cascade]，
+// 四标记一次 dispatch 内联写）。
+@group(1) @binding(0) var<uniform> shadow: ShadowUniforms;
+@group(1) @binding(5) var<storage, read_write> shadow_marks: array<u32>;
+
+struct ShadowUniforms {
+    cascade_view_proj: array<mat4x4f, 4>,
+    planes: array<vec4f, 24>,
+    splits: vec4f,
+    camera_forward: vec4f,
+    camera_pos: vec4f,
+    map_size: vec4f,
+}
 
 var<immediate> push: PushCull;
 struct PushCull {
@@ -92,4 +106,22 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     marks[slot] = visible;
     gap_marks[slot] = 0u;
+    // —— 8.3 shadow 标记（四 cascade 内联）：同一世界保守盒逐 cascade 求交。
+    // 平面来自 shadow UBO group(1)（4×6=24 平面 384B 超 push 上限的落位）。
+    // 两枚语义钉的执行面：这里只做视锥标记——Hi-Z 遮挡不参与 shadow（主相机
+    // 深度语义对 shadow 视锥不合法）；LOD 粗化不在标记侧（shadow_build 按
+    // 档位环再粗一档取引脚）。
+    for (var c = 0u; c < 4u; c = c + 1u) {
+        var svis = 1u;
+        for (var p = 0u; p < 6u; p = p + 1u) {
+            let pl = shadow.planes[c * 6u + p];
+            let px = select(wmin.x, wmax.x, pl.x >= 0.0);
+            let py = select(wmin.y, wmax.y, pl.y >= 0.0);
+            let pz = select(wmin.z, wmax.z, pl.z >= 0.0);
+            if pl.x * px + pl.y * py + pl.z * pz + pl.w < 0.0 {
+                svis = 0u;
+            }
+        }
+        shadow_marks[slot * 4u + c] = svis;
+    }
 }

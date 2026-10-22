@@ -3,7 +3,8 @@
 //! buffer）、无深度附件、无混合、单 color 附件、动态 viewport/scissor。
 //!
 //! set 布局由调用方传入（集与布局同源纪律）：合成 pass = [set1 帧UBO layout,
-//! G-buffer 采样集 layout]，present blit = [G-buffer 采样集 layout]——
+//! G-buffer 采样集 layout, cluster 集 layout, shadow 域 layout（8.3）]，
+//! present blit = [G-buffer 采样集 layout]——
 //! 采样集布局里本 pass 用不到的 binding 合法闲置（描述符写入完整，非
 //! partially-bound 的悬空）。
 
@@ -207,13 +208,14 @@ impl CompositePipeline {
         frame_layout: vk::DescriptorSetLayout,
         gbuffer_layout: vk::DescriptorSetLayout,
         cluster_layout: vk::DescriptorSetLayout,
+        shadow_layout: vk::DescriptorSetLayout,
     ) -> Result<Self> {
         Ok(Self {
             inner: FullscreenPipeline::new(
                 ctx,
                 GBUFFER_COMPOSITE_SPV,
                 hdr_format,
-                &[frame_layout, gbuffer_layout, cluster_layout],
+                &[frame_layout, gbuffer_layout, cluster_layout, shadow_layout],
             )?,
         })
     }

@@ -27,7 +27,8 @@ use crate::{
         BindlessTables, ClusterTargets, CompositePipeline, Context, CullPass, FramePool,
         GBufferTargets, GraphicsPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
         InstanceTables, LodPass, MeshPool, OcclusionPass, OverlayPipeline, PresentBlitPipeline,
-        TransparentPasses, TransparentPipeline, Swapchain, Uploader,
+        ShadowBuildPass, ShadowPipeline, ShadowTargets, TransparentPasses, TransparentPipeline,
+        Swapchain, Uploader,
         ALBEDO_FORMAT, DEPTH_FORMAT, LightTable, MATPARAM_FORMAT, MAX_FRAMES_IN_FLIGHT,
         NORMAL_FORMAT, TABLE_CAPACITY,
     },};
@@ -45,11 +46,11 @@ pub(super) fn init_vulkan(
     _main_thread: NonSendMarker,
     mut commands: Commands,
 ) -> Result<(), BevyError> {
-    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer, pipeline, composite_pipeline, blit_pipeline, light_table, transparent_targets, transparent_passes, transparent_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, lod_pass, ui_ring, gpu_timer) =
+    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer, pipeline, composite_pipeline, blit_pipeline, light_table, transparent_targets, transparent_passes, transparent_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, lod_pass, shadow_targets, shadow_pipeline, shadow_build_pass, ui_ring, gpu_timer) =
         try_init_vulkan(&wrapper)
             .or_fatal("Vulkan 初始化失败，资源束一个都不插入")?; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过帧循环
     info!(
-        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GBufferTargets（G-buffer 附件 + HDR 中间目标，8.1）+ GraphicsPipeline + CompositePipeline + PresentBlitPipeline + ClusterTargets/TransparentPasses/TransparentPipeline（透明 Clustered Forward 层，8.1.3）+ OverlayPipeline + CullPass（视锥剔除 compute）+ IndirectPass（indirect 命令组装 compute）+ HizPyramid（Hi-Z 金字塔）+ OcclusionPass（遮挡测试 compute）+ LodPass（LOD 选档 compute，6.2）+ UiVertexRing + GpuTimer（5.5 GPU 帧计时）；清屏+剔除+遮挡+选档+组装+绘制自下一帧（Last）起"
+        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GBufferTargets（G-buffer 附件 + HDR 中间目标，8.1）+ GraphicsPipeline + CompositePipeline + PresentBlitPipeline + ClusterTargets/TransparentPasses/TransparentPipeline（透明 Clustered Forward 层，8.1.3）+ OverlayPipeline + CullPass（视锥剔除 compute）+ IndirectPass（indirect 命令组装 compute）+ HizPyramid（Hi-Z 金字塔）+ OcclusionPass（遮挡测试 compute）+ LodPass（LOD 选档 compute，6.2）+ ShadowTargets/ShadowPipeline/ShadowBuildPass（CSM 级联阴影，8.3）+ UiVertexRing + GpuTimer（5.5 GPU 帧计时）；清屏+剔除+遮挡+选档+组装+绘制自下一帧（Last）起"
     );
     // 插入顺序 = 创建顺序；World 清场顺序不定，退出时的反序拆除见 teardown_vulkan
     commands.insert_resource(ctx);
@@ -74,6 +75,11 @@ pub(super) fn init_vulkan(
     commands.insert_resource(hiz);
     commands.insert_resource(occlusion_pass);
     commands.insert_resource(lod_pass);
+    // shadow 家族（8.3）：管线先于资源插（拆时反序先拆管线再拆资源，
+    // layout 借用关系与创建序一致）
+    commands.insert_resource(shadow_pipeline);
+    commands.insert_resource(shadow_build_pass);
+    commands.insert_resource(shadow_targets);
     commands.insert_resource(ui_ring);
     commands.insert_resource(gpu_timer);
     Ok(())
@@ -162,13 +168,24 @@ fn try_init_vulkan(
     // 全屏对（8.1/8.2.3）：合成（G-buffer 光照累积 → HDR 目标，layout 借 set1 +
     // G-buffer 采样 + cluster 集）与 present blit（HDR 目标 → swapchain）——
     // 拆除序先于 GBufferTargets/ClusterTargets 与 BindlessTables（layout 借用关系）
+    // shadow 资源族（8.3）：级联深度图/UBO/标记/命令环 + 描述符——先于合成
+    // 管线（set layout 借用）与 shadow 命令组装/绘制管线
+    let shadow_targets = ShadowTargets::new(&ctx)?;
     let composite_pipeline = CompositePipeline::new(
         &ctx,
         crate::render::HDR_FORMAT,
         tables.set1_layout(),
         gbuffer.sampled_layout(),
         transparent_targets.set_layout(),
+        shadow_targets.set_layout(),
     )?;
+    let shadow_pipeline = ShadowPipeline::new(
+        &ctx,
+        instance_tables.set2_layout(),
+        shadow_targets.set_layout(),
+    )?;
+    let shadow_build_pass =
+        ShadowBuildPass::new(&ctx, instance_tables.set2_layout(), shadow_targets.set_layout())?;
     let blit_pipeline = PresentBlitPipeline::new(
         &ctx,
         swapchain.view_format,
@@ -199,7 +216,7 @@ fn try_init_vulkan(
     )?;
     // 视锥剔除 compute 管线（5.2）：只借 set2（b0/b1/b2 只读三表 + b3 标记），
     // 平面随 112B push——前置闸门④的载体（空转首跑在首个有实例的帧收账）
-    let cull_pass = CullPass::new(&ctx, instance_tables.set2_layout())?;
+    let cull_pass = CullPass::new(&ctx, instance_tables.set2_layout(), shadow_targets.set_layout())?;
     // indirect 命令组装 compute 管线（5.3）：只借 set2（b0 对象表 + b3 标记 +
     // b4 在场环 + b5 命令环），count 随 4B push——闸门②首跑在首个有在场行的帧收账
     let indirect_pass = IndirectPass::new(&ctx, instance_tables.set2_layout())?;
@@ -227,7 +244,7 @@ fn try_init_vulkan(
         ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer,
         pipeline, composite_pipeline, blit_pipeline, light_table, transparent_targets, transparent_passes,
         transparent_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass,
-        lod_pass, ui_ring, gpu_timer,
+        lod_pass, shadow_targets, shadow_pipeline, shadow_build_pass, ui_ring, gpu_timer,
     ))
 }
 
@@ -304,6 +321,11 @@ pub(super) fn teardown_vulkan(world: &mut World) {
     world.remove_resource::<CullPass>();
     world.remove_resource::<IndirectPass>();
     world.remove_resource::<LodPass>();
+    // shadow 家族（8.3）：管线 layout 借用 ShadowTargets 的 set layout（其又借
+    // InstanceTables set2）——先拆管线再拆资源，资源先于 InstanceTables
+    world.remove_resource::<ShadowBuildPass>();
+    world.remove_resource::<ShadowPipeline>();
+    world.remove_resource::<ShadowTargets>();
     // GPU 常驻绘制数据随管线之后拆（管线 layout 借用其 set2 layout），描述符
     // 只指向自己的三份 buffer——随字段 Drop，顺序在资产级自由
     world.remove_resource::<InstanceTables>();
@@ -347,6 +369,9 @@ type InitChain = (
     HizPyramid,
     OcclusionPass,
     LodPass,
+    ShadowTargets,
+    ShadowPipeline,
+    ShadowBuildPass,
     UiVertexRing,
     GpuTimer,
 );

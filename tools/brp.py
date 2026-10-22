@@ -286,6 +286,14 @@ def cmd_cull_stats(args):
     out(rpc(args.host, args.port, "ash_renderer/cull_stats"))
 
 
+def cmd_shadow_set(args):
+    out(rpc(args.host, args.port, "ash_renderer/shadow_set", {"enabled": args.enabled.lower() == "true"}))
+
+
+def cmd_shadow_stats(args):
+    out(rpc(args.host, args.port, "ash_renderer/shadow_stats", {}))
+
+
 def cmd_light_spawn(args):
     params = {"pos": args.pos, "color": args.color, "radius": args.radius,
               "intensity": args.intensity}
@@ -654,6 +662,12 @@ def main():
     sub.add_parser("stats", help="增量计量读数（ash_renderer/increment_stats）").set_defaults(func=cmd_stats)
 
     sub.add_parser("cull-stats", help="剔除读数对照：GPU 标记 vs CPU 参照逐实体 + 不一致清单（ash_renderer/cull_stats；读数陈旧 ≤2 帧，对照前等 ≥3 帧）").set_defaults(func=cmd_cull_stats)
+
+    p = sub.add_parser("shadow-set", help="阴影开关（ash_renderer/shadow_set：false = 全链旁路，画面回 8.2 基线）")
+    p.add_argument("enabled", choices=["true", "false"])
+    p.set_defaults(func=cmd_shadow_set)
+
+    sub.add_parser("shadow-stats", help="阴影对照读数（ash_renderer/shadow_stats：逐 cascade GPU 标记 vs CPU 参照，判定线 3 读数口）").set_defaults(func=cmd_shadow_stats)
 
     p = sub.add_parser("light-spawn", help="spawn 点光进常驻表（ash_renderer/light_spawn，8.2.2；返回槽号=稳定身份，下帧生效）")
     p.add_argument("--pos", type=float, nargs=3, required=True, metavar=("X", "Y", "Z"), help="世界位置")

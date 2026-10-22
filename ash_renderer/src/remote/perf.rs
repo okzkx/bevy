@@ -58,6 +58,7 @@ pub(crate) fn perf_stats(
         "frame_wall_ms": percentile_block(&perf, |s| s.frame_wall_ms),
         "gpu_total_ms": percentile_block(&perf, |s| s.gpu_total_ms),
         "gpu_lighting_ms": percentile_block(&perf, |s| s.gpu_lighting_ms),
+        "gpu_shadow_ms": percentile_block(&perf, |s| s.gpu_shadow_ms),
         "gpu_compute_ms": percentile_block(&perf, |s| s.gpu_compute_ms),
         "gpu_hiz_ms": percentile_block(&perf, |s| s.gpu_hiz_ms),
         "sections_mean": {
@@ -132,6 +133,7 @@ pub(crate) fn perf_samples(In(params): In<Option<Value>>, perf: Res<PerfLedger>)
                 "record_submit_ms": s.record_submit_ms,
                 "present_ms": s.present_ms,
                 "gpu_compute_ms": s.gpu_compute_ms,
+                "gpu_shadow_ms": s.gpu_shadow_ms,
                 "gpu_lighting_ms": s.gpu_lighting_ms,
                 "gpu_hiz_ms": s.gpu_hiz_ms,
                 "gpu_total_ms": s.gpu_total_ms,

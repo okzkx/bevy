@@ -6,3 +6,4 @@ pub(crate) mod hiz;
 pub(crate) mod indirect;
 pub(crate) mod lod;
 pub(crate) mod occlusion;
+pub(crate) mod shadow_build;

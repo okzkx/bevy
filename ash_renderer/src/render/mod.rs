@@ -99,5 +99,12 @@ pub use pipeline::overlay_pipeline::{
     pack_ui_push, OverlayPipeline, UiDrawCall, UiPaint, UI_PUSH_CONSTANTS_SIZE, UI_VERTEX_STRIDE,
 };
 pub use pipeline::graphics_pipeline::GraphicsPipeline;
+pub use pipeline::shadow::{ShadowPipeline, ShadowTargets, ShadowWriteDraw, SHADOW_UBO_SIZE};
+pub use gpu::shadow_build::ShadowBuildPass;
+pub use shading::shadow::{
+    cascade_matrices, cascade_slice_boundaries, pack_shadow_uniforms, ShadowCascadeInput,
+    ShadowDiagnostics, ShadowSettings, ShadowUniformsData, SHADOW_CASCADES, SHADOW_MAP_SIZE,
+    SHADOW_MAX_DISTANCE, SHADOW_NEAR_DISTANCE,
+};
 pub use resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
 pub use swapchain::{AcquireOutcome, PresentOutcome, Swapchain};
