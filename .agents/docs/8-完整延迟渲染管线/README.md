@@ -6,13 +6,13 @@
 
 **一句话说明**：本步把现行"单方向光 Lambert 直出"改造成无烘焙、传统结构的 PC 端完整管线——Filament BRDF 材质、多光源光照累积、CSM+PCSS 级联软阴影、HDR/ToneMapping/Bloom/SMAA；本步不主张 GI 本体（归步骤 9）、反射与精确 OIT，也不把步骤 5/6 的 GPU-driven 骨架搬回 CPU（draw_calls 维持 5.3 口径是贯穿红线）。
 
-**当前验收状态：⬜ 未开工**。范围 2026-10-19 用户增补定稿，管线形状 2026-10-20 拍板（deferred + Clustered Forward、开工即 3D cluster、GPU bitonic 透明排序、GPU-driven shadow pass、motion vectors 留位）；段级拆解施工计划已立案（2026-10-21，[施工计划：完整延迟渲染管线五段拆解](施工计划：完整延迟渲染管线五段拆解.md)）。
+**当前验收状态：⬜ 未开工**。范围 2026-10-19 用户增补定稿，管线形状 2026-10-20 拍板（deferred + Clustered Forward、开工即 3D cluster、GPU bitonic 透明排序、GPU-driven shadow pass、motion vectors 留位）；段级拆解施工计划已立案（2026-10-21，[施工计划：完整延迟渲染管线五段拆解](施工计划：完整延迟渲染管线五段拆解.md)）；8.1 段施工计划已立案（2026-10-22，[施工计划：G-buffer与透明层拆解](8.1-G-buffer与不透明几何/施工计划：G-buffer与透明层拆解.md)——世界位置取法=深度重建、render/ 全量一次迁移两枚拍板）。
 
 ## 施工顺序
 
 | 段 | 文件夹 | 范围（即各段一句话说明的占位） | 状态 |
 |---|---|---|---|
-| 8.1 | `8.1-G-buffer与不透明几何`（开工时立） | G-buffer 布局与世界位置取法、motion vectors 留位、透明拆 Clustered Forward 层（开工即 3D cluster）+ GPU bitonic 排序；为 8.2 光照累积与步骤 9 SCGI 供原料 | ⬜ 已立案（2026-10-21） |
+| 8.1 | [8.1-G-buffer与不透明几何](8.1-G-buffer与不透明几何/) | G-buffer 布局与世界位置取法（已拍板=深度重建）、motion vectors 留位、透明拆 Clustered Forward 层（开工即 3D cluster）+ GPU bitonic 排序；为 8.2 光照累积与步骤 9 SCGI 供原料 | ⬜ 段施工计划已立案（2026-10-22） |
 | 8.2 | `8.2-FilamentBRDF与多光源`（开工时立） | 材质参数面扩容（metallic/roughness/normal/AO）、光照累积 pass、多光源列表 GPU 驻留（预留 shadow 标志位） | ⬜ 已立案（2026-10-21） |
 | 8.3 | `8.3-CSM与PCSS级联阴影`（开工时立） | shadow depth pass 逐 cascade 走 GPU-driven（标记链 + build_indirect，CPU 只发矩阵）、级联划分、PCSS 滤波半径、阴影采样进光照累积 | ⬜ 已立案（2026-10-21） |
 | 8.4 | `8.4-HDR与ToneMapping`（开工时立） | 不透明+透明合成进 HDR 契约、Bloom（HDR 域）、ToneMapping、输出编码恰好一次（终结 swapchain 编码判定线悬案） | ⬜ 已立案（2026-10-21） |
@@ -22,7 +22,7 @@
 
 ## 开工前置
 
-- **目录组织（2026-10-21 用户拍板）**：实施时建 `render/` 文件夹归渲染相关代码，渲染管线/BRDF 着色/后处理等分文件夹（`pipeline/`/`shading/`/`post/` 提案）；迁移范围与子目录细则随 8.1 段施工计划拍板（[施工计划 §5](施工计划：完整延迟渲染管线五段拆解.md)）。
+- **目录组织（2026-10-21 用户拍板）**：实施时建 `render/` 文件夹归渲染相关代码，渲染管线/BRDF 着色/后处理等分文件夹（`pipeline/`/`shading/`/`post/` 提案）；**8.1 的代码落 `render/pipeline/`**（2026-10-22 用户钉明，[施工计划 §5](施工计划：完整延迟渲染管线五段拆解.md)）；迁移范围剩余部分与子目录细则随 8.1 段施工计划拍板。
 - 步骤 5/6 的步骤级验收归档欠账仍先于本步骤开工（[路线图当前位置](../学习目标实现步骤.md)原欠账保留）。
 - 挂账 F25（6.2 选档链潜伏缺陷）/F26（zero_day 帧时间空洞）不阻塞本步施工（[待修复清单 §7](../待修复清单.md)）。
 - 步骤 7 三场景（Sponza/zero_day/Poly Haven）为长期验收场；7.3 供料四件（真 PBR 贴图面）为 8.2 验收资产。
