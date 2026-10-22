@@ -13,7 +13,7 @@ use ash_macros::system;
 
 use crate::{
     driver::host::FrameSyncSettings,
-    overlay::{EguiPassTiming, MonitorHistory},
+    overlay::{EguiPassTiming, MonitorHistory, RenderMode},
     render::{Context, ImageCache, MeshPool, PerfLedger},
 };
 
@@ -104,4 +104,31 @@ pub(crate) fn frame_sync_cmd(
         "enabled": settings.enabled,
         "refresh_millihertz": settings.refresh_millihertz,
     }))
+}
+
+/// `ash_renderer/set_render_mode`：着色模式切换（debug 面板 RenderMode 的 BRP
+/// 通道，8.2.3 增补）——unlit/normal/position 是 G-buffer 验收仪器，供无人
+/// 取证分流（画面异常时先切仪器定位问题层）。
+///
+/// # Errors
+/// 参数不合法（未知模式名）。
+#[system]
+pub(crate) fn set_render_mode(
+    In(params): In<Option<Value>>,
+    mut mode: ResMut<'_, RenderMode>,
+) -> BrpResult {
+    #[derive(serde::Deserialize)]
+    struct P {
+        mode: String,
+    }
+    let p: P = serde_json::from_value(params.unwrap_or(Value::Null))
+        .map_err(|e| invalid_params(format!("params: {e}")))?;
+    *mode = match p.mode.as_str() {
+        "lambert" => RenderMode::Lambert,
+        "unlit" => RenderMode::Unlit,
+        "normal" => RenderMode::Normal,
+        "position" => RenderMode::Position,
+        other => return Err(invalid_params(format!("未知模式 {other}：lambert/unlit/normal/position"))),
+    };
+    Ok(json!({ "mode": p.mode }))
 }

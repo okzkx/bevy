@@ -10,7 +10,7 @@
 //! | 0 | albedo | R8G8B8A8_UNORM | 线性反照率（贴图采样 × base_color，sRGB 解码在采样端） |
 //! | 1 | normal | R16G16B16A16_SFLOAT | 世界空间法线 xyz 直存（w 未用；编码取舍见施工记录） |
 //! | 2 | motion vectors | ——（不分配） | 留位：槽位号保留 |
-//! | 3 | matparam | R8G8B8A8_UNORM | 材质标量（8.2.1）：r=metallic / g=AO / b=perceptualRoughness / a=1.0 预留——8.2 光照累积的 PBR 入参 |
+//! | 3 | matparam | R8G8B8A8_UNORM | 材质标量（8.2.1）：r=metallic / g=AO / b=perceptualRoughness / a=reflectance（8.2.3 转正）——光照累积的 PBR 入参 |
 //! | — | depth | D32_SFLOAT | reverse-Z 深度（本体按帧槽在 [`super::depth`]） |
 //!
 //! **HDR 中间目标 hdr**（R16G16B16A16_SFLOAT）：合成（G-buffer 光照）与透明
@@ -38,8 +38,8 @@ pub const ALBEDO_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 pub const NORMAL_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 /// matparam 附件格式（8.2.1）：材质标量 r=metallic / g=AO / b=perceptualRoughness
-/// / a=1.0 预留。8bit 量化与 Filament deferred 层同档（roughness/metallic 均走
-/// 8bit 打包），PBR 语义下精度足够；法线/反照率的编码取舍不适用于标量面。
+/// / a=reflectance。8bit 量化与 Filament deferred 层同档（roughness/metallic
+/// 均走 8bit 打包），PBR 语义下精度足够；法线/反照率的编码取舍不适用于标量面。
 pub const MATPARAM_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 
 /// HDR 中间目标格式（透明层的 alpha blending 也落在此目标上）。

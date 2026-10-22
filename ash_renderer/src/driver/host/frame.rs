@@ -521,6 +521,10 @@ pub(crate) fn draw_frame(
                 ambient_color,
                 light_color,
                 mode: render_mode.as_u32(),
+                // 8.2.3：光照累积 V 向量的相机世界位置（相机缺席帧 zeros 兜底）
+                camera_pos: cam_now
+                    .map(|(t, _)| [t.x, t.y, t.z, 0.0])
+                    .unwrap_or([0.0; 4]),
             }),
         )
         .or_fatal("帧 UBO 写失败，渲染链无法继续")?;
@@ -892,6 +896,8 @@ pub(crate) fn draw_frame(
         // FrameDraw 借 GBufferTargets 引用（record_frame 消费附件视图与采样集）
         composite_pipeline: composite_pipeline.pipeline(),
         composite_layout: composite_pipeline.layout(),
+        // 8.2.3：合成光照累积的 cluster 集（与透明层同一 layout 对象）
+        cluster_set: cluster_targets.frame_set(slot_now),
         blit_pipeline: blit_pipeline.pipeline(),
         blit_layout: blit_pipeline.layout(),
         overlay_pipeline: overlay_pipeline.pipeline(),

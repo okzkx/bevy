@@ -45,12 +45,12 @@ use crate::render::MAX_FRAMES_IN_FLIGHT;
 /// 布局事实上排除了各自异容的必要；异容需求出现时拆两个常量再改）。
 pub const TABLE_CAPACITY: u32 = 1024;
 
-/// 每帧 UBO 字节数（set1 b0）。192B（mat4 view_proj + 灯光参数 + mat4
-/// inv_view_proj——8.1 深度重建世界位置的常量面扩容，128B 冻结边界第二次
-/// 解冻，照 5.1.1 解冻清单先例逐项落日志；与 8.2 光源扩容**分开**解冻，
-/// 段施工记录钉明）；binding 形状（b0 UNIFORM_BUFFER）与 pipeline layout
-/// 不变，range 在写入时的 `DescriptorBufferInfo`，扩容不动 ABI。
-pub const FRAME_UBO_SIZE: u64 = 192;
+/// 每帧 UBO 字节数（set1 b0）。208B（mat4 view_proj + 灯光参数 + mat4
+/// inv_view_proj + vec4 camera_pos——8.2.3 光照累积的 V 向量需要相机世界
+/// 位置，192B 冻结边界第三次解冻，照 5.1.1 解冻清单先例逐项落日志）；binding
+/// 形状（b0 UNIFORM_BUFFER）与 pipeline layout 不变，range 在写入时的
+/// `DescriptorBufferInfo`，扩容不动 ABI。
+pub const FRAME_UBO_SIZE: u64 = 208;
 
 /// 帧数据打包模式（UBO `mode` 字段，与 `debug_draw.wgsl` 的 case 值逐字同源；
 /// 非零值的语义见 host 侧 [`crate::driver::host`] 的材质三模式说明）。
@@ -78,6 +78,9 @@ pub struct FrameUniformsData {
     pub light_color: [f32; 4],
     /// 材质模式（`FRAME_MODE_*`）。
     pub mode: u32,
+    /// 相机世界位置（xyz，8.2.3：光照累积的 V = normalize(camera_pos − world)
+    /// 取数面；w 未用）。相机缺席帧 zeros 兜底（与 view_proj 同源同帧）。
+    pub camera_pos: [f32; 4],
 }
 
 /// [`FrameUniformsData`] 的 WGSL 布局镜像（uniform address space）：本类型不参与
@@ -94,6 +97,7 @@ struct FrameUniformsLayout {
     mode: u32,
     _pad: [u32; 3],
     inv_view_proj: [f32; 16],
+    camera_pos: [f32; 4],
 }
 
 const _: () = {
@@ -103,11 +107,12 @@ const _: () = {
     assert!(std::mem::offset_of!(FrameUniformsLayout, light_color) == 96);
     assert!(std::mem::offset_of!(FrameUniformsLayout, mode) == 112);
     assert!(std::mem::offset_of!(FrameUniformsLayout, inv_view_proj) == 128);
-    assert!(std::mem::size_of::<FrameUniformsLayout>() == 192);
-    assert!(FRAME_UBO_SIZE == 192);
+    assert!(std::mem::offset_of!(FrameUniformsLayout, camera_pos) == 192);
+    assert!(std::mem::size_of::<FrameUniformsLayout>() == 208);
+    assert!(FRAME_UBO_SIZE == 208);
 };
 
-/// [`FrameUniformsData`] → 128B uniform 字节（偏移按 [`FrameUniformsLayout`] 的
+/// [`FrameUniformsData`] → 208B uniform 字节（偏移按 [`FrameUniformsLayout`] 的
 /// 静态断言表手工排布，与 `pipeline.rs::pack_push` 同一纪律）。
 #[must_use]
 pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usize] {
@@ -127,6 +132,10 @@ pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usiz
     // 116..128 对齐垫保持 0；inv_view_proj @ 128（8.1.2 深度重建常量面）
     for (i, v) in d.inv_view_proj.to_cols_array().iter().enumerate() {
         put(128 + i * 4, &v.to_le_bytes());
+    }
+    // camera_pos @ 192（8.2.3 光照累积 V 向量常量面）
+    for (i, v) in d.camera_pos.iter().enumerate() {
+        put(192 + i * 4, &v.to_le_bytes());
     }
     out
 }
@@ -740,5 +749,6 @@ fn identity_frame_uniforms() -> FrameUniformsData {
         ambient_color: [0.0; 4],
         light_color: [0.0; 4],
         mode: FRAME_MODE_LAMBERT,
+        camera_pos: [0.0; 4],
     }
 }

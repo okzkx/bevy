@@ -188,9 +188,11 @@ impl Drop for FullscreenPipeline {
     }
 }
 
-/// 合成管线资源（8.1）：G-buffer 光照 → HDR 中间目标。
-/// layout = [set1 帧 UBO, G-buffer 采样集]（集与布局同源纪律——两个 layout
-/// 对象分别借用 BindlessTables 与 GBufferTargets，拆除序先于两者）。
+/// 合成管线资源（8.1/8.2.3）：G-buffer 光照累积 → HDR 中间目标。
+/// layout = [set1 帧 UBO, G-buffer 采样集, cluster 集]（集与布局同源纪律——
+/// 三个 layout 对象分别借用 BindlessTables、GBufferTargets 与 ClusterTargets，
+/// 拆除序先于三者）。cluster 集为 8.2.3 光照累积的取数面（b0 网格参数 /
+/// b1 光源常驻表 / b2 逐 cluster 列表）。
 #[derive(bevy::prelude::Resource)]
 pub struct CompositePipeline {
     inner: FullscreenPipeline,
@@ -204,13 +206,14 @@ impl CompositePipeline {
         hdr_format: vk::Format,
         frame_layout: vk::DescriptorSetLayout,
         gbuffer_layout: vk::DescriptorSetLayout,
+        cluster_layout: vk::DescriptorSetLayout,
     ) -> Result<Self> {
         Ok(Self {
             inner: FullscreenPipeline::new(
                 ctx,
                 GBUFFER_COMPOSITE_SPV,
                 hdr_format,
-                &[frame_layout, gbuffer_layout],
+                &[frame_layout, gbuffer_layout, cluster_layout],
             )?,
         })
     }

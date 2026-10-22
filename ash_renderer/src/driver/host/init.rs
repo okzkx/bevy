@@ -151,28 +151,29 @@ fn try_init_vulkan(
         tables.set1_layout(),
         instance_tables.set2_layout(),
     )?;
-    // 全屏对（8.1）：合成（G-buffer 光照 → HDR 目标，layout 借 set1+G-buffer 采样
-    // layout）与 present blit（HDR 目标 → swapchain，layout 只借 G-buffer 采样
-    // layout）——拆除序先于 GBufferTargets 与 BindlessTables（layout 借用关系）
+    // 光源常驻表（8.2.2）：punctual 光源 storage 表（槽位+增量账本，常驻拍板
+    // 形态）——先于 cluster 资源建（描述符 b1 引用其帧槽环）
+    let light_table = LightTable::new(&ctx, ctx.memory_contract())?;
+    let light_ring_buffers: Vec<vk::Buffer> =
+        (0..MAX_FRAMES_IN_FLIGHT).map(|s| light_table.ring_buffer(s)).collect();
+    // 透明 Clustered Forward 层（8.1.3）：资源（cluster 表/透明命令链）——先于
+    // 合成管线建（8.2.3 合成的 set2 = cluster 集 layout）
+    let transparent_targets = ClusterTargets::new(&ctx, swapchain.extent, &light_ring_buffers)?;
+    // 全屏对（8.1/8.2.3）：合成（G-buffer 光照累积 → HDR 目标，layout 借 set1 +
+    // G-buffer 采样 + cluster 集）与 present blit（HDR 目标 → swapchain）——
+    // 拆除序先于 GBufferTargets/ClusterTargets 与 BindlessTables（layout 借用关系）
     let composite_pipeline = CompositePipeline::new(
         &ctx,
         crate::render::HDR_FORMAT,
         tables.set1_layout(),
         gbuffer.sampled_layout(),
+        transparent_targets.set_layout(),
     )?;
     let blit_pipeline = PresentBlitPipeline::new(
         &ctx,
         swapchain.view_format,
         gbuffer.sampled_layout(),
     )?;
-    // 光源常驻表（8.2.2）：punctual 光源 storage 表（槽位+增量账本，常驻拍板
-    // 形态）——先于 cluster 资源建（描述符 b1 引用其帧槽环）
-    let light_table = LightTable::new(&ctx, ctx.memory_contract())?;
-    let light_ring_buffers: Vec<vk::Buffer> =
-        (0..MAX_FRAMES_IN_FLIGHT).map(|s| light_table.ring_buffer(s)).collect();
-    // 透明 Clustered Forward 层（8.1.3）：资源（cluster 表/透明命令链）+ compute
-    // 三件（[set2, cluster_set] 双集）+ 透明图形管线（HDR 混合 + 深度重绑）
-    let transparent_targets = ClusterTargets::new(&ctx, swapchain.extent, &light_ring_buffers)?;
     let transparent_passes = TransparentPasses::new(
         &ctx,
         transparent_targets.set_layout(),

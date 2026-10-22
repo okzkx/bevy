@@ -74,9 +74,12 @@ pub struct FrameDraw<'a> {
     /// G-buffer 附件 + HDR 中间目标（8.1：多 pass 帧编排的附件面，采样集
     /// 也在其上——合成 pass 与 present blit 消费）。
     pub gbuffer: &'a GBufferTargets,
-    /// 合成管线（G-buffer 光照 → HDR 中间目标；全屏，无深度/混合）。
+    /// 合成管线（G-buffer 光照累积 → HDR 中间目标；全屏，无深度/混合）。
     pub composite_pipeline: vk::Pipeline,
     pub composite_layout: vk::PipelineLayout,
+    /// cluster 集（8.2.3：合成光照累积的取数面——b0 网格参数 / b1 光源常驻表
+    /// / b2 逐 cluster 列表；与透明层同一 layout 对象）。
+    pub cluster_set: vk::DescriptorSet,
     /// present blit 管线（HDR 中间目标 → swapchain；全屏，无深度/混合）。
     pub blit_pipeline: vk::Pipeline,
     pub blit_layout: vk::PipelineLayout,
@@ -772,8 +775,9 @@ impl FramePool {
                 vk::PipelineBindPoint::GRAPHICS,
                 draw.composite_pipeline,
             );
-            // set0 = 帧 UBO（与场景管线 set1 同一 layout 对象），set1 = G-buffer 采样集
-            let composite_sets = [draw.set1, draw.gbuffer.sampled_set(slot)];
+            // set0 = 帧 UBO（与场景管线 set1 同一 layout 对象），set1 = G-buffer
+            // 采样集，set2 = cluster 集（8.2.3 光照累积取数）
+            let composite_sets = [draw.set1, draw.gbuffer.sampled_set(slot), draw.cluster_set];
             device.cmd_bind_descriptor_sets(
                 frame.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,

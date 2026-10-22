@@ -8,7 +8,8 @@
 // perceptualRoughness clamp 0.045（desktop MIN_PERCEPTUAL_ROUGHNESS）、
 // normal map 经派生 TBN（屏幕空间余切框架，无顶点 tangent 依赖——glTF 资产
 // 不保证 TANGENT 属性）扰动世界法线、occlusion 贴图 R 通道取 AO；三者进
-// matparam 附件（r=metallic/g=AO/b=perceptualRoughness），光照累积 pass 直读。
+// matparam 附件（r=metallic/g=AO/b=perceptualRoughness/a=reflectance），光照
+// 累积 pass 直读。
 //
 // 接口（与 debug_draw 同一 set/binding 冻结表）：
 // - set0 b0/b1：纹理数组 + sampler 数组（runtime array，build.rs 补丁器补 capability）。
@@ -82,6 +83,9 @@ fn normal_cofactor(m: mat4x4f) -> mat3x3f {
 // 屏幕空间余切框架（Schüler 2015 "Normal Mapping Without a Precomputed
 // Tangent"）：由世界位置/uv 的屏幕空间导数现算 TBN——无顶点 tangent 依赖，
 // 任意 glTF 资产可用；导数要求 uniform 控制流（本 shader 无提前 return）。
+// 退化守卫：uv 导数零区（平铺 UV 的整数缝/等值像素块）t=b=0 时
+// inverseSqrt(0)=inf 与 0×inf 产生 NaN（实抓：全画面黑/白紊乱）——
+// 退化侧 T/B 列落 0，最终归一化自然回落几何法线。
 fn cotangent_frame(n: vec3f, p: vec3f, uv: vec2f) -> mat3x3f {
     let dp1 = dpdx(p);
     let dp2 = dpdy(p);
@@ -91,8 +95,11 @@ fn cotangent_frame(n: vec3f, p: vec3f, uv: vec2f) -> mat3x3f {
     let dp1perp = cross(n, dp1);
     let t = dp2perp * duv1.x + dp1perp * duv2.x;
     let b = dp2perp * duv1.y + dp1perp * duv2.y;
-    let invmax = inverseSqrt(max(dot(t, t), dot(b, b)));
-    return mat3x3f(normalize(t * invmax), normalize(b * invmax), n);
+    let m = max(dot(t, t), dot(b, b));
+    let invmax = select(0.0, inverseSqrt(m), m > 1e-20);
+    let t_d = select(vec3f(0.0), normalize(t * invmax), m > 1e-20);
+    let b_d = select(vec3f(0.0), normalize(b * invmax), m > 1e-20);
+    return mat3x3f(t_d, b_d, n);
 }
 
 struct VsOut {
@@ -157,18 +164,22 @@ fn fs_main(in: VsOut) -> GBufferOut {
     }
 
     // —— 法线：几何法线为底，normal map 经派生 TBN 扰动（切线空间 xyz，
-    // glTF +Y up 约定：tex*2-1 后直接进 TBN）
+    // glTF +Y up 约定：tex*2-1 后直接进 TBN）。
+    // TBN 计算必须在**一致控制流**里（dpdx/dpdy 规范要求——分支内调用遇
+    // helper invocation 分歧 = 未定义值，实抓过全画面黑/白紊乱）
+    let tbn = cotangent_frame(normalize(in.world_normal), in.world_pos, in.uv);
     var n = normalize(in.world_normal);
     if (mat.tex_normal != NO_TEXTURE) {
         let nt = textureSampleLevel(
             textures[mat.tex_normal], samplers[mat.sampler_index], in.uv, 0.0).xyz;
-        let tbn = cotangent_frame(n, in.world_pos, in.uv);
         n = normalize(tbn * (nt * 2.0 - 1.0));
     }
 
     return GBufferOut(
         vec4f(albedo.rgb, 1.0),
         vec4f(n, 0.0),
-        vec4f(metallic, occlusion, perceptual_roughness, 1.0),
+        // a = reflectance（介电体 F0 = 0.16·reflectance² 的原值，Filament 默认
+        // 0.5；1.0 预留通道就此转正——8.2.3 光照累积直接消费）
+        vec4f(metallic, occlusion, perceptual_roughness, mat.reflectance),
     );
 }
