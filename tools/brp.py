@@ -256,6 +256,10 @@ def cmd_mutate(args):
     params = {"entity": args.entity}
     if args.base_color:
         params["base_color"] = [float(x) for x in args.base_color]
+    if args.metallic is not None:
+        params["metallic"] = float(args.metallic)
+    if args.roughness is not None:
+        params["perceptual_roughness"] = float(args.roughness)
     if args.slot_base_color_from:
         params["slot_base_color_from"] = args.slot_base_color_from
     if args.mesh_vertex_scale is not None:
@@ -621,6 +625,8 @@ def main():
     p = sub.add_parser("mutate", help="改资产内容：同 AssetId 原位变更，触发 Modified（ash_renderer/mutate_asset）")
     p.add_argument("entity", help="定位实体（取它身上的 Mesh3d/MeshMaterial3d 柄）")
     p.add_argument("--base-color", nargs=4, metavar=("R", "G", "B", "A"), help="材质 base_color（线性域 RGBA）")
+    p.add_argument("--metallic", type=float, help="材质 metallic（[0,1]，8.2 PBR 面）")
+    p.add_argument("--roughness", type=float, help="材质 perceptual_roughness（[0,1]，8.2 PBR 面）")
     p.add_argument("--slot-base-color-from", help="换材质贴图槽：拷源实体的 base_color_texture 柄")
     p.add_argument("--mesh-vertex-scale", type=float, help="mesh 顶点绕原点均匀缩放系数")
     p.add_argument("--image-tint", nargs=3, metavar=("R", "G", "B"), help="base_color_texture 像素按通道乘的色调")
