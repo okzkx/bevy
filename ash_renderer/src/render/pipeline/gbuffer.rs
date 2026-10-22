@@ -74,6 +74,7 @@ impl ColorTarget {
     pub(crate) fn view(&self) -> vk::ImageView {
         self.view
     }
+
 }
 
 impl ColorTarget {
@@ -88,6 +89,7 @@ impl ColorTarget {
         need_blend: bool,
         role: &str,
     ) -> Result<Self> {
+        let _ = extent;
         let features = unsafe {
             ctx.instance
                 .get_physical_device_format_properties(ctx.physical_device, format)

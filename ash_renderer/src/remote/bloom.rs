@@ -34,7 +34,7 @@ pub(crate) fn bloom_set(In(params): In<Option<Value>>, world: &mut World) -> Brp
         settings.tonemap = tonemap;
         echo["tonemap"] = json!(tonemap);
     }
-    if echo.as_object().map_or(true, |o| o.is_empty()) {
+    if echo.as_object().is_none_or(|o| o.is_empty()) {
         return Err(invalid_params("无有效字段（enabled/strength/tonemap 任一）"));
     }
     Ok(json!({ "applied": echo, "current": {

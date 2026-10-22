@@ -68,6 +68,8 @@ impl Plugin for AshHostPlugin {
             .init_resource::<crate::render::ShadowDiagnostics>()
             // Bloom 开关与参数（8.4）：BRP bloom_set 直达
             .init_resource::<crate::render::BloomSettings>()
+            // SMAA 开关（8.5）：BRP smaa_set 直达
+            .init_resource::<crate::render::SmaaSettings>()
             .init_resource::<crate::render::PerfLedger>()
             // DrawList 组装对照账面（7.9 判定线 2 的 BRP 开关对照模式）
             .init_resource::<drawlist::DrawListVerify>()

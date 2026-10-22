@@ -299,13 +299,11 @@ impl BloomTargets {
         )
         .create_sampler(device)?;
         let alloc = |layout: vk::DescriptorSetLayout, count: usize| -> Result<Vec<vk::DescriptorSet>> {
-            let sets = unsafe {
-                device.allocate_descriptor_sets(
-                    &vk::DescriptorSetAllocateInfo::default()
-                        .descriptor_pool(self.pool)
-                        .set_layouts(&std::iter::repeat_n(layout, count).collect::<Vec<_>>()),
-                )
-            }?;
+            let sets = device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(self.pool)
+                    .set_layouts(&std::iter::repeat_n(layout, count).collect::<Vec<_>>()),
+            )?;
             Ok(sets)
         };
         self.sets_down = alloc(self.set_layout_tex, (n - 1) * slots)?;

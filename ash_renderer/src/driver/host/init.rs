@@ -27,6 +27,7 @@ use crate::{
         BindlessTables, ClusterTargets, CompositePipeline, Context, CullPass, FramePool,
         GBufferTargets, GraphicsPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
         BloomPipelines, BloomTargets, InstanceTables, LodPass, MeshPool, OcclusionPass,
+        SmaaPipelines, SmaaTargets,
         OverlayPipeline, PresentTonemapPipeline,
         ShadowBuildPass, ShadowPipeline, ShadowTargets, TransparentPasses, TransparentPipeline,
         Swapchain, Uploader,
@@ -48,11 +49,11 @@ pub(super) fn init_vulkan(
     mut commands: Commands,
 ) -> Result<(), BevyError> {
     let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer, pipeline, composite_pipeline, blit_pipeline, light_table, transparent_targets, transparent_passes, transparent_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, lod_pass, shadow_targets, shadow_pipeline, shadow_build_pass, bloom_targets,
-        bloom_pipelines, ui_ring, gpu_timer) =
+        bloom_pipelines, smaa_targets, smaa_pipelines, ui_ring, gpu_timer) =
         try_init_vulkan(&wrapper)
             .or_fatal("Vulkan 初始化失败，资源束一个都不插入")?; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过帧循环
     info!(
-        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GBufferTargets（G-buffer 附件 + HDR 中间目标，8.1）+ GraphicsPipeline + CompositePipeline + PresentBlitPipeline + ClusterTargets/TransparentPasses/TransparentPipeline（透明 Clustered Forward 层，8.1.3）+ OverlayPipeline + CullPass（视锥剔除 compute）+ IndirectPass（indirect 命令组装 compute）+ HizPyramid（Hi-Z 金字塔）+ OcclusionPass（遮挡测试 compute）+ LodPass（LOD 选档 compute，6.2）+ ShadowTargets/ShadowPipeline/ShadowBuildPass（CSM 级联阴影，8.3）+ BloomTargets/BloomPipelines/PresentTonemapPipeline（HDR 后处理，8.4）+ UiVertexRing + GpuTimer（5.5 GPU 帧计时）；清屏+剔除+遮挡+选档+组装+绘制自下一帧（Last）起"
+        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GBufferTargets（G-buffer 附件 + HDR 中间目标，8.1）+ GraphicsPipeline + CompositePipeline + PresentBlitPipeline + ClusterTargets/TransparentPasses/TransparentPipeline（透明 Clustered Forward 层，8.1.3）+ OverlayPipeline + CullPass（视锥剔除 compute）+ IndirectPass（indirect 命令组装 compute）+ HizPyramid（Hi-Z 金字塔）+ OcclusionPass（遮挡测试 compute）+ LodPass（LOD 选档 compute，6.2）+ ShadowTargets/ShadowPipeline/ShadowBuildPass（CSM 级联阴影，8.3）+ BloomTargets/BloomPipelines/PresentTonemapPipeline（HDR 后处理，8.4）+ SmaaTargets/SmaaPipelines（SMAA 三 pass，8.5）+ UiVertexRing + GpuTimer（5.5 GPU 帧计时）；清屏+剔除+遮挡+选档+组装+绘制自下一帧（Last）起"
     );
     // 插入顺序 = 创建顺序；World 清场顺序不定，退出时的反序拆除见 teardown_vulkan
     commands.insert_resource(ctx);
@@ -80,6 +81,8 @@ pub(super) fn init_vulkan(
     // Bloom 家族（8.4）：管线先于资源插（拆时反序）
     commands.insert_resource(bloom_pipelines);
     commands.insert_resource(bloom_targets);
+    commands.insert_resource(smaa_pipelines);
+    commands.insert_resource(smaa_targets);
     // shadow 家族（8.3）：管线先于资源插（拆时反序先拆管线再拆资源，
     // layout 借用关系与创建序一致）
     commands.insert_resource(shadow_pipeline);
@@ -102,14 +105,14 @@ pub(super) fn init_vulkan(
 fn try_init_vulkan(
     wrapper: &Query<&RawHandleWrapper, With<PrimaryWindow>>,
 ) -> Result<InitChain> {
-    let wrapper = wrapper.single().map_err(|_| {
+        let wrapper = wrapper.single().map_err(|_| {
         VulkanError::Init(
             "PrimaryWindow 上没有 RawHandleWrapper：窗口未在 Startup 前建好，时序假设被打破".into(),
         )
     })?;
     let ctx = Context::new(wrapper)?;
-    let swapchain = Swapchain::new(&ctx)?;
-    // 深度附件按帧槽建（尺寸取 swapchain 首建 extent，重建走 rebuild_depth）
+        let swapchain = Swapchain::new(&ctx)?;
+        // 深度附件按帧槽建（尺寸取 swapchain 首建 extent，重建走 rebuild_depth）
     let frames = FramePool::new(&ctx, swapchain.extent)?;
     // 上传链：池懒建（首帧按需分配）；有专用 transfer 族时两族 CONCURRENT 共享
     //（所有权乒乓不值得，见 GpuBuffer::create_with_families 注释）
@@ -200,9 +203,21 @@ fn try_init_vulkan(
         bloom_targets.set_layout_tex(),
         bloom_targets.set_layout_up(),
     )?;
+    // SMAA 资源族 + 三全屏管线（8.5）：LDR 目标 + edges/blend + 两 LUT——
+    // present tonemap 的落点从 swapchain 改为 LDR 目标（R8G8B8A8_UNORM 线性
+    // 存储），neighborhood 混合后经 swapchain SRGB view 编码恰好一次
+        let smaa_targets = SmaaTargets::new(&ctx, &mut uploader, swapchain.extent)?;
+        let smaa_pipelines = SmaaPipelines::new(
+        &ctx,
+        smaa_targets.set_layout_a(),
+        smaa_targets.set_layout_b(),
+        vk::Format::R8G8B8A8_UNORM,
+        vk::Format::R8G8B8A8_UNORM,
+        swapchain.view_format,
+    )?;
     let blit_pipeline = PresentTonemapPipeline::new(
         &ctx,
-        swapchain.view_format,
+        vk::Format::R8G8B8A8_UNORM,
         tables.set1_layout(),
         gbuffer.sampled_layout(),
         bloom_targets.set_layout_up(),
@@ -261,7 +276,7 @@ fn try_init_vulkan(
         pipeline, composite_pipeline, blit_pipeline, light_table, transparent_targets, transparent_passes,
         transparent_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass,
         lod_pass, shadow_targets, shadow_pipeline, shadow_build_pass, bloom_targets,
-        bloom_pipelines, ui_ring, gpu_timer,
+        bloom_pipelines, smaa_targets, smaa_pipelines, ui_ring, gpu_timer,
     ))
 }
 
@@ -322,6 +337,10 @@ pub(super) fn teardown_vulkan(world: &mut World) {
     // 无借用）与 BindlessTables
     world.remove_resource::<BloomPipelines>();
     world.remove_resource::<BloomTargets>();
+    // SMAA 家族（8.5）：管线 layout 借用 SmaaTargets 的 set layouts——先拆
+    // 管线再拆资源；LUT 直传票据随退出排空覆盖
+    world.remove_resource::<SmaaPipelines>();
+    world.remove_resource::<SmaaTargets>();
     // 透明层（8.1.3）：TransparentPipeline 的 layout 借用 BindlessTables/
     // InstanceTables/ClusterTargets 的 set layouts——先拆管线再拆资源
     world.remove_resource::<TransparentPipeline>();
@@ -396,6 +415,8 @@ type InitChain = (
     ShadowBuildPass,
     BloomTargets,
     BloomPipelines,
+    SmaaTargets,
+    SmaaPipelines,
     UiVertexRing,
     GpuTimer,
 );
