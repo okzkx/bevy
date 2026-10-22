@@ -83,9 +83,15 @@ pub struct FrameDraw<'a> {
     /// cluster 集（8.2.3：合成光照累积的取数面——b0 网格参数 / b1 光源常驻表
     /// / b2 逐 cluster 列表；与透明层同一 layout 对象）。
     pub cluster_set: vk::DescriptorSet,
-    /// present blit 管线（HDR 中间目标 → swapchain；全屏，无深度/混合）。
-    pub blit_pipeline: vk::Pipeline,
-    pub blit_layout: vk::PipelineLayout,
+    /// present tonemap 管线（8.4：HDR + Bloom → ACES → swapchain）。
+    pub tonemap_pipeline: vk::Pipeline,
+    pub tonemap_layout: vk::PipelineLayout,
+    /// bloom 参数集（8.4：tonemap set2——up0 + 采样器 + 参数 UBO；恒 Some，
+    /// 关闭帧 shader 内旁路 bloom 采样）。
+    pub bloom_params_set: vk::DescriptorSet,
+    /// Bloom 链录制输入（8.4；关闭 = None——链整段跳过，up0 内容陈旧但
+    /// tonemap 不采样）。
+    pub bloom: Option<crate::render::pipeline::post::BloomFrameDraw>,
     /// overlay 管线（UI 半边的绘制入口；深度格式与实例对齐声明，读/写全关）。
     pub overlay_pipeline: vk::Pipeline,
     /// overlay 自有 pipeline layout（只借 set0，无 set1）——换管线后描述符绑定
@@ -1184,7 +1190,301 @@ impl FramePool {
                 timer.mark(frame.command_buffer, slot, 5);
             }
 
-            // —— present blit + UI（8.1）：swapchain 只被全屏 blit 写——HDR 中间
+            // —— Bloom 链（8.4，HDR 域）：prefilter（读 HDR，软膝阈值提亮部）
+            // → 逐级 down（dual-Kawase 13 tap）→ 逐级 up（tent + 对应级直加）。
+            // 关 = None（链整段跳过，up0 陈旧但 tonemap 侧 shader 不采样）；
+            // 各级目标 UNDEFINED→COLOR 进 / COLOR→SHADER_READ_ONLY 出（UNDEFINED
+            // 作 oldLayout 从任意终态合法，内容每帧重写）。
+            if let Some(bloom) = &draw.bloom {
+                let e0 = bloom.extents[0];
+                let to_color = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(bloom.images_down[0])
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .level_count(1)
+                            .layer_count(1),
+                    )
+                    .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+                device.cmd_pipeline_barrier(
+                    frame.command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    std::slice::from_ref(&to_color),
+                );
+                let bloom_attachment = vk::RenderingAttachmentInfo::default()
+                    .image_view(bloom.views_down[0])
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .store_op(vk::AttachmentStoreOp::STORE);
+                device.cmd_begin_rendering(
+                    frame.command_buffer,
+                    &vk::RenderingInfo::default()
+                        .render_area(vk::Rect2D {
+                            offset: vk::Offset2D::default(),
+                            extent: e0,
+                        })
+                        .layer_count(1)
+                        .color_attachments(std::slice::from_ref(&bloom_attachment)),
+                );
+                device.cmd_bind_pipeline(
+                    frame.command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    bloom.prefilter_pipeline,
+                );
+                let pre_sets = [bloom.gbuffer_set];
+                device.cmd_bind_descriptor_sets(
+                    frame.command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    bloom.prefilter_layout,
+                    0,
+                    &pre_sets,
+                    &[],
+                );
+                device.cmd_set_viewport(
+                    frame.command_buffer,
+                    0,
+                    &[vk::Viewport {
+                        x: 0.0,
+                        y: 0.0,
+                        width: e0.width as f32,
+                        height: e0.height as f32,
+                        min_depth: 0.0,
+                        max_depth: 1.0,
+                    }],
+                );
+                device.cmd_set_scissor(
+                    frame.command_buffer,
+                    0,
+                    &[vk::Rect2D { offset: vk::Offset2D::default(), extent: e0 }],
+                );
+                device.cmd_draw(frame.command_buffer, 3, 1, 0, 1);
+                device.cmd_end_rendering(frame.command_buffer);
+                let b0_read = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(bloom.images_down[0])
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .level_count(1)
+                            .layer_count(1),
+                    )
+                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                device.cmd_pipeline_barrier(
+                    frame.command_buffer,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    std::slice::from_ref(&b0_read),
+                );
+                for i in 1..crate::render::BLOOM_LEVELS {
+                    let ei = bloom.extents[i];
+                    let to_color_i = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(bloom.images_down[i])
+                        .subresource_range(
+                            vk::ImageSubresourceRange::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .level_count(1)
+                                .layer_count(1),
+                        )
+                        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+                    device.cmd_pipeline_barrier(
+                        frame.command_buffer,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        std::slice::from_ref(&to_color_i),
+                    );
+                    let att_i = vk::RenderingAttachmentInfo::default()
+                        .image_view(bloom.views_down[i])
+                        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                        .store_op(vk::AttachmentStoreOp::STORE);
+                    device.cmd_begin_rendering(
+                        frame.command_buffer,
+                        &vk::RenderingInfo::default()
+                            .render_area(vk::Rect2D {
+                                offset: vk::Offset2D::default(),
+                                extent: ei,
+                            })
+                            .layer_count(1)
+                            .color_attachments(std::slice::from_ref(&att_i)),
+                    );
+                    device.cmd_bind_pipeline(
+                        frame.command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        bloom.down_pipeline,
+                    );
+                    let d_sets = [bloom.down_sets[i - 1]];
+                    device.cmd_bind_descriptor_sets(
+                        frame.command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        bloom.down_layout,
+                        0,
+                        &d_sets,
+                        &[],
+                    );
+                    device.cmd_set_viewport(
+                        frame.command_buffer,
+                        0,
+                        &[vk::Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: ei.width as f32,
+                            height: ei.height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        }],
+                    );
+                    device.cmd_set_scissor(
+                        frame.command_buffer,
+                        0,
+                        &[vk::Rect2D { offset: vk::Offset2D::default(), extent: ei }],
+                    );
+                    device.cmd_draw(frame.command_buffer, 3, 1, 0, 1);
+                    device.cmd_end_rendering(frame.command_buffer);
+                    let read_i = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(bloom.images_down[i])
+                        .subresource_range(
+                            vk::ImageSubresourceRange::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .level_count(1)
+                                .layer_count(1),
+                        )
+                        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                    device.cmd_pipeline_barrier(
+                        frame.command_buffer,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        std::slice::from_ref(&read_i),
+                    );
+                }
+                for i in (0..crate::render::BLOOM_LEVELS - 1).rev() {
+                    let ei = bloom.extents[i];
+                    let to_color_u = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(bloom.images_up[i])
+                        .subresource_range(
+                            vk::ImageSubresourceRange::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .level_count(1)
+                                .layer_count(1),
+                        )
+                        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+                    device.cmd_pipeline_barrier(
+                        frame.command_buffer,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        std::slice::from_ref(&to_color_u),
+                    );
+                    let att_u = vk::RenderingAttachmentInfo::default()
+                        .image_view(bloom.views_up[i])
+                        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                        .store_op(vk::AttachmentStoreOp::STORE);
+                    device.cmd_begin_rendering(
+                        frame.command_buffer,
+                        &vk::RenderingInfo::default()
+                            .render_area(vk::Rect2D {
+                                offset: vk::Offset2D::default(),
+                                extent: ei,
+                            })
+                            .layer_count(1)
+                            .color_attachments(std::slice::from_ref(&att_u)),
+                    );
+                    device.cmd_bind_pipeline(
+                        frame.command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        bloom.up_pipeline,
+                    );
+                    let u_sets = [bloom.up_sets[i]];
+                    device.cmd_bind_descriptor_sets(
+                        frame.command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        bloom.up_layout,
+                        0,
+                        &u_sets,
+                        &[],
+                    );
+                    device.cmd_set_viewport(
+                        frame.command_buffer,
+                        0,
+                        &[vk::Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: ei.width as f32,
+                            height: ei.height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        }],
+                    );
+                    device.cmd_set_scissor(
+                        frame.command_buffer,
+                        0,
+                        &[vk::Rect2D { offset: vk::Offset2D::default(), extent: ei }],
+                    );
+                    device.cmd_draw(frame.command_buffer, 3, 1, 0, 1);
+                    device.cmd_end_rendering(frame.command_buffer);
+                    let read_u = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(bloom.images_up[i])
+                        .subresource_range(
+                            vk::ImageSubresourceRange::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .level_count(1)
+                                .layer_count(1),
+                        )
+                        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                    device.cmd_pipeline_barrier(
+                        frame.command_buffer,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        std::slice::from_ref(&read_u),
+                    );
+                }
+            }
+
+            // —— present tonemap + UI（8.4 接缝正式启用；8.1 的 blit 退役）——
             // 目标采样写 swapchain（SRGB view 的 ROP 编码恰好一次）。loadOp
             // DON'T CARE（blit 覆写全部像素，清屏无意义）；UI 同实例接画，
             // raster order 保证 UI 盖在场景之上。overlay 管线只声明 set0（UI
@@ -1208,15 +1508,19 @@ impl FramePool {
             device.cmd_bind_pipeline(
                 frame.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                draw.blit_pipeline,
+                draw.tonemap_pipeline,
             );
-            let blit_sets = [draw.gbuffer.sampled_set(slot)];
+            let tonemap_sets = [
+                draw.set1,
+                draw.gbuffer.sampled_set(slot),
+                draw.bloom_params_set,
+            ];
             device.cmd_bind_descriptor_sets(
                 frame.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                draw.blit_layout,
+                draw.tonemap_layout,
                 0,
-                &blit_sets,
+                &tonemap_sets,
                 &[],
             );
             device.cmd_set_viewport(

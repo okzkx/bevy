@@ -54,8 +54,8 @@ pub const SAMPLED_BINDING_SAMPLER: u32 = 4;
 pub const SAMPLED_BINDING_MATPARAM: u32 = 5;
 
 /// 一张颜色附件：VkImage + dedicated memory + view（COLOR_ATTACHMENT |
-/// SAMPLED 用途——G-buffer 附件渲染后由合成/blit 采样）。
-struct ColorTarget {
+/// SAMPLED 用途——G-buffer 附件渲染后由合成/blit 采样；8.4 Bloom 链复用）。
+pub(crate) struct ColorTarget {
     device: Device,
     image: vk::Image,
     memory: vk::DeviceMemory,
@@ -63,11 +63,25 @@ struct ColorTarget {
 }
 
 impl ColorTarget {
+    /// image 句柄（布局屏障用）。
+    #[must_use]
+    pub(crate) fn image(&self) -> vk::Image {
+        self.image
+    }
+
+    /// view 句柄（附件/采样描述符用）。
+    #[must_use]
+    pub(crate) fn view(&self) -> vk::ImageView {
+        self.view
+    }
+}
+
+impl ColorTarget {
     /// 按契约创建颜色附件：格式 feature 逐位查证（支持与启用分开），全有或全无。
     ///
     /// # Errors
     /// 格式 feature 不足或 Vulkan 创建/分配/绑定失败。
-    fn new(
+    pub(crate) fn new(
         ctx: &Context,
         extent: vk::Extent2D,
         format: vk::Format,

@@ -17,7 +17,8 @@ use crate::render::Context;
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与主管线同一编译路径）。
 const GBUFFER_COMPOSITE_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer_composite.spv"));
-const PRESENT_BLIT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/present_blit.spv"));
+const PRESENT_TONEMAP_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/present_tonemap.spv"));
 
 /// 全屏管线 + pipeline layout（dynamic rendering 形态）。
 #[derive(bevy::prelude::Resource)]
@@ -237,28 +238,30 @@ impl CompositePipeline {
 unsafe impl Send for CompositePipeline {}
 unsafe impl Sync for CompositePipeline {}
 
-/// present blit 管线资源（8.1）：HDR 中间目标 → swapchain。
-/// layout = [G-buffer 采样集]（本 pass 只消费 b2 hdr / b4 采样器，其余
-/// binding 合法闲置）。
+/// present tonemap 管线资源（8.4 接缝正式启用；8.1 的 blit 退役）：HDR + Bloom
+/// → ACES → swapchain。layout = [帧 UBO, G-buffer 采样集, bloom 参数集]——
+/// mode 旁路面（debug 仪器直出）+ hdr + bloom/参数。
 #[derive(bevy::prelude::Resource)]
-pub struct PresentBlitPipeline {
+pub struct PresentTonemapPipeline {
     inner: FullscreenPipeline,
 }
 
-impl PresentBlitPipeline {
+impl PresentTonemapPipeline {
     /// # Errors
     /// shader module / layout / pipeline 任一创建失败。
     pub fn new(
         ctx: &Context,
         color_format: vk::Format,
+        frame_layout: vk::DescriptorSetLayout,
         gbuffer_layout: vk::DescriptorSetLayout,
+        bloom_layout: vk::DescriptorSetLayout,
     ) -> Result<Self> {
         Ok(Self {
             inner: FullscreenPipeline::new(
                 ctx,
-                PRESENT_BLIT_SPV,
+                PRESENT_TONEMAP_SPV,
                 color_format,
-                &[gbuffer_layout],
+                &[frame_layout, gbuffer_layout, bloom_layout],
             )?,
         })
     }
@@ -277,5 +280,5 @@ impl PresentBlitPipeline {
 }
 
 // # Safety:同 FullscreenPipeline 约定
-unsafe impl Send for PresentBlitPipeline {}
-unsafe impl Sync for PresentBlitPipeline {}
+unsafe impl Send for PresentTonemapPipeline {}
+unsafe impl Sync for PresentTonemapPipeline {}
