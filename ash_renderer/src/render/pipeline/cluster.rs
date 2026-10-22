@@ -19,9 +19,10 @@
 //!    取数通道要多一张取数目标+拷贝，附件重绑免拷贝零带宽——透明 pass 把
 //!    G-buffer 深度再挂回 depth attachment，loadOp LOAD、只测不写）。
 //!
-//! 光源列表 = 每帧环（HOST_VISIBLE，宿主每帧重写）：8.2 才裁决"常驻表 vs
-//! 每帧环"的光源驻留形态——本段的环是透明层的测试载体（场景无点光源实体，
-//! 测试光源经 `ash_renderer/cluster_lights` 注入），不预设 8.2 的裁决。
+//! 光源数据 = **光源常驻表**（8.2.2 起切表：[`crate::render::shading::LightTable`]，
+//! 用户拍板常驻表形态）——本模块只持有描述符引用（b1 绑定表环），表的槽位
+//! 账本/脏行重写归 light_table 模块；光源注入经 BRP `ash_renderer/light_*`
+//! 方法族。
 //!
 //! CPU 参照（[`cluster_reference`] 纯函数 + 单测）：与 cluster_build.wgsl
 //! 同公式（分片边界/AABB 投影/球-AABB 求交），供 BRP census 对照。
@@ -32,6 +33,7 @@ use bevy::prelude::Resource;
 
 use crate::common::error::{Result, VulkanError};
 use crate::render::resources::{BufferRole, GpuBuffer};
+use crate::render::shading::LightRecord;
 use crate::render::Context;
 
 const CLUSTER_BUILD_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cluster_build.spv"));
@@ -48,8 +50,6 @@ const TRANSPARENT_FORWARD_SPV: &[u8] =
 pub const CLUSTER_TILE_SIZE: u32 = 32;
 /// 深度分片数（视图深度指数划分）。
 pub const CLUSTER_SLICES: u32 = 32;
-/// 点光源列表容量（每帧环；8.2 光源扩容前的测试载体）。
-pub const MAX_CLUSTER_LIGHTS: u32 = 64;
 /// 单 cluster 光源索引容量（超出截断——CPU 参照同语义，计数面照实对照）。
 pub const MAX_PER_CLUSTER: u32 = 16;
 /// 深度分片区间（视图深度，米）。
@@ -59,8 +59,6 @@ pub const CLUSTER_FAR: f32 = 200.0;
 /// 诊断读数显式报——与对象表容量纪律同族，学习项目规模下不预期触顶）。
 pub const TRANSPARENT_CAPACITY: u32 = 16384;
 
-/// 点光源 GPU 记录步长（2×vec4 = 32B，与 WGSL `PointLight` 同序互证）。
-pub const POINT_LIGHT_STRIDE: usize = 32;
 /// cluster 均匀数据步长：view_proj 64B + inv_view_proj 64B + 标量 8×4B + 垫 16B。
 pub const CLUSTER_UNIFORM_SIZE: usize = 160;
 /// cluster 记录步长（count + 16 索引）。
@@ -75,38 +73,6 @@ pub const CLUSTER_BINDING_INDEX_LIST: u32 = 4;
 pub const CLUSTER_BINDING_KEYS: u32 = 5;
 pub const CLUSTER_BINDING_COMMANDS: u32 = 6;
 pub const CLUSTER_BINDING_COUNT: u32 = 7;
-
-/// 一盏测试点光源（BRP 注入 → 光源环；8.2 前的透明层光照数据载体）。
-#[derive(Clone, Copy, Debug)]
-pub struct PointLightGpu {
-    /// 世界空间位置（xyz）+ 作用半径（w，米）。
-    pub pos_radius: [f32; 4],
-    /// 颜色 × 强度（rgb，线性；w 未用）。
-    pub color_intensity: [f32; 4],
-}
-
-impl PointLightGpu {
-    /// 打包 32B 进光源环（与 WGSL `PointLight` 同序互证）。
-    #[must_use]
-    pub fn pack(&self) -> [u8; POINT_LIGHT_STRIDE] {
-        let mut out = [0u8; POINT_LIGHT_STRIDE];
-        for (i, v) in self
-            .pos_radius
-            .iter()
-            .chain(self.color_intensity.iter())
-            .enumerate()
-        {
-            out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
-        }
-        out
-    }
-}
-
-/// BRP 注入的测试点光源列表（draw_frame 每帧写光源环的来源；空 = 纯方向光
-/// 语义不变）。只喂透明层 cluster——不透明合成仍单方向光（8.2 多光源归
-/// 光照累积 pass）。
-#[derive(Resource, Default)]
-pub struct TestPointLights(pub Vec<PointLightGpu>);
 
 /// cluster 网格维度（由 extent 推得，重建时更新）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,7 +140,7 @@ pub fn cluster_reference(
     inv_view_proj: bevy::math::Mat4,
     extent: vk::Extent2D,
     grid: ClusterGrid,
-    lights: &[PointLightGpu],
+    lights: &[LightRecord],
 ) -> Vec<Vec<u32>> {
     let mut out = Vec::with_capacity(grid.cluster_count() as usize);
     for ci in 0..grid.cluster_count() {
@@ -208,6 +174,10 @@ pub fn cluster_reference(
         for (l, light) in lights.iter().enumerate() {
             let c = bevy::math::Vec3::from_slice(&light.pos_radius[..3]);
             let r = light.pos_radius[3];
+            // 死灯门卫（8.2.2：回收槽清零 radius=0，与 cluster_build.wgsl 同式）
+            if r <= 0.0 {
+                continue;
+            }
             let closest = c.clamp(min, max);
             if closest.distance(c) <= r {
                 list.push(l as u32);
@@ -268,8 +238,6 @@ pub struct ClusterTargets {
     /// cluster 表本体并重写描述符）。
     sets: Vec<vk::DescriptorSet>,
     uniforms: Vec<GpuBuffer>,
-    /// 光源环（HOST_VISIBLE，宿主每帧重写）。
-    lights_rings: Vec<GpuBuffer>,
     /// cluster 索引表（DEVICE_LOCAL，cluster_build 写 / 透明 FS 读）。
     cluster_lists: Vec<GpuBuffer>,
     /// 逐 cluster 计数（HOST_VISIBLE，cluster_build 写，BRP 读数面）。
@@ -291,7 +259,7 @@ impl ClusterTargets {
     ///
     /// # Errors
     /// buffer 创建/内存分配/描述符对象创建失败。
-    pub fn new(ctx: &Context, extent: vk::Extent2D) -> Result<Self> {
+    pub fn new(ctx: &Context, extent: vk::Extent2D, light_buffers: &[vk::Buffer]) -> Result<Self> {
         let grid = cluster_grid(extent);
         let mut this = Self {
             device: ctx.device.clone(),
@@ -301,7 +269,6 @@ impl ClusterTargets {
             pool: vk::DescriptorPool::null(),
             sets: Vec::new(),
             uniforms: Vec::new(),
-            lights_rings: Vec::new(),
             cluster_lists: Vec::new(),
             cluster_counts: Vec::new(),
             t_index_lists: Vec::new(),
@@ -311,11 +278,11 @@ impl ClusterTargets {
         };
         let slots = slot_count();
         this.build_buffers(ctx, slots)?;
-        this.build_descriptors(ctx, slots)?;
+        this.build_descriptors(ctx, slots, light_buffers)?;
         this.extent = extent;
         info!(
             "透明层资源就绪: cluster 网格 {}×{}×{}（{} clusters，tile {CLUSTER_TILE_SIZE}px）\
-             × {} 帧槽；光源环 {MAX_CLUSTER_LIGHTS}、单 cluster 上限 {MAX_PER_CLUSTER}、\
+             × {} 帧槽；光源 = 常驻灯表(b1 绑定)、单 cluster 上限 {MAX_PER_CLUSTER}、\
              透明行容量 {TRANSPARENT_CAPACITY}（命令环 + 索引/键列表；排序归 8.1.4）",
             grid.tiles_x,
             grid.tiles_y,
@@ -337,8 +304,6 @@ impl ClusterTargets {
         };
         for _ in 0..slots {
             self.uniforms.push(mk(BufferRole::Storage, CLUSTER_UNIFORM_SIZE as u64)?);
-            self.lights_rings
-                .push(mk(BufferRole::Storage, u64::from(MAX_CLUSTER_LIGHTS) * POINT_LIGHT_STRIDE as u64)?);
             self.cluster_counts.push(mk(BufferRole::Storage, u64::from(self.grid.cluster_count()) * 4)?);
             self.t_counts.push(mk(BufferRole::Storage, 4)?);
             self.cluster_lists.push(mk(
@@ -357,7 +322,12 @@ impl ClusterTargets {
         Ok(())
     }
 
-    fn build_descriptors(&mut self, ctx: &Context, slots: usize) -> Result<()> {
+    fn build_descriptors(
+        &mut self,
+        ctx: &Context,
+        slots: usize,
+        light_buffers: &[vk::Buffer],
+    ) -> Result<()> {
         let device = &ctx.device;
         let stages = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT;
         let storage = |binding: u32| {
@@ -383,7 +353,7 @@ impl ClusterTargets {
                 None,
             )
         }?;
-        let result = unsafe { self.build_descriptors_inner(ctx, slots) };
+        let result = unsafe { self.build_descriptors_inner(ctx, slots, light_buffers) };
         if result.is_err() {
             unsafe { device.destroy_descriptor_set_layout(self.set_layout, None) };
             self.set_layout = vk::DescriptorSetLayout::null();
@@ -393,7 +363,12 @@ impl ClusterTargets {
 
     /// # Safety
     /// `set_layout` 须已创建成功。
-    unsafe fn build_descriptors_inner(&mut self, ctx: &Context, slots: usize) -> Result<()> {
+    unsafe fn build_descriptors_inner(
+        &mut self,
+        ctx: &Context,
+        slots: usize,
+        light_buffers: &[vk::Buffer],
+    ) -> Result<()> {
         unsafe {
             let device = &ctx.device;
             self.pool = device.create_descriptor_pool(
@@ -417,20 +392,25 @@ impl ClusterTargets {
             };
             let mut infos = Vec::with_capacity(8 * slots);
             for slot in 0..slots {
-                let groups: [&GpuBuffer; 8] = [
-                    &self.uniforms[slot],
-                    &self.lights_rings[slot],
-                    &self.cluster_lists[slot],
-                    &self.cluster_counts[slot],
-                    &self.t_index_lists[slot],
-                    &self.t_keys[slot],
-                    &self.t_commands[slot],
-                    &self.t_counts[slot],
+                // b1 = 光源常驻表本帧槽环（本体住 LightTable，本结构只持描述符
+                // 引用——8.2.2 切表）
+                let light = *light_buffers.get(slot % light_buffers.len()).ok_or_else(|| {
+                    VulkanError::Init("光源常驻表帧槽环数量少于 cluster 帧槽".into())
+                })?;
+                let groups: [vk::Buffer; 8] = [
+                    self.uniforms[slot].buffer(),
+                    light,
+                    self.cluster_lists[slot].buffer(),
+                    self.cluster_counts[slot].buffer(),
+                    self.t_index_lists[slot].buffer(),
+                    self.t_keys[slot].buffer(),
+                    self.t_commands[slot].buffer(),
+                    self.t_counts[slot].buffer(),
                 ];
-                for buffer in groups {
+                for buffer in &groups {
                     infos.push(
                         vk::DescriptorBufferInfo::default()
-                            .buffer(buffer.buffer())
+                            .buffer(*buffer)
                             .offset(0)
                             .range(vk::WHOLE_SIZE),
                     );
@@ -493,12 +473,6 @@ impl ClusterTargets {
     #[must_use]
     pub fn uniform(&mut self, slot: usize) -> &mut GpuBuffer {
         { let n = self.uniforms.len(); &mut self.uniforms[slot % n] }
-    }
-
-    /// 第 `slot` 帧槽的光源环（宿主写入口）。
-    #[must_use]
-    pub fn lights_ring(&mut self, slot: usize) -> &mut GpuBuffer {
-        { let n = self.lights_rings.len(); &mut self.lights_rings[slot % n] }
     }
 
     /// 第 `slot` 帧槽的透明命令环句柄（draw 消费）。
@@ -567,7 +541,12 @@ impl ClusterTargets {
     ///
     /// # Errors
     /// 等待排空或新 buffer/描述符创建失败。
-    pub fn rebuild(&mut self, ctx: &Context, extent: vk::Extent2D) -> Result<()> {
+    pub fn rebuild(
+        &mut self,
+        ctx: &Context,
+        extent: vk::Extent2D,
+        light_buffers: &[vk::Buffer],
+    ) -> Result<()> {
         if self.extent == extent {
             return Ok(());
         }
@@ -576,7 +555,7 @@ impl ClusterTargets {
         self.drop_resources();
         self.grid = cluster_grid(extent);
         self.build_buffers(ctx, slots)?;
-        self.build_descriptors(ctx, slots)?;
+        self.build_descriptors(ctx, slots, light_buffers)?;
         self.extent = extent;
         info!(
             "透明层资源随 swapchain 重建: cluster 网格 {}×{}×{}（{} clusters）",
@@ -596,7 +575,6 @@ impl ClusterTargets {
         self.sets.clear();
         for v in [
             &mut self.uniforms,
-            &mut self.lights_rings,
             &mut self.cluster_lists,
             &mut self.cluster_counts,
             &mut self.t_index_lists,

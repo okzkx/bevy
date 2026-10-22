@@ -22,6 +22,7 @@
 //! | `gpu/lod` | 进程级+纯函数 | GPU LOD 选档 compute 半边(6.2):LodPass 管线 + 判据/迟滞纯函数 + 诊断账面 |
 //! | `gpu/hiz` | 进程级+纯函数 | Hi-Z 深度金字塔(6.1.2):HizPyramid ×2 帧槽 + 逐级归约管线 + reverse-Z 保守方向纯函数 |
 //! | `gpu/indirect` | 进程级+纯函数 | indirect 闭环 compute 半边(5.3):IndirectPass 命令组装管线 + 诊断账面 + 命令布局参照 |
+//! | `shading/light_table` | 资产级 | 光源常驻表(8.2.2):punctual 光源 storage 表 + 槽位账本 + 脏行增量重写(常驻拍板形态) |
 //! | `perf` | 进程级 | GPU timestamp 计时(GpuTimer 每帧槽 query pool)+ 帧样本账(PerfLedger 分位数,5.5) |
 //!
 //! 拆分点：同步对象不挂任何一张 swapchain image 上——重建 swapchain 时原地不动；
@@ -33,6 +34,7 @@ mod gpu;
 mod perf;
 mod pipeline;
 mod resources;
+mod shading;
 mod swapchain;
 
 pub use context::{Context, HeapBudgetReading};
@@ -72,10 +74,14 @@ pub use assets::uploader::{
     CopyRegion, ImageRelease, Release, StagingCopy, StagingImageCopy, Ticket, UploadBatch, Uploader,
 };
 pub use perf::{FrameSample, GpuTimer, PerfLedger, QUERIES_PER_FRAME};
+pub use shading::{
+    LightRecord, LightTable, LIGHT_FLAG_SHADOW, LIGHT_RECORD_SIZE, LIGHT_TABLE_CAPACITY,
+    LIGHT_TYPE_POINT,
+};
 pub use pipeline::cluster::{
     cluster_grid, cluster_reference, pack_cluster_uniforms, slice_view_depth, ClusterBuildDraw,
     TransparentFrame,
-    ClusterGrid, ClusterTargets, PointLightGpu, TestPointLights, TransparentCollectDraw,
+    ClusterGrid, ClusterTargets, TransparentCollectDraw,
     TransparentGatherDraw, TransparentPasses, TransparentPipeline, CLUSTER_FAR, CLUSTER_NEAR,
     CLUSTER_SLICES, CLUSTER_TILE_SIZE, MAX_PER_CLUSTER, TRANSPARENT_CAPACITY,
 };

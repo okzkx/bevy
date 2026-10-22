@@ -53,7 +53,7 @@ use crate::{
 use super::drawlist;
 use crate::render::{
     pack_cluster_uniforms, ClusterTargets, CompositePipeline, GBufferTargets,
-    PresentBlitPipeline, TestPointLights, TransparentFrame, TransparentPasses,
+    LightTable, PresentBlitPipeline, TransparentFrame, TransparentPasses,
     TransparentPipeline,
 };
 
@@ -128,8 +128,8 @@ pub(crate) struct FrameInput<'w, 's> {
     transparent_passes: Res<'w, TransparentPasses>,
     /// 透明前向管线（8.1.3）。
     transparent_pipeline: Res<'w, TransparentPipeline>,
-    /// 测试点光源（BRP 注入；8.2 光源驻留形态裁决前的透明层数据载体）。
-    test_lights: Res<'w, TestPointLights>,
+    /// 光源常驻表（8.2.2：BRP light_* 方法族的落账面，脏行增量重写）。
+    light_table: ResMut<'w, LightTable>,
     /// overlay 管线：UI 半边绑定用（init 链与场景管线同批创建）。
     overlay_pipeline: Res<'w, OverlayPipeline>,
     /// 上传器：普通帧只读票号，overlay 在场时图集整传要走它提交批次（独占写点）。
@@ -249,7 +249,7 @@ pub(crate) fn draw_frame(
         ref mut cluster_targets,
         ref transparent_passes,
         ref transparent_pipeline,
-        ref test_lights,
+        ref mut light_table,
         ref overlay_pipeline,
         ref cameras,
         ref lights,
@@ -325,9 +325,13 @@ pub(crate) fn draw_frame(
         gbuffer
             .rebuild(ctx, swapchain.extent, &depth_views)
             .or_fatal("G-buffer 附件重建失败，渲染链无法继续")?;
-        // 透明层 cluster 表随 swapchain 同批重建（幂等；自带 device_wait_idle）
+        // 透明层 cluster 表随 swapchain 同批重建（幂等；自带 device_wait_idle；
+        // 光源常驻表环不在重建域——容量与尺寸无关，描述符重绑由 rebuild 接收）
+        let light_ring_buffers: Vec<vk::Buffer> = (0..MAX_FRAMES_IN_FLIGHT)
+            .map(|s| light_table.ring_buffer(s))
+            .collect();
         cluster_targets
-            .rebuild(ctx, swapchain.extent)
+            .rebuild(ctx, swapchain.extent, &light_ring_buffers)
             .or_fatal("透明层 cluster 表重建失败，渲染链无法继续")?;
         gate.pending = false;
     }
@@ -522,30 +526,25 @@ pub(crate) fn draw_frame(
         .or_fatal("帧 UBO 写失败，渲染链无法继续")?;
 
     // 4a-0) 透明层帧侧宿主写（8.1.3，wait_for_slot 的 fence 纪律内）：
-    // cluster 均匀数据（view_proj/inv_view_proj/网格标量）、测试光源环、
-    // 透明行计数清零（collect 的 atomicAdd 基线）。
+    // cluster 均匀数据（view_proj/inv_view_proj/网格标量）、光源常驻表脏行
+    //（8.2.2）、透明行计数清零（collect 的 atomicAdd 基线）。
     let slot_now = frames.current_index();
     let cluster_uniform = pack_cluster_uniforms(
         &view_proj,
         &inv_view_proj,
         swapchain.extent,
         cluster_targets.grid(),
-        test_lights.0.len() as u32,
+        light_table.light_count(),
     );
     cluster_targets
         .uniform(slot_now)
         .write(0, &cluster_uniform)
         .or_fatal("cluster 均匀数据写失败，渲染链无法继续")?;
-    {
-        let mut packed = Vec::with_capacity(test_lights.0.len() * 32);
-        for light in &test_lights.0 {
-            packed.extend_from_slice(&light.pack());
-        }
-        cluster_targets
-            .lights_ring(slot_now)
-            .write(0, &packed)
-            .or_fatal("光源环写失败，渲染链无法继续")?;
-    }
+    // 光源常驻表脏行增量重写（8.2.2，wait_for_slot 之后——fence 纪律同模型
+    // 环；稳态零写，变更帧只写脏行且覆盖两个帧槽才出账）
+    light_table
+        .write_dirty(slot_now)
+        .or_fatal("光源常驻表脏行写失败，渲染链无法继续")?;
     // prev 透明计数先读后清（本帧槽两帧前输出，fence 纪律）——bitonic 排序
     // 的空排让路判据（prev = 0 的帧数组未排，gather 尾部反向读取仍覆盖全部
     // 真实行，只丢一帧排序；读数不决定画什么，只决定是否跑空排序）

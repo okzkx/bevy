@@ -46,9 +46,13 @@ struct MaterialRecord {
     _pad: vec3<u32>,
 }
 
-struct PointLight {
-    pos_radius: vec4f,
-    color_intensity: vec4f,
+// 64B 记录（_pad 的成员对齐把步长从 48 撑到 64——Rust 侧 pack 同布局，
+// light_table.rs 互证）
+struct LightRecord {
+    pos_radius: vec4f,       // xyz 世界位置 + w 半径（米；0 = 死灯，门卫跳过）
+    color_intensity: vec4f,  // 颜色（rgb 线性）× 强度（w）
+    flags: u32,              // bit0 = shadow（8.3 预留）；bits 8..15 = type
+    _pad: vec3<u32>,
 }
 
 struct ClusterParams {
@@ -76,7 +80,7 @@ struct ClusterRecord {
 @group(2) @binding(1) var<storage, read> models: array<mat4x4f>;
 @group(2) @binding(2) var<storage, read> materials: array<MaterialRecord>;
 @group(3) @binding(0) var<storage, read> params: ClusterParams;
-@group(3) @binding(1) var<storage, read> lights: array<PointLight>;
+@group(3) @binding(1) var<storage, read> lights: array<LightRecord>;
 @group(3) @binding(2) var<storage, read> clusters: array<ClusterRecord>;
 
 const INV_PI: f32 = 0.3183099;

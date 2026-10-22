@@ -27,9 +27,9 @@ use crate::{
         BindlessTables, ClusterTargets, CompositePipeline, Context, CullPass, FramePool,
         GBufferTargets, GraphicsPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
         InstanceTables, LodPass, MeshPool, OcclusionPass, OverlayPipeline, PresentBlitPipeline,
-        TestPointLights, TransparentPasses, TransparentPipeline, Swapchain, Uploader,
-        ALBEDO_FORMAT, DEPTH_FORMAT, MATPARAM_FORMAT, MAX_FRAMES_IN_FLIGHT, NORMAL_FORMAT,
-        TABLE_CAPACITY,
+        TransparentPasses, TransparentPipeline, Swapchain, Uploader,
+        ALBEDO_FORMAT, DEPTH_FORMAT, LightTable, MATPARAM_FORMAT, MAX_FRAMES_IN_FLIGHT,
+        NORMAL_FORMAT, TABLE_CAPACITY,
     },};
 
 /// 初始化入口：取主窗口句柄，串链建全套 Vulkan 资源。`NonSendMarker` 把初始化
@@ -45,7 +45,7 @@ pub(super) fn init_vulkan(
     _main_thread: NonSendMarker,
     mut commands: Commands,
 ) -> Result<(), BevyError> {
-    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer, pipeline, composite_pipeline, blit_pipeline, transparent_targets, transparent_passes, transparent_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, lod_pass, ui_ring, gpu_timer) =
+    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer, pipeline, composite_pipeline, blit_pipeline, light_table, transparent_targets, transparent_passes, transparent_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, lod_pass, ui_ring, gpu_timer) =
         try_init_vulkan(&wrapper)
             .or_fatal("Vulkan 初始化失败，资源束一个都不插入")?; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过帧循环
     info!(
@@ -67,7 +67,7 @@ pub(super) fn init_vulkan(
     commands.insert_resource(transparent_targets);
     commands.insert_resource(transparent_passes);
     commands.insert_resource(transparent_pipeline);
-    commands.insert_resource(TestPointLights::default());
+    commands.insert_resource(light_table);
     commands.insert_resource(overlay_pipeline);
     commands.insert_resource(cull_pass);
     commands.insert_resource(indirect_pass);
@@ -165,9 +165,14 @@ fn try_init_vulkan(
         swapchain.view_format,
         gbuffer.sampled_layout(),
     )?;
-    // 透明 Clustered Forward 层（8.1.3）：资源（cluster 表/光源环/透明命令链）
-    // + compute 三件（[set2, cluster_set] 双集）+ 透明图形管线（HDR 混合 + 深度重绑）
-    let transparent_targets = ClusterTargets::new(&ctx, swapchain.extent)?;
+    // 光源常驻表（8.2.2）：punctual 光源 storage 表（槽位+增量账本，常驻拍板
+    // 形态）——先于 cluster 资源建（描述符 b1 引用其帧槽环）
+    let light_table = LightTable::new(&ctx, ctx.memory_contract())?;
+    let light_ring_buffers: Vec<vk::Buffer> =
+        (0..MAX_FRAMES_IN_FLIGHT).map(|s| light_table.ring_buffer(s)).collect();
+    // 透明 Clustered Forward 层（8.1.3）：资源（cluster 表/透明命令链）+ compute
+    // 三件（[set2, cluster_set] 双集）+ 透明图形管线（HDR 混合 + 深度重绑）
+    let transparent_targets = ClusterTargets::new(&ctx, swapchain.extent, &light_ring_buffers)?;
     let transparent_passes = TransparentPasses::new(
         &ctx,
         transparent_targets.set_layout(),
@@ -219,7 +224,7 @@ fn try_init_vulkan(
     std::mem::forget(drain_guard);
     Ok((
         ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer,
-        pipeline, composite_pipeline, blit_pipeline, transparent_targets, transparent_passes,
+        pipeline, composite_pipeline, blit_pipeline, light_table, transparent_targets, transparent_passes,
         transparent_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass,
         lod_pass, ui_ring, gpu_timer,
     ))
@@ -282,7 +287,7 @@ pub(super) fn teardown_vulkan(world: &mut World) {
     world.remove_resource::<TransparentPipeline>();
     world.remove_resource::<TransparentPasses>();
     world.remove_resource::<ClusterTargets>();
-    world.remove_resource::<TestPointLights>();
+    world.remove_resource::<LightTable>();
     world.remove_resource::<GBufferTargets>();
     world.remove_resource::<FramePool>();
     // UI 顶点环随帧级一批拆（帧内使用，无表/管线依赖；overlay 未装时缺席即 no-op）
@@ -331,6 +336,7 @@ type InitChain = (
     GraphicsPipeline,
     CompositePipeline,
     PresentBlitPipeline,
+    LightTable,
     ClusterTargets,
     TransparentPasses,
     TransparentPipeline,

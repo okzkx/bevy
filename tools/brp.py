@@ -273,6 +273,37 @@ def cmd_cull_stats(args):
     out(rpc(args.host, args.port, "ash_renderer/cull_stats"))
 
 
+def cmd_light_spawn(args):
+    params = {"pos": args.pos, "color": args.color, "radius": args.radius,
+              "intensity": args.intensity}
+    if args.shadow:
+        params["shadow"] = True
+    out(rpc(args.host, args.port, "ash_renderer/light_spawn", params))
+
+
+def cmd_light_update(args):
+    params = {"slot": args.slot}
+    if args.pos is not None:
+        params["pos"] = args.pos
+    if args.color is not None:
+        params["color"] = args.color
+    if args.radius is not None:
+        params["radius"] = args.radius
+    if args.intensity is not None:
+        params["intensity"] = args.intensity
+    if args.shadow is not None:
+        params["shadow"] = args.shadow == "true"
+    out(rpc(args.host, args.port, "ash_renderer/light_update", params))
+
+
+def cmd_light_remove(args):
+    out(rpc(args.host, args.port, "ash_renderer/light_remove", {"slot": args.slot}))
+
+
+def cmd_light_stats(args):
+    out(rpc(args.host, args.port, "ash_renderer/light_stats"))
+
+
 def cmd_cull_set(args):
     out(rpc(args.host, args.port, "ash_renderer/cull_set_enabled",
             {"enabled": args.enabled == "true"}))
@@ -598,6 +629,29 @@ def main():
     sub.add_parser("stats", help="增量计量读数（ash_renderer/increment_stats）").set_defaults(func=cmd_stats)
 
     sub.add_parser("cull-stats", help="剔除读数对照：GPU 标记 vs CPU 参照逐实体 + 不一致清单（ash_renderer/cull_stats；读数陈旧 ≤2 帧，对照前等 ≥3 帧）").set_defaults(func=cmd_cull_stats)
+
+    p = sub.add_parser("light-spawn", help="spawn 点光进常驻表（ash_renderer/light_spawn，8.2.2；返回槽号=稳定身份，下帧生效）")
+    p.add_argument("--pos", type=float, nargs=3, required=True, metavar=("X", "Y", "Z"), help="世界位置")
+    p.add_argument("--color", type=float, nargs=3, required=True, metavar=("R", "G", "B"), help="线性 RGB")
+    p.add_argument("--radius", type=float, default=10.0, help="作用半径（米，缺省 10）")
+    p.add_argument("--intensity", type=float, default=10.0, help="强度（candela 域，缺省 10）")
+    p.add_argument("--shadow", action="store_true", help="置 shadow 标志位（8.3 预留，本段只记账）")
+    p.set_defaults(func=cmd_light_spawn)
+
+    p = sub.add_parser("light-update", help="原位改灯参数（ash_renderer/light_update，槽号不变——cluster 列表引用稳定）")
+    p.add_argument("slot", type=int, help="目标槽号")
+    p.add_argument("--pos", type=float, nargs=3, metavar=("X", "Y", "Z"), help="世界位置（缺省不动）")
+    p.add_argument("--color", type=float, nargs=3, metavar=("R", "G", "B"), help="线性 RGB（缺省不动）")
+    p.add_argument("--radius", type=float, help="作用半径（缺省不动）")
+    p.add_argument("--intensity", type=float, help="强度（缺省不动）")
+    p.add_argument("--shadow", choices=["true", "false"], help="shadow 标志位（缺省不动）")
+    p.set_defaults(func=cmd_light_update)
+
+    p = sub.add_parser("light-remove", help="回收灯（ash_renderer/light_remove；槽清零入 free list，cluster 列表下帧不再命中）")
+    p.add_argument("slot", type=int, help="目标槽号")
+    p.set_defaults(func=cmd_light_remove)
+
+    sub.add_parser("light-stats", help="常驻灯表读数（ash_renderer/light_stats：在场槽/记录镜像/脏行账——census 前置核对）").set_defaults(func=cmd_light_stats)
 
     p = sub.add_parser("cull-set", help="剔除开关（ash_renderer/cull_set_enabled；true=compute dispatch，false=host 全可见填充——数据层 A/B）")
     p.add_argument("--enabled", required=True, choices=["true", "false"], help="开关目标态")
