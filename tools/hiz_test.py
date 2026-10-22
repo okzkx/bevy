@@ -152,7 +152,10 @@ def main():
         sys.exit(1)
 
     print("\n== ① 场景布置：钉机位（遮挡样本必须沿相机→目标视线摆，相机在 +z 侧）==")
-    orbit = rpc("ash_renderer/set_camera", {"yaw_deg": 0, "pitch_deg": 10, "radius": 8})["orbit"]
+    # target 显式钉死（6.1 几何）：7.1 中庭机位改了默认环绕中心后，不钉 target 会让
+    # ⑤ 恢复位 (0,0.3,5.5) 落到 45° 垂直 FOV 之外（CPU 视锥正确判不可见，测试假阴性）
+    orbit = rpc("ash_renderer/set_camera", {"yaw_deg": 0, "pitch_deg": 10, "radius": 8,
+                                            "target": [0.0, 0.0, 0.0]})["orbit"]
     print(f"  相机 yaw {orbit['yaw_deg']:.1f} pitch {orbit['pitch_deg']:.1f} radius {orbit['radius']:.1f} target {orbit['target']}")
 
     print("\n== 摆遮挡对：墙（cuboid 非均匀缩放）+ 被挡球 ==")

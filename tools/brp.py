@@ -182,6 +182,10 @@ def cmd_spawn_shape(args):
     params = {"shape": args.shape}
     if args.color:
         params["color"] = args.color
+    if getattr(args, "metallic", None) is not None:
+        params["metallic"] = args.metallic
+    if getattr(args, "roughness", None) is not None:
+        params["perceptual_roughness"] = args.roughness
     if args.translation:
         params["translation"] = args.translation
     if args.rotation:
@@ -552,9 +556,11 @@ def main():
     p.add_argument("--name-suffix", help="Name 后缀（默认 （副本））")
     p.set_defaults(func=cmd_spawn)
 
-    p = sub.add_parser("spawn-shape", help="造测试体：五形状+颜色→Lambert 材质（ash_renderer/spawn_shape，6.1.1；mesh 按形状/材质按颜色缓存，同参共享零新上传）")
+    p = sub.add_parser("spawn-shape", help="造测试体：五形状+颜色+PBR 参数→材质（ash_renderer/spawn_shape，6.1.1/8.2；mesh 按形状/材质按参数缓存，同参共享零新上传）")
     p.add_argument("shape", choices=["sphere", "cylinder", "capsule", "cone", "cuboid"], help="形状（cuboid 非均匀缩放 = 墙体遮挡样本）")
     p.add_argument("--color", nargs=3, type=float, metavar=("R", "G", "B"), help="sRGB 颜色 [0,1]（默认 0.8 0.8 0.8）")
+    p.add_argument("--metallic", type=float, help="金属度 [0,1]（8.2 PBR，默认 0）")
+    p.add_argument("--roughness", type=float, help="感知粗糙度 [0,1]（8.2 PBR，默认 0.5）")
     p.add_argument("--translation", nargs=3, type=float, metavar=("X", "Y", "Z"), help="世界坐标位置（默认原点）")
     p.add_argument("--rotation", nargs=3, type=float, metavar=("YAW", "PITCH", "ROLL"), help="欧拉角 YXZ 度数（默认 0）")
     p.add_argument("--scale", nargs=3, type=float, metavar=("X", "Y", "Z"), help="非均匀缩放（默认 1 1 1）")

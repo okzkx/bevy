@@ -10,7 +10,7 @@
 //! |---|---|
 //! | [`mouse`] | 虚拟鼠标：窗口无关鼠标输入源，注入 `Messages<WindowEvent>` 与 bevy_winit 同层 |
 //! | [`objects`] | 对象生命周期方法族：spawn 克隆/换柄写方法 + increment_stats 统计读数 |
-//! | [`shapes`] | 测试实体方法族（6.1.1）：spawn_shape 五形状 + 颜色 → Lambert 材质（遮挡对/墙体样本载具） |
+//! | [`shapes`] | 测试实体方法族（6.1.1/8.2）：spawn_shape 五形状 + 颜色 + PBR 参数 → 材质（遮挡对/墙体/梯度球载具） |
 //! | [`generate`] | 常驻大场景方法族（5.4）：generate_scene 程序化铺实例；chunk 身份与整块增删（5.4.2） |
 //! | [`assets`] | 资产内容变更 + 运行期动态加载：mutate/load_mesh/load_image/reload |
 //! | [`cull`] | 剔除读数与开关（5.2）：cull_stats 对照 + cull_set_enabled 开关 |

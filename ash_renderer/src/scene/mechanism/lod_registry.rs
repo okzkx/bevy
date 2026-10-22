@@ -142,7 +142,9 @@ pub fn spawn_lod_ladder(
             "LOD 阶梯仅支持 sphere（ico 细分参数面 4/3/2/1）".into(),
         ));
     }
-    let readback = spawn_test_shape(world, shape, color, translation, None, scale, name, unique)?;
+    let readback = spawn_test_shape(
+        world, shape, color, None, None, translation, None, scale, name, unique,
+    )?;
     let base_handle = world
         .get::<Mesh3d>(readback.entity)
         .map(|m| m.0.clone())
