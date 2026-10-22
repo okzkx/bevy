@@ -13,7 +13,7 @@
 
 | 件 | 位置 | 一句话职责 |
 |---|---|---|
-| `cull.wgsl` | `examples/shaders/` | compute 单入口 `cs_main`：读 set2 三表 + push 六平面，写 `marks[slot]` |
+| `cull.wgsl` | `shaders/` | compute 单入口 `cs_main`：读 set2 三表 + push 六平面，写 `marks[slot]` |
 | `vulkan/cull.rs` | `src/vulkan/` | CullPass（compute 管线+layout）+ `frustum_planes`/`aabb_visible`（CPU 参照，库测试钉语义）+ `pack_cull_push` + `record`（录制）+ `CullSettings`/`CullDiagnostics`（开关与诊断账面） |
 | 标记环（第四族） | `vulkan/instance_table.rs` | `mark_rings`：HOST_VISIBLE ×2 帧槽 + set2 扩 b3（COMPUTE-only read_write storage，描述符 init 一次写入） |
 | cull 录制点 | `vulkan/frames.rs` | `FrameDraw.cull`（Option）+ `record_frame` 渲染进场前 dispatch + 5.3 预置屏障 |
@@ -77,7 +77,7 @@ GPU（异步）
 ## 5. 代码改动简要解析（git show --stat 实数：11 改 3 增，+851/−31）
 
 **新增**：
-- `ash_renderer/examples/shaders/cull.wgsl` —— compute 着色器本体；`@group(0)`（组号随 compute 管线布局，非图形布局的 set2 位次——首跑 VUID 订正钉在头注释里）。
+- `ash_renderer/shaders/cull.wgsl` —— compute 着色器本体；`@group(0)`（组号随 compute 管线布局，非图形布局的 set2 位次——首跑 VUID 订正钉在头注释里）。
 - `ash_renderer/src/vulkan/cull.rs` —— 本段核心：管线 + 参照实现 + push 排布 + 录制 + 开关/诊断账面，五块合一处；`frustum_planes` 用 `to_cols_array` 手提数学行（列主序 a[i*4+j]）。
 - `ash_renderer/src/remote/cull.rs` —— BRP 两方法（对照/开关），红线边界写在模块文档。
 

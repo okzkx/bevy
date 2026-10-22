@@ -6,8 +6,8 @@
 
 | 文件 | 一句话 |
 |---|---|
-| `examples/shaders/hiz_downsample.wgsl` | 归约单入口：2×2 取 MIN 写下一级（reverse-Z 方向钉在注释里） |
-| `examples/shaders/occlusion.wgsl` | 遮挡判定：8 角点投屏 → 选 mip → 4 tap MIN → `obj_max < occluder` 判剔除，合并写 b3、独立写 b6 |
+| `shaders/hiz_downsample.wgsl` | 归约单入口：2×2 取 MIN 写下一级（reverse-Z 方向钉在注释里） |
+| `shaders/occlusion.wgsl` | 遮挡判定：8 角点投屏 → 选 mip → 4 tap MIN → `obj_max < occluder` 判剔除，合并写 b3、独立写 b6 |
 | `src/vulkan/hiz.rs` | HizPyramid：×2 帧槽 R32F mip 链本体 + 归约管线 + 遮挡测试描述符 + 读回通道 + reverse-Z 纯函数三件（单测） |
 | `src/vulkan/occlusion.rs` | OcclusionPass：遮挡 compute 管线 + 80B push 打包 + 投屏参照 + OcclusionSettings/Diagnostics |
 | `src/scene/mechanism/test_entities.rs` | 测试实体本体：五形状 + 颜色 → 按形状/颜色缓存的 mesh/材质（遮挡样本载具） |

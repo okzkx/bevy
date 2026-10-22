@@ -119,5 +119,5 @@ BRP `increment_stats` 的 `gpu_tables` 段：object_slots/object_capacity/object
 
 - `vulkan/pipeline.rs`（+84 行中多为注释/日志，PushLayout+pack_push+PushData 约 −70 行）——push 冻结表 96B→4B，96B 打包器整体退役；layout 三集。
 - `vulkan/frames.rs`（−161 净）——DepthTarget 迁出 + DrawCall 换 instance u32 + push 4B + 三集绑定。
-- `examples/shaders/debug_draw.wgsl`（+59/−31）——三表读取、flat varying 材质槽、PushParams 缩 4B。
+- `shaders/debug_draw.wgsl`（+59/−31）——三表读取、flat varying 材质槽、PushParams 缩 4B。
 - `vulkan/mod.rs`、`driver/host/mod.rs`、`examples/upload_probe.rs`——重出口/挂线/新参适配。

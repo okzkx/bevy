@@ -12,7 +12,7 @@ BRP `spawn_lod` 造一个四档阶梯实体并登记 `LodGroups`；上传链把�
 |---|---|
 | [scene/mechanism/lod_registry.rs](../../../../ash_renderer/src/scene/mechanism/lod_registry.rs) | LOD 组登记处：基准身份→各档变体柄（flush 盘点/表写/census 共用）+ 阶梯 spawn 本体（形状 × 档位缓存） |
 | [vulkan/lod.rs](../../../../ash_renderer/src/vulkan/lod.rs) | 选档 compute 半边：LodPass 管线 + 96B push + 判据/迟滞纯函数（CPU 参照）+ 开关/诊断资源 |
-| [examples/shaders/lod_select.wgsl](../../../../ash_renderer/examples/shaders/lod_select.wgsl) | 选档 shader：8 角点投屏 → floor 分带 + 迟滞 → 写 b8 |
+| [shaders/lod_select.wgsl](../../../../ash_renderer/shaders/lod_select.wgsl) | 选档 shader：8 角点投屏 → floor 分带 + 迟滞 → 写 b8 |
 | [remote/lod.rs](../../../../ash_renderer/src/remote/lod.rs) | BRP 方法族薄壳：lod_census（逐实例对照）/lod_set_enabled/lod_set_params |
 
 扩展件：instance_table.rs（两条新环 + set2 b7/b8）、ledger.rs（LOD 脏集两套奇偶）、upload.rs（档位盘点/换槽置脏/到货反查三挂点）、drawlist.rs（write_lod_table_ring）、build_indirect.wgsl（pick_lod_entry 按档取引脚）、frames.rs（FrameDraw.lod + 录制位）、frame.rs（LOD 半边：dispatch/关闭填充/诊断）、shapes.rs（spawn_lod 薄壳）、tools/scene_lod.py（场景脚本持久化）。

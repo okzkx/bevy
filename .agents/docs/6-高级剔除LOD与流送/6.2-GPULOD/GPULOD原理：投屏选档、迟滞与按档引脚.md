@@ -12,7 +12,7 @@
 
 LOD 档位本质上回答"这个物体在屏幕上占多大"。距离判据（distance-based）是它的粗糙近似：要为每个物体配一张距离表，换相机 FOV、换分辨率、换屏占比预期就整体失真。投屏尺寸把这三个因素都含在投影里，一次算完。
 
-做法（[`lod_select.wgsl`](../../../../ash_renderer/examples/shaders/lod_select.wgsl)，CPU 参照 = [`lod.rs`](../../../../ash_renderer/src/vulkan/lod.rs) 纯函数两件）：
+做法（[`lod_select.wgsl`](../../../../ash_renderer/shaders/lod_select.wgsl)，CPU 参照 = [`lod.rs`](../../../../ash_renderer/src/vulkan/lod.rs) 纯函数两件）：
 
 1. 对象表 AABB 的 8 角点经 model × view_proj 投到像素坐标（与 6.1 遮挡同款推导，见 §四）；
 2. 取 clamp 进屏幕后的像素矩形**最大边**为 s——clamp 的约定是"离屏部分不渲染"，完全离屏 s = 0 → 最粗档（反正不画）；
@@ -36,7 +36,7 @@ LOD 档位本质上回答"这个物体在屏幕上占多大"。距离判据（di
 
 ## 三、应用：档位环 → 变体表 → 命令三字段
 
-选档结果落地为档位环 b8 里一个 u32（每实例槽一个）。真正的"应用"发生在 build_indirect（[`build_indirect.wgsl`](../../../../ash_renderer/examples/shaders/build_indirect.wgsl) `pick_lod_entry`）：拿档位查 LOD 变体表 b7（每槽 4 条 `LodEntry` = `(first_index, index_count, vertex_base)`，`index_count = 0` 为该档未驻留哨兵），改写组装中命令的三个引脚字段。
+选档结果落地为档位环 b8 里一个 u32（每实例槽一个）。真正的"应用"发生在 build_indirect（[`build_indirect.wgsl`](../../../../ash_renderer/shaders/build_indirect.wgsl) `pick_lod_entry`）：拿档位查 LOD 变体表 b7（每槽 4 条 `LodEntry` = `(first_index, index_count, vertex_base)`，`index_count = 0` 为该档未驻留哨兵），改写组装中命令的三个引脚字段。
 
 三层兜底，对应判定线 3"不访问未驻留 LOD"：
 

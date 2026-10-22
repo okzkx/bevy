@@ -52,7 +52,7 @@ GPU-driven 路线的前提是**决策权整体搬到 GPU**（5.2~5.3 已完成�
 
 测试对象不是真实几何而是**对象表里的 AABB**（occlusion.wgsl 读 ObjectRecord 的 aabb_min/max）。AABB 比真实几何胖——胖盒子的投屏更大、最近角点更近，两头都更难被判遮挡，方向保守。代价是剔除力折损：细长斜放的物体，AABB 可能大出几何好几倍。
 
-判定分四步（[`occlusion.wgsl`](../../../../ash_renderer/examples/shaders/occlusion.wgsl) `occlusion_verdict`，CPU 参照 = hiz.rs 纯函数三件 + occlusion.rs 投屏参照）：
+判定分四步（[`occlusion.wgsl`](../../../../ash_renderer/shaders/occlusion.wgsl) `occlusion_verdict`，CPU 参照 = hiz.rs 纯函数三件 + occlusion.rs 投屏参照）：
 
 1. **投屏**：AABB 8 角点经 model × view_proj，透视除法后转像素矩形。必须在角点级投屏——透视不是仿射，"世界 AABB 投屏再取包围矩形"与"逐角点投屏再取包围矩形"不等价。任一角点 w ≤ 0（在相机平面背后）→ 恒判可见。
 2. **选层**：`level = ceil(log2(AABB 像素最大边))`，clamp 进级数、下限 1。设最大边为 s，则 2^(L−1) < s ≤ 2^L：tile 边长 ≥ AABB 边 > tile 半边 → AABB 每轴至多横跨 2 个 tile → 以投屏矩形左上角锚定的 2×2 tap **必覆盖全部相交 tile**。过覆盖（tap 读到 AABB 之外的 tile）只会让 MIN 更小、遮挡者更弱 → 更保守。这一式是"4 tap O(1)"成立的全部前提，多 tap、逐 tile 循环都不需要。

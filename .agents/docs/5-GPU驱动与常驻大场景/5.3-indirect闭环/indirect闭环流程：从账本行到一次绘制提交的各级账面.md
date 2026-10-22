@@ -6,10 +6,10 @@
 
 | 文件 | 一句话职责 |
 |---|---|
-| `examples/shaders/build_indirect.wgsl` | 命令组装 compute：逐在场行读对象表三引脚 + 标记 → 写一条 20B `VkDrawIndexedIndirectCommand`（不可见 `instanceCount=0`，`firstInstance`=槽号） |
+| `shaders/build_indirect.wgsl` | 命令组装 compute：逐在场行读对象表三引脚 + 标记 → 写一条 20B `VkDrawIndexedIndirectCommand`（不可见 `instanceCount=0`，`firstInstance`=槽号） |
 | `src/vulkan/indirect.rs` | 组装管线（IndirectPass：set2 单集 + 4B push count）+ dispatch/屏障录制 + 诊断账面（IndirectStats）+ count 上界执法（maxDrawIndirectCount） |
 | `src/remote/draw.rs` | BRP `ash_renderer/draw_stats`：绘制调用数/命令条数/零实例条数读数（只读，诊断标注） |
-| `examples/shaders/debug_draw.wgsl`（改） | `push.instance` → `@builtin(instance_index)`（firstInstance 携带槽号），图形 push 通道删除 |
+| `shaders/debug_draw.wgsl`（改） | `push.instance` → `@builtin(instance_index)`（firstInstance 携带槽号），图形 push 通道删除 |
 | `src/vulkan/instance_table.rs`（改） | 环家族 4→6：在场环（b4，HOST_VISIBLE）+ 命令环（b5，DEVICE_LOCAL 新角色） |
 | `src/vulkan/frames.rs`（改） | 场景段逐 draw 循环退役 → 一次 `cmd_draw_indexed_indirect`；组装 dispatch 记录位 |
 

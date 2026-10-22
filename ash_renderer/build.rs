@@ -1,7 +1,7 @@
 //! 着色器编译管线（3.3.3 落地，兑现 2026-09-28 "runtime+capability 补丁器"定案，
 //! 见 3.3 前置闸门施工记录 §4）：
 //!
-//! `examples/shaders/*.wgsl` → naga 30.0.1（wgsl-in → spv-out）→ spirv-val 闸门 →
+//! `shaders/*.wgsl` → naga 30.0.1（wgsl-in → spv-out）→ spirv-val 闸门 →
 //! （被 VUID-04680 拒的 runtime 模块）capability 补丁 → 复跑 spirv-val 兜底 →
 //! `OUT_DIR/<stem>.spv`（小端词流）。探针经
 //! `include_bytes!(concat!(env!("OUT_DIR"), "/<stem>.spv"))` 消费，与 3.4 正式
@@ -32,7 +32,7 @@ const CAP_SAMPLED_IMAGE_ARRAY_NON_UNIFORM: u32 = 5307;
 const EXT_DESCRIPTOR_INDEXING: &str = "SPV_EXT_descriptor_indexing";
 
 fn main() {
-    let shaders_dir = Path::new("examples/shaders");
+    let shaders_dir = Path::new("shaders");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo 提供 OUT_DIR"));
     // 目录级 rerun-if-changed：逐文件声明只盯已知文件，新落一个 .wgsl 不会触发
     // 重编译（cargo 对"新增文件"无感知）——3.4 首个正式 shader 落地时实撞此坑。

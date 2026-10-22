@@ -36,8 +36,8 @@ use ash::{ext::debug_utils, vk, Device, Entry};
 use ash_renderer::render::{BufferRole, GpuBuffer, MemoryContract};
 
 const VALIDATION_LAYER: &std::ffi::CStr = c"VK_LAYER_KHRONOS_validation";
-const RUNTIME_WGSL: &str = include_str!("shaders/bindless_probe_runtime.wgsl");
-const FIXED_WGSL: &str = include_str!("shaders/bindless_probe_fixed.wgsl");
+const RUNTIME_WGSL: &str = include_str!("../shaders/bindless_probe_runtime.wgsl");
+const FIXED_WGSL: &str = include_str!("../shaders/bindless_probe_fixed.wgsl");
 
 // SPIR-V 语法表常量(核心 1.0 + SPV_EXT_descriptor_indexing,值由规范 JSON 钉死):
 // 扫描器与补丁器只认词流,不引 spirv crate 的枚举依赖。
