@@ -21,6 +21,12 @@ struct SpawnShapeParams {
     /// sRGB [0,1] 三元组；材质只设 base_color（Lambert 路径）。
     #[serde(default)]
     color: Option<[f32; 3]>,
+    /// 金属度 [0,1]（8.2 PBR 参数面；缺省 = StandardMaterial 默认 0）。
+    #[serde(default)]
+    metallic: Option<f32>,
+    /// 感知粗糙度 [0,1]（8.2 PBR 参数面；缺省 = StandardMaterial 默认 0.5）。
+    #[serde(default)]
+    perceptual_roughness: Option<f32>,
     #[serde(default)]
     translation: Option<[f32; 3]>,
     /// 欧拉角 YXZ 度数（与 set_transform/属性面板同口径）。
@@ -50,6 +56,8 @@ pub(crate) fn spawn_shape(In(params): In<Option<Value>>, world: &mut World) -> B
         world,
         p.shape,
         color,
+        p.metallic,
+        p.perceptual_roughness,
         p.translation.map(Vec3::from_array),
         p.rotation_euler_deg.map(Vec3::from_array),
         p.scale.map(Vec3::from_array),

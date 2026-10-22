@@ -12,8 +12,8 @@
 //!
 //! 形状口径（立案拍板五形状，立方体承担墙体遮挡样本）：全部单位尺寸
 //!（半径 0.5 / 高 1.0 / 立方体 1³），尺寸缩放交给 Transform.scale——
-//! 墙体遮挡样本 = 立方体非均匀缩放直出。颜色 sRGB [0,1] 三元组，
-//! 材质只设 base_color（全局 ASH_RENDER_MODE 下的 Lambert 路径）。
+//! 墙体遮挡样本 = 立方体非均匀缩放直出。颜色 sRGB [0,1] 三元组；metallic/
+//! roughness 给值即进材质（8.2 PBR 参数面，缺省 = StandardMaterial 默认）。
 
 use std::collections::HashMap;
 
@@ -51,17 +51,22 @@ impl TestShape {
     }
 }
 
-/// 材质缓存键：sRGB 三元组的位模式（同输入值同位 → 命中；f32 直接做
-/// HashMap 键无 Eq，位模式是精确等价的整数化）。
+/// 材质缓存键：sRGB 颜色三元组 + metallic/roughness 标量的位模式（同输入
+/// 值同位 → 命中；f32 直接做 HashMap 键无 Eq，位模式是精确等价的整数化）。
+/// 缺省标量记 f32::NAN 位——与显式给值天然不同键，缓存不串味。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct ColorKey([u32; 3]);
+struct MaterialKey {
+    color: [u32; 3],
+    metallic: u32,
+    perceptual_roughness: u32,
+}
 
 /// 测试实体资产缓存：mesh 按形状、材质按颜色。惰性初始化——首次 spawn
 /// 才进 World，不预造任何资产（空场压测/默认启动零成本）。
 #[derive(Resource, Default)]
 pub struct TestShapeAssets {
     meshes: HashMap<TestShape, Handle<Mesh>>,
-    materials: HashMap<ColorKey, Handle<StandardMaterial>>,
+    materials: HashMap<MaterialKey, Handle<StandardMaterial>>,
 }
 
 /// 测试实体读回：实体号与资产身份（写后读对账用，increment_stats 入行
@@ -90,6 +95,8 @@ pub fn spawn_test_shape(
     world: &mut World,
     shape: TestShape,
     color: [f32; 3],
+    metallic: Option<f32>,
+    perceptual_roughness: Option<f32>,
     translation: Option<Vec3>,
     rotation_euler_deg: Option<Vec3>,
     scale: Option<Vec3>,
@@ -120,7 +127,11 @@ pub fn spawn_test_shape(
         }
     }
     };
-    let key = ColorKey(color.map(f32::to_bits));
+    let key = MaterialKey {
+        color: color.map(f32::to_bits),
+        metallic: metallic.unwrap_or(f32::NAN).to_bits(),
+        perceptual_roughness: perceptual_roughness.unwrap_or(f32::NAN).to_bits(),
+    };
     let material_handle = match world
         .get_resource::<TestShapeAssets>()
         .and_then(|a| a.materials.get(&key))
@@ -132,6 +143,10 @@ pub fn spawn_test_shape(
                 .resource_mut::<Assets<StandardMaterial>>()
                 .add(StandardMaterial {
                     base_color: Color::srgb(color[0], color[1], color[2]),
+                    // 8.2 PBR 参数面：给值即设（缺省保持 StandardMaterial
+                    // 默认——metallic 0 / roughness 0.5，既有调用零变化）
+                    metallic: metallic.unwrap_or(0.0),
+                    perceptual_roughness: perceptual_roughness.unwrap_or(0.5),
                     ..Default::default()
                 });
             world
