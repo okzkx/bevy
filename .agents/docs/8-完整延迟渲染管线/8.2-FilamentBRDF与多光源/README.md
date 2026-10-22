@@ -20,7 +20,7 @@
   - 标准模型 diffuse/specular 双 lobe 组成在 `shaders/src/surface_shading_model_standard.fs`；punctual 光距离/角度衰减在 `shaders/src/surface_light_punctual.fs`；光源循环骨架在 `shaders/src/surface_lighting.fs`。
   - PBR 理论白皮书源在 `docs_src/src_markdeep/Filament.md.html`，材质定义指南在 `docs_src/src_markdeep/Materials.md.html`。
 - **开工前置 ✅ 已产出（2026-10-22，`goal/8.2-filament-ref`）**：[Filament 源码参考：标准模型 BRDF 与多光源（8.2 对照基准）](../../笔记/渲染/Filament%20源码参考：标准模型%20BRDF%20与%20多光源（8.2%20对照基准）.md)——钉明对照函数清单（D_GGX + V_SmithGGXCorrelated + F_Schlick + Lambert）、宏默认组合（desktop = FILAMENT_QUALITY_HIGH，Burley 非默认）、glTF roughness=perceptual 域换算链、punctual 衰减公式与驻留形态证据；判定线①"与 Filament 参考对照收敛"以该篇 §0/§3 钉明的函数与版本为基准。
-- **边界**：Filament 是 forward 全屏管线、没有独立光照累积 pass，本段 pass 组织方式不照抄——只取 BRDF 数学与光源定义；GLSL→WGSL 是数学对照，不是逐行移植。
+- **边界**：Filament 是 forward 全屏管线、没有独立光照累积 pass，本段 pass 组织方式不照抄——BRDF 侧按 2026-10-22 用户拍板为**完全照抄口径**（标准模型直接光函数级移植进 WGSL，命名保留原名，详见源码参考篇 §0），pass 编排自主。
 
 ## 任务面板（拆分占位）
 

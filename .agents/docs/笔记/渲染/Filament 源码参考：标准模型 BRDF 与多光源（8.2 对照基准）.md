@@ -5,6 +5,7 @@
 ## 0. 判定线
 
 - **8.2 对照基准钉明（desktop 默认组合，实测核实）**：`D_GGX`（GGX 法向分布）＋ `V_SmithGGXCorrelated`（Heitz 2014 高度相关完整项）＋ `F_Schlick(f0, f90, VoH)`（f90 = saturate(16.5·Σf0)，介电体饱和到 1）＋ **diffuse = Lambert（1/π）**。**Burley 不是默认**——它是 `BRDF_DIFFUSE` 宏的另一个可选值，8.2 不取。
+- **照抄口径（2026-10-22 用户二次拍板）**：8.2 直接光 BRDF = Filament 标准模型**函数级移植**——本篇 §3/§4/§5.2 的全部函数与常量逐式照抄进 WGSL，函数命名保留 Filament 原名；"数学对照"升级为"照抄移植"，§7 边界的旧口径已随之订正。
 - desktop 质量档 = `FILAMENT_QUALITY_HIGH`（`ShaderModel::DESKTOP` → quality_high，libs/filamat/src/shaders/CodeGenerator.cpp），所以 V 项默认走**完整 Smith** 而非 FAST 近似；FAST（Hammon 2017）是 NORMAL 以下档的替代。
 - **glTF 的 roughnessFactor 就是 perceptualRoughness**（surface_shading_lit.fs `perceptualRoughness = material.roughness`），着色用 α = perceptual²，下限 clamp 0.045（desktop `MIN_PERCEPTUAL_ROUGHNESS`）。即：贴图/参数域记 perceptual，进 D/V 前平方——与 Unity 篇"两级换算"同构。
 - F0 = `baseColor·metallic + reflectance·(1−metallic)`，reflectance 默认 0.5 → 介电体 F0 = 0.16·0.5² = **0.04**；diffuseColor = `baseColor·(1−metallic)`。与 Unity 篇 `lerp(0.04, albedo, metallic)` 在 reflectance=0.5 时逐项等价。
@@ -187,7 +188,7 @@ float getAngleAttenuation(const vec3 lightDir, const vec3 l, const vec2 scaleOff
 
 ## 7. 边界（本篇不主张）
 
-- **照抄范围 = BRDF 数学与光源定义**；pass 组织不照抄——Filament 是 forward（逐片元查 froxel 逐灯算），8.2 是 deferred 光照累积，只有"逐光源累加到 inout color"的循环形状同构。
+- **照抄范围 = 标准模型直接光 BRDF 与光源定义**（§0 照抄口径钉明：函数级移植进 WGSL，命名保留原名）；pass 组织不照抄——Filament 是 forward（逐片元查 froxel 逐灯算），8.2 是 deferred 光照累积，只有"逐光源累加到 inout color"的循环形状同构。
 - standard 以外的 shading model（cloth/clearcoat/subsurface/refraction）不在 8.2 交付；本篇只记录了它们存在与入口（surface_shading_model_*.fs）。
 - 间接光全家（prefilteredDFG、irradiance SH、multiBounceAO、reflected lobe 拉伸）不在 8.2，接口位已留（§6.3）。
 - SUN_AS_AREA_LIGHT（HIGH 档把太阳做圆盘面光采样）不取——方向光按纯方向光对照，这是 8.2 判定线①的对照口径。
