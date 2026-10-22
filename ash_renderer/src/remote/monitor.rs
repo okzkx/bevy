@@ -126,7 +126,9 @@ pub(crate) fn set_render_mode(
     let p: P = serde_json::from_value(params.unwrap_or(Value::Null))
         .map_err(|e| invalid_params(format!("params: {e}")))?;
     *mode = match p.mode.as_str() {
-        "lambert" => RenderMode::Lambert,
+        // 0 号模式 8.2.3 起是 Filament surfaceShading 照抄——正名 filament，
+        // "lambert" 保留兼容别名（UBO 值不变，debug_window.rs from_env 同步）
+        "filament" | "lambert" => RenderMode::Lambert,
         "unlit" => RenderMode::Unlit,
         "normal" => RenderMode::Normal,
         "position" => RenderMode::Position,
@@ -136,7 +138,7 @@ pub(crate) fn set_render_mode(
         "reflectance" => RenderMode::Reflectance,
         "depth" => RenderMode::Depth,
         other => return Err(invalid_params(format!(
-            "未知模式 {other}：lambert/unlit/normal/position/metallic/roughness/ao/reflectance/depth",
+            "未知模式 {other}：filament(lambert 兼容)/unlit/normal/position/metallic/roughness/ao/reflectance/depth",
         ))),
     };
     Ok(json!({ "mode": p.mode }))

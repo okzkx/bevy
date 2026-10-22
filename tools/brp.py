@@ -707,8 +707,8 @@ def main():
     p.add_argument("--enabled", choices=["true", "false"], help="开关目标态（缺省只读）")
     p.set_defaults(func=cmd_frame_sync)
 
-    p = sub.add_parser("render-mode", help="着色模式切换（ash_renderer/set_render_mode，8.2.3 增补 8.2.5 扩列：lambert/unlit/normal/position + G-buffer 调试仪器 metallic/roughness/ao/reflectance/depth——matparam 单通道灰度直出与深度线性化，mutate 写后读验收口）")
-    p.add_argument("mode", choices=["lambert", "unlit", "normal", "position", "metallic", "roughness", "ao", "reflectance", "depth"], help="目标模式")
+    p = sub.add_parser("render-mode", help="着色模式切换（ash_renderer/set_render_mode，8.2.3 增补 8.2.5 扩列：filament(lambert 兼容别名)/unlit/normal/position + G-buffer 调试仪器 metallic/roughness/ao/reflectance/depth——matparam 单通道灰度直出与深度线性化，mutate 写后读验收口）")
+    p.add_argument("mode", choices=["filament", "lambert", "unlit", "normal", "position", "metallic", "roughness", "ao", "reflectance", "depth"], help="目标模式")
     p.set_defaults(func=cmd_render_mode)
 
     p = sub.add_parser("load-mesh", help="异步加载新 mesh：entity=换到既有实体 / source=克隆挂新实体（ash_renderer/load_mesh）")

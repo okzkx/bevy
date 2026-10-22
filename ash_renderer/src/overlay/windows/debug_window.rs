@@ -16,10 +16,12 @@ use crate::scene::mechanism::WorkloadSettings;
 use crate::overlay::framework::paint::AtlasGpu;
 
 /// 场景着色模式（UBO `mode` 的宿主侧形态）。UI 单选钮写、`draw_frame` 读；
-/// 初值来自 env `ASH_RENDER_MODE`（拼写错误 warn 后按 lambert 继续）。
+/// 初值来自 env `ASH_RENDER_MODE`（拼写错误 warn 后按 filament 继续）。
 #[derive(Clone, Copy, PartialEq, Eq, Resource)]
 pub enum RenderMode {
-    /// 数据驱动 Lambert（默认）：UBO 方向光 + 环境，bevy 物理链同构。
+    /// Filament BRDF 光照累积（默认）：8.2.3 起照抄 Filament surfaceShading
+    ///（历史名 Lambert 退役——UI/BRP/env 拼写改 filament，"lambert" 保留兼容别名，
+    /// UBO 值不变）。
     Lambert,
     /// albedo 直出：base color/UV/颜色空间对照（官方侧同款置 unlit）。
     Unlit,
@@ -41,7 +43,7 @@ pub enum RenderMode {
 impl RenderMode {
     pub(crate) fn from_env() -> Self {
         match std::env::var("ASH_RENDER_MODE").ok().as_deref() {
-            None | Some("") | Some("lambert") => Self::Lambert,
+            None | Some("") | Some("filament") | Some("lambert") => Self::Lambert,
             Some("unlit") => Self::Unlit,
             Some("normal") => Self::Normal,
             Some("position") => Self::Position,
@@ -53,7 +55,7 @@ impl RenderMode {
             Some(other) => {
                 // 拼写错误是配置问题不是运行故障：warn 后按默认继续，不中断帧循环
                 bevy::log::warn!(
-                    "ASH_RENDER_MODE={other:?} 无法识别（可选 lambert/unlit/normal/position/metallic/roughness/ao/reflectance/depth），按 lambert 继续"
+                    "ASH_RENDER_MODE={other:?} 无法识别（可选 filament(lambert 兼容)/unlit/normal/position/metallic/roughness/ao/reflectance/depth），按 filament 继续"
                 );
                 Self::Lambert
             }
@@ -225,7 +227,7 @@ impl DebugWindow<'_> {
                 ui.separator();
                 ui.label("着色模式");
                 ui.horizontal(|ui| {
-                    ui.selectable_value(mode, RenderMode::Lambert, "lambert");
+                    ui.selectable_value(mode, RenderMode::Lambert, "filament");
                     ui.selectable_value(mode, RenderMode::Unlit, "unlit");
                     ui.selectable_value(mode, RenderMode::Normal, "normal");
                     ui.selectable_value(mode, RenderMode::Position, "position");

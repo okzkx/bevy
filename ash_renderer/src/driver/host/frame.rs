@@ -503,7 +503,7 @@ pub(crate) fn draw_frame(
             fmt_vec4(ambient_color),
             if per_camera_ambient.is_some() { "相机 AmbientLight" } else { "GlobalAmbientLight" },
             match render_mode {
-                RenderMode::Lambert => "lambert",
+                RenderMode::Lambert => "filament",
                 RenderMode::Unlit => "unlit",
                 RenderMode::Normal => "normal",
                 RenderMode::Position => "position",
