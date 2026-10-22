@@ -22,6 +22,7 @@
 //! | `gpu/lod` | 进程级+纯函数 | GPU LOD 选档 compute 半边(6.2):LodPass 管线 + 判据/迟滞纯函数 + 诊断账面 |
 //! | `gpu/hiz` | 进程级+纯函数 | Hi-Z 深度金字塔(6.1.2):HizPyramid ×2 帧槽 + 逐级归约管线 + reverse-Z 保守方向纯函数 |
 //! | `gpu/indirect` | 进程级+纯函数 | indirect 闭环 compute 半边(5.3):IndirectPass 命令组装管线 + 诊断账面 + 命令布局参照 |
+//! | `shading/light_table` | 资产级 | 光源常驻表(8.2.2):punctual 光源 storage 表 + 槽位账本 + 脏行增量重写(常驻拍板形态) |
 //! | `perf` | 进程级 | GPU timestamp 计时(GpuTimer 每帧槽 query pool)+ 帧样本账(PerfLedger 分位数,5.5) |
 //!
 //! 拆分点：同步对象不挂任何一张 swapchain image 上——重建 swapchain 时原地不动；
@@ -33,6 +34,7 @@ mod gpu;
 mod perf;
 mod pipeline;
 mod resources;
+mod shading;
 mod swapchain;
 
 pub use context::{Context, HeapBudgetReading};
@@ -44,6 +46,9 @@ pub use gpu::hiz::{
     occluded_reverse_z, occlusion_mip_level, reduce_tile_reverse_z, HizCensus, HizPyramid,
     HIZ_FORMAT,
 };
+// 诊断回读助手（8.1.3 透明族判定线③立的面）：BRP 读数方法族（remote/）与
+// render 内部同频复用，crate 级重出口。
+pub(crate) use gpu::hiz::readback_buffer;
 pub use gpu::indirect::{IndirectDraw, IndirectPass, IndirectStats, INDIRECT_PUSH_SIZE};
 pub use gpu::lod::{
     lod_hysteresis_level, lod_raw_level, pack_lod_push, LodDiagnostics, LodDraw, LodPass,
@@ -56,14 +61,16 @@ pub use gpu::occlusion::{
 pub use assets::descriptors::{
     pack_frame_uniforms, BindlessTables, FrameUniformsData, SlotBinding, TABLE_CAPACITY,
     PLACEHOLDER_DIR_TO_LIGHT,
-    FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_POSITION, FRAME_MODE_UNLIT,
+    FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC, FRAME_MODE_NORMAL,
+    FRAME_MODE_POSITION, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
 };
 pub use assets::images::{image_spec, sampler_key, GpuImage, ImageCache, ImageConvertError, ImageSpec, SamplerKey};
 pub use assets::instance_table::{
     conservative_world_aabb, pack_lod_entry, pack_material_record, pack_model, pack_object_record,
     InstanceTables, GAP_MARK_SIZE, INDIRECT_COMMAND_SIZE, LOD_ENTRY_SIZE, LOD_LEVEL_SIZE,
     LOD_TABLE_STRIDE, MARK_SIZE, MATERIAL_RECORD_SIZE, MATERIAL_TABLE_CAPACITY, MAX_LOD_LEVELS,
-    MODEL_STRIDE, OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY, OCC_MARK_SIZE, PRESENCE_ENTRY_SIZE,
+    MODEL_STRIDE, NO_TEXTURE_INDEX, OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY, OCC_MARK_SIZE,
+    PRESENCE_ENTRY_SIZE,
 };
 pub use assets::mesh_convert::{convert_mesh, ConvertedMesh, MeshConvertError, VERTEX_STRIDE};
 pub use assets::pool::{MeshPool, MeshSlot, PoolRange};
@@ -71,16 +78,20 @@ pub use assets::uploader::{
     CopyRegion, ImageRelease, Release, StagingCopy, StagingImageCopy, Ticket, UploadBatch, Uploader,
 };
 pub use perf::{FrameSample, GpuTimer, PerfLedger, QUERIES_PER_FRAME};
+pub use shading::{
+    LightRecord, LightTable, LIGHT_FLAG_SHADOW, LIGHT_RECORD_SIZE, LIGHT_TABLE_CAPACITY,
+    LIGHT_TYPE_POINT,
+};
 pub use pipeline::cluster::{
     cluster_grid, cluster_reference, pack_cluster_uniforms, slice_view_depth, ClusterBuildDraw,
     TransparentFrame,
-    ClusterGrid, ClusterTargets, PointLightGpu, TestPointLights, TransparentCollectDraw,
+    ClusterGrid, ClusterTargets, TransparentCollectDraw,
     TransparentGatherDraw, TransparentPasses, TransparentPipeline, CLUSTER_FAR, CLUSTER_NEAR,
     CLUSTER_SLICES, CLUSTER_TILE_SIZE, MAX_PER_CLUSTER, TRANSPARENT_CAPACITY,
 };
 pub use pipeline::fullscreen_pipeline::{CompositePipeline, PresentBlitPipeline};
 pub use pipeline::gbuffer::{
-    GBufferTargets, ALBEDO_FORMAT, HDR_FORMAT, NORMAL_FORMAT,
+    GBufferTargets, ALBEDO_FORMAT, HDR_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
 };
 pub use pipeline::depth::{DepthTarget, DEPTH_FORMAT};
 pub use pipeline::frames::{FrameDraw, Frame, FramePool, MAX_FRAMES_IN_FLIGHT};

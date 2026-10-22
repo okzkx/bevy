@@ -5,7 +5,8 @@
 //
 // 接口（透明族独立小集，cluster.rs 布局契约——hiz 先例：不进 set2）：
 // - b0 ClusterParams（160B：view_proj + inv_view_proj + 标量，每帧槽直写）。
-// - b1 PointLight 数组（每帧环，宿主写；8.2 光源驻留形态裁决前的测试载体）。
+// - b1 LightRecord 数组（光源常驻表本帧槽环，8.2.2 切表——脏行增量重写，
+//   稳态零上传；槽号即 cluster 列表引用的稳定身份）。
 // - b2 cluster 光源索引表（DEVICE_LOCAL，count + 16 索引/cluster）。
 // - b3 逐 cluster 计数（HOST_VISIBLE，本 compute 全量重写——无清零需求）。
 //
@@ -17,9 +18,13 @@
 // 并发语义：每 invocation 独占写 lists[ci]/counts[ci]，普通 store 无需原子；
 // 索引序 = 光源遍历序（对照按集合语义，不承诺顺序）。
 
-struct PointLight {
-    pos_radius: vec4f,       // xyz 世界位置 + w 半径（米）
-    color_intensity: vec4f,  // 颜色×强度（rgb 线性）
+// 64B 记录（_pad 的成员对齐把步长从 48 撑到 64——Rust 侧 pack 同布局，
+// light_table.rs 互证）
+struct LightRecord {
+    pos_radius: vec4f,       // xyz 世界位置 + w 半径（米；0 = 死灯，门卫跳过）
+    color_intensity: vec4f,  // 颜色（rgb 线性）× 强度（w，candela 域）
+    flags: u32,              // bit0 = shadow（8.3 预留）；bits 8..15 = type
+    _pad: vec3<u32>,
 }
 
 struct ClusterParams {
@@ -41,7 +46,7 @@ struct ClusterRecord {
 }
 
 @group(0) @binding(0) var<storage, read> params: ClusterParams;
-@group(0) @binding(1) var<storage, read> lights: array<PointLight>;
+@group(0) @binding(1) var<storage, read> lights: array<LightRecord>;
 @group(0) @binding(2) var<storage, read_write> lists: array<ClusterRecord>;
 @group(0) @binding(3) var<storage, read_write> counts: array<u32>;
 
@@ -92,6 +97,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var l = 0u; l < params.light_count; l = l + 1u) {
         let lp = lights[l].pos_radius.xyz;
         let r = lights[l].pos_radius.w;
+        if (r <= 0.0) {
+            continue;  // 死灯门卫（8.2.2：回收槽清零语义，CPU 参照同式）
+        }
         let closest = clamp(lp, aabb_min, aabb_max);
         if (distance(closest, lp) <= r) {
             if (count < MAX_PER_CLUSTER) {

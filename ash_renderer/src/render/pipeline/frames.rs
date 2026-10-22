@@ -74,9 +74,12 @@ pub struct FrameDraw<'a> {
     /// G-buffer 附件 + HDR 中间目标（8.1：多 pass 帧编排的附件面，采样集
     /// 也在其上——合成 pass 与 present blit 消费）。
     pub gbuffer: &'a GBufferTargets,
-    /// 合成管线（G-buffer 光照 → HDR 中间目标；全屏，无深度/混合）。
+    /// 合成管线（G-buffer 光照累积 → HDR 中间目标；全屏，无深度/混合）。
     pub composite_pipeline: vk::Pipeline,
     pub composite_layout: vk::PipelineLayout,
+    /// cluster 集（8.2.3：合成光照累积的取数面——b0 网格参数 / b1 光源常驻表
+    /// / b2 逐 cluster 列表；与透明层同一 layout 对象）。
+    pub cluster_set: vk::DescriptorSet,
     /// present blit 管线（HDR 中间目标 → swapchain；全屏，无深度/混合）。
     pub blit_pipeline: vk::Pipeline,
     pub blit_layout: vk::PipelineLayout,
@@ -389,6 +392,9 @@ impl FramePool {
             for gbuffer_image in [
                 draw.gbuffer.albedo_image(slot),
                 draw.gbuffer.normal_image(slot),
+                // 8.2.1 matparam（材质标量 r=metallic/g=AO/b=roughness）随
+                // G-buffer 三附件同批进场
+                draw.gbuffer.matparam_image(slot),
                 // HDR 中间目标同样首用 UNDEFINED 进场（下帧 UNDEFINED 进场丢弃
                 // 上一轮 SHADER_READ_ONLY 内容——loadOp CLEAR 覆写全像素）
                 draw.gbuffer.hdr_image(slot),
@@ -551,6 +557,18 @@ impl FramePool {
                             float32: [0.0, 0.0, 0.0, 0.0],
                         },
                     }),
+                // 8.2.1 matparam（材质标量）：附件计数与主管线声明面一致
+                //（VUID-06179——管线 colorAttachmentCount = 实例 colorAttachmentCount）
+                vk::RenderingAttachmentInfo::default()
+                    .image_view(draw.gbuffer.matparam_view(slot))
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .clear_value(vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.0, 0.0, 0.0, 1.0],
+                        },
+                    }),
             ];
             let depth_attachment = vk::RenderingAttachmentInfo::default()
                 .image_view(frame.depth.view)
@@ -682,6 +700,15 @@ impl FramePool {
                     vk::ImageAspectFlags::COLOR,
                 ),
                 (
+                    // 8.2.1 matparam：合成 pass 光照累积的 PBR 入参采样面
+                    draw.gbuffer.matparam_image(slot),
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::ImageAspectFlags::COLOR,
+                ),
+                (
                     frame.depth.image,
                     vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                     vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
@@ -748,8 +775,9 @@ impl FramePool {
                 vk::PipelineBindPoint::GRAPHICS,
                 draw.composite_pipeline,
             );
-            // set0 = 帧 UBO（与场景管线 set1 同一 layout 对象），set1 = G-buffer 采样集
-            let composite_sets = [draw.set1, draw.gbuffer.sampled_set(slot)];
+            // set0 = 帧 UBO（与场景管线 set1 同一 layout 对象），set1 = G-buffer
+            // 采样集，set2 = cluster 集（8.2.3 光照累积取数）
+            let composite_sets = [draw.set1, draw.gbuffer.sampled_set(slot), draw.cluster_set];
             device.cmd_bind_descriptor_sets(
                 frame.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,

@@ -10,6 +10,7 @@
 //! | 0 | albedo | R8G8B8A8_UNORM | 线性反照率（贴图采样 × base_color，sRGB 解码在采样端） |
 //! | 1 | normal | R16G16B16A16_SFLOAT | 世界空间法线 xyz 直存（w 未用；编码取舍见施工记录） |
 //! | 2 | motion vectors | ——（不分配） | 留位：槽位号保留 |
+//! | 3 | matparam | R8G8B8A8_UNORM | 材质标量（8.2.1）：r=metallic / g=AO / b=perceptualRoughness / a=reflectance（8.2.3 转正）——光照累积的 PBR 入参 |
 //! | — | depth | D32_SFLOAT | reverse-Z 深度（本体按帧槽在 [`super::depth`]） |
 //!
 //! **HDR 中间目标 hdr**（R16G16B16A16_SFLOAT）：合成（G-buffer 光照）与透明
@@ -36,6 +37,11 @@ pub const ALBEDO_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 /// 留作后续优化项，不主张）。
 pub const NORMAL_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
+/// matparam 附件格式（8.2.1）：材质标量 r=metallic / g=AO / b=perceptualRoughness
+/// / a=reflectance。8bit 量化与 Filament deferred 层同档（roughness/metallic
+/// 均走 8bit 打包），PBR 语义下精度足够；法线/反照率的编码取舍不适用于标量面。
+pub const MATPARAM_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
+
 /// HDR 中间目标格式（透明层的 alpha blending 也落在此目标上）。
 pub const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
@@ -45,6 +51,7 @@ pub const SAMPLED_BINDING_NORMAL: u32 = 1;
 pub const SAMPLED_BINDING_HDR: u32 = 2;
 pub const SAMPLED_BINDING_DEPTH: u32 = 3;
 pub const SAMPLED_BINDING_SAMPLER: u32 = 4;
+pub const SAMPLED_BINDING_MATPARAM: u32 = 5;
 
 /// 一张颜色附件：VkImage + dedicated memory + view（COLOR_ATTACHMENT |
 /// SAMPLED 用途——G-buffer 附件渲染后由合成/blit 采样）。
@@ -182,6 +189,7 @@ impl Drop for ColorTarget {
 struct GBufferSlot {
     albedo: ColorTarget,
     normal: ColorTarget,
+    matparam: ColorTarget,
     hdr: ColorTarget,
 }
 
@@ -223,7 +231,7 @@ impl GBufferTargets {
         };
         this.build(ctx, extent, depth_views)?;
         info!(
-            "G-buffer 附件就绪: albedo {ALBEDO_FORMAT:?} + normal {NORMAL_FORMAT:?} + HDR {HDR_FORMAT:?} \
+            "G-buffer 附件就绪: albedo {ALBEDO_FORMAT:?} + normal {NORMAL_FORMAT:?} + matparam {MATPARAM_FORMAT:?} + HDR {HDR_FORMAT:?} \
              × {} 帧槽（motion vectors 留位不分配，槽位契约见模块注释）",
             depth_views.len(),
         );
@@ -254,6 +262,13 @@ impl GBufferTargets {
         self.slots[slot].normal.view
     }
 
+    /// 第 `slot` 帧槽的 matparam 附件视图（attachment 2，槽位号 3——motion
+    /// vectors 留位不动，8.2.1）。
+    #[must_use]
+    pub fn matparam_view(&self, slot: usize) -> vk::ImageView {
+        self.slots[slot].matparam.view
+    }
+
     /// 第 `slot` 帧槽的 HDR 中间目标视图（合成/透明层 attachment 0）。
     #[must_use]
     pub fn hdr_view(&self, slot: usize) -> vk::ImageView {
@@ -270,6 +285,12 @@ impl GBufferTargets {
     #[must_use]
     pub fn normal_image(&self, slot: usize) -> vk::Image {
         self.slots[slot].normal.image
+    }
+
+    /// 第 `slot` 帧槽的 matparam image 句柄（同上，8.2.1）。
+    #[must_use]
+    pub fn matparam_image(&self, slot: usize) -> vk::Image {
+        self.slots[slot].matparam.image
     }
 
     /// 第 `slot` 帧槽的 HDR image 句柄（同上）。
@@ -321,6 +342,13 @@ impl GBufferTargets {
                 Ok(GBufferSlot {
                     albedo: ColorTarget::new(ctx, extent, ALBEDO_FORMAT, false, "G-buffer albedo")?,
                     normal: ColorTarget::new(ctx, extent, NORMAL_FORMAT, false, "G-buffer normal")?,
+                    matparam: ColorTarget::new(
+                        ctx,
+                        extent,
+                        MATPARAM_FORMAT,
+                        false,
+                        "G-buffer matparam",
+                    )?,
                     hdr: ColorTarget::new(ctx, extent, HDR_FORMAT, true, "HDR 中间目标")?,
                 })
             })
@@ -388,6 +416,7 @@ fn build_sampling(
         sampled(SAMPLED_BINDING_NORMAL),
         sampled(SAMPLED_BINDING_HDR),
         sampled(SAMPLED_BINDING_DEPTH),
+        sampled(SAMPLED_BINDING_MATPARAM),
         vk::DescriptorSetLayoutBinding::default()
             .binding(SAMPLED_BINDING_SAMPLER)
             .descriptor_type(vk::DescriptorType::SAMPLER)
@@ -431,7 +460,7 @@ unsafe fn build_sampling_inner(
                 .pool_sizes(&[
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                        .descriptor_count(4 * depth_views.len() as u32),
+                        .descriptor_count(5 * depth_views.len() as u32),
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::SAMPLER)
                         .descriptor_count(depth_views.len() as u32),
@@ -486,6 +515,7 @@ unsafe fn build_sampling_inner(
                 vk::DescriptorImageInfo::default()
                     .image_view(*depth_view)
                     .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL),
+                image_info(slot.matparam.view),
                 vk::DescriptorImageInfo::default().sampler(sampler),
             ]);
         }
@@ -494,6 +524,7 @@ unsafe fn build_sampling_inner(
             SAMPLED_BINDING_NORMAL,
             SAMPLED_BINDING_HDR,
             SAMPLED_BINDING_DEPTH,
+            SAMPLED_BINDING_MATPARAM,
             SAMPLED_BINDING_SAMPLER,
         ];
         let writes: Vec<vk::WriteDescriptorSet> = sets
@@ -515,7 +546,7 @@ unsafe fn build_sampling_inner(
             .collect();
         device.update_descriptor_sets(&writes, &[]);
         info!(
-            "G-buffer 采样集就绪: b0 albedo / b1 normal / b2 hdr / b3 depth / b4 线性采样器 × {} 帧槽（{}x{}）",
+            "G-buffer 采样集就绪: b0 albedo / b1 normal / b2 hdr / b3 depth / b4 线性采样器 / b5 matparam × {} 帧槽（{}x{}）",
             depth_views.len(),
             extent.width,
             extent.height,

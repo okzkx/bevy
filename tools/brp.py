@@ -209,6 +209,11 @@ def cmd_generate_chunks(args):
     out(rpc(args.host, args.port, "ash_renderer/generate_chunks", params))
 
 
+def cmd_ring_census(args):
+    params = {"slot": args.slot} if args.slot is not None else None
+    out(rpc(args.host, args.port, "ash_renderer/ring_census", params))
+
+
 def cmd_chunk_census(args):
     out(rpc(args.host, args.port, "ash_renderer/chunk_census"))
 
@@ -256,6 +261,10 @@ def cmd_mutate(args):
     params = {"entity": args.entity}
     if args.base_color:
         params["base_color"] = [float(x) for x in args.base_color]
+    if args.metallic is not None:
+        params["metallic"] = float(args.metallic)
+    if args.roughness is not None:
+        params["perceptual_roughness"] = float(args.roughness)
     if args.slot_base_color_from:
         params["slot_base_color_from"] = args.slot_base_color_from
     if args.mesh_vertex_scale is not None:
@@ -271,6 +280,37 @@ def cmd_stats(args):
 
 def cmd_cull_stats(args):
     out(rpc(args.host, args.port, "ash_renderer/cull_stats"))
+
+
+def cmd_light_spawn(args):
+    params = {"pos": args.pos, "color": args.color, "radius": args.radius,
+              "intensity": args.intensity}
+    if args.shadow:
+        params["shadow"] = True
+    out(rpc(args.host, args.port, "ash_renderer/light_spawn", params))
+
+
+def cmd_light_update(args):
+    params = {"slot": args.slot}
+    if args.pos is not None:
+        params["pos"] = args.pos
+    if args.color is not None:
+        params["color"] = args.color
+    if args.radius is not None:
+        params["radius"] = args.radius
+    if args.intensity is not None:
+        params["intensity"] = args.intensity
+    if args.shadow is not None:
+        params["shadow"] = args.shadow == "true"
+    out(rpc(args.host, args.port, "ash_renderer/light_update", params))
+
+
+def cmd_light_remove(args):
+    out(rpc(args.host, args.port, "ash_renderer/light_remove", {"slot": args.slot}))
+
+
+def cmd_light_stats(args):
+    out(rpc(args.host, args.port, "ash_renderer/light_stats"))
 
 
 def cmd_cull_set(args):
@@ -368,6 +408,11 @@ def cmd_frame_sync(args):
     if args.enabled is not None:
         params["enabled"] = args.enabled == "true"
     out(rpc(args.host, args.port, "ash_renderer/frame_sync", params or None))
+
+
+def cmd_render_mode(args):
+    out(rpc(args.host, args.port, "ash_renderer/set_render_mode", {"mode": args.mode}))
+
 
 def cmd_workload(args):
     if args.on and args.off:
@@ -567,6 +612,9 @@ def main():
     p.set_defaults(func=cmd_generate_chunks)
 
     sub.add_parser("chunk-census", help="chunk 盘点（ash_renderer/chunk_census，只读：在场块 id/原点/边长/成员数）").set_defaults(func=cmd_chunk_census)
+    p = sub.add_parser("ring-census", help="环内容对账（ash_renderer/ring_census，8.2.6 定责仪器：模型环/材质环双帧槽逐槽字节 vs 宿主期望 + 在场环；--slot 限单槽）")
+    p.add_argument("--slot", type=int, help="限定实例槽（缺省盘点全部已驻留行）")
+    p.set_defaults(func=cmd_ring_census)
 
     p = sub.add_parser("chunk-despawn", help="整块删除（ash_renderer/chunk_despawn，按 id 找根递归 despawn；removed_rows 次帧对账）")
     p.add_argument("--id", type=int, required=True, help="目标 chunk id（chunk-census 可查）")
@@ -590,6 +638,8 @@ def main():
     p = sub.add_parser("mutate", help="改资产内容：同 AssetId 原位变更，触发 Modified（ash_renderer/mutate_asset）")
     p.add_argument("entity", help="定位实体（取它身上的 Mesh3d/MeshMaterial3d 柄）")
     p.add_argument("--base-color", nargs=4, metavar=("R", "G", "B", "A"), help="材质 base_color（线性域 RGBA）")
+    p.add_argument("--metallic", type=float, help="材质 metallic（[0,1]，8.2 PBR 面）")
+    p.add_argument("--roughness", type=float, help="材质 perceptual_roughness（[0,1]，8.2 PBR 面）")
     p.add_argument("--slot-base-color-from", help="换材质贴图槽：拷源实体的 base_color_texture 柄")
     p.add_argument("--mesh-vertex-scale", type=float, help="mesh 顶点绕原点均匀缩放系数")
     p.add_argument("--image-tint", nargs=3, metavar=("R", "G", "B"), help="base_color_texture 像素按通道乘的色调")
@@ -598,6 +648,29 @@ def main():
     sub.add_parser("stats", help="增量计量读数（ash_renderer/increment_stats）").set_defaults(func=cmd_stats)
 
     sub.add_parser("cull-stats", help="剔除读数对照：GPU 标记 vs CPU 参照逐实体 + 不一致清单（ash_renderer/cull_stats；读数陈旧 ≤2 帧，对照前等 ≥3 帧）").set_defaults(func=cmd_cull_stats)
+
+    p = sub.add_parser("light-spawn", help="spawn 点光进常驻表（ash_renderer/light_spawn，8.2.2；返回槽号=稳定身份，下帧生效）")
+    p.add_argument("--pos", type=float, nargs=3, required=True, metavar=("X", "Y", "Z"), help="世界位置")
+    p.add_argument("--color", type=float, nargs=3, required=True, metavar=("R", "G", "B"), help="线性 RGB")
+    p.add_argument("--radius", type=float, default=10.0, help="作用半径（米，缺省 10）")
+    p.add_argument("--intensity", type=float, default=10.0, help="强度（candela 域，缺省 10）")
+    p.add_argument("--shadow", action="store_true", help="置 shadow 标志位（8.3 预留，本段只记账）")
+    p.set_defaults(func=cmd_light_spawn)
+
+    p = sub.add_parser("light-update", help="原位改灯参数（ash_renderer/light_update，槽号不变——cluster 列表引用稳定）")
+    p.add_argument("slot", type=int, help="目标槽号")
+    p.add_argument("--pos", type=float, nargs=3, metavar=("X", "Y", "Z"), help="世界位置（缺省不动）")
+    p.add_argument("--color", type=float, nargs=3, metavar=("R", "G", "B"), help="线性 RGB（缺省不动）")
+    p.add_argument("--radius", type=float, help="作用半径（缺省不动）")
+    p.add_argument("--intensity", type=float, help="强度（缺省不动）")
+    p.add_argument("--shadow", choices=["true", "false"], help="shadow 标志位（缺省不动）")
+    p.set_defaults(func=cmd_light_update)
+
+    p = sub.add_parser("light-remove", help="回收灯（ash_renderer/light_remove；槽清零入 free list，cluster 列表下帧不再命中）")
+    p.add_argument("slot", type=int, help="目标槽号")
+    p.set_defaults(func=cmd_light_remove)
+
+    sub.add_parser("light-stats", help="常驻灯表读数（ash_renderer/light_stats：在场槽/记录镜像/脏行账——census 前置核对）").set_defaults(func=cmd_light_stats)
 
     p = sub.add_parser("cull-set", help="剔除开关（ash_renderer/cull_set_enabled；true=compute dispatch，false=host 全可见填充——数据层 A/B）")
     p.add_argument("--enabled", required=True, choices=["true", "false"], help="开关目标态")
@@ -633,6 +706,10 @@ def main():
     p = sub.add_parser("frame-sync", help="帧率同步开关读写（ash_renderer/frame_sync，7.6：缺省只读返回 {enabled, refresh_millihertz}；--enabled 写开关。语义=帧循环节奏对齐显示器刷新率，非 present mode 切换）")
     p.add_argument("--enabled", choices=["true", "false"], help="开关目标态（缺省只读）")
     p.set_defaults(func=cmd_frame_sync)
+
+    p = sub.add_parser("render-mode", help="着色模式切换（ash_renderer/set_render_mode，8.2.3 增补 8.2.5 扩列：filament(lambert 兼容别名)/unlit/normal/position + G-buffer 调试仪器 metallic/roughness/ao/reflectance/depth——matparam 单通道灰度直出与深度线性化，mutate 写后读验收口）")
+    p.add_argument("mode", choices=["filament", "lambert", "unlit", "normal", "position", "metallic", "roughness", "ao", "reflectance", "depth"], help="目标模式")
+    p.set_defaults(func=cmd_render_mode)
 
     p = sub.add_parser("load-mesh", help="异步加载新 mesh：entity=换到既有实体 / source=克隆挂新实体（ash_renderer/load_mesh）")
     p.add_argument("--path", required=True, help='资产路径（如 "models/FlightHelmet/FlightHelmet.gltf#Mesh0/Primitive1"）')

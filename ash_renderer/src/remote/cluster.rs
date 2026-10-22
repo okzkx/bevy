@@ -1,10 +1,10 @@
-//! 透明层验证方法族（8.1.3）：BRP 侧的 cluster 对照与测试光源注入——
-//! `cluster_lights` 写测试点光源列表（透明层数据载体；8.2 光源驻留形态
-//! 裁决前的注入通道），`cluster_census` 做 GPU 逐 cluster 计数 vs CPU 参照
-//! 的对照（判定线②的证据面）。
+//! 透明层验证方法族（8.1.3/8.2.2）：BRP 侧的 cluster 对照与光源常驻表方法族
+//! ——`light_spawn`/`light_update`/`light_remove`/`light_stats` 落账常驻灯表
+//!（用户拍板驻留形态；4.1 账本语义），`cluster_census` 做 GPU 逐 cluster
+//! 计数 vs CPU 参照的对照（判定线②的证据面）。
 //!
 //! 红线边界（照 cull_stats 拍板）：census 只读计数对照，**不回灌绘制决策**；
-//! lights 只写测试光源数据（透明层光照输入，不触碰不透明合成语义）。
+//! light_* 只写光源数据（不触碰绘制决策链）。
 //!
 //! 读数陈旧性：cluster 计数是帧槽直读（该槽两帧前 cluster_build 的输出），
 //! CPU 参照按 handler 时刻的相机/光源现算——对照前提 = 相机与光源自产生
@@ -18,61 +18,173 @@ use serde_json::{json, Value};
 
 use ash_macros::system;
 
-use crate::{
-    render::{
-        cluster_reference, conservative_world_aabb, ClusterGrid, ClusterTargets, Context,
-        PointLightGpu, TestPointLights,
-    },
-    scene::InstanceLedger,
+use crate::render::{
+    cluster_reference, conservative_world_aabb, ClusterGrid, ClusterTargets, Context, LightRecord,
+    LightTable, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT,
 };
+use crate::scene::InstanceLedger;
 
 use super::{error_codes, invalid_params, BrpError, BrpResult};
 
-/// `ash_renderer/cluster_lights` 参数：光源数组（空数组 = 清空，回到纯方向光）。
+/// 光源注入公共参数（spawn 全量必填；update 全量可选——逐项合并）。
 #[derive(serde::Deserialize)]
-struct ClusterLightsParams {
-    lights: Vec<LightIn>,
+struct LightParams {
+    pos: Option<[f32; 3]>,
+    radius: Option<f32>,
+    color: Option<[f32; 3]>,
+    intensity: Option<f32>,
+    /// shadow 标志位（8.3 预留，本段只记账不消费）。
+    shadow: Option<bool>,
 }
 
-#[derive(serde::Deserialize)]
-struct LightIn {
-    pos: [f32; 3],
-    radius: f32,
-    color: [f32; 3],
-    intensity: f32,
+impl LightParams {
+    fn merge_onto(self, record: &mut LightRecord) {
+        if let Some(pos) = self.pos {
+            record.pos_radius[..3].copy_from_slice(&pos);
+        }
+        if let Some(radius) = self.radius {
+            record.pos_radius[3] = radius;
+        }
+        if let Some(color) = self.color {
+            record.color_intensity[..3].copy_from_slice(&color);
+        }
+        if let Some(intensity) = self.intensity {
+            record.color_intensity[3] = intensity;
+        }
+        match self.shadow {
+            Some(true) => record.flags |= LIGHT_FLAG_SHADOW,
+            Some(false) => record.flags &= !LIGHT_FLAG_SHADOW,
+            None => {}
+        }
+    }
 }
 
-/// `ash_renderer/cluster_lights`：写测试点光源列表（透明层 cluster 的数据源；
-/// 8.2 光源驻留形态裁决前的注入口）。写入后下一帧起生效（光源环每帧重写）。
+/// `ash_renderer/light_spawn`：spawn 一盏点光进常驻表，返回槽号（cluster
+/// 列表引用的稳定身份）。写入后下帧起生效（脏行增量重写）。
 ///
 /// # Errors
-/// 参数不合法 / 数量超容量（显式报错不截断）。
+/// 参数缺失 / 半径非正 / 容量耗尽（显式报错不截断）。
 #[system]
-pub(crate) fn cluster_lights(
+pub(crate) fn light_spawn(
     In(params): In<Option<Value>>,
-    mut lights: ResMut<'_, TestPointLights>,
+    mut table: ResMut<'_, LightTable>,
 ) -> BrpResult {
-    let p: ClusterLightsParams = serde_json::from_value(params.unwrap_or(Value::Null))
+    let p: LightParams = serde_json::from_value(params.unwrap_or(Value::Null))
         .map_err(|e| invalid_params(format!("params: {e}")))?;
-    if p.lights.len() > 64 {
-        return Err(invalid_params(format!(
-            "光源数 {} 超出容量 64（MAX_CLUSTER_LIGHTS）",
-            p.lights.len()
-        )));
+    let Some(pos) = p.pos else {
+        return Err(invalid_params("params 缺失：需要 pos（光源世界位置）"));
+    };
+    let Some(color) = p.color else {
+        return Err(invalid_params("params 缺失：需要 color（线性 RGB）"));
+    };
+    let radius = p.radius.unwrap_or(10.0);
+    let intensity = p.intensity.unwrap_or(10.0);
+    if radius <= 0.0 {
+        return Err(invalid_params(format!("radius {radius} 非正——作用半径必须大于 0")));
     }
-    lights.0 = p
-        .lights
-        .iter()
-        .map(|l| PointLightGpu {
-            pos_radius: [l.pos[0], l.pos[1], l.pos[2], l.radius],
-            color_intensity: [l.color[0], l.color[1], l.color[2], l.intensity],
+    let mut record = LightRecord {
+        pos_radius: [pos[0], pos[1], pos[2], radius],
+        color_intensity: [color[0], color[1], color[2], intensity],
+        flags: LIGHT_TYPE_POINT << 8,
+    };
+    p.merge_onto(&mut record);
+    let slot = table.spawn(record).map_err(|e| BrpError {
+        code: error_codes::INTERNAL_ERROR,
+        message: format!("光源 spawn 失败: {e}"),
+        data: None,
+    })?;
+    info!("BRP spawn 点光 → 常驻表槽 {slot}（radius {radius}）");
+    Ok(json!({ "slot": slot, "count": table.light_count() }))
+}
+
+/// `ash_renderer/light_update` 参数：槽号 + 逐项可选合并。
+#[derive(serde::Deserialize)]
+struct LightUpdateParams {
+    slot: u32,
+    #[serde(flatten)]
+    changes: LightParams,
+}
+
+/// `ash_renderer/light_update`：原位改一盏灯的参数（槽号不变——cluster 列表
+/// 引用稳定，改内容不换槽的 4.1 语义）。写入后下帧起生效。
+///
+/// # Errors
+/// 参数不合法 / 槽号不在场。
+#[system]
+pub(crate) fn light_update(
+    In(params): In<Option<Value>>,
+    mut table: ResMut<'_, LightTable>,
+) -> BrpResult {
+    let p: LightUpdateParams = serde_json::from_value(params.unwrap_or(Value::Null))
+        .map_err(|e| invalid_params(format!("params: {e}")))?;
+    let Some(mut record) = table.record(p.slot) else {
+        return Err(invalid_params(format!("光源槽 {} 不在场", p.slot)));
+    };
+    p.changes.merge_onto(&mut record);
+    table.update(p.slot, record).map_err(|e| BrpError {
+        code: error_codes::INTERNAL_ERROR,
+        message: format!("光源 update 失败: {e}"),
+        data: None,
+    })?;
+    Ok(json!({ "slot": p.slot }))
+}
+
+/// `ash_renderer/light_remove`：回收一盏灯（槽清零入 free list，cluster 列表
+/// 下一帧起不再命中）。
+///
+/// # Errors
+/// 参数不合法 / 槽号不在场。
+#[system]
+pub(crate) fn light_remove(
+    In(params): In<Option<Value>>,
+    mut table: ResMut<'_, LightTable>,
+) -> BrpResult {
+    #[derive(serde::Deserialize)]
+    struct P {
+        slot: u32,
+    }
+    let p: P = serde_json::from_value(params.unwrap_or(Value::Null))
+        .map_err(|e| invalid_params(format!("params: {e}")))?;
+    table.remove(p.slot).map_err(|e| BrpError {
+        code: error_codes::INTERNAL_ERROR,
+        message: format!("光源 remove 失败: {e}"),
+        data: None,
+    })?;
+    Ok(json!({ "slot": p.slot, "count": table.light_count() }))
+}
+
+/// `ash_renderer/light_stats`：常驻表读数（在场槽/记录镜像/账面）——census
+/// 前置核对与判定线②的灯表对照源。
+///
+/// # Errors
+/// 资源缺席。
+#[system]
+pub(crate) fn light_stats(In(_params): In<Option<Value>>, table: Res<'_, LightTable>) -> BrpResult {
+    let lights: Vec<Value> = table
+        .active_slots()
+        .into_iter()
+        .filter_map(|slot| {
+            table.record(slot).map(|r| {
+                json!({
+                    "slot": slot,
+                    "pos": [r.pos_radius[0], r.pos_radius[1], r.pos_radius[2]],
+                    "radius": r.pos_radius[3],
+                    "color": [r.color_intensity[0], r.color_intensity[1], r.color_intensity[2]],
+                    "intensity": r.color_intensity[3],
+                    "shadow": r.flags & LIGHT_FLAG_SHADOW != 0,
+                    "type": r.light_type(),
+                })
+            })
         })
         .collect();
-    info!(
-        "BRP 注入测试点光源 {} 盏（透明层 cluster 数据面）",
-        lights.0.len()
-    );
-    Ok(json!({ "count": lights.0.len() }))
+    Ok(json!({
+        "count": table.light_count(),
+        "active": lights.len(),
+        "capacity": 256,
+        "dirty": table.dirty_count(),
+        "dirty_writes_total": table.dirty_writes_total(),
+        "lights": lights,
+    }))
 }
 
 /// `ash_renderer/cluster_census`：cluster 光源列表对照（判定线②的读数口）。
@@ -104,7 +216,7 @@ pub(crate) fn cluster_census(In(_params): In<Option<Value>>, world: &mut World) 
             }
         }
     };
-    let light_count = world.resource::<TestPointLights>().0.len();
+    let light_count = world.resource::<LightTable>().light_count();
     let grid: ClusterGrid;
     let gpu_counts: Vec<u32>;
     let transparent_rows: u32;
@@ -134,9 +246,13 @@ pub(crate) fn cluster_census(In(_params): In<Option<Value>>, world: &mut World) 
         })?;
         transparent_rows = u32::from_le_bytes(t_bytes);
     }
-    // CPU 参照（与 cluster_build.wgsl 同公式）
-    let lights = world.resource::<TestPointLights>();
-    let ref_lists = cluster_reference(view_proj, inv_view_proj, extent, grid, &lights.0);
+    // CPU 参照（与 cluster_build.wgsl 同公式）：按槽号铺满遍历域，空槽 = 死灯
+    // 记录（radius 0，双侧门卫一致跳过）
+    let table = world.resource::<LightTable>();
+    let lights: Vec<LightRecord> = (0..light_count)
+        .map(|slot| table.record(slot).unwrap_or(LightRecord::DEAD))
+        .collect();
+    let ref_lists = cluster_reference(view_proj, inv_view_proj, extent, grid, &lights);
     let mut mismatch = Vec::new();
     let mut total_gpu = 0u64;
     let mut total_cpu = 0u64;

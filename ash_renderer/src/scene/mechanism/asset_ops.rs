@@ -46,6 +46,8 @@ pub enum AssetOpError {
     MeshPositionsUnsupported,
     /// image 非 4 字节 RGBA 族格式，像素 tint 拒绝。
     ImageFormatUnsupported(TextureFormat),
+    /// 参数域不合法（PBR 标量出界等）。
+    InvalidParams(&'static str),
     /// 请求没带任何要动的量。
     NothingToDo,
 }
@@ -55,6 +57,10 @@ pub enum AssetOpError {
 pub struct MutateAsset {
     /// 改材质参数：base_color（线性域 RGBA）。
     pub base_color: Option<[f32; 4]>,
+    /// 改材质参数：metallic（[0,1]，8.2 PBR 面）。
+    pub metallic: Option<f32>,
+    /// 改材质参数：perceptual_roughness（[0,1]，8.2 PBR 面）。
+    pub perceptual_roughness: Option<f32>,
     /// 换材质贴图槽：把源实体的 base_color_texture 柄拷过来（None 源 = 清槽）。
     pub slot_base_color_from: Option<Entity>,
     /// 改 Mesh 内容：POSITION 顶点绕原点均匀缩放系数。
@@ -97,11 +103,21 @@ pub fn mutate_asset(
         .map(|m| m.0.clone())
         .ok_or(AssetOpError::TargetNotPrimitive(target))?;
     if p.base_color.is_none()
+        && p.metallic.is_none()
+        && p.perceptual_roughness.is_none()
         && p.slot_base_color_from.is_none()
         && p.mesh_vertex_scale.is_none()
         && p.image_tint.is_none()
     {
         return Err(AssetOpError::NothingToDo);
+    }
+    // PBR 标量域校验（[0,1]；8.2 shader 端也有 clamp，这里把误用挡在入口）
+    if p.metallic.is_some_and(|m| !(0.0..=1.0).contains(&m))
+        || p.perceptual_roughness.is_some_and(|r| !(0.0..=1.0).contains(&r))
+    {
+        return Err(AssetOpError::InvalidParams(
+            "metallic / perceptual_roughness 须在 [0,1]",
+        ));
     }
 
     // —— 预校验段（只读）：逐项检查可动性，执行段需要的解析结果就地收集。
@@ -174,6 +190,22 @@ pub fn mutate_asset(
             .get_mut(&material_handle)
             .ok_or(AssetOpError::AssetMissing("StandardMaterial"))?;
         material.base_color = Color::LinearRgba(LinearRgba::new(r, g, b, a));
+        readback.material = Some(material_handle.id());
+    }
+
+    if p.metallic.is_some() || p.perceptual_roughness.is_some() {
+        let mut assets = world.get_resource_mut::<Assets<StandardMaterial>>().ok_or(
+            AssetOpError::AssetMissing("Assets<StandardMaterial> 容器缺席"),
+        )?;
+        let mut material = assets
+            .get_mut(&material_handle)
+            .ok_or(AssetOpError::AssetMissing("StandardMaterial"))?;
+        if let Some(m) = p.metallic {
+            material.metallic = m;
+        }
+        if let Some(r) = p.perceptual_roughness {
+            material.perceptual_roughness = r;
+        }
         readback.material = Some(material_handle.id());
     }
 

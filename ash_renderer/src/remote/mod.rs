@@ -37,6 +37,7 @@ pub mod mouse;
 pub mod objects;
 pub mod perf;
 pub mod residency;
+pub mod ring_census;
 pub mod shapes;
 
 use std::collections::HashMap;
@@ -51,15 +52,16 @@ use serde_json::{json, Value};
 use self::{
     assets::{load_image_cmd, load_mesh_cmd, load_world_cmd, mutate_asset_cmd, reload_asset_cmd},
     cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
-    cluster::{cluster_census, cluster_lights, transparent_sort_check},
+    cluster::{cluster_census, light_remove, light_spawn, light_stats, light_update, transparent_sort_check},
     draw::{draw_stats, drawlist_verify_set},
     generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
     gap::{gap_census, gap_set, gap_stats},
     lod::{lod_census, lod_set_enabled, lod_set_params},
-    monitor::{frame_sync_cmd, monitor_stats},
+    monitor::{frame_sync_cmd, monitor_stats, set_render_mode},
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     objects::{increment_stats, replace_handles, spawn_primitive},
     residency::{residency_set, residency_stats},
+    ring_census::ring_census,
     perf::{perf_samples, perf_stats, workload},
     shapes::{spawn_lod, spawn_shape},
 };
@@ -103,7 +105,10 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/mouse_wheel", mouse_wheel)
                 .with_method_main("ash_renderer/mouse_status", mouse_status)
                 .with_method_main("ash_renderer/cull_stats", cull_stats)
-                .with_method_main("ash_renderer/cluster_lights", cluster_lights)
+                .with_method_main("ash_renderer/light_spawn", light_spawn)
+                .with_method_main("ash_renderer/light_update", light_update)
+                .with_method_main("ash_renderer/light_remove", light_remove)
+                .with_method_main("ash_renderer/light_stats", light_stats)
                 .with_method_main("ash_renderer/cluster_census", cluster_census)
                 .with_method_main("ash_renderer/transparent_sort_check", transparent_sort_check)
                 .with_method_main("ash_renderer/hiz_census", hiz_census)
@@ -124,7 +129,9 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/perf_samples", perf_samples)
                 .with_method_main("ash_renderer/workload", workload)
                 .with_method_main("ash_renderer/monitor_stats", monitor_stats)
-                .with_method_main("ash_renderer/frame_sync", frame_sync_cmd),
+                .with_method_main("ash_renderer/frame_sync", frame_sync_cmd)
+                .with_method_main("ash_renderer/set_render_mode", set_render_mode)
+                .with_method_main("ash_renderer/ring_census", ring_census),
             RemoteHttpPlugin::default(),
         ));
     }

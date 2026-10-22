@@ -37,6 +37,12 @@ struct MutateAssetParams {
     /// 改材质 base_color（线性域 RGBA）。
     #[serde(default)]
     base_color: Option<[f32; 4]>,
+    /// 改材质 metallic（[0,1]，8.2 PBR 面）。
+    #[serde(default)]
+    metallic: Option<f32>,
+    /// 改材质 perceptual_roughness（[0,1]，8.2 PBR 面）。
+    #[serde(default)]
+    perceptual_roughness: Option<f32>,
     /// 换材质 base_color 贴图槽：拷源实体材质的槽柄（含清槽语义）。
     #[serde(default)]
     slot_base_color_from: Option<Entity>,
@@ -62,6 +68,8 @@ pub(crate) fn mutate_asset_cmd(In(params): In<Option<Value>>, world: &mut World)
         serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
     let req = MutateAsset {
         base_color: p.base_color,
+        metallic: p.metallic,
+        perceptual_roughness: p.perceptual_roughness,
         slot_base_color_from: p.slot_base_color_from,
         mesh_vertex_scale: p.mesh_vertex_scale,
         image_tint: p.image_tint,
@@ -213,8 +221,9 @@ fn asset_op_error(err: AssetOpError) -> BrpError {
             message: format!("贴图格式 {format:?} 非 4 字节 RGBA 族,像素 tint 拒绝"),
             data: None,
         },
+        AssetOpError::InvalidParams(what) => invalid_params(what),
         AssetOpError::NothingToDo => invalid_params(
-            "至少一项变更（base_color / slot_base_color_from / mesh_vertex_scale / image_tint）",
+            "至少一项变更（base_color / metallic / perceptual_roughness / slot_base_color_from /              mesh_vertex_scale / image_tint）",
         ),
     }
 }

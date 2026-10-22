@@ -75,6 +75,7 @@ fn compile(path: &Path, stem: &str) -> Vec<u32> {
             panic!("[{stem}] WGSL 解析失败:\n{}", e.emit_to_string(&source));
         }
     };
+    assert_host_layout(&module, stem);
     // 能力面与闸门探针同款显式声明：binding 数组、非一致索引、var<immediate>。
     let caps = Capabilities::IMMEDIATES
         | Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY
@@ -87,6 +88,40 @@ fn compile(path: &Path, stem: &str) -> Vec<u32> {
     match spv::write_vec(&module, &info, &spv::Options::default(), None) {
         Ok(w) => w,
         Err(e) => panic!("[{stem}] SPIR-V 生成失败: {e}"),
+    }
+}
+
+/// 跨端布局互证闸门：与宿主打包逐字节同源的记录结构体，naga 算出的
+/// 结构体 span（字节数）必须与宿主常量相等——WGSL 侧结构体的成员对齐
+///（如 `vec3<u32>` 对齐 16）会把步长撑得比宿主打包大，材质/对象槽 ≥1
+/// 全体错位（8.2.6 实抓：MaterialRecord 步长 80 ≠ 宿主 64，缺陷①②同根）。
+/// 宿主常量正本 = `render/assets/instance_table.rs`（ MATERIAL_RECORD_SIZE
+/// / OBJECT_RECORD_SIZE 等）与 lights 侧记录尺寸；新增记录结构时在此登记。
+/// 注：span = 结构体字节数；storage 数组步长 = span 向上取整到对齐，span
+/// 相等且对齐不超宿主步长即步长相等。
+const HOST_LAYOUT_GATE: &[(&str, u32)] = &[
+    ("MaterialRecord", 64),
+    ("ObjectRecord", 48),
+    ("LightRecord", 64),
+    ("LodEntry", 12),
+    ("IndirectCommand", 20),
+];
+
+fn assert_host_layout(module: &naga::Module, stem: &str) {
+    for (_, ty) in module.types.iter() {
+        let Some(name) = &ty.name else { continue };
+        let Some((_, expect)) = HOST_LAYOUT_GATE.iter().find(|(n, _)| n == name) else {
+            continue;
+        };
+        let naga::TypeInner::Struct { span, .. } = &ty.inner else {
+            continue;
+        };
+        assert!(
+            span == expect,
+            "[{stem}] WGSL 结构体 {name} 跨端布局破缺:naga span {span}B ≠ 宿主记录 {expect}B\
+             ——成员对齐把步长撑大了,shader 端 storage 数组索引将与宿主打包错位\
+             （垫尾用标量 u32,不用 vec3/vec4;详见 assert_host_layout 注释）"
+        );
     }
 }
 
