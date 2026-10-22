@@ -35,7 +35,7 @@ use crate::scene::{
 use crate::render::{
     pack_lod_entry, pack_material_record, pack_model, BindlessTables, ImageCache, InstanceTables,
     LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS,
-    MODEL_STRIDE, MeshPool,
+    MODEL_STRIDE, MeshPool, NO_TEXTURE_INDEX,
 };
 
 /// 组装对照账面（7.9 判定线 2 的 BRP 开关对照模式）：开启时帧循环逐帧跑
@@ -235,9 +235,26 @@ fn write_material_ring(
             .as_ref()
             .and_then(|handle| image_cache.slots(handle.id()))
             .unwrap_or_else(BindlessTables::fallback_slots);
+        // 8.2.1 PBR 扩列供料：三贴图槽缺席写 NO_TEXTURE_INDEX 哨兵（shader 端
+        // 分支跳过采样），标量域语义 = Filament gltfio 同款（roughness 记
+        // perceptual 域、reflectance 原值，clamp 换算归 shader 端）
+        let optional_slot = |texture: Option<&bevy::asset::Handle<bevy::image::Image>>| {
+            texture
+                .and_then(|handle| image_cache.slots(handle.id()))
+                .map(|slots| slots.texture)
+                .unwrap_or(NO_TEXTURE_INDEX)
+        };
         let bytes = pack_material_record(
             [color.red, color.green, color.blue, color.alpha],
-            slots.texture,
+            material.metallic,
+            material.perceptual_roughness,
+            material.reflectance,
+            [
+                slots.texture,
+                optional_slot(material.normal_map_texture.as_ref()),
+                optional_slot(material.metallic_roughness_texture.as_ref()),
+                optional_slot(material.occlusion_texture.as_ref()),
+            ],
             slots.sampler,
         );
         tables

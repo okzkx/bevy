@@ -62,8 +62,13 @@ pub const MATERIAL_TABLE_CAPACITY: u32 = 1 << 16;
 pub const OBJECT_RECORD_SIZE: u64 = 48;
 /// 模型环步长（mat4x4f）。按实例槽索引，与对象表同一索引空间。
 pub const MODEL_STRIDE: u64 = 64;
-/// 材质记录字节数（vec4 + u32×2 + 垫 ×2，对齐 16）。
-pub const MATERIAL_RECORD_SIZE: u64 = 32;
+/// 材质记录字节数（8.2.1 扩列 32→64：vec4 + PBR 标量 ×3 + 贴图槽 ×4 + 采样器
+/// + 垫，对齐 16）。
+pub const MATERIAL_RECORD_SIZE: u64 = 64;
+
+/// 贴图槽缺席哨兵（8.2.1）：材质未挂该贴图时槽位字段写本值，shader 端
+/// 分支跳过采样（base_color 恒在场走 fallback 白图，不适用本哨兵）。
+pub const NO_TEXTURE_INDEX: u32 = u32::MAX;
 /// 剔除可见标记字节数（u32/实例槽，5.2）。
 pub const MARK_SIZE: u64 = 4;
 /// 遮挡标记字节数（u32/实例槽，6.1——遮挡独立标记位，A/B 归因读数）。
@@ -116,20 +121,36 @@ const _: () = {
     assert!(std::mem::size_of::<ObjectRecordLayout>() as u64 == OBJECT_RECORD_SIZE);
 };
 
-/// 材质记录布局镜像。
+/// 材质记录布局镜像（8.2.1 PBR 扩列：标量域语义照 Filament——roughness 记
+/// perceptual 域，clamp 与 α=p² 换算在 shader 端做；reflectance 默认 0.5，
+/// 介电体 F0 = 0.16·reflectance²）。
 #[repr(C)]
 #[allow(dead_code)]
 struct MaterialRecordLayout {
     base_color: [f32; 4],
-    tex_index: u32,
+    metallic: f32,
+    perceptual_roughness: f32,
+    reflectance: f32,
+    _pad0: u32,
+    tex_base_color: u32,
+    /// 缺席写 [`NO_TEXTURE_INDEX`] 哨兵，shader 端分支跳过采样。
+    tex_normal: u32,
+    tex_metallic_roughness: u32,
+    tex_occlusion: u32,
     sampler_index: u32,
-    _pad: [u32; 2],
+    _pad: [u32; 3],
 }
 
 const _: () = {
     assert!(std::mem::offset_of!(MaterialRecordLayout, base_color) == 0);
-    assert!(std::mem::offset_of!(MaterialRecordLayout, tex_index) == 16);
-    assert!(std::mem::offset_of!(MaterialRecordLayout, sampler_index) == 20);
+    assert!(std::mem::offset_of!(MaterialRecordLayout, metallic) == 16);
+    assert!(std::mem::offset_of!(MaterialRecordLayout, perceptual_roughness) == 20);
+    assert!(std::mem::offset_of!(MaterialRecordLayout, reflectance) == 24);
+    assert!(std::mem::offset_of!(MaterialRecordLayout, tex_base_color) == 32);
+    assert!(std::mem::offset_of!(MaterialRecordLayout, tex_normal) == 36);
+    assert!(std::mem::offset_of!(MaterialRecordLayout, tex_metallic_roughness) == 40);
+    assert!(std::mem::offset_of!(MaterialRecordLayout, tex_occlusion) == 44);
+    assert!(std::mem::offset_of!(MaterialRecordLayout, sampler_index) == 48);
     assert!(std::mem::size_of::<MaterialRecordLayout>() as u64 == MATERIAL_RECORD_SIZE);
 };
 
@@ -161,11 +182,15 @@ pub fn pack_object_record(
     out
 }
 
-/// 材质记录 → 32B storage 字节。
+/// 材质记录 → 64B storage 字节（8.2.1 扩列：PBR 三标量 + 四贴图槽，偏移按
+/// [`MaterialRecordLayout`] 静态断言表手工排布）。
 #[must_use]
 pub fn pack_material_record(
     base_color: [f32; 4],
-    tex_index: u32,
+    metallic: f32,
+    perceptual_roughness: f32,
+    reflectance: f32,
+    tex_slots: [u32; 4],
     sampler_index: u32,
 ) -> [u8; MATERIAL_RECORD_SIZE as usize] {
     let mut out = [0u8; MATERIAL_RECORD_SIZE as usize];
@@ -175,8 +200,13 @@ pub fn pack_material_record(
     for (i, v) in base_color.iter().enumerate() {
         put(i * 4, &v.to_le_bytes());
     }
-    put(16, &tex_index.to_le_bytes());
-    put(20, &sampler_index.to_le_bytes());
+    put(16, &metallic.to_le_bytes());
+    put(20, &perceptual_roughness.to_le_bytes());
+    put(24, &reflectance.to_le_bytes());
+    for (i, slot) in tex_slots.iter().enumerate() {
+        put(32 + i * 4, &slot.to_le_bytes());
+    }
+    put(48, &sampler_index.to_le_bytes());
     out
 }
 
@@ -836,7 +866,10 @@ impl Drop for InstanceTables {
 
 #[cfg(test)]
 mod tests {
-    use super::{conservative_world_aabb, pack_lod_entry, pack_model, pack_object_record, LOD_ENTRY_SIZE, OBJECT_RECORD_SIZE};
+    use super::{
+        conservative_world_aabb, pack_lod_entry, pack_material_record, pack_model,
+        pack_object_record, LOD_ENTRY_SIZE, MATERIAL_RECORD_SIZE, OBJECT_RECORD_SIZE,
+    };
     use bevy::math::{Mat4, Vec3};
 
     /// 非均匀缩放 + 旋转下包围盒保守包住几何:任取盒内样本点,变换后必在
@@ -908,6 +941,35 @@ mod tests {
             *c = f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().expect("4B"));
         }
         assert_eq!(m.to_cols_array(), cols);
+    }
+
+    /// 材质记录 64B 布局（8.2.1 扩列）：PBR 三标量 + 四贴图槽 + 采样器偏移
+    /// 逐项互证，缺席哨兵按位写入。
+    #[test]
+    fn pack_material_record_layout() {
+        let bytes = pack_material_record(
+            [0.1, 0.2, 0.3, 1.0],
+            0.75,
+            0.5,
+            0.5,
+            [7, u32::MAX, 9, u32::MAX],
+            3,
+        );
+        assert_eq!(bytes.len(), MATERIAL_RECORD_SIZE as usize);
+        let read_f32 = |o: usize| f32::from_le_bytes(bytes[o..o + 4].try_into().expect("4B"));
+        let read_u32 = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().expect("4B"));
+        assert_eq!(read_f32(4), 0.2);
+        assert_eq!(read_f32(16), 0.75);
+        assert_eq!(read_f32(20), 0.5);
+        assert_eq!(read_f32(24), 0.5, "reflectance 记录原值（clamp 换算在 shader 端）");
+        assert_eq!(read_u32(32), 7);
+        assert_eq!(read_u32(36), u32::MAX, "normal 缺席哨兵");
+        assert_eq!(read_u32(40), 9);
+        assert_eq!(read_u32(44), u32::MAX, "occlusion 缺席哨兵");
+        assert_eq!(read_u32(48), 3);
+        // 垫区保持 0
+        assert_eq!(read_u32(28), 0);
+        assert_eq!(read_u32(52), 0);
     }
 
     /// LOD 变体条目 12B 布局（6.2）：first_index/index_count/vertex_base 同序

@@ -63,7 +63,8 @@ pub use assets::instance_table::{
     conservative_world_aabb, pack_lod_entry, pack_material_record, pack_model, pack_object_record,
     InstanceTables, GAP_MARK_SIZE, INDIRECT_COMMAND_SIZE, LOD_ENTRY_SIZE, LOD_LEVEL_SIZE,
     LOD_TABLE_STRIDE, MARK_SIZE, MATERIAL_RECORD_SIZE, MATERIAL_TABLE_CAPACITY, MAX_LOD_LEVELS,
-    MODEL_STRIDE, OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY, OCC_MARK_SIZE, PRESENCE_ENTRY_SIZE,
+    MODEL_STRIDE, NO_TEXTURE_INDEX, OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY, OCC_MARK_SIZE,
+    PRESENCE_ENTRY_SIZE,
 };
 pub use assets::mesh_convert::{convert_mesh, ConvertedMesh, MeshConvertError, VERTEX_STRIDE};
 pub use assets::pool::{MeshPool, MeshSlot, PoolRange};
@@ -80,7 +81,7 @@ pub use pipeline::cluster::{
 };
 pub use pipeline::fullscreen_pipeline::{CompositePipeline, PresentBlitPipeline};
 pub use pipeline::gbuffer::{
-    GBufferTargets, ALBEDO_FORMAT, HDR_FORMAT, NORMAL_FORMAT,
+    GBufferTargets, ALBEDO_FORMAT, HDR_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
 };
 pub use pipeline::depth::{DepthTarget, DEPTH_FORMAT};
 pub use pipeline::frames::{FrameDraw, Frame, FramePool, MAX_FRAMES_IN_FLIGHT};

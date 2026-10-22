@@ -66,9 +66,16 @@ struct IndirectCommand {
 
 struct MaterialRecord {
     base_color: vec4f,
-    tex_index: u32,
+    metallic: f32,
+    perceptual_roughness: f32,
+    reflectance: f32,
+    _pad0: u32,
+    tex_base_color: u32,
+    tex_normal: u32,
+    tex_metallic_roughness: u32,
+    tex_occlusion: u32,
     sampler_index: u32,
-    _pad: vec2<u32>,
+    _pad: vec3<u32>,
 }
 
 @group(0) @binding(0) var<storage, read> objects: array<ObjectRecord>;

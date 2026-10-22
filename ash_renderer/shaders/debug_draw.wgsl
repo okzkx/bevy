@@ -62,9 +62,16 @@ struct ObjectRecord {
 // 材质环记录（32B，与 Rust MaterialRecordLayout 静态互证）。
 struct MaterialRecord {
     base_color: vec4f,
-    tex_index: u32,
+    metallic: f32,
+    perceptual_roughness: f32,
+    reflectance: f32,
+    _pad0: u32,
+    tex_base_color: u32,
+    tex_normal: u32,
+    tex_metallic_roughness: u32,
+    tex_occlusion: u32,
     sampler_index: u32,
-    _pad: vec2<u32>,
+    _pad: vec3<u32>,
 }
 
 // 与 Rust 侧 FRAME_MODE_* 同值（descriptors.rs）
@@ -133,7 +140,7 @@ fn vs_main(
 fn fs_main(in: VsOut) -> @location(0) vec4f {
     let mat = materials[in.material];
     let albedo =
-        textureSampleLevel(textures[mat.tex_index], samplers[mat.sampler_index], in.uv, 0.0)
+        textureSampleLevel(textures[mat.tex_base_color], samplers[mat.sampler_index], in.uv, 0.0)
             * mat.base_color;
     let n = normalize(in.world_normal);
     // 材质三模式（3.5 定案）：unlit / normal / Lambert（默认，数据驱动）。

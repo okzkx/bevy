@@ -389,6 +389,9 @@ impl FramePool {
             for gbuffer_image in [
                 draw.gbuffer.albedo_image(slot),
                 draw.gbuffer.normal_image(slot),
+                // 8.2.1 matparam（材质标量 r=metallic/g=AO/b=roughness）随
+                // G-buffer 三附件同批进场
+                draw.gbuffer.matparam_image(slot),
                 // HDR 中间目标同样首用 UNDEFINED 进场（下帧 UNDEFINED 进场丢弃
                 // 上一轮 SHADER_READ_ONLY 内容——loadOp CLEAR 覆写全像素）
                 draw.gbuffer.hdr_image(slot),

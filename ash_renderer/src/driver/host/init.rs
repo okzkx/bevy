@@ -28,7 +28,8 @@ use crate::{
         GBufferTargets, GraphicsPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
         InstanceTables, LodPass, MeshPool, OcclusionPass, OverlayPipeline, PresentBlitPipeline,
         TestPointLights, TransparentPasses, TransparentPipeline, Swapchain, Uploader,
-        ALBEDO_FORMAT, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT, NORMAL_FORMAT, TABLE_CAPACITY,
+        ALBEDO_FORMAT, DEPTH_FORMAT, MATPARAM_FORMAT, MAX_FRAMES_IN_FLIGHT, NORMAL_FORMAT,
+        TABLE_CAPACITY,
     },};
 
 /// 初始化入口：取主窗口句柄，串链建全套 Vulkan 资源。`NonSendMarker` 把初始化
@@ -140,11 +141,11 @@ fn try_init_vulkan(
         .map(|s| frames.depth_view(s))
         .collect();
     let gbuffer = GBufferTargets::new(&ctx, swapchain.extent, &depth_views)?;
-    // 图形管线：G-buffer 写入 pass——双 color（albedo/normal）+ 深度，声明面 =
-    // 实例附件全集（VUID-08914 纪律），布局与常驻表同源
+    // 图形管线：G-buffer 写入 pass——三 color（albedo/normal/matparam）+ 深度，
+    // 声明面 = 实例附件全集（VUID-08914 纪律），布局与常驻表同源
     let pipeline = GraphicsPipeline::new(
         &ctx,
-        &[ALBEDO_FORMAT, NORMAL_FORMAT],
+        &[ALBEDO_FORMAT, NORMAL_FORMAT, MATPARAM_FORMAT],
         DEPTH_FORMAT,
         tables.set0_layout(),
         tables.set1_layout(),
