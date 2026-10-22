@@ -52,14 +52,23 @@ pub const TABLE_CAPACITY: u32 = 1024;
 /// `DescriptorBufferInfo`，扩容不动 ABI。
 pub const FRAME_UBO_SIZE: u64 = 208;
 
-/// 帧数据打包模式（UBO `mode` 字段，与 `debug_draw.wgsl` 的 case 值逐字同源；
-/// 非零值的语义见 host 侧 [`crate::driver::host`] 的材质三模式说明）。
+/// 帧数据打包模式（UBO `mode` 字段；0..=2 与退役 A/B 参照 `debug_draw.wgsl`
+/// 同值，4 起为合成 pass 专属的 G-buffer 通道仪器；语义见
+/// `gbuffer_composite.wgsl` 与 host 侧材质模式说明）。
 pub const FRAME_MODE_LAMBERT: u32 = 0;
 pub const FRAME_MODE_UNLIT: u32 = 1;
 pub const FRAME_MODE_NORMAL: u32 = 2;
 /// 世界位置可视化（8.1.2）：G-buffer 深度反投影重建的世界坐标编码直出——
 /// 深度重建机制的验收仪器（仅合成 pass 消费，forward 时代无此模式）。
 pub const FRAME_MODE_POSITION: u32 = 3;
+/// G-buffer 调试仪器（8.2.5）：matparam 单通道灰度直出——mutate 材质热改
+///（metallic/roughness）的写后读验收口。
+pub const FRAME_MODE_METALLIC: u32 = 4;
+pub const FRAME_MODE_ROUGHNESS: u32 = 5;
+pub const FRAME_MODE_AO: u32 = 6;
+pub const FRAME_MODE_REFLECTANCE: u32 = 7;
+/// reverse-Z 深度线性化灰度（clip.w / far——透视 w = 视空间深度）。
+pub const FRAME_MODE_DEPTH: u32 = 8;
 
 /// 每帧 UBO 的宿主侧取数产物（`draw_frame` 组装，[`pack_frame_uniforms`] 排布）。
 pub struct FrameUniformsData {

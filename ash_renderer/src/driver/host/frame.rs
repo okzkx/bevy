@@ -507,6 +507,11 @@ pub(crate) fn draw_frame(
                 RenderMode::Unlit => "unlit",
                 RenderMode::Normal => "normal",
                 RenderMode::Position => "position",
+                RenderMode::Metallic => "metallic",
+                RenderMode::Roughness => "roughness",
+                RenderMode::AmbientOcclusion => "ao",
+                RenderMode::Reflectance => "reflectance",
+                RenderMode::Depth => "depth",
             },
         ));
     }

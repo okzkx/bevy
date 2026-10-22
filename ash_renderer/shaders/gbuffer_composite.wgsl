@@ -30,6 +30,9 @@
 // - 0 Shading：Filament BRDF 光照累积（Lambert 单光时代 mode 0 的正名——
 //   值不变，语义升级）
 // - 1 Unlit / 2 Normal / 3 Position：8.1 验收仪器原样保留
+// - 4..8 G-buffer 调试仪器（8.2.5）：matparam 单通道灰度直出（metallic/
+//   roughness/AO/reflectance——mutate 材质热改的写后读验收口）+
+//   reverse-Z 深度线性化灰度
 //
 // 背景判定：reverse-Z 深度清 0 = 远平面 → 输出清屏色（forward 直出清屏语义
 // 的 deferred 承接）。间接光注入项（步骤 9）：本 pass 输出前的 `indirect`
@@ -89,6 +92,11 @@ const MODE_SHADING: u32 = 0u;   // FRAME_MODE_LAMBERT（值不变，语义升级
 const MODE_UNLIT: u32 = 1u;
 const MODE_NORMAL: u32 = 2u;
 const MODE_POSITION: u32 = 3u;
+const MODE_METALLIC: u32 = 4u;      // FRAME_MODE_*（descriptors.rs 同值）
+const MODE_ROUGHNESS: u32 = 5u;
+const MODE_AO: u32 = 6u;
+const MODE_REFLECTANCE: u32 = 7u;
+const MODE_DEPTH: u32 = 8u;
 
 // 清屏色（与 host 侧 CLEAR_COLOR 同值——线性域，SRGB 编码在最终 ROP 一次）
 const CLEAR_COLOR: vec3f = vec3f(0.02, 0.06, 0.14);
@@ -274,6 +282,28 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     }
     if frame.mode == MODE_POSITION {
         return vec4f(world_from_depth(in.uv, depth.r) * 0.0625 + vec3f(0.5), 1.0);
+    }
+    // —— G-buffer 调试仪器（8.2.5）：matparam 单通道灰度直出。8bit 量化面
+    // 如实呈现（写入端 clamp/域换算一并可见）；背景已在上方清屏色早退。
+    if (frame.mode == MODE_METALLIC || frame.mode == MODE_ROUGHNESS
+        || frame.mode == MODE_AO || frame.mode == MODE_REFLECTANCE) {
+        let m = textureSampleLevel(matparam_tex, gbuf_sampler, in.uv, 0.0);
+        let c = select(
+            select(
+                select(m.r, m.g, frame.mode == MODE_AO),
+                m.b, frame.mode == MODE_ROUGHNESS),
+            m.a, frame.mode == MODE_REFLECTANCE);
+        return vec4f(vec3f(c), 1.0);
+    }
+    if frame.mode == MODE_DEPTH {
+        // reverse-Z 深度线性化。注意片段阶段 @builtin(position).w = 1/clip.w
+        //（与 cluster tile 用 in.clip.xy 当像素坐标同一套语义），不能直读当
+        // 视深——走反投影重建世界位置，再经 view_proj 取 clip.w = 视空间深度
+        //（透视 w = 正距离），除 far 归一。far 取 cluster 参数面（同帧同相机）。
+        let world = world_from_depth(in.uv, depth.r);
+        let view_depth = (frame.view_proj * vec4f(world, 1.0)).w;
+        let t = saturate(view_depth / max(cluster_params.far, 1e-4));
+        return vec4f(vec3f(t), 1.0);
     }
 
     // —— Shading（mode 0 及未知值兜底）：Filament BRDF 光照累积

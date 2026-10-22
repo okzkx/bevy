@@ -8,8 +8,8 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 use crate::scene::mechanism::scene_gen::SceneChunk;
 use crate::render::{
     BindlessTables, CullDiagnostics, CullSettings, ImageCache, IndirectStats,
-    MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics, OcclusionSettings, PerfLedger, Uploader, FRAME_MODE_LAMBERT, FRAME_MODE_POSITION,
-    FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
+    MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics, OcclusionSettings, PerfLedger, Uploader, FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC, FRAME_MODE_POSITION,
+    FRAME_MODE_NORMAL, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
 };
 use crate::scene::mechanism::WorkloadSettings;
 
@@ -28,6 +28,14 @@ pub enum RenderMode {
     /// 世界位置可视化（8.1.2）：G-buffer 深度反投影重建——世界位置取法
     /// （=深度重建拍板）的验收仪器。
     Position,
+    /// matparam 单通道灰度直出（8.2.5 G-buffer 调试仪器）：metallic/roughness/
+    /// AO/reflectance 逐通道判读——mutate 材质热改的写后读验收口。
+    Metallic,
+    Roughness,
+    AmbientOcclusion,
+    Reflectance,
+    /// reverse-Z 深度线性化灰度。
+    Depth,
 }
 
 impl RenderMode {
@@ -37,23 +45,34 @@ impl RenderMode {
             Some("unlit") => Self::Unlit,
             Some("normal") => Self::Normal,
             Some("position") => Self::Position,
+            Some("metallic") => Self::Metallic,
+            Some("roughness") => Self::Roughness,
+            Some("ao") => Self::AmbientOcclusion,
+            Some("reflectance") => Self::Reflectance,
+            Some("depth") => Self::Depth,
             Some(other) => {
                 // 拼写错误是配置问题不是运行故障：warn 后按默认继续，不中断帧循环
                 bevy::log::warn!(
-                    "ASH_RENDER_MODE={other:?} 无法识别（可选 lambert/unlit/normal/position），按 lambert 继续"
+                    "ASH_RENDER_MODE={other:?} 无法识别（可选 lambert/unlit/normal/position/metallic/roughness/ao/reflectance/depth），按 lambert 继续"
                 );
                 Self::Lambert
             }
         }
     }
 
-    /// UBO `mode` 值（与 `debug_draw.wgsl` 的 `MODE_*` 同值，`FRAME_MODE_*`）。
+    /// UBO `mode` 值（与 `gbuffer_composite.wgsl` 的 `MODE_*` 同值，
+    /// `FRAME_MODE_*`；0..=2 兼容退役 A/B 参照 `debug_draw.wgsl`）。
     pub(crate) fn as_u32(self) -> u32 {
         match self {
             Self::Lambert => FRAME_MODE_LAMBERT,
             Self::Unlit => FRAME_MODE_UNLIT,
             Self::Normal => FRAME_MODE_NORMAL,
             Self::Position => FRAME_MODE_POSITION,
+            Self::Metallic => FRAME_MODE_METALLIC,
+            Self::Roughness => FRAME_MODE_ROUGHNESS,
+            Self::AmbientOcclusion => FRAME_MODE_AO,
+            Self::Reflectance => FRAME_MODE_REFLECTANCE,
+            Self::Depth => FRAME_MODE_DEPTH,
         }
     }
 }
@@ -209,6 +228,15 @@ impl DebugWindow<'_> {
                     ui.selectable_value(mode, RenderMode::Lambert, "lambert");
                     ui.selectable_value(mode, RenderMode::Unlit, "unlit");
                     ui.selectable_value(mode, RenderMode::Normal, "normal");
+                    ui.selectable_value(mode, RenderMode::Position, "position");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("G-buffer");
+                    ui.selectable_value(mode, RenderMode::Metallic, "metallic");
+                    ui.selectable_value(mode, RenderMode::Roughness, "roughness");
+                    ui.selectable_value(mode, RenderMode::AmbientOcclusion, "ao");
+                    ui.selectable_value(mode, RenderMode::Reflectance, "reflectance");
+                    ui.selectable_value(mode, RenderMode::Depth, "depth");
                 });
                 ui.separator();
                 // 5.2 视锥剔除：开关切 compute dispatch / host 全可见填充

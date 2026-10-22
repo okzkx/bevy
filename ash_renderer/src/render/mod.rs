@@ -58,7 +58,8 @@ pub use gpu::occlusion::{
 pub use assets::descriptors::{
     pack_frame_uniforms, BindlessTables, FrameUniformsData, SlotBinding, TABLE_CAPACITY,
     PLACEHOLDER_DIR_TO_LIGHT,
-    FRAME_MODE_LAMBERT, FRAME_MODE_NORMAL, FRAME_MODE_POSITION, FRAME_MODE_UNLIT,
+    FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC, FRAME_MODE_NORMAL,
+    FRAME_MODE_POSITION, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
 };
 pub use assets::images::{image_spec, sampler_key, GpuImage, ImageCache, ImageConvertError, ImageSpec, SamplerKey};
 pub use assets::instance_table::{

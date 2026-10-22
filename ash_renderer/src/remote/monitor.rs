@@ -107,8 +107,10 @@ pub(crate) fn frame_sync_cmd(
 }
 
 /// `ash_renderer/set_render_mode`：着色模式切换（debug 面板 RenderMode 的 BRP
-/// 通道，8.2.3 增补）——unlit/normal/position 是 G-buffer 验收仪器，供无人
-/// 取证分流（画面异常时先切仪器定位问题层）。
+/// 通道，8.2.3 增补）——unlit/normal/position 是 G-buffer 验收仪器，8.2.5
+/// 增补 metallic/roughness/ao/reflectance/depth 五枚 G-buffer 通道调试仪器
+///（matparam 单通道灰度直出 + 深度线性化），供无人取证分流（画面异常时先
+/// 切仪器定位问题层；mutate 材质热改的写后读验收走同口）。
 ///
 /// # Errors
 /// 参数不合法（未知模式名）。
@@ -128,7 +130,14 @@ pub(crate) fn set_render_mode(
         "unlit" => RenderMode::Unlit,
         "normal" => RenderMode::Normal,
         "position" => RenderMode::Position,
-        other => return Err(invalid_params(format!("未知模式 {other}：lambert/unlit/normal/position"))),
+        "metallic" => RenderMode::Metallic,
+        "roughness" => RenderMode::Roughness,
+        "ao" => RenderMode::AmbientOcclusion,
+        "reflectance" => RenderMode::Reflectance,
+        "depth" => RenderMode::Depth,
+        other => return Err(invalid_params(format!(
+            "未知模式 {other}：lambert/unlit/normal/position/metallic/roughness/ao/reflectance/depth",
+        ))),
     };
     Ok(json!({ "mode": p.mode }))
 }
