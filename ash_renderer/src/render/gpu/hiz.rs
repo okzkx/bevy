@@ -29,7 +29,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::common::error::{Result, VulkanError};
 
-use super::{images::full_mip_chain, Context};
+use crate::render::assets::images::full_mip_chain;
+use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物；spirv-val 已过，naga textureLoad/
 /// textureDimensions/textureNumLevels 的 mip 层参数发射已实证）。
@@ -352,8 +353,8 @@ impl HizPyramid {
             device: ctx.device.clone(),
             slots: Vec::new(),
             views: Vec::new(),
-            initialized: (0..super::MAX_FRAMES_IN_FLIGHT).map(|_| AtomicBool::new(false)).collect(),
-            warmup: super::MAX_FRAMES_IN_FLIGHT as u32,
+            initialized: (0..crate::render::MAX_FRAMES_IN_FLIGHT).map(|_| AtomicBool::new(false)).collect(),
+            warmup: crate::render::MAX_FRAMES_IN_FLIGHT as u32,
             levels,
             extent,
             reduction: ReductionPass {
@@ -376,7 +377,7 @@ impl HizPyramid {
              遮挡测试读同槽两帧前输出——fence 纪律零新同步形状；重建 warmup {MAX} 帧）",
             extent.width,
             extent.height,
-            MAX = super::MAX_FRAMES_IN_FLIGHT,
+            MAX = crate::render::MAX_FRAMES_IN_FLIGHT,
         );
         Ok(this)
     }
@@ -425,7 +426,7 @@ impl HizPyramid {
         self.extent = extent;
         self.levels = full_mip_chain(extent.width, extent.height);
         self.initialized = (0..self.slots_capacity()).map(|_| AtomicBool::new(false)).collect();
-        self.warmup = super::MAX_FRAMES_IN_FLIGHT as u32;
+        self.warmup = crate::render::MAX_FRAMES_IN_FLIGHT as u32;
         self.build_images_and_views(ctx, depth_images)?;
         self.build_reduction(ctx)?;
         self.build_occlusion_sets(ctx, depth_images)?;
@@ -440,7 +441,7 @@ impl HizPyramid {
     }
 
     fn slots_capacity(&self) -> usize {
-        super::MAX_FRAMES_IN_FLIGHT
+        crate::render::MAX_FRAMES_IN_FLIGHT
     }
 
     /// 录制一帧的归约链（渲染进场收口后调用）：每级绑 (slot, level) set →
@@ -545,7 +546,7 @@ impl HizPyramid {
     fn build_images_and_views(&mut self, ctx: &Context, depth_images: &[vk::Image]) -> Result<()> {
         let device = &ctx.device;
         let mut slots = Vec::new();
-        for _ in 0..super::MAX_FRAMES_IN_FLIGHT {
+        for _ in 0..crate::render::MAX_FRAMES_IN_FLIGHT {
             let image = unsafe {
                 device.create_image(
                     &vk::ImageCreateInfo::default()
@@ -739,7 +740,7 @@ impl HizPyramid {
         }
         self.reduction.set_layout = set_layout;
         // —— pool + sets + 写入（重建路径先 reset 旧 pool 复用）
-        let sets_total = super::MAX_FRAMES_IN_FLIGHT * self.levels as usize;
+        let sets_total = crate::render::MAX_FRAMES_IN_FLIGHT * self.levels as usize;
         if self.reduction.pool != vk::DescriptorPool::null() {
             unsafe { device.reset_descriptor_pool(self.reduction.pool, vk::DescriptorPoolResetFlags::empty()) }
                 .map_err(VulkanError::from)?;
@@ -776,7 +777,7 @@ impl HizPyramid {
         // [0] 槽位不派发），其余 = 金字塔（恒 GENERAL）
         let mut image_infos = Vec::with_capacity(sets_total * 2);
         let mut meta = Vec::with_capacity(sets_total * 2);
-        for slot in 0..super::MAX_FRAMES_IN_FLIGHT {
+        for slot in 0..crate::render::MAX_FRAMES_IN_FLIGHT {
             for level in 0..self.levels as usize {
                 let set = sets[slot * self.levels as usize + level];
                 image_infos.push(
@@ -838,10 +839,10 @@ impl HizPyramid {
             self.occlusion_pool = unsafe {
                 device.create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
-                        .max_sets(super::MAX_FRAMES_IN_FLIGHT as u32)
+                        .max_sets(crate::render::MAX_FRAMES_IN_FLIGHT as u32)
                         .pool_sizes(&[vk::DescriptorPoolSize::default()
                             .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                            .descriptor_count(super::MAX_FRAMES_IN_FLIGHT as u32)]),
+                            .descriptor_count(crate::render::MAX_FRAMES_IN_FLIGHT as u32)]),
                     None,
                 )
             }
@@ -853,7 +854,7 @@ impl HizPyramid {
             .map_err(VulkanError::from)?;
         }
         let occlusion_layouts =
-            std::iter::repeat_n(self.occlusion_layout, super::MAX_FRAMES_IN_FLIGHT).collect::<Vec<_>>();
+            std::iter::repeat_n(self.occlusion_layout, crate::render::MAX_FRAMES_IN_FLIGHT).collect::<Vec<_>>();
         self.occlusion_sets = unsafe {
             device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
@@ -1009,7 +1010,7 @@ unsafe fn create_depth_sample_view(device: &Device, image: vk::Image) -> Result<
                 &vk::ImageViewCreateInfo::default()
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(super::DEPTH_FORMAT)
+                    .format(crate::render::DEPTH_FORMAT)
                     .subresource_range(
                         vk::ImageSubresourceRange::default()
                             .aspect_mask(vk::ImageAspectFlags::DEPTH)
@@ -1048,6 +1049,89 @@ unsafe fn create_bound_memory(ctx: &Context, image: vk::Image) -> Result<vk::Dev
         Ok(memory)
     }
 }
+
+/// 诊断回读助手：把一段 buffer 拷进一次性 staging 并回读（8.1.3 透明族判定线
+/// ③的索引列表读数面复用 hiz census 的一次性命令池 + staging 形状；低频 BRP
+/// 调用，不在帧循环内）。
+///
+/// # Errors
+/// staging 创建/提交/等待失败（设备丢失等）。
+pub(crate) fn readback_buffer(ctx: &Context, src: vk::Buffer, out: &mut [u8]) -> Result<()> {
+    unsafe {
+        let device = &ctx.device;
+        let byte_size = out.len() as u64;
+        let staging = device.create_buffer(
+            &vk::BufferCreateInfo::default()
+                .size(byte_size)
+                .usage(vk::BufferUsageFlags::TRANSFER_DST),
+            None,
+        )?;
+        let (memory, pool, cb, fence) = (|| -> Result<(vk::DeviceMemory, vk::CommandPool, vk::CommandBuffer, vk::Fence)> {
+            let reqs = device.get_buffer_memory_requirements(staging);
+            let memory_type = ctx.memory_contract().find_type(
+                reqs.memory_type_bits,
+                vk::MemoryPropertyFlags::HOST_VISIBLE,
+                vk::MemoryPropertyFlags::HOST_COHERENT,
+            )?;
+            let memory = device.allocate_memory(
+                &vk::MemoryAllocateInfo::default()
+                    .allocation_size(reqs.size)
+                    .memory_type_index(memory_type),
+                None,
+            )?;
+            device.bind_buffer_memory(staging, memory, 0)?;
+            let pool = device.create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                    .queue_family_index(ctx.queue_family_index),
+                None,
+            )?;
+            let cb = device
+                .allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .command_pool(pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(1),
+                )?[0];
+            let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
+            Ok((memory, pool, cb, fence))
+        })()?;
+        let record = (|| {
+            device.begin_command_buffer(
+                cb,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
+            let region = vk::BufferCopy::default().size(byte_size);
+            device.cmd_copy_buffer(cb, src, staging, std::slice::from_ref(&region));
+            device.end_command_buffer(cb)
+        })();
+        if let Err(e) = record {
+            device.destroy_fence(fence, None);
+            device.destroy_command_pool(pool, None);
+            device.destroy_buffer(staging, None);
+            device.free_memory(memory, None);
+            return Err(e.into());
+        }
+        device.queue_submit(
+            ctx.queue,
+            &[vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cb))],
+            fence,
+        )?;
+        device.wait_for_fences(std::slice::from_ref(&fence), true, u64::MAX)?;
+        let ptr = device
+            .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+            .map_err(VulkanError::from)?;
+        out.copy_from_slice(std::slice::from_raw_parts(ptr.cast::<u8>(), out.len()));
+        device.unmap_memory(memory);
+        device.destroy_fence(fence, None);
+        device.destroy_command_pool(pool, None);
+        device.destroy_buffer(staging, None);
+        device.free_memory(memory, None);
+        Ok(())
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

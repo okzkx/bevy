@@ -227,11 +227,11 @@ pub fn mutate_asset(
     // 等事件链标记重估会让组装缓存对全量路径晚一帧（对照模式实抓）。写入点
     // 直接标记材质引用行重估，同帧 draw_frame 即收敛（材质内容进组装判定
     // 的是 alpha 计数；贴图槽/mesh 内容不进元组，重估幂等无害）。
-    if p.base_color.is_some() || new_slot.is_some() {
-        if let Some(mut ledger) = world.get_resource_mut::<InstanceLedger>() {
-            for entity in ledger.rows_with_material(material_handle.id()) {
-                ledger.mark_assembly_stale(entity);
-            }
+    if (p.base_color.is_some() || new_slot.is_some())
+        && let Some(mut ledger) = world.get_resource_mut::<InstanceLedger>()
+    {
+        for entity in ledger.rows_with_material(material_handle.id()) {
+            ledger.mark_assembly_stale(entity);
         }
     }
 

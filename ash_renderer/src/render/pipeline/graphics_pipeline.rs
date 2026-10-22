@@ -8,7 +8,7 @@
 //! 的字节层面：场景绘制的 push 字节恒 0）。
 //!
 //! 状态选型（面板定案）：
-//! - **顶点输入**：交错 32B（pos12+normal12+uv8，[`super::VERTEX_STRIDE`]），与
+//! - **顶点输入**：交错 32B（pos12+normal12+uv8，[`crate::render::VERTEX_STRIDE`]），与
 //!   mesh_convert 是同一份契约；vertex-input 布局不默认等同 storage 布局。
 //! - **reverse-Z 成套**：bevy 透视投影是无限反向 Z（`get_clip_from_view`），
 //!   深度清值 0 + `GREATER` 比较成套使用，不混正向 Z 的 LESS 模板。
@@ -28,10 +28,12 @@ use bevy::log::info;
 
 use crate::common::error::Result;
 
-use super::Context;
+use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与探针同一编译路径）。
-const DEBUG_DRAW_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/debug_draw.spv"));
+/// 8.1 起场景管线 = G-buffer 写入（albedo+normal 双 color + 深度）；
+/// debug_draw.wgsl（forward 直出）退役为 A/B 对照参照，不再进主管线。
+const GBUFFER_WRITE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer_write.spv"));
 
 /// 图形管线 + pipeline layout（dynamic rendering 形态，无 RenderPass）。
 #[derive(bevy::prelude::Resource)]
@@ -50,7 +52,7 @@ impl GraphicsPipeline {
     /// shader module / layout / pipeline 任一创建失败。
     pub fn new(
         ctx: &Context,
-        color_format: vk::Format,
+        color_formats: &[vk::Format],
         depth_format: vk::Format,
         set0_layout: vk::DescriptorSetLayout,
         set1_layout: vk::DescriptorSetLayout,
@@ -58,7 +60,7 @@ impl GraphicsPipeline {
     ) -> Result<Self> {
         let device = &ctx.device;
         // 词流（小端）→ ash 的 &[u32]；build.rs 只写整词，as_chunks 即全部字节
-        let words: Vec<u32> = DEBUG_DRAW_SPV
+        let words: Vec<u32> = GBUFFER_WRITE_SPV
             .as_chunks::<4>()
             .0
             .iter()
@@ -73,7 +75,7 @@ impl GraphicsPipeline {
         let result = unsafe {
             Self::new_inner(
                 device,
-                color_format,
+                color_formats,
                 depth_format,
                 set0_layout,
                 set1_layout,
@@ -93,7 +95,7 @@ impl GraphicsPipeline {
     /// `module` 须刚创建成功且未销毁。
     unsafe fn new_inner(
         device: &Device,
-        color_format: vk::Format,
+        color_formats: &[vk::Format],
         depth_format: vk::Format,
         set0_layout: vk::DescriptorSetLayout,
         set1_layout: vk::DescriptorSetLayout,
@@ -107,7 +109,8 @@ impl GraphicsPipeline {
                 &vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts),
                 None,
             )?;
-            let result = Self::create_pipeline(device, color_format, depth_format, layout, module);
+            let result =
+                Self::create_pipeline(device, color_formats, depth_format, layout, module);
             if result.is_err() {
                 device.destroy_pipeline_layout(layout, None);
             }
@@ -121,7 +124,7 @@ impl GraphicsPipeline {
     /// `module`/`layout` 须为合法句柄；入口名存在于 module。
     unsafe fn create_pipeline(
         device: &Device,
-        color_format: vk::Format,
+        color_formats: &[vk::Format],
         depth_format: vk::Format,
         layout: vk::PipelineLayout,
         module: vk::ShaderModule,
@@ -142,7 +145,7 @@ impl GraphicsPipeline {
             // 顶点输入 = mesh_convert 的同一份 32B 交错契约（三属性偏移 0/12/24）
             let vertex_binding = [vk::VertexInputBindingDescription::default()
                 .binding(0)
-                .stride(super::VERTEX_STRIDE as u32)
+                .stride(crate::render::VERTEX_STRIDE as u32)
                 .input_rate(vk::VertexInputRate::VERTEX)];
             let vertex_attributes = [
                 vk::VertexInputAttributeDescription::default()
@@ -186,18 +189,24 @@ impl GraphicsPipeline {
                 .depth_compare_op(vk::CompareOp::GREATER)
                 .min_depth_bounds(0.0)
                 .max_depth_bounds(1.0);
-            let blend_attachment = [vk::PipelineColorBlendAttachmentState::default()
-                .blend_enable(false)
-                .color_write_mask(vk::ColorComponentFlags::RGBA)];
+            // 逐 color 附件一条 blend 态（8.1 起 G-buffer pass 双 color；
+            // 声明面 = 实例附件全集，VUID-08914 纪律）
+            let blend_attachment: Vec<vk::PipelineColorBlendAttachmentState> = color_formats
+                .iter()
+                .map(|_| {
+                    vk::PipelineColorBlendAttachmentState::default()
+                        .blend_enable(false)
+                        .color_write_mask(vk::ColorComponentFlags::RGBA)
+                })
+                .collect();
             let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
                 .attachments(&blend_attachment);
             let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
             let dynamic_info =
                 vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
             // dynamic rendering：附件格式内联声明（无 RenderPass/Framebuffer）
-            let color_formats = [color_format];
             let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-                .color_attachment_formats(&color_formats)
+                .color_attachment_formats(color_formats)
                 .depth_attachment_format(depth_format);
             let info = vk::GraphicsPipelineCreateInfo::default()
                 .stages(&stages)
@@ -221,7 +230,7 @@ impl GraphicsPipeline {
             // VUID-vkDestroyDevice-device-05137 可抓获此类泄漏）。
             device.destroy_shader_module(module, None);
             info!(
-                "图形管线就绪: dynamic rendering（color {color_format:?} / depth {depth_format:?}），\
+                "图形管线就绪: dynamic rendering（color {color_formats:?} / depth {depth_format:?}），\
                  顶点输入 32B 交错（pos/normal/uv @ 0/12/24），reverse-Z（clear 0 + GREATER），\
                  viewport 正高度直出，剔除关，push 退役（5.3：firstInstance 携带槽号），set0/set1/set2 同源绑定"
             );

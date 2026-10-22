@@ -12,7 +12,7 @@ use bevy::prelude::*;
 
 use super::debug_window::FpsSnapshot;
 use crate::driver::host::FrameSyncSettings;
-use crate::vulkan::{Context, ImageCache, MeshPool};
+use crate::render::{Context, ImageCache, MeshPool};
 
 /// 一个监控采样点（fps 快照刷新节奏入账，约 0.5s 一个）。
 #[derive(Clone, Copy)]

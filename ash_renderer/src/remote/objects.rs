@@ -21,7 +21,7 @@ use crate::{
         replace_handles as apply_handle_swap, spawn_primitive_clone, AssetReadiness,
         AssetRetirements, HandleSwapReadback, InstanceLedger, ObjectOpError,
     },
-    vulkan::{BindlessTables, ImageCache, InstanceTables, MeshPool, OBJECT_TABLE_CAPACITY},
+    render::{BindlessTables, ImageCache, InstanceTables, MeshPool, OBJECT_TABLE_CAPACITY},
 };
 
 use super::invalid_params;

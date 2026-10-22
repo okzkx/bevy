@@ -54,7 +54,7 @@ use crate::overlay::windows::entity_tree_window::{
 };
 use crate::overlay::windows::monitor_window::{MonitorHistory, MonitorWindow};
 use crate::scene::mechanism::WorkloadSettings;
-use crate::vulkan::{
+use crate::render::{
     CullDiagnostics, CullSettings, Context, ImageCache, IndirectStats, MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics,
     OcclusionSettings, PerfLedger,
 };

@@ -82,7 +82,7 @@ fn compile(path: &Path, stem: &str) -> Vec<u32> {
     let mut validator = Validator::new(ValidationFlags::all(), caps);
     let info = match validator.validate(&module) {
         Ok(i) => i,
-        Err(e) => panic!("[{stem}] naga IR 校验失败: {e}"),
+        Err(e) => panic!("[{stem}] naga IR 校验失败: {e:#?}"),
     };
     match spv::write_vec(&module, &info, &spv::Options::default(), None) {
         Ok(w) => w,

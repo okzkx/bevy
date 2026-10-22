@@ -24,7 +24,7 @@ use bevy::prelude::Resource;
 
 use crate::common::error::Result;
 
-use super::Context;
+use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物，spirv-val 已过）。
 const OCCLUSION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/occlusion.spv"));

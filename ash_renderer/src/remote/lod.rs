@@ -24,7 +24,7 @@ use ash_macros::system;
 use crate::{
     common::error::VulkanError,
     scene::{InstanceLedger, LodGroups},
-    vulkan::{
+    render::{
         aabb_screen_rect, lod_hysteresis_level, lod_raw_level, InstanceTables, LOD_LEVEL_SIZE,
         LodDiagnostics, LodSettings, MAX_LOD_LEVELS, MeshPool,
     },
@@ -75,7 +75,7 @@ pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> B
     let pool = world.resource::<MeshPool>();
     let lod_groups = world.resource::<LodGroups>();
     let swapchain_extent = {
-        let swapchain = world.resource::<crate::vulkan::Swapchain>();
+        let swapchain = world.resource::<crate::render::Swapchain>();
         [
             swapchain.extent.width as f32,
             swapchain.extent.height as f32,

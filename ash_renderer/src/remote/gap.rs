@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use ash_macros::system;
 
 use crate::scene::{GapMode, GapSnapshot, ResidencySettings, ResidencyStats};
-use crate::vulkan::MAX_LOD_LEVELS;
+use crate::render::MAX_LOD_LEVELS;
 
 use super::{invalid_params, BrpResult};
 

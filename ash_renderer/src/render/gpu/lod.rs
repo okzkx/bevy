@@ -29,7 +29,8 @@ use bevy::prelude::Resource;
 
 use crate::common::error::Result;
 
-use super::{Context, MAX_LOD_LEVELS};
+use crate::render::Context;
+use crate::render::MAX_LOD_LEVELS;
 
 /// shader 模块字节（build.rs 产物，spirv-val 已过）。
 const LOD_SELECT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/lod_select.spv"));

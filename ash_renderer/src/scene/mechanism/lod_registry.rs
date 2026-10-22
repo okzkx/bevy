@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use super::{ObjectOpError, TestShape, spawn_test_shape};
-use crate::vulkan::MAX_LOD_LEVELS;
+use crate::render::MAX_LOD_LEVELS;
 
 /// LOD 组登记处：基准 mesh 身份 → 各档变体柄（level 0 = 基准自身），加
 /// level → base 反查（档位资产到货时重挂引用行 LOD 脏标用）与变体网格

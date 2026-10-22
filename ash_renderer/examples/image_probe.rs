@@ -24,7 +24,7 @@
 use std::sync::Mutex;
 
 use ash::{ext::debug_utils, vk, Device, Entry};
-use ash_renderer::vulkan::{
+use ash_renderer::render::{
     image_spec, BufferRole, GpuBuffer, GpuImage, MemoryContract, StagingImageCopy, UploadBatch,
     Uploader,
 };
@@ -269,7 +269,7 @@ fn group_a_mapping() {
     let e = image_spec(&uninit).unwrap_err();
     assert!(matches!(
         e,
-        ash_renderer::vulkan::ImageConvertError::MissingData
+        ash_renderer::render::ImageConvertError::MissingData
     ));
     let d1 = Image::new(
         Extent3d {
@@ -285,7 +285,7 @@ fn group_a_mapping() {
     let e = image_spec(&d1).unwrap_err();
     assert!(matches!(
         e,
-        ash_renderer::vulkan::ImageConvertError::UnsupportedDimension(_)
+        ash_renderer::render::ImageConvertError::UnsupportedDimension(_)
     ));
     // 5.4.3：静态 mip0 退役——带链描述符不再拒绝（链由 GPU blit 生成），
     // mip_level_count 形状本就不进规格（资产数据按 level 0 收）
@@ -303,7 +303,7 @@ fn group_a_mapping() {
     let e = image_spec(&hdr).unwrap_err();
     assert!(matches!(
         e,
-        ash_renderer::vulkan::ImageConvertError::UnsupportedFormat(_)
+        ash_renderer::render::ImageConvertError::UnsupportedFormat(_)
     ));
     println!("[拒绝] 无数据 ✓  D1 ✓  mip 链 3 ✓  Rgba16Float ✓(Tier①:warn 一次跳过,帧循环照常)");
 
@@ -519,7 +519,7 @@ fn group_c_cross_family(ctx: &ProbeCtx, transfer_family: u32, transfer_queue: vk
                 height: 4,
                 mip_levels: 1,
             }],
-            image_releases: vec![ash_renderer::vulkan::ImageRelease {
+            image_releases: vec![ash_renderer::render::ImageRelease {
                 image: gpu.image(),
                 to_family: gfx_family,
             }],

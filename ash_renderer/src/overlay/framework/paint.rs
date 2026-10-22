@@ -21,7 +21,7 @@ use bevy::{ecs::system::SystemParam, image::ImageSamplerDescriptor, prelude::*};
 
 use crate::{
     common::error::{Result, VulkanError},
-    vulkan::{
+    render::{
         sampler_key, BindlessTables, BufferRole, Context, GpuBuffer, GpuImage, ImageSpec,
         SlotBinding, StagingImageCopy, Ticket, UiDrawCall, UiPaint, UploadBatch, Uploader,
         MAX_FRAMES_IN_FLIGHT, UI_VERTEX_STRIDE,

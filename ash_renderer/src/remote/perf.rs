@@ -13,13 +13,13 @@ use ash_macros::system;
 
 use crate::{
     scene::{InstanceLedger, mechanism::WorkloadSettings},
-    vulkan::{GpuTimer, ImageCache, MeshPool, PerfLedger},
+    render::{GpuTimer, ImageCache, MeshPool, PerfLedger},
 };
 
 use super::{invalid_params, BrpResult};
 
 /// 分位数三元组（p50/p95/p99）+ 均值，从 PerfLedger 现算。
-fn percentile_block(ledger: &PerfLedger, field: impl Fn(&crate::vulkan::FrameSample) -> f32) -> Value {
+fn percentile_block(ledger: &PerfLedger, field: impl Fn(&crate::render::FrameSample) -> f32) -> Value {
     let values: Vec<f32> = ledger.snapshot().iter().map(&field).collect();
     let pick = |p: f32| ledger.percentile(p, &field).map(|v| (v * 1000.0).round() / 1000.0);
     let mean = if values.is_empty() {
@@ -57,7 +57,7 @@ pub(crate) fn perf_stats(
         "cpu_total_ms": percentile_block(&perf, |s| s.cpu_total_ms),
         "frame_wall_ms": percentile_block(&perf, |s| s.frame_wall_ms),
         "gpu_total_ms": percentile_block(&perf, |s| s.gpu_total_ms),
-        "gpu_graphics_ms": percentile_block(&perf, |s| s.gpu_graphics_ms),
+        "gpu_lighting_ms": percentile_block(&perf, |s| s.gpu_lighting_ms),
         "gpu_compute_ms": percentile_block(&perf, |s| s.gpu_compute_ms),
         "gpu_hiz_ms": percentile_block(&perf, |s| s.gpu_hiz_ms),
         "sections_mean": {
@@ -132,7 +132,7 @@ pub(crate) fn perf_samples(In(params): In<Option<Value>>, perf: Res<PerfLedger>)
                 "record_submit_ms": s.record_submit_ms,
                 "present_ms": s.present_ms,
                 "gpu_compute_ms": s.gpu_compute_ms,
-                "gpu_graphics_ms": s.gpu_graphics_ms,
+                "gpu_lighting_ms": s.gpu_lighting_ms,
                 "gpu_hiz_ms": s.gpu_hiz_ms,
                 "gpu_total_ms": s.gpu_total_ms,
                 "instance_rows": s.instance_rows,
@@ -169,7 +169,7 @@ pub(crate) fn workload(In(params): In<Option<Value>>, world: &mut World) -> BrpR
 }
 
 /// 字段均值（两位小数；空窗口返回 0）。
-fn mean_of(ledger: &PerfLedger, field: impl Fn(&crate::vulkan::FrameSample) -> f32) -> f64 {
+fn mean_of(ledger: &PerfLedger, field: impl Fn(&crate::render::FrameSample) -> f32) -> f64 {
     let values: Vec<f32> = ledger.snapshot().iter().map(field).collect();
     if values.is_empty() {
         return 0.0;

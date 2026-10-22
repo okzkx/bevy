@@ -8,7 +8,7 @@
 //! 后端只有 wgpu/glow——本模块自己接：[`framework`] 持有 [`egui::Context`] 并在
 //! Update 跑一遍 egui pass（纯 CPU，零 Vulkan 符号），产 [`EguiFrame`] 交给
 //! [`framework::paint`]（draw_frame 内调用的绘制半边：图集镜像整传 + 顶点环写入
-//! → `UiPaint`，Vulkan 调用全走 [`crate::vulkan`] 出口）。
+//! → `UiPaint`，Vulkan 调用全走 [`crate::render`] 出口）。
 //!
 //! | 子模块 | 职责 |
 //! |---|---|

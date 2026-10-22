@@ -6,9 +6,9 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::scene::mechanism::scene_gen::SceneChunk;
-use crate::vulkan::{
+use crate::render::{
     BindlessTables, CullDiagnostics, CullSettings, ImageCache, IndirectStats,
-    MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics, OcclusionSettings, PerfLedger, Uploader, FRAME_MODE_LAMBERT,
+    MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics, OcclusionSettings, PerfLedger, Uploader, FRAME_MODE_LAMBERT, FRAME_MODE_POSITION,
     FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
 };
 use crate::scene::mechanism::WorkloadSettings;
@@ -25,6 +25,9 @@ pub enum RenderMode {
     Unlit,
     /// 世界法线可视化：法线方向验收仪器（非均匀缩放案例的判定仪器）。
     Normal,
+    /// 世界位置可视化（8.1.2）：G-buffer 深度反投影重建——世界位置取法
+    /// （=深度重建拍板）的验收仪器。
+    Position,
 }
 
 impl RenderMode {
@@ -33,10 +36,11 @@ impl RenderMode {
             None | Some("") | Some("lambert") => Self::Lambert,
             Some("unlit") => Self::Unlit,
             Some("normal") => Self::Normal,
+            Some("position") => Self::Position,
             Some(other) => {
                 // 拼写错误是配置问题不是运行故障：warn 后按默认继续，不中断帧循环
                 bevy::log::warn!(
-                    "ASH_RENDER_MODE={other:?} 无法识别（可选 lambert/unlit/normal），按 lambert 继续"
+                    "ASH_RENDER_MODE={other:?} 无法识别（可选 lambert/unlit/normal/position），按 lambert 继续"
                 );
                 Self::Lambert
             }
@@ -49,6 +53,7 @@ impl RenderMode {
             Self::Lambert => FRAME_MODE_LAMBERT,
             Self::Unlit => FRAME_MODE_UNLIT,
             Self::Normal => FRAME_MODE_NORMAL,
+            Self::Position => FRAME_MODE_POSITION,
         }
     }
 }
@@ -114,7 +119,7 @@ pub(in crate::overlay) struct PerfPanelCache {
     /// (p50, p95, p99, 样本数) 逐字段。
     pub(in crate::overlay) cpu: (f32, f32, f32, usize),
     pub(in crate::overlay) gpu_total: (f32, f32, f32, usize),
-    pub(in crate::overlay) gpu_graphics: (f32, f32, f32, usize),
+    pub(in crate::overlay) gpu_lighting: (f32, f32, f32, usize),
 }
 
 const PANEL_PS: [f32; 3] = [0.50, 0.95, 0.99];
@@ -133,7 +138,7 @@ impl PerfPanelCache {
         };
         self.cpu = take(perf.percentiles(&PANEL_PS, |s| s.cpu_total_ms));
         self.gpu_total = take(perf.percentiles(&PANEL_PS, |s| s.gpu_total_ms));
-        self.gpu_graphics = take(perf.percentiles(&PANEL_PS, |s| s.gpu_graphics_ms));
+        self.gpu_lighting = take(perf.percentiles(&PANEL_PS, |s| s.gpu_lighting_ms));
     }
 }
 
@@ -227,10 +232,10 @@ impl DebugWindow<'_> {
                     } else {
                         match occlusion_diag.fallback {
                             Some(fallback) => match fallback {
-                                crate::vulkan::OcclusionFallback::Disabled => "关（A/B）",
-                                crate::vulkan::OcclusionFallback::CullOff => "关（视锥关闭）",
-                                crate::vulkan::OcclusionFallback::PyramidWarmup => "warmup",
-                                crate::vulkan::OcclusionFallback::CameraJump => "相机跳变",
+                                crate::render::OcclusionFallback::Disabled => "关（A/B）",
+                                crate::render::OcclusionFallback::CullOff => "关（视锥关闭）",
+                                crate::render::OcclusionFallback::PyramidWarmup => "warmup",
+                                crate::render::OcclusionFallback::CameraJump => "相机跳变",
                             },
                             None => "空场",
                         }
@@ -271,7 +276,7 @@ impl DebugWindow<'_> {
                 };
                 show_pct(ui, "CPU", pct.cpu);
                 show_pct(ui, "GPU 全帧", pct.gpu_total);
-                show_pct(ui, "GPU 图形", pct.gpu_graphics);
+                show_pct(ui, "GPU 图形", pct.gpu_lighting);
                 ui.monospace(format!(
                     "变更注入 {}（rows {}）——只进计量，诊断不驱动绘制",
                     if workload.enabled { "开" } else { "关" },

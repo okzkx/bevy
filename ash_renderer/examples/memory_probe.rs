@@ -14,7 +14,7 @@
 //!   不期待驱动必返回固定错误码,绑定即拆,不当正常路径继续用。
 //!
 //! 本探针不碰窗口/surface,自含 Entry → Instance → PhysicalDevice → Device 最小链,
-//! 用 [`ash_renderer::vulkan`] 的契约类型本体(测的是交付代码,不是探针复制品)。
+//! 用 [`ash_renderer::render`] 的契约类型本体(测的是交付代码,不是探针复制品)。
 //! 与主工程 device 的差异:本探针不链 12/13 feature(内存路径不涉及这些位),
 //! 用旧 SubmitInfo + 旧 pipeline barrier(不启用 synchronization2 就不用 submit2,
 //! 接口定案归 3.2.4);同步验证照主工程常开。
@@ -26,7 +26,7 @@ use std::slice;
 use std::sync::Mutex;
 
 use ash::{ext::debug_utils, vk, Device, Entry};
-use ash_renderer::vulkan::{align_up, BufferRole, GpuBuffer, MemoryContract};
+use ash_renderer::render::{align_up, BufferRole, GpuBuffer, MemoryContract};
 
 const VALIDATION_LAYER: &std::ffi::CStr = c"VK_LAYER_KHRONOS_validation";
 

@@ -17,7 +17,7 @@ use ash::{khr::swapchain, vk, Device};
 use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
-use crate::vulkan::Context;
+use crate::render::Context;
 
 /// acquire 的三种结局。SUBOPTIMAL 拿得到图但下次要重建——照常渲染完这帧再重建。
 #[derive(Debug, Clone, Copy)]
