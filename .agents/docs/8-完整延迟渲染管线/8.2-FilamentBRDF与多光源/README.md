@@ -6,7 +6,10 @@
 
 **一句话说明**：本段把 Lambert 换成 Filament BRDF、把光照从"绘制时直算"改成"全屏光照累积 pass 读 G-buffer"——多光源自此与光源数解耦着色成本，为 8.3 阴影与步骤 9 间接光注入立接口；本段不主张阴影（归 8.3）与 GI（归步骤 9）。
 
-**当前状态：🔧 施工中（2026-10-22 `$plan-execute 8.2` 开工，临时分支 `goal/8.2-filament-ref` 续工）**；开工前置源码参考篇已产出、段施工计划已立案（立案期拍板=光源驻留形态常驻表）；任务拆解与逐任务状态以[段施工计划 §1](施工计划：Filament%20BRDF%20与%20多光源光照累积.md)为准（下表已同步）。
+**当前状态：🔧 施工中（2026-10-22 `$plan-execute 8.2` 开工，临时分支 `goal/8.2-filament-ref` 续工）**；8.2.1~8.2.3 三任务 ✅，8.2.4 部分（A/B+census 过，梯度/Helmet 对照遗留），8.2.5 未跑——遗留项与挂账：
+- **整树 despawn device lost（严重，须最小复现定责）**：Sponza 全树 BRP despawn + 103 组网格/69 张贴图同批回收后设备丢失（此前 7.2 实测同路径干净，8.1/8.2 改动面是否引入待查；重跑未复现但出现一次，另见一次疑似加载停摆/截图冻结假象）——嫌疑面：4.4 回收链 × 8.2.1 贴图槽扩列（optional_slot 三槽引用）的失效时序。
+- 点光强度量级钉：BRP 缺省 candela 值对 20000 lux 方向光场景贡献 ~1e-3 输出（不可见），A/B 配方须 e3~e4 量级。
+- HDR 高光白截断 = 无 ToneMapping 的预期形态（8.4 收口）；alpha mask 纹理素黑色覆盖 = 8.1 既有语义。开工前置源码参考篇已产出、段施工计划已立案（立案期拍板=光源驻留形态常驻表）；任务拆解与逐任务状态以[段施工计划 §1](施工计划：Filament%20BRDF%20与%20多光源光照累积.md)为准（下表已同步）。
 
 ## 代码落点（提案）
 
@@ -26,10 +29,10 @@
 
 | 任务 | 交付（详见段施工计划 §1） | 状态 |
 |---|---|---|
-| 8.2.1 材质参数面扩容 | `MaterialRecordLayout` 扩列（metallic/roughness 进记录、normal/AO 贴图槽进 bindless 双表）+ 解冻清单 + glTF 取数 + 7.3 供料四件接入 | ⬜ |
-| 8.2.2 光源常驻表 | LightTable（storage，槽位+增量账本+free list）+ shadow 标志位 + BRP 灯方法族 + 方向光归属钉明 + 8.1 光源环切表接线 | ⬜ |
-| 8.2.3 光照累积 pass | `gbuffer_composite.wgsl` Lambert 换照抄 Filament surfaceShading（函数级移植）；读 G-buffer × 常驻灯表逐灯累加；直写 HDR；间接光注入空接口 | ⬜ |
-| 8.2.4 多光源判定线 | 多光源 A/B（BRP 驱动）+ 金属/粗糙度梯度读图 + 单体对照（filament 仓库资产 + 编译本体参照渲染）+ 透明层一致性 | ⬜ |
+| 8.2.1 材质参数面扩容 | `MaterialRecordLayout` 扩列（metallic/roughness 进记录、normal/AO 贴图槽进 bindless 双表）+ 解冻清单 + glTF 取数 + 7.3 供料四件接入 | ✅（2026-10-22，[施工记录](8.2.1-施工记录：材质参数面扩容.md)；冒烟实抓 VUID-06179 即修） |
+| 8.2.2 光源常驻表 | LightTable（storage，槽位+增量账本+free list）+ shadow 标志位 + BRP 灯方法族 + 方向光归属钉明（set1 UBO 单光保留）+ 8.1 光源环切表接线 | ✅（2026-10-22，[施工记录](8.2.2-施工记录：光源常驻表.md)；census 55520=55520 零 mismatch，复用槽 33696=33696） |
+| 8.2.3 光照累积 pass | `gbuffer_composite.wgsl` Lambert 换照抄 Filament surfaceShading（函数级移植，命名保留原名）；UBO 208B 三解冻（camera_pos）；透明层同 BRDF；间接光注入空接口 | ✅（2026-10-22，[施工记录](8.2.3-施工记录：光照累积pass照抄Filament.md)；多光源 A/B 全链读图过；TBN 两钉：uniform 控制流 + uv 退化守卫） |
+| 8.2.4 多光源判定线 | 多光源 A/B（BRP 驱动）+ 金属/粗糙度梯度读图 + 单体对照（filament 仓库资产 + 编译本体参照渲染）+ 透明层一致性 | 🔧 部分（A/B ✅ + census ✅ + mutate 热改面 ✅（edb981c91）；**遗留：金属/粗糙度梯度专用场景读图、DamagedHelmet 双渲染器对照（gltf_viewer 已编译产出）**） |
 | 8.2.5 总验收与计量 | 回归总跑（resize/最小化）+ 性能成组记录（并入 8.1 七位区间）+ 既有判定线零回退 | ⬜ |
 
 ## 材料清单
