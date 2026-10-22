@@ -168,7 +168,11 @@ impl CullPass {
     ///
     /// # Errors
     /// shader module / layout / pipeline 任一创建失败。
-    pub fn new(ctx: &Context, set2_layout: vk::DescriptorSetLayout) -> Result<Self> {
+    pub fn new(
+        ctx: &Context,
+        set2_layout: vk::DescriptorSetLayout,
+        shadow_layout: vk::DescriptorSetLayout,
+    ) -> Result<Self> {
         let device = &ctx.device;
         let words: Vec<u32> = CULL_SPV
             .as_chunks::<4>()
@@ -186,8 +190,10 @@ impl CullPass {
         unsafe {
             let layout = device
                 .create_pipeline_layout(
+                    // 8.3：[set2, shadow set] 双集——shadow UBO（四 cascade
+                    // 平面）与交错标记环在第二集（cull.wgsl group(1)）
                     &vk::PipelineLayoutCreateInfo::default()
-                        .set_layouts(std::slice::from_ref(&set2_layout))
+                        .set_layouts(&[set2_layout, shadow_layout])
                         .push_constant_ranges(std::slice::from_ref(&push_range)),
                     None,
                 )
@@ -237,6 +243,7 @@ pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     set2: vk::DescriptorSet,
+    shadow_set: vk::DescriptorSet,
     cull: &CullDraw,
 ) {
     unsafe {
@@ -246,7 +253,7 @@ pub(crate) fn record(
             vk::PipelineBindPoint::COMPUTE,
             cull.layout,
             0,
-            std::slice::from_ref(&set2),
+            &[set2, shadow_set],
             &[],
         );
         device.cmd_push_constants(

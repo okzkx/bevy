@@ -38,6 +38,9 @@ use crate::render::gpu::hiz::HizPyramid;
 use crate::render::gpu::indirect::IndirectDraw;
 use crate::render::gpu::lod::LodDraw;
 use crate::render::gpu::occlusion::OcclusionDraw;
+use crate::render::gpu::shadow_build::ShadowBuildDraw;
+use crate::render::pipeline::shadow::ShadowWriteDraw;
+use crate::render::shading::shadow::SHADOW_MAP_SIZE;
 use crate::render::GBufferTargets;
 use crate::render::pipeline::cluster::TransparentFrame;
 use crate::render::pipeline::overlay_pipeline::{pack_ui_push, UiPaint};
@@ -109,6 +112,19 @@ pub struct FrameDraw<'a> {
     /// 最细档，命令引脚回到对象记录基准）。录制在遮挡测试之后、indirect
     /// 组装之前（档位写 → 组装读的依赖由 lod::record 自带屏障收口）。
     pub lod: Option<LodDraw>,
+    /// shadow 命令组装 dispatch（8.3；关闭/空场为 None）。录制在 LOD 之后、
+    /// 透明三 dispatch 之前（shadow 标记读依赖由 cull::record 预置屏障承担，
+    /// 命令 → 绘制的依赖由 shadow_build::record 自带 DRAW_INDIRECT 屏障收口）。
+    pub shadow_build: Option<ShadowBuildDraw>,
+    /// shadow depth pass 输入（8.3；关闭/空场为 None——四级联 render pass +
+    /// indirect draw，在 G-buffer pass 之前录制；关 = 画面与 8.2 基线一致）。
+    pub shadow: Option<ShadowWriteDraw>,
+    /// shadow 域描述符集（8.3：合成 pass 的 shadow 采样取数面——b0 UBO +
+    /// b1..4 级联深度图；恒 Some，关闭帧 shader 内旁路 shadow 采样）。
+    pub shadow_set: vk::DescriptorSet,
+    /// 级联深度图本体（8.3）：布局屏障恒录的面——composite 的 shadow 描述符
+    /// 恒绑定（空场/关闭帧也在集内），四张图的布局必须始终合法。
+    pub shadow_images: [vk::Image; 4],
     /// 透明 Clustered Forward 层（8.1.3）：cluster 构建/收集/组装三 dispatch
     ///（compute 区间录制）+ 透明绘制输入（合成 pass 之后、Hi-Z 之前）。
     /// `transparent = None` = 空场（无在场行，三 dispatch 与绘制整段跳过）。
@@ -459,7 +475,7 @@ impl FramePool {
             // 依赖形状（消费归 5.3，判定线 3）。空场/关闭 = None（host 已把
             // 本帧槽标记填全可见，诊断语义不断）。
             if let Some(cull) = &draw.cull {
-                crate::render::gpu::cull::record(device, frame.command_buffer, draw.set2, cull);
+                crate::render::gpu::cull::record(device, frame.command_buffer, draw.set2, draw.shadow_set, cull);
             }
 
             // —— Hi-Z 遮挡测试 dispatch（6.1，渲染进场之前、视锥之后）：读
@@ -483,6 +499,19 @@ impl FramePool {
             // 自带屏障是命令写 → DRAW_INDIRECT 读的依赖形状。空场 = None。
             if let Some(indirect) = &draw.indirect {
                 crate::render::gpu::indirect::record(device, frame.command_buffer, draw.set2, indirect);
+            }
+
+            // —— shadow 命令组装 dispatch（8.3，渲染进场之前）：读在场环 +
+            // shadow 标记 + LOD 档位环，逐在场行 × 每 cascade 组装命令（两枚
+            // 语义钉的执行面见 shadow_build.wgsl）。空场/关闭 = None。
+            if let Some(sb) = &draw.shadow_build {
+                crate::render::gpu::shadow_build::record(
+                    device,
+                    frame.command_buffer,
+                    draw.set2,
+                    draw.shadow_set,
+                    sb,
+                );
             }
 
             // —— 透明层三 dispatch（8.1.3，渲染进场之前）：cluster 光源列表
@@ -530,6 +559,160 @@ impl FramePool {
             // —— 帧计时 T1：compute 区间（cull+组装）结束点位。
             if let Some(timer) = draw.timer {
                 timer.mark(frame.command_buffer, slot, 1);
+            }
+
+            // —— shadow depth pass（8.3，G-buffer 之前）：四级联各一个小
+            // render pass（D32 reverse-Z clear 0 + GREATER 与主链成套），一次
+            // cmd_draw_indexed_indirect 消费各自命令环——CPU 只发矩阵与在场
+            // 行数上界，剔除/决策归 GPU（判定线 3 的绘制面）。深度图固定
+            // 尺寸（viewport 2048²，不随 swapchain），UNDEFINED 进场 = 旧内容
+            // 可丢弃（loadOp CLEAR 每帧重写）。布局纪律：进出屏障恒录（pass
+            // 关/空场帧也要把地图送回 SHADER_READ_ONLY——composite 的 shadow
+            // 描述符恒绑定，布局必须始终合法）；UNDEFINED 作 oldLayout = 声明
+            // 旧内容可丢弃，从任意终态都合法（depth 内容不跨帧持久）。
+            for image in &draw.shadow_images {
+                let to_attachment = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(*image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                            .level_count(1)
+                            .layer_count(1),
+                    )
+                    .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE);
+                device.cmd_pipeline_barrier(
+                    frame.command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    std::slice::from_ref(&to_attachment),
+                );
+            }
+            if let Some(shadow) = &draw.shadow {
+                let map_extent = vk::Extent2D {
+                    width: SHADOW_MAP_SIZE,
+                    height: SHADOW_MAP_SIZE,
+                };
+                for (c, view) in shadow.views.iter().enumerate() {
+                    let shadow_depth_attachment = vk::RenderingAttachmentInfo::default()
+                        .image_view(*view)
+                        .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                        .load_op(vk::AttachmentLoadOp::CLEAR)
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                        .clear_value(vk::ClearValue {
+                            depth_stencil: vk::ClearDepthStencilValue { depth: 0.0, stencil: 0 },
+                        });
+                    device.cmd_begin_rendering(
+                        frame.command_buffer,
+                        &vk::RenderingInfo::default()
+                            .render_area(vk::Rect2D {
+                                offset: vk::Offset2D::default(),
+                                extent: map_extent,
+                            })
+                            .layer_count(1)
+                            .depth_attachment(&shadow_depth_attachment),
+                    );
+                    device.cmd_bind_pipeline(
+                        frame.command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        shadow.pipeline,
+                    );
+                    device.cmd_bind_descriptor_sets(
+                        frame.command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        shadow.layout,
+                        0,
+                        &[shadow.set2, shadow.shadow_set],
+                        &[],
+                    );
+                    // 池整绑（offset 0，与主管线同一契约——命令引脚在 GPU 侧定位）
+                    device.cmd_bind_vertex_buffers(
+                        frame.command_buffer,
+                        0,
+                        &[shadow.vertex_buffer],
+                        &[0],
+                    );
+                    device.cmd_bind_index_buffer(
+                        frame.command_buffer,
+                        shadow.index_buffer,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+                    device.cmd_set_viewport(
+                        frame.command_buffer,
+                        0,
+                        &[vk::Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: map_extent.width as f32,
+                            height: map_extent.height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        }],
+                    );
+                    device.cmd_set_scissor(
+                        frame.command_buffer,
+                        0,
+                        &[vk::Rect2D {
+                            offset: vk::Offset2D::default(),
+                            extent: map_extent,
+                        }],
+                    );
+                    // 4B push = cascade 索引（帧级全局量的本职，cull 112B 同款理由）
+                    device.cmd_push_constants(
+                        frame.command_buffer,
+                        shadow.layout,
+                        vk::ShaderStageFlags::VERTEX,
+                        0,
+                        &(c as u32).to_le_bytes(),
+                    );
+                    device.cmd_draw_indexed_indirect(
+                        frame.command_buffer,
+                        shadow.commands[c],
+                        0,
+                        shadow.command_count,
+                        INDIRECT_COMMAND_STRIDE,
+                    );
+                    device.cmd_end_rendering(frame.command_buffer);
+                }
+            }
+            // 出场：ATTACHMENT→SHADER_READ_ONLY（合成 pass 采样）——恒录
+            //（pass 跳过帧也送回，保持描述符布局合法）
+            for image in &draw.shadow_images {
+                let shadow_to_read = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(*image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                            .level_count(1)
+                            .layer_count(1),
+                    )
+                    .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                device.cmd_pipeline_barrier(
+                    frame.command_buffer,
+                    vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    std::slice::from_ref(&shadow_to_read),
+                );
+            }
+            // —— 帧计时 T2：shadow 区间结束点位（8.3 起插入，后续段界顺移）。
+            if let Some(timer) = draw.timer {
+                timer.mark(frame.command_buffer, slot, 2);
             }
 
             // —— G-buffer pass（8.1 不透明 deferred 写入，多 color 附件首跑）：
@@ -673,9 +856,9 @@ impl FramePool {
 
             device.cmd_end_rendering(frame.command_buffer);
 
-            // —— 帧计时 T2：G-buffer 区间结束点位。
+            // —— 帧计时 T3：G-buffer 区间结束点位。
             if let Some(timer) = draw.timer {
-                timer.mark(frame.command_buffer, slot, 2);
+                timer.mark(frame.command_buffer, slot, 3);
             }
 
             // —— 附件转只读屏障：albedo/normal（COLOR_ATTACHMENT→SHADER_READ_
@@ -777,7 +960,8 @@ impl FramePool {
             );
             // set0 = 帧 UBO（与场景管线 set1 同一 layout 对象），set1 = G-buffer
             // 采样集，set2 = cluster 集（8.2.3 光照累积取数）
-            let composite_sets = [draw.set1, draw.gbuffer.sampled_set(slot), draw.cluster_set];
+            // set3 = shadow 域（8.3：级联深度图 + shadow UBO——PCSS 采样取数面）
+            let composite_sets = [draw.set1, draw.gbuffer.sampled_set(slot), draw.cluster_set, draw.shadow_set];
             device.cmd_bind_descriptor_sets(
                 frame.command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -950,9 +1134,9 @@ impl FramePool {
                 slice::from_ref(&hdr_to_read),
             );
 
-            // —— 帧计时 T3：合成区间（8.1.3 起透明层并入）结束点位。
+            // —— 帧计时 T4：合成区间（8.1.3 起透明层并入）结束点位。
             if let Some(timer) = draw.timer {
-                timer.mark(frame.command_buffer, slot, 3);
+                timer.mark(frame.command_buffer, slot, 4);
             }
 
             // —— 透明层深度重绑归还：ATTACHMENT→READ_ONLY（Hi-Z 归约采样；
@@ -995,9 +1179,9 @@ impl FramePool {
                 hiz.record_reduction(device, frame.command_buffer, slot);
             }
 
-            // —— 帧计时 T4：Hi-Z 归约区间结束点位。
+            // —— 帧计时 T5：Hi-Z 归约区间结束点位。
             if let Some(timer) = draw.timer {
-                timer.mark(frame.command_buffer, slot, 4);
+                timer.mark(frame.command_buffer, slot, 5);
             }
 
             // —— present blit + UI（8.1）：swapchain 只被全屏 blit 写——HDR 中间
@@ -1131,9 +1315,9 @@ impl FramePool {
 
             device.cmd_end_rendering(frame.command_buffer);
 
-            // —— 帧计时 T5：present blit + UI 区间结束点位。
+            // —— 帧计时 T6：present blit + UI 区间结束点位。
             if let Some(timer) = draw.timer {
-                timer.mark(frame.command_buffer, slot, 5);
+                timer.mark(frame.command_buffer, slot, 6);
             }
 
             // —— 出场：颜色画完到 present 引擎接管之间必须收口；PRESENT_SRC 是
@@ -1160,9 +1344,9 @@ impl FramePool {
                 &[],
                 &[to_present_src],
             );
-            // —— 帧计时 T6：全帧区间（T0→T6）结束点位，end_command_buffer 之前。
+            // —— 帧计时 T7：全帧区间（T0→T7）结束点位，end_command_buffer 之前。
             if let Some(timer) = draw.timer {
-                timer.mark(frame.command_buffer, slot, 6);
+                timer.mark(frame.command_buffer, slot, 7);
             }
 
             device.end_command_buffer(frame.command_buffer)?;

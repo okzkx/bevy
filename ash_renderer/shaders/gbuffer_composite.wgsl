@@ -87,6 +87,24 @@ struct ClusterRecord {
 @group(2) @binding(0) var<storage, read> cluster_params: ClusterParams;
 @group(2) @binding(1) var<storage, read> lights: array<LightRecord>;
 @group(2) @binding(2) var<storage, read> clusters: array<ClusterRecord>;
+// 8.3 shadow 域（set3）：b0 shadow UBO（级联矩阵/分割带/开关旗标）+
+// b1..4 四级联深度图（D32 texture_load 自写滤波——non-filterable 路线，
+// 不引 compare sampler）。shadow 关 = shadow_visibility 恒 1（UBO 旗标）。
+@group(3) @binding(0) var<uniform> shadow: ShadowUniforms;
+@group(3) @binding(1) var shadow_map0: texture_2d<f32>;
+@group(3) @binding(2) var shadow_map1: texture_2d<f32>;
+@group(3) @binding(3) var shadow_map2: texture_2d<f32>;
+@group(3) @binding(4) var shadow_map3: texture_2d<f32>;
+
+struct ShadowUniforms {
+    cascade_view_proj: array<mat4x4f, 4>,
+    planes: array<vec4f, 24>,
+    splits: vec4f,
+    camera_forward: vec4f,
+    camera_pos: vec4f,
+    // x = map_size（PCSS texel 归一）、y = enabled 旗标（0/1）
+    map_size: vec4f,
+}
 
 const MODE_SHADING: u32 = 0u;   // FRAME_MODE_LAMBERT（值不变，语义升级为 BRDF）
 const MODE_UNLIT: u32 = 1u;
@@ -258,6 +276,94 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 }
 
 // 深度反投影：uv → shader-NDC（uv.y = 0.5 - 0.5·ndc.y 的逆变换）→ clip → world
+// —— 8.3 PCSS 软阴影（立案拍板 texture_load 路线）：
+// cascade 选择按视深（dot(world-cam, forward) vs 分割带）；盒外/带外保守无影；
+// blocker search 3×3 取"比片段更近"的平均深度（reverse-Z：更近 = 值更大），
+// 半影半径 = 深度差的相对比值放大（立案允许的简化估计，非物理量纲），
+// PCF 3×3 随半径采样。开关旗标（UBO y）= 全链旁路面。
+fn shadow_map_load(ci: u32, px: vec2<i32>) -> f32 {
+    return select(
+        select(
+            select(
+                textureLoad(shadow_map0, px, 0).r,
+                textureLoad(shadow_map1, px, 0).r, ci != 0u),
+            textureLoad(shadow_map2, px, 0).r, ci != 1u),
+        textureLoad(shadow_map3, px, 0).r, ci != 2u);
+}
+
+fn shadow_visibility(world_pos: vec3f, n: vec3f) -> f32 {
+    if (shadow.map_size.y < 0.5) {
+        return 1.0;
+    }
+    let view_depth = dot(world_pos - shadow.camera_pos.xyz, shadow.camera_forward.xyz);
+    var ci = 4u;
+    if (view_depth <= shadow.splits.x) {
+        ci = 0u;
+    } else if (view_depth <= shadow.splits.y) {
+        ci = 1u;
+    } else if (view_depth <= shadow.splits.z) {
+        ci = 2u;
+    } else if (view_depth <= shadow.splits.w) {
+        ci = 3u;
+    }
+    if (ci == 4u) {
+        return 1.0;
+    }
+    // 防自遮蔽：法线偏移（沿法线把采样点抬离表面，随级联指数放大——粗级联
+    // texel 世界尺寸更大）+ 深度 bias（比较时 own 打折，斜率面自挡主源）
+    let lifted = world_pos + n * (0.01 + 0.03 * f32(ci));
+    let cs = shadow.cascade_view_proj[ci] * vec4f(lifted, 1.0);
+    let ndc = cs.xyz / cs.w;
+    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z <= 0.0) {
+        return 1.0;
+    }
+    let uv = vec2f(ndc.x * 0.5 + 0.5, 0.5 - 0.5 * ndc.y);
+    let size = shadow.map_size.x;
+    let texel = 1.0 / size;
+    let base = vec2<i32>(vec2f(uv.x * size, uv.y * size));
+    let own = ndc.z;
+    // —— blocker search（3×3）：遮挡物 = 比 own 更近（reverse-Z 更大值）
+    // 比较 bias：reverse-Z 下"更近 = 值更大"，遮挡须 d > own + bias 才成立
+    //（own - bias 会把表面自身 texel 判成遮挡物——全场景自挡实抓即修）。
+    // 容差三因子：掠射面斜率（NoL 反比）+ 级联序号（远级联 texel 与 ndc
+    // 范围更大，G-buffer 深度重建的世界坐标噪声在粗级联里被等比放大——
+    // 32× 差值可视化实抓 ±0.0156 抖动，施工记录钉明）
+    let no_l = saturate(dot(n, normalize(-shadow.camera_pos.xyz + lifted)));
+    let bias = 0.004 + 0.03 * (1.0 - no_l) + 0.012 * f32(ci);
+    let own_cmp = own + bias;
+    // —— blocker search（3×3）：遮挡物 = 比 own 更近（reverse-Z 更大值）
+    var blocker_sum = 0.0;
+    var blocker_count = 0.0;
+    for (var dy = -1i; dy <= 1i; dy = dy + 1i) {
+        for (var dx = -1i; dx <= 1i; dx = dx + 1i) {
+            let d = shadow_map_load(ci, base + vec2<i32>(dx, dy));
+            if (d > own_cmp) {
+                blocker_sum = blocker_sum + d;
+                blocker_count = blocker_count + 1.0;
+            }
+        }
+    }
+    if (blocker_count == 0.0) {
+        return 1.0;
+    }
+    let blocker_avg = blocker_sum / blocker_count;
+    // —— 半影半径：深度差相对比值放大（立案钉明的简化估计，texel 域）
+    let ratio = saturate((blocker_avg - own) / max(own, 1e-4));
+    let radius = clamp(ratio * 32.0, 1.0, 8.0);
+    // —— PCF（3×3 × 半径步进）：逆风采样，lit = 采到的深度不比 own 近
+    var lit = 0.0;
+    var taps = 0.0;
+    for (var dy = -2i; dy <= 2i; dy = dy + 1i) {
+        for (var dx = -2i; dx <= 2i; dx = dx + 1i) {
+            let offset = vec2<i32>(vec2f(f32(dx), f32(dy)) * radius * texel * size);
+            let d = shadow_map_load(ci, base + offset);
+            lit = lit + select(1.0, 0.0, d > own_cmp);
+            taps = taps + 1.0;
+        }
+    }
+    return lit / taps;
+}
+
 fn world_from_depth(uv: vec2f, depth: f32) -> vec3f {
     let ndc = vec3f(uv.x * 2.0 - 1.0, 1.0 - 2.0 * uv.y, depth);
     let clip = vec4f(ndc, 1.0);
@@ -351,10 +457,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     let l = select(vec3f(0.0, 1.0, 0.0), normalize(l_raw), dot(l_raw, l_raw) > 1e-8);
     let dir_NoL = saturate(dot(n, l));
     if (dir_NoL > 0.0) {
+        // 8.3 PCSS：方向光项乘阴影可见性（透明层/环境项不接影——段边界）
+        let shadow = shadow_visibility(world_pos, n);
         // 强度已折进 rgb（bevy 同款 illuminance 预乘，w 传 1.0——Filament 的
         // colorIntensity.w 预曝光位由 rgb 内含强度承担）
         light_sum = light_sum + surfaceShading(
-            pixel, l, vec4f(frame.light_color.rgb, 1.0), 1.0, dir_NoL, V, n, NoV, occlusion);
+            pixel, l, vec4f(frame.light_color.rgb, 1.0), 1.0, dir_NoL, V, n, NoV, occlusion)
+            * shadow;
     }
 
     // 环境光项保持在光源循环外（参考篇 §6.4）；albedo × ambient = 现役

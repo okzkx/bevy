@@ -35,7 +35,7 @@ use crate::common::error::Result;
 use super::Context;
 
 /// 每帧槽查询位数量（T0..T6，见模块注释时区表；8.1 多 pass 形状起七位）。
-pub const QUERIES_PER_FRAME: u32 = 7;
+pub const QUERIES_PER_FRAME: u32 = 8;
 
 /// 一帧的计量样本：CPU 分段（统一口径 §3 传播之外的四段——wait/acquire/
 /// 组装/双环/录制提交/present）+ GPU 区间 + 规模读数。全部毫秒。
@@ -57,6 +57,8 @@ pub struct FrameSample {
     /// 上述 CPU 各段合计。
     pub cpu_total_ms: f32,
     pub gpu_compute_ms: f32,
+    /// shadow depth pass 区间（四级联，8.3——T2 插入后逐段顺移）。
+    pub gpu_shadow_ms: f32,
     /// G-buffer 写入区间（不透明 deferred pass，8.1）。
     pub gpu_gbuffer_ms: f32,
     /// 延迟合成区间（G-buffer 光照；8.2 起光照累积并入，8.1.3 起透明层并入）。
@@ -262,7 +264,7 @@ impl GpuTimer {
         }
     }
 
-    /// 段界采样（T1 compute 后 / T2 rendering 后 / T3 提交前）。
+    /// 段界采样（T1 compute 后 / T2 shadow 后（8.3）/ T3 rendering 后 / T4 提交前……）。
     pub fn mark(&self, command_buffer: vk::CommandBuffer, slot: usize, index: u32) {
         if !self.enabled {
             return;
@@ -283,7 +285,7 @@ impl GpuTimer {
     ///
     /// # Errors
     /// 查询结果取回失败（设备丢失等，Tier② 语义由调用方分流）。
-    pub fn fetch(&mut self, slot: usize) -> Result<Option<[f32; 6]>> {
+    pub fn fetch(&mut self, slot: usize) -> Result<Option<[f32; 8]>> {
         if !self.enabled || !self.recorded[slot].load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -316,7 +318,9 @@ impl GpuTimer {
             ticks_to_ms(raw[2], raw[3]),
             ticks_to_ms(raw[3], raw[4]),
             ticks_to_ms(raw[4], raw[5]),
-            ticks_to_ms(raw[0], raw[6]),
+            ticks_to_ms(raw[5], raw[6]),
+            ticks_to_ms(raw[6], raw[7]),
+            ticks_to_ms(raw[0], raw[7]),
         ]))
     }
 }

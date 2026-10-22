@@ -52,9 +52,12 @@ use crate::{
 
 use super::drawlist;
 use crate::render::{
-    pack_cluster_uniforms, ClusterTargets, CompositePipeline, GBufferTargets,
-    LightTable, PresentBlitPipeline, TransparentFrame, TransparentPasses,
+    cascade_matrices, pack_cluster_uniforms, pack_shadow_uniforms, ClusterTargets,
+    CompositePipeline, GBufferTargets, LightTable, PresentBlitPipeline, ShadowBuildPass,
+    ShadowCascadeInput, ShadowDiagnostics, ShadowPipeline, ShadowSettings, ShadowTargets,
+    ShadowUniformsData, ShadowWriteDraw, TransparentFrame, TransparentPasses,
     TransparentPipeline,
+    SHADOW_CASCADES, SHADOW_MAP_SIZE,
 };
 
 /// resize 闸门状态（`draw_frame` 的 `Local`，跨帧保持）。
@@ -176,6 +179,16 @@ pub(crate) struct FrameInput<'w, 's> {
     lod_settings: Res<'w, LodSettings>,
     /// LOD 诊断账面（每帧刷新，egui/BRP 读数口；只进计量）。
     lod_diag: ResMut<'w, LodDiagnostics>,
+    /// shadow 资源族（8.3）：级联 UBO/标记/命令环 + 深度图 + 描述符。
+    shadow_targets: ResMut<'w, ShadowTargets>,
+    /// shadow 绘制管线（depth-only，8.3）。
+    shadow_pipeline: Res<'w, ShadowPipeline>,
+    /// shadow 命令组装 compute 管线（8.3）。
+    shadow_build_pass: Res<'w, ShadowBuildPass>,
+    /// 阴影开关（BRP/egui 写，draw_frame 读）。
+    shadow_settings: Res<'w, ShadowSettings>,
+    /// 阴影诊断账面（8.3，BRP shadow_stats 读数口）。
+    shadow_diag: ResMut<'w, ShadowDiagnostics>,
     /// LOD 组登记处（6.2；只读——LOD 表环写入的变体柄来源）。
     lod_groups: Res<'w, LodGroups>,
     /// 驻留管理器设置（6.3/6.5；DrawList 可绘锚解析读 floor_anchor 开关）。
@@ -268,6 +281,11 @@ pub(crate) fn draw_frame(
         ref lod_pass,
         ref lod_settings,
         ref mut lod_diag,
+        ref mut shadow_targets,
+        ref shadow_pipeline,
+        ref shadow_build_pass,
+        ref shadow_settings,
+        ref mut shadow_diag,
         ref lod_groups,
         ref residency_settings,
         ref mut gap_snapshot,
@@ -351,7 +369,7 @@ pub(crate) fn draw_frame(
     let gpu_sections = timer
         .fetch(frames.current_index())
         .or_fatal("GPU 帧计时取回失败，渲染链无法继续")?
-        .unwrap_or([0.0; 6]);
+        .unwrap_or([0.0; 8]);
 
     // 2) acquire：拿到一张可画的 image；OUT_OF_DATE = 这个 swapchain 已不可用
     //（最小化/恢复/独占模式切换等），必须立即重建——等不得下一帧
@@ -443,6 +461,8 @@ pub(crate) fn draw_frame(
     let mut inv_view_proj = Mat4::IDENTITY;
     let mut per_camera_ambient: Option<&AmbientLight> = None;
     let mut cam_now: Option<(Vec3, bevy::math::Quat)> = None;
+    // 8.3：相机投影 near（camera match 内写入；默认值兜底相机缺席帧）
+    let mut camera_near: f32 = 0.1;
     match cameras.single() {
         Ok((projection, global, ambient_override)) => {
             view_proj = projection.get_clip_from_view() * global.affine().inverse();
@@ -451,6 +471,11 @@ pub(crate) fn draw_frame(
             inv_view_proj = view_proj.inverse();
             per_camera_ambient = ambient_override;
             cam_now = Some((global.translation(), global.rotation()));
+            // 8.3 级联底座：投影 near（z_ndc↔视深换算）；非透视投影兜底 100
+            camera_near = match projection {
+                Projection::Perspective(p) => p.near,
+                _ => 100.0,
+            };
         }
         Err(_) => draw_state
             .warned_no_camera
@@ -534,6 +559,48 @@ pub(crate) fn draw_frame(
         )
         .or_fatal("帧 UBO 写失败，渲染链无法继续")?;
 
+    // 4a-0-1) shadow UBO（8.3，帧槽环与主 UBO 同一 fence 证据）：级联矩阵
+    //（log 分割拟合）+ 四×六平面（cull 内联标记与 shadow_stats CPU 参照同源）
+    //+ 分割带/相机基（composite cascade 选择）。相机缺席帧 = identity 矩阵
+    //（画面不可读属预期，与帧 UBO 兜底同口径）。
+    let shadow_frame = frames.current_index();
+    let (shadow_cascades, shadow_splits) = match cam_now {
+        Some((pos, rot)) => {
+            let forward = rot * Vec3::NEG_Z;
+            let input = ShadowCascadeInput {
+                inv_view_proj,
+                camera_pos: pos,
+                camera_forward: forward,
+                near: camera_near,
+                dir_to_light: Vec3::from_slice(&dir_to_light[..3]).normalize_or_zero(),
+            };
+            cascade_matrices(&input)
+        }
+        None => ([Mat4::IDENTITY; SHADOW_CASCADES], [f32::INFINITY; SHADOW_CASCADES]),
+    };
+    let shadow_planes: Vec<Vec4> = shadow_cascades
+        .iter()
+        .flat_map(|m| frustum_planes(m).to_vec())
+        .collect();
+    let shadow_uniform = ShadowUniformsData {
+        cascade_view_proj: shadow_cascades,
+        planes: shadow_planes.try_into().expect("4×6 平面"),
+        splits: shadow_splits,
+        camera_forward: cam_now
+            .map(|(_, r)| {
+                let f = r * Vec3::NEG_Z;
+                [f.x, f.y, f.z, 0.0]
+            })
+            .unwrap_or([0.0; 4]),
+        camera_pos: cam_now.map(|(t, _)| [t.x, t.y, t.z, 0.0]).unwrap_or([0.0; 4]),
+        map_size: SHADOW_MAP_SIZE as f32,
+        enabled: f32::from(shadow_settings.enabled),
+    };
+    shadow_targets
+        .ubo(shadow_frame)
+        .write(0, &pack_shadow_uniforms(&shadow_uniform))
+        .or_fatal("shadow UBO 写失败，渲染链无法继续")?;
+
     // 4a-0) 透明层帧侧宿主写（8.1.3，wait_for_slot 的 fence 纪律内）：
     // cluster 均匀数据（view_proj/inv_view_proj/网格标量）、光源常驻表脏行
     //（8.2.2）、透明行计数清零（collect 的 atomicAdd 基线）。
@@ -594,7 +661,9 @@ pub(crate) fn draw_frame(
     // 边界：任何系统不得读它决定画什么）。
     let cull_frame = frames.current_index();
     let cull_bound = instance_tables.used_object_slots();
-    let cull_dispatch = if cull_settings.enabled && cull_bound > 0 {
+    // 8.3：shadow 开启时剔除 dispatch 也承担 shadow 标记产出——即使主视锥
+    // A/B 关，dispatch 仍要跑（写 shadow 标记）；两侧全关才可跳过
+    let cull_dispatch = if (cull_settings.enabled || shadow_settings.enabled) && cull_bound > 0 {
         // 闸门④空转首跑留痕：首个 dispatch 帧收账一次（零 VUID 由验证层执法）
         if !cull_diag.first_dispatch_logged {
             info!(
@@ -635,6 +704,45 @@ pub(crate) fn draw_frame(
         cull_diag.marks_frame = cull_frame;
         cull_diag.rows_compared = assembly.slots.len();
         cull_diag.visible_count = visible_among_live;
+    }
+
+    // 4a-2-0) shadow 标记半边（8.3）：dispatch 跑了 → 标记 = compute 输出；
+    // 没跑（shadow 关或空场）→ host 全可见填充（读数语义 = 剔除量 0，A/B 的
+    // B 面同口径；composite 侧 shadow 关 = shader 旁路，标记内容无消费）。
+    // 诊断逐 cascade 计数（fence 纪律内直读，陈旧 ≤2 帧与主标记同款）。
+    if !(shadow_settings.enabled && cull_bound > 0) {
+        let ones: Vec<u8> = (0..cull_bound)
+            .flat_map(|_| [1u32, 1u32, 1u32, 1u32].map(u32::to_le_bytes).concat())
+            .collect();
+        shadow_targets
+            .mark_mut(shadow_frame)
+            .write(0, &ones)
+            .or_fatal("shadow 标记环全可见填充失败，渲染链无法继续")?;
+    }
+    if cull_bound > 0 {
+        let mut sbytes = vec![0u8; cull_bound as usize * 4 * 4];
+        shadow_targets
+            .mark_mut(shadow_frame)
+            .read(0, &mut sbytes)
+            .or_fatal("shadow 标记环读数失败，渲染链无法继续")?;
+        let smark_at = |slot: u32, c: usize| {
+            u32::from_le_bytes(
+                sbytes[slot as usize * 16 + c * 4..slot as usize * 16 + c * 4 + 4]
+                    .try_into()
+                    .expect("4B"),
+            )
+        };
+        let mut gpu_vis = [0u32; SHADOW_CASCADES];
+        for &slot in assembly.slots.iter() {
+            for (c, vis) in gpu_vis.iter_mut().enumerate() {
+                *vis += u32::from(smark_at(slot, c) == 1);
+            }
+        }
+        shadow_diag.enabled = shadow_settings.enabled;
+        shadow_diag.bound = cull_bound;
+        shadow_diag.marks_frame = shadow_frame;
+        shadow_diag.gpu_visible = gpu_vis;
+        shadow_diag.cpu_visible = [0; SHADOW_CASCADES];
     }
 
     // 4a-2-1) Hi-Z 遮挡半边（6.1）：fallback 判据逐项核对（occlusion 模块
@@ -829,6 +937,15 @@ pub(crate) fn draw_frame(
     indirect_stats.walk_rows = ledger.len();
     indirect_stats.pending_rows = pending_rows;
 
+    // 4a-3-1) shadow 命令组装半边（8.3）：读 shadow 标记 + LOD 档位环，逐在场
+    // 行 × 每 cascade 组装命令（两枚语义钉：无遮挡参与、LOD 再粗一档）。空场
+    // /关闭 = None（shadow 命令环内容无消费——shadow pass 整段跳过）。
+    let shadow_build_dispatch = if shadow_settings.enabled && indirect_count > 0 {
+        Some(shadow_build_pass.draw(indirect_count))
+    } else {
+        None
+    };
+
     // 4b) overlay 绘制半边：图集整传（可能多出一张 transfer 票据——本帧
     // 图形提交的 wait_ticket 在此后快照，flush_uploads 批与图集批都被等待）→
     // 镶嵌 → 顶点环写入 → UiPaint + 本帧槽 buffer 句柄（record_frame 的 UI 段
@@ -886,6 +1003,43 @@ pub(crate) fn draw_frame(
     } else {
         None
     };
+    // shadow depth pass 输入（8.3）：在场行 > 0 且开关开才录四级联绘制；
+    // 关 = 画面与 8.2 基线一致（composite 侧 shader 旁路 shadow 采样）
+    let shadow_frame_input = if shadow_settings.enabled && indirect_count > 0 {
+        Some(ShadowWriteDraw {
+            pipeline: shadow_pipeline.pipeline(),
+            layout: shadow_pipeline.layout(),
+            set2: instance_tables.frame_set2(frames.current_index()),
+            shadow_set: shadow_targets.frame_set(frames.current_index()),
+            views: [
+                shadow_targets.map_view(0),
+                shadow_targets.map_view(1),
+                shadow_targets.map_view(2),
+                shadow_targets.map_view(3),
+            ],
+            images: [
+                shadow_targets.map_image(0),
+                shadow_targets.map_image(1),
+                shadow_targets.map_image(2),
+                shadow_targets.map_image(3),
+            ],
+            commands: [
+                shadow_targets.command(frames.current_index(), 0),
+                shadow_targets.command(frames.current_index(), 1),
+                shadow_targets.command(frames.current_index(), 2),
+                shadow_targets.command(frames.current_index(), 3),
+            ],
+            command_count: indirect_count,
+            vertex_buffer: pool.vertex_buffer().ok_or_else(|| {
+                VulkanError::Upload("shadow 输入在场行非空但顶点池缺席——状态矛盾".into())
+            })?,
+            index_buffer: pool.index_buffer().ok_or_else(|| {
+                VulkanError::Upload("shadow 输入在场行非空但索引池缺席——状态矛盾".into())
+            })?,
+        })
+    } else {
+        None
+    };
     let frame_draw = FrameDraw {
         pipeline: pipeline.pipeline(),
         layout: pipeline.layout(),
@@ -917,6 +1071,15 @@ pub(crate) fn draw_frame(
         ticket_semaphore: uploader.ticket_semaphore(),
         clear: CLEAR_COLOR,
         cull: cull_dispatch,
+        shadow_build: shadow_build_dispatch,
+        shadow: shadow_frame_input,
+        shadow_set: shadow_targets.frame_set(frames.current_index()),
+        shadow_images: [
+            shadow_targets.map_image(0),
+            shadow_targets.map_image(1),
+            shadow_targets.map_image(2),
+            shadow_targets.map_image(3),
+        ],
         indirect: indirect_dispatch,
         occlusion: occl_dispatch,
         lod: lod_dispatch,
@@ -972,11 +1135,12 @@ pub(crate) fn draw_frame(
         present_ms,
         cpu_total_ms,
         gpu_compute_ms: gpu_sections[0],
-        gpu_gbuffer_ms: gpu_sections[1],
-        gpu_lighting_ms: gpu_sections[2],
-        gpu_hiz_ms: gpu_sections[3],
-        gpu_present_ms: gpu_sections[4],
-        gpu_total_ms: gpu_sections[5],
+        gpu_shadow_ms: gpu_sections[1],
+        gpu_gbuffer_ms: gpu_sections[2],
+        gpu_lighting_ms: gpu_sections[3],
+        gpu_hiz_ms: gpu_sections[4],
+        gpu_present_ms: gpu_sections[5],
+        gpu_total_ms: gpu_sections[7],
         instance_rows: indirect_count,
         visible_rows: visible_among_live,
     });
