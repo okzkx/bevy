@@ -92,7 +92,7 @@ const MODE_POSITION: u32 = 3u;
 
 // 清屏色（与 host 侧 CLEAR_COLOR 同值——线性域，SRGB 编码在最终 ROP 一次）
 const CLEAR_COLOR: vec3f = vec3f(0.02, 0.06, 0.14);
-const EXPOSURE: f32 = 0.0010019;
+const EXPOSURE: f32 = 0.00063;  // 8.2.4 重校准：20000 lx 下 albedo0.5·NoL0.5 漫反射 ≈1.0（8.4 换正式 tone mapping/预曝光口径）
 
 // MAX_PER_CLUSTER（cluster.rs 同源）
 const MAX_PER_CLUSTER: u32 = 16u;
