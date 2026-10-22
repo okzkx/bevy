@@ -554,6 +554,18 @@ impl FramePool {
                             float32: [0.0, 0.0, 0.0, 0.0],
                         },
                     }),
+                // 8.2.1 matparam（材质标量）：附件计数与主管线声明面一致
+                //（VUID-06179——管线 colorAttachmentCount = 实例 colorAttachmentCount）
+                vk::RenderingAttachmentInfo::default()
+                    .image_view(draw.gbuffer.matparam_view(slot))
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .clear_value(vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.0, 0.0, 0.0, 1.0],
+                        },
+                    }),
             ];
             let depth_attachment = vk::RenderingAttachmentInfo::default()
                 .image_view(frame.depth.view)
@@ -678,6 +690,15 @@ impl FramePool {
                 ),
                 (
                     draw.gbuffer.normal_image(slot),
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::ImageAspectFlags::COLOR,
+                ),
+                (
+                    // 8.2.1 matparam：合成 pass 光照累积的 PBR 入参采样面
+                    draw.gbuffer.matparam_image(slot),
                     vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                     vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
