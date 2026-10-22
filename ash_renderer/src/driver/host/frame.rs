@@ -416,11 +416,15 @@ pub(crate) fn draw_frame(
         }
     };
     let mut view_proj = Mat4::IDENTITY;
+    let mut inv_view_proj = Mat4::IDENTITY;
     let mut per_camera_ambient: Option<&AmbientLight> = None;
     let mut cam_now: Option<(Vec3, bevy::math::Quat)> = None;
     match cameras.single() {
         Ok((projection, global, ambient_override)) => {
             view_proj = projection.get_clip_from_view() * global.affine().inverse();
+            // 8.1.2 深度重建常量面：clip→world 反投影（与 view_proj 同帧同源；
+            // glam 的 Mat4::inverse 通用逆，投影矩阵可逆性由投影构造保证）
+            inv_view_proj = view_proj.inverse();
             per_camera_ambient = ambient_override;
             cam_now = Some((global.translation(), global.rotation()));
         }
@@ -478,6 +482,7 @@ pub(crate) fn draw_frame(
                 RenderMode::Lambert => "lambert",
                 RenderMode::Unlit => "unlit",
                 RenderMode::Normal => "normal",
+                RenderMode::Position => "position",
             },
         ));
     }
@@ -487,6 +492,7 @@ pub(crate) fn draw_frame(
             0,
             &pack_frame_uniforms(&FrameUniformsData {
                 view_proj,
+                inv_view_proj,
                 dir_to_light,
                 ambient_color,
                 light_color,

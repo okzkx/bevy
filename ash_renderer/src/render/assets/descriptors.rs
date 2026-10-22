@@ -45,22 +45,29 @@ use crate::render::MAX_FRAMES_IN_FLIGHT;
 /// 布局事实上排除了各自异容的必要；异容需求出现时拆两个常量再改）。
 pub const TABLE_CAPACITY: u32 = 1024;
 
-/// 每帧 UBO 字节数（set1 b0）。128B 灯光版（mat4 view_proj + 灯光参数）；
-/// binding 形状（b0
-/// UNIFORM_BUFFER）与 pipeline layout 不变，range 在写入时的
-/// `DescriptorBufferInfo`，扩容不动 ABI。
-pub const FRAME_UBO_SIZE: u64 = 128;
+/// 每帧 UBO 字节数（set1 b0）。192B（mat4 view_proj + 灯光参数 + mat4
+/// inv_view_proj——8.1 深度重建世界位置的常量面扩容，128B 冻结边界第二次
+/// 解冻，照 5.1.1 解冻清单先例逐项落日志；与 8.2 光源扩容**分开**解冻，
+/// 段施工记录钉明）；binding 形状（b0 UNIFORM_BUFFER）与 pipeline layout
+/// 不变，range 在写入时的 `DescriptorBufferInfo`，扩容不动 ABI。
+pub const FRAME_UBO_SIZE: u64 = 192;
 
 /// 帧数据打包模式（UBO `mode` 字段，与 `debug_draw.wgsl` 的 case 值逐字同源；
 /// 非零值的语义见 host 侧 [`crate::driver::host`] 的材质三模式说明）。
 pub const FRAME_MODE_LAMBERT: u32 = 0;
 pub const FRAME_MODE_UNLIT: u32 = 1;
 pub const FRAME_MODE_NORMAL: u32 = 2;
+/// 世界位置可视化（8.1.2）：G-buffer 深度反投影重建的世界坐标编码直出——
+/// 深度重建机制的验收仪器（仅合成 pass 消费，forward 时代无此模式）。
+pub const FRAME_MODE_POSITION: u32 = 3;
 
 /// 每帧 UBO 的宿主侧取数产物（`draw_frame` 组装，[`pack_frame_uniforms`] 排布）。
 pub struct FrameUniformsData {
     /// view × projection（列主序展平约定同 push 的 model）。
     pub view_proj: bevy::math::Mat4,
+    /// inv(view_proj)（8.1.2）：clip→world 反投影——G-buffer 深度重建世界
+    /// 位置的常量面；相机缺席帧 identity 兜底（与 view_proj 同源同帧）。
+    pub inv_view_proj: bevy::math::Mat4,
     /// 表面到光方向（xyz 单位向量，w=0 占位）。**bevy GPU 同款语义**：
     /// `prepare_lights` 写 `dir_to_light = transform.back()`（forward 取负，
     /// "N·L 就绪"），Lambert 直接 `dot(n, dir_to_light)`，符号混淆在此斩断。
@@ -86,6 +93,7 @@ struct FrameUniformsLayout {
     light_color: [f32; 4],
     mode: u32,
     _pad: [u32; 3],
+    inv_view_proj: [f32; 16],
 }
 
 const _: () = {
@@ -94,8 +102,9 @@ const _: () = {
     assert!(std::mem::offset_of!(FrameUniformsLayout, ambient_color) == 80);
     assert!(std::mem::offset_of!(FrameUniformsLayout, light_color) == 96);
     assert!(std::mem::offset_of!(FrameUniformsLayout, mode) == 112);
-    assert!(std::mem::size_of::<FrameUniformsLayout>() == 128);
-    assert!(FRAME_UBO_SIZE == 128);
+    assert!(std::mem::offset_of!(FrameUniformsLayout, inv_view_proj) == 128);
+    assert!(std::mem::size_of::<FrameUniformsLayout>() == 192);
+    assert!(FRAME_UBO_SIZE == 192);
 };
 
 /// [`FrameUniformsData`] → 128B uniform 字节（偏移按 [`FrameUniformsLayout`] 的
@@ -115,7 +124,10 @@ pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usiz
         }
     }
     put(112, &d.mode.to_le_bytes());
-    // 116..128 对齐垫保持 0
+    // 116..128 对齐垫保持 0；inv_view_proj @ 128（8.1.2 深度重建常量面）
+    for (i, v) in d.inv_view_proj.to_cols_array().iter().enumerate() {
+        put(128 + i * 4, &v.to_le_bytes());
+    }
     out
 }
 
@@ -723,6 +735,7 @@ pub const PLACEHOLDER_DIR_TO_LIGHT: [f32; 4] = [0.5, 1.0, 0.3, 0.0];
 fn identity_frame_uniforms() -> FrameUniformsData {
     FrameUniformsData {
         view_proj: bevy::math::Mat4::IDENTITY,
+        inv_view_proj: bevy::math::Mat4::IDENTITY,
         dir_to_light: PLACEHOLDER_DIR_TO_LIGHT,
         ambient_color: [0.0; 4],
         light_color: [0.0; 4],

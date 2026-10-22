@@ -8,7 +8,7 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 use crate::scene::mechanism::scene_gen::SceneChunk;
 use crate::render::{
     BindlessTables, CullDiagnostics, CullSettings, ImageCache, IndirectStats,
-    MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics, OcclusionSettings, PerfLedger, Uploader, FRAME_MODE_LAMBERT,
+    MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics, OcclusionSettings, PerfLedger, Uploader, FRAME_MODE_LAMBERT, FRAME_MODE_POSITION,
     FRAME_MODE_NORMAL, FRAME_MODE_UNLIT,
 };
 use crate::scene::mechanism::WorkloadSettings;
@@ -25,6 +25,9 @@ pub enum RenderMode {
     Unlit,
     /// 世界法线可视化：法线方向验收仪器（非均匀缩放案例的判定仪器）。
     Normal,
+    /// 世界位置可视化（8.1.2）：G-buffer 深度反投影重建——世界位置取法
+    /// （=深度重建拍板）的验收仪器。
+    Position,
 }
 
 impl RenderMode {
@@ -33,10 +36,11 @@ impl RenderMode {
             None | Some("") | Some("lambert") => Self::Lambert,
             Some("unlit") => Self::Unlit,
             Some("normal") => Self::Normal,
+            Some("position") => Self::Position,
             Some(other) => {
                 // 拼写错误是配置问题不是运行故障：warn 后按默认继续，不中断帧循环
                 bevy::log::warn!(
-                    "ASH_RENDER_MODE={other:?} 无法识别（可选 lambert/unlit/normal），按 lambert 继续"
+                    "ASH_RENDER_MODE={other:?} 无法识别（可选 lambert/unlit/normal/position），按 lambert 继续"
                 );
                 Self::Lambert
             }
@@ -49,6 +53,7 @@ impl RenderMode {
             Self::Lambert => FRAME_MODE_LAMBERT,
             Self::Unlit => FRAME_MODE_UNLIT,
             Self::Normal => FRAME_MODE_NORMAL,
+            Self::Position => FRAME_MODE_POSITION,
         }
     }
 }
