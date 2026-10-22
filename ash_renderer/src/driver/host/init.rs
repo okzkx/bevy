@@ -26,7 +26,8 @@ use crate::{
     render::{
         BindlessTables, ClusterTargets, CompositePipeline, Context, CullPass, FramePool,
         GBufferTargets, GraphicsPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
-        InstanceTables, LodPass, MeshPool, OcclusionPass, OverlayPipeline, PresentBlitPipeline,
+        BloomPipelines, BloomTargets, InstanceTables, LodPass, MeshPool, OcclusionPass,
+        OverlayPipeline, PresentTonemapPipeline,
         ShadowBuildPass, ShadowPipeline, ShadowTargets, TransparentPasses, TransparentPipeline,
         Swapchain, Uploader,
         ALBEDO_FORMAT, DEPTH_FORMAT, LightTable, MATPARAM_FORMAT, MAX_FRAMES_IN_FLIGHT,
@@ -46,11 +47,12 @@ pub(super) fn init_vulkan(
     _main_thread: NonSendMarker,
     mut commands: Commands,
 ) -> Result<(), BevyError> {
-    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer, pipeline, composite_pipeline, blit_pipeline, light_table, transparent_targets, transparent_passes, transparent_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, lod_pass, shadow_targets, shadow_pipeline, shadow_build_pass, ui_ring, gpu_timer) =
+    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer, pipeline, composite_pipeline, blit_pipeline, light_table, transparent_targets, transparent_passes, transparent_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, lod_pass, shadow_targets, shadow_pipeline, shadow_build_pass, bloom_targets,
+        bloom_pipelines, ui_ring, gpu_timer) =
         try_init_vulkan(&wrapper)
             .or_fatal("Vulkan 初始化失败，资源束一个都不插入")?; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过帧循环
     info!(
-        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GBufferTargets（G-buffer 附件 + HDR 中间目标，8.1）+ GraphicsPipeline + CompositePipeline + PresentBlitPipeline + ClusterTargets/TransparentPasses/TransparentPipeline（透明 Clustered Forward 层，8.1.3）+ OverlayPipeline + CullPass（视锥剔除 compute）+ IndirectPass（indirect 命令组装 compute）+ HizPyramid（Hi-Z 金字塔）+ OcclusionPass（遮挡测试 compute）+ LodPass（LOD 选档 compute，6.2）+ ShadowTargets/ShadowPipeline/ShadowBuildPass（CSM 级联阴影，8.3）+ UiVertexRing + GpuTimer（5.5 GPU 帧计时）；清屏+剔除+遮挡+选档+组装+绘制自下一帧（Last）起"
+        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GBufferTargets（G-buffer 附件 + HDR 中间目标，8.1）+ GraphicsPipeline + CompositePipeline + PresentBlitPipeline + ClusterTargets/TransparentPasses/TransparentPipeline（透明 Clustered Forward 层，8.1.3）+ OverlayPipeline + CullPass（视锥剔除 compute）+ IndirectPass（indirect 命令组装 compute）+ HizPyramid（Hi-Z 金字塔）+ OcclusionPass（遮挡测试 compute）+ LodPass（LOD 选档 compute，6.2）+ ShadowTargets/ShadowPipeline/ShadowBuildPass（CSM 级联阴影，8.3）+ BloomTargets/BloomPipelines/PresentTonemapPipeline（HDR 后处理，8.4）+ UiVertexRing + GpuTimer（5.5 GPU 帧计时）；清屏+剔除+遮挡+选档+组装+绘制自下一帧（Last）起"
     );
     // 插入顺序 = 创建顺序；World 清场顺序不定，退出时的反序拆除见 teardown_vulkan
     commands.insert_resource(ctx);
@@ -75,6 +77,9 @@ pub(super) fn init_vulkan(
     commands.insert_resource(hiz);
     commands.insert_resource(occlusion_pass);
     commands.insert_resource(lod_pass);
+    // Bloom 家族（8.4）：管线先于资源插（拆时反序）
+    commands.insert_resource(bloom_pipelines);
+    commands.insert_resource(bloom_targets);
     // shadow 家族（8.3）：管线先于资源插（拆时反序先拆管线再拆资源，
     // layout 借用关系与创建序一致）
     commands.insert_resource(shadow_pipeline);
@@ -186,10 +191,21 @@ fn try_init_vulkan(
     )?;
     let shadow_build_pass =
         ShadowBuildPass::new(&ctx, instance_tables.set2_layout(), shadow_targets.set_layout())?;
-    let blit_pipeline = PresentBlitPipeline::new(
+    // Bloom 资源族 + 三全屏管线（8.4）：半分辨率链目标 → 布局/描述符 →
+    // prefilter/down/up；present tonemap 的 layout 借用 bloom 的 set_layout_up
+    let bloom_targets = BloomTargets::new(&ctx, swapchain.extent)?;
+    let bloom_pipelines = BloomPipelines::new(
+        &ctx,
+        gbuffer.sampled_layout(),
+        bloom_targets.set_layout_tex(),
+        bloom_targets.set_layout_up(),
+    )?;
+    let blit_pipeline = PresentTonemapPipeline::new(
         &ctx,
         swapchain.view_format,
+        tables.set1_layout(),
         gbuffer.sampled_layout(),
+        bloom_targets.set_layout_up(),
     )?;
     let transparent_passes = TransparentPasses::new(
         &ctx,
@@ -244,7 +260,8 @@ fn try_init_vulkan(
         ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer,
         pipeline, composite_pipeline, blit_pipeline, light_table, transparent_targets, transparent_passes,
         transparent_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass,
-        lod_pass, shadow_targets, shadow_pipeline, shadow_build_pass, ui_ring, gpu_timer,
+        lod_pass, shadow_targets, shadow_pipeline, shadow_build_pass, bloom_targets,
+        bloom_pipelines, ui_ring, gpu_timer,
     ))
 }
 
@@ -299,7 +316,12 @@ pub(super) fn teardown_vulkan(world: &mut World) {
     world.remove_resource::<OcclusionPass>();
     world.remove_resource::<HizPyramid>();
     world.remove_resource::<CompositePipeline>();
-    world.remove_resource::<PresentBlitPipeline>();
+    world.remove_resource::<PresentTonemapPipeline>();
+    // Bloom 家族（8.4）：BloomPipelines 的 layout 借用 BloomTargets 的 set
+    // layouts——先拆管线再拆资源；资源先于 GBufferTargets（复用 ColorTarget
+    // 无借用）与 BindlessTables
+    world.remove_resource::<BloomPipelines>();
+    world.remove_resource::<BloomTargets>();
     // 透明层（8.1.3）：TransparentPipeline 的 layout 借用 BindlessTables/
     // InstanceTables/ClusterTargets 的 set layouts——先拆管线再拆资源
     world.remove_resource::<TransparentPipeline>();
@@ -358,7 +380,7 @@ type InitChain = (
     GBufferTargets,
     GraphicsPipeline,
     CompositePipeline,
-    PresentBlitPipeline,
+    PresentTonemapPipeline,
     LightTable,
     ClusterTargets,
     TransparentPasses,
@@ -372,6 +394,8 @@ type InitChain = (
     ShadowTargets,
     ShadowPipeline,
     ShadowBuildPass,
+    BloomTargets,
+    BloomPipelines,
     UiVertexRing,
     GpuTimer,
 );

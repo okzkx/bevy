@@ -89,7 +89,11 @@ pub use pipeline::cluster::{
     TransparentGatherDraw, TransparentPasses, TransparentPipeline, CLUSTER_FAR, CLUSTER_NEAR,
     CLUSTER_SLICES, CLUSTER_TILE_SIZE, MAX_PER_CLUSTER, TRANSPARENT_CAPACITY,
 };
-pub use pipeline::fullscreen_pipeline::{CompositePipeline, PresentBlitPipeline};
+pub use pipeline::fullscreen_pipeline::{CompositePipeline, PresentTonemapPipeline};
+pub use pipeline::post::{
+    pack_bloom_params, BloomFrameDraw, BloomPipelines, BloomParamsData, BloomSettings,
+    BloomTargets, BLOOM_LEVELS,
+};
 pub use pipeline::gbuffer::{
     GBufferTargets, ALBEDO_FORMAT, HDR_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
 };

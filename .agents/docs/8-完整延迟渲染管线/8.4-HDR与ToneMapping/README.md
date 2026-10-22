@@ -6,7 +6,7 @@
 
 **一句话说明**：本段把合成从 LDR 直出改成 HDR 契约——高动态中间目标、Bloom、tone mapping、输出编码恰好一次，终结 swapchain 编码判定线悬案；本段不主张 GI（归步骤 9）与反射。
 
-**当前状态：⬜ 已立案（2026-10-21）**；段目录与段 README 预立（2026-10-22 用户增补，预施工文件夹先行）——段施工计划与任务编号仍随段开工立案，判定线以[步骤级施工计划 §1 8.4 节](../施工计划：完整延迟渲染管线五段拆解.md)为准。
+**当前状态：✅ 收官（2026-10-22，[施工记录](8.4-施工记录：HDR、ToneMapping与Bloom.md)，分支 `goal/8.4` 待并回拍板）**；段施工计划已立案（[施工计划：HDR、ToneMapping与Bloom](施工计划：HDR、ToneMapping与Bloom.md)）——链路=present 接缝正式启用（blit 退役），Bloom 5 级 dual-Kawase + ACES（Narkowicz 近似）+ 编码恰好一次落点维持 SRGB view ROP；四判定线全过（亮度分布对照/Bloom A/B/编码单次性/resize+零 VUID+clippy），回归矩阵与 8.3 基线一致。
 
 ## 代码落点（提案）
 

@@ -53,7 +53,8 @@ use crate::{
 use super::drawlist;
 use crate::render::{
     cascade_matrices, pack_cluster_uniforms, pack_shadow_uniforms, ClusterTargets,
-    CompositePipeline, GBufferTargets, LightTable, PresentBlitPipeline, ShadowBuildPass,
+    BloomSettings, BloomTargets, CompositePipeline, GBufferTargets, LightTable,
+    PresentTonemapPipeline, ShadowBuildPass,
     ShadowCascadeInput, ShadowDiagnostics, ShadowPipeline, ShadowSettings, ShadowTargets,
     ShadowUniformsData, ShadowWriteDraw, TransparentFrame, TransparentPasses,
     TransparentPipeline,
@@ -123,8 +124,12 @@ pub(crate) struct FrameInput<'w, 's> {
     gbuffer: ResMut<'w, GBufferTargets>,
     /// 合成管线（G-buffer 光照 → HDR 目标，8.1）。
     composite_pipeline: Res<'w, CompositePipeline>,
-    /// present blit 管线（HDR 目标 → swapchain，8.1）。
-    blit_pipeline: Res<'w, PresentBlitPipeline>,
+    /// present tonemap 管线（8.4：HDR + Bloom → ACES → swapchain）。
+    tonemap_pipeline: Res<'w, PresentTonemapPipeline>,
+    /// Bloom 链资源与三全屏管线（8.4）。
+    bloom_targets: ResMut<'w, BloomTargets>,
+    bloom_pipelines: Res<'w, crate::render::BloomPipelines>,
+    bloom_settings: Res<'w, BloomSettings>,
     /// 透明层资源（8.1.3：光源环/uniform/计数的宿主写点 + 集句柄）。
     cluster_targets: ResMut<'w, ClusterTargets>,
     /// 透明层 compute 三件（8.1.3：build/collect/gather dispatch 输入源）。
@@ -258,7 +263,10 @@ pub(crate) fn draw_frame(
         ref pipeline,
         ref mut gbuffer,
         ref composite_pipeline,
-        ref blit_pipeline,
+        ref tonemap_pipeline,
+        ref mut bloom_targets,
+        ref bloom_pipelines,
+        ref bloom_settings,
         ref mut cluster_targets,
         ref transparent_passes,
         ref transparent_pipeline,
@@ -336,6 +344,10 @@ pub(crate) fn draw_frame(
             (0..MAX_FRAMES_IN_FLIGHT).map(|s| frames.depth_image(s)).collect();
         hiz.rebuild(ctx, swapchain.extent, &depth_images)
             .or_fatal("Hi-Z 金字塔重建失败，渲染链无法继续")?;
+        // Bloom 链随 swapchain 同批重建（同样幂等；自带 device_wait_idle）
+        bloom_targets
+            .rebuild(ctx, swapchain.extent)
+            .or_fatal("Bloom 链重建失败，渲染链无法继续")?;
         // G-buffer 附件随 swapchain 同批重建（幂等；自带 device_wait_idle；
         // 深度视图已按新尺寸重建——采样集 b3 的重建依赖）
         let depth_views: Vec<vk::ImageView> =
@@ -600,6 +612,21 @@ pub(crate) fn draw_frame(
         .ubo(shadow_frame)
         .write(0, &pack_shadow_uniforms(&shadow_uniform))
         .or_fatal("shadow UBO 写失败，渲染链无法继续")?;
+
+    // 4a-0-2) Bloom 参数 UBO（8.4，帧槽环与主 UBO 同一 fence 证据）：
+    // strength/enabled/tonemap 三个标量——BRP bloom_set 直达。
+    let bloom_frame = frames.current_index();
+    bloom_targets
+        .ubo(bloom_frame)
+        .write(
+            0,
+            &crate::render::pack_bloom_params(&crate::render::BloomParamsData {
+                strength: bloom_settings.strength,
+                enabled: f32::from(bloom_settings.enabled),
+                tonemap: f32::from(bloom_settings.tonemap),
+            }),
+        )
+        .or_fatal("Bloom 参数 UBO 写失败，渲染链无法继续")?;
 
     // 4a-0) 透明层帧侧宿主写（8.1.3，wait_for_slot 的 fence 纪律内）：
     // cluster 均匀数据（view_proj/inv_view_proj/网格标量）、光源常驻表脏行
@@ -1040,6 +1067,66 @@ pub(crate) fn draw_frame(
     } else {
         None
     };
+    // Bloom 链录制输入（8.4）：开关开才录九个全屏 pass；关 = None
+    //（tonemap 侧 shader 不采样 bloom，up0 陈旧无消费）。
+    let bloom_frame_input = if bloom_settings.enabled {
+        Some(crate::render::BloomFrameDraw {
+            prefilter_pipeline: bloom_pipelines.prefilter_pipeline(),
+            prefilter_layout: bloom_pipelines.prefilter_layout(),
+            down_pipeline: bloom_pipelines.down_pipeline(),
+            down_layout: bloom_pipelines.down_layout(),
+            up_pipeline: bloom_pipelines.up_pipeline(),
+            up_layout: bloom_pipelines.up_layout(),
+            gbuffer_set: gbuffer.sampled_set(frames.current_index()),
+            down_sets: [
+                bloom_targets.set_down(1, frames.current_index()),
+                bloom_targets.set_down(2, frames.current_index()),
+                bloom_targets.set_down(3, frames.current_index()),
+                bloom_targets.set_down(4, frames.current_index()),
+            ],
+            up_sets: [
+                bloom_targets.set_up(0, frames.current_index()),
+                bloom_targets.set_up(1, frames.current_index()),
+                bloom_targets.set_up(2, frames.current_index()),
+                bloom_targets.set_up(3, frames.current_index()),
+            ],
+            images_down: [
+                bloom_targets.down_image(0),
+                bloom_targets.down_image(1),
+                bloom_targets.down_image(2),
+                bloom_targets.down_image(3),
+                bloom_targets.down_image(4),
+            ],
+            images_up: [
+                bloom_targets.up_image(0),
+                bloom_targets.up_image(1),
+                bloom_targets.up_image(2),
+                bloom_targets.up_image(3),
+            ],
+            views_down: [
+                bloom_targets.down_view(0),
+                bloom_targets.down_view(1),
+                bloom_targets.down_view(2),
+                bloom_targets.down_view(3),
+                bloom_targets.down_view(4),
+            ],
+            views_up: [
+                bloom_targets.up_view(0),
+                bloom_targets.up_view(1),
+                bloom_targets.up_view(2),
+                bloom_targets.up_view(3),
+            ],
+            extents: [
+                bloom_targets.level_extent(0),
+                bloom_targets.level_extent(1),
+                bloom_targets.level_extent(2),
+                bloom_targets.level_extent(3),
+                bloom_targets.level_extent(4),
+            ],
+        })
+    } else {
+        None
+    };
     let frame_draw = FrameDraw {
         pipeline: pipeline.pipeline(),
         layout: pipeline.layout(),
@@ -1057,8 +1144,10 @@ pub(crate) fn draw_frame(
         composite_layout: composite_pipeline.layout(),
         // 8.2.3：合成光照累积的 cluster 集（与透明层同一 layout 对象）
         cluster_set: cluster_targets.frame_set(slot_now),
-        blit_pipeline: blit_pipeline.pipeline(),
-        blit_layout: blit_pipeline.layout(),
+        tonemap_pipeline: tonemap_pipeline.pipeline(),
+        tonemap_layout: tonemap_pipeline.layout(),
+        bloom_params_set: bloom_targets.params_set(frames.current_index()),
+        bloom: bloom_frame_input,
         overlay_pipeline: overlay_pipeline.pipeline(),
         overlay_layout: overlay_pipeline.layout(),
         ui: ui.as_ref().map(|(paint, _)| paint),

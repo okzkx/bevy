@@ -8,4 +8,5 @@ pub(crate) mod fullscreen_pipeline;
 pub(crate) mod gbuffer;
 pub(crate) mod graphics_pipeline;
 pub(crate) mod overlay_pipeline;
+pub(crate) mod post;
 pub(crate) mod shadow;

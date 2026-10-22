@@ -286,6 +286,17 @@ def cmd_cull_stats(args):
     out(rpc(args.host, args.port, "ash_renderer/cull_stats"))
 
 
+def cmd_bloom_set(args):
+    params = {}
+    if args.enabled:
+        params["enabled"] = args.enabled.lower() == "true"
+    if args.strength is not None:
+        params["strength"] = args.strength
+    if args.tonemap:
+        params["tonemap"] = args.tonemap.lower() == "true"
+    out(rpc(args.host, args.port, "ash_renderer/bloom_set", params))
+
+
 def cmd_shadow_set(args):
     out(rpc(args.host, args.port, "ash_renderer/shadow_set", {"enabled": args.enabled.lower() == "true"}))
 
@@ -662,6 +673,12 @@ def main():
     sub.add_parser("stats", help="增量计量读数（ash_renderer/increment_stats）").set_defaults(func=cmd_stats)
 
     sub.add_parser("cull-stats", help="剔除读数对照：GPU 标记 vs CPU 参照逐实体 + 不一致清单（ash_renderer/cull_stats；读数陈旧 ≤2 帧，对照前等 ≥3 帧）").set_defaults(func=cmd_cull_stats)
+
+    p = sub.add_parser("bloom-set", help="Bloom 开关/强度/tonemap 开关（ash_renderer/bloom_set）")
+    p.add_argument("--enabled", choices=["true", "false"], help="Bloom 开关（默认 true）")
+    p.add_argument("--strength", type=float, help="线性叠加系数（默认 0.04）")
+    p.add_argument("--tonemap", choices=["true", "false"], help="tonemap 开关（默认 true）")
+    p.set_defaults(func=cmd_bloom_set)
 
     p = sub.add_parser("shadow-set", help="阴影开关（ash_renderer/shadow_set：false = 全链旁路，画面回 8.2 基线）")
     p.add_argument("enabled", choices=["true", "false"])
