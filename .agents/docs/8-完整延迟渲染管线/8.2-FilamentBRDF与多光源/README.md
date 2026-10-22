@@ -13,6 +13,15 @@
 - **`render/shading/`**（步骤级施工计划 §5 提案形状：BRDF 着色——材质参数面、光照累积、光源数据为 8.2/8.3 主体）；逐文件去向随 8.1 迁移施工钉明。
 - 落点触及既有面：材质环/实例表（8.1 迁移后路径以迁移施工记录为准）、光源组装（`scene/content/lights.rs` 扩族）、BRP 方法族扩（多光源 spawn/参数改——BRP 优先定例沿用）。
 
+## 参考底座（2026-10-22 登记）
+
+- **本地 Filament 源码检出 `F:\okzkx\filament`**：git 工作副本，`git describe` = `rc/1.78.1-cut-31-g373190d49`（1.78.1 前开发线，非稳定 tag，检出会漂移——参考篇产出时按当日 HEAD 重钉版本）。核实结论（2026-10-22 现场核对，属实）：
+  - BRDF 数学在 `shaders/src/surface_brdf.fs`——`D_GGX` / `V_SmithGGXCorrelated` / `F_Schlick`，diffuse 走 `BRDF_DIFFUSE` 宏（Lambert 与 Burley 双变体并存，取舍随参考篇钉明）。
+  - 标准模型 diffuse/specular 双 lobe 组成在 `shaders/src/surface_shading_model_standard.fs`；punctual 光距离/角度衰减在 `shaders/src/surface_light_punctual.fs`；光源循环骨架在 `shaders/src/surface_lighting.fs`。
+  - PBR 理论白皮书源在 `docs_src/src_markdeep/Filament.md.html`，材质定义指南在 `docs_src/src_markdeep/Materials.md.html`。
+- **开工前置**：段施工计划立案前先产出 Filament 源码参考篇（落点 `../../笔记/渲染/`，与 Unity PBR 调研同面板）——钉明对照函数清单（交付范围涉及 D/V/F 与 diffuse 变体的取舍）、`BRDF_SPECULAR_D/V/F` 与 `BRDF_DIFFUSE` 宏的默认组合、Filament 命名与本项目 WGSL 的映射；判定线①"与 Filament 参考对照收敛"以该篇钉明的函数与版本为基准。
+- **边界**：Filament 是 forward 全屏管线、没有独立光照累积 pass，本段 pass 组织方式不照抄——只取 BRDF 数学与光源定义；GLSL→WGSL 是数学对照，不是逐行移植。
+
 ## 任务面板（拆分占位）
 
 任务编号与逐任务交付随段施工计划立案钉明；下表为步骤级交付范围的预分，不预设编号。
@@ -28,3 +37,4 @@
 
 - [施工计划：完整延迟渲染管线五段拆解](../施工计划：完整延迟渲染管线五段拆解.md)——§1 8.2 节（交付/落点/判定线草案）、§2 待决项汇总（光源驻留形态）。
 - [Unity PBR 调研：材质模型、BRDF 与 IBL](../../笔记/渲染/Unity%20PBR%20调研：材质模型、BRDF%20与%20IBL.md)——Filament BRDF 参照底座。
+- Filament 本地源码检出（`F:\okzkx\filament`）——BRDF 对照参考底座，锚点与开工前置见上文[参考底座](#参考底座2026-10-22-登记)。
