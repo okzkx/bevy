@@ -51,6 +51,7 @@ use crate::{
 };
 
 use super::drawlist;
+use crate::render::{CompositePipeline, GBufferTargets, PresentBlitPipeline};
 
 /// resize 闸门状态（`draw_frame` 的 `Local`，跨帧保持）。
 ///
@@ -111,6 +112,12 @@ pub(crate) struct FrameInput<'w, 's> {
     /// GPU 常驻绘制数据（对象表/模型环/材质环）：本帧双环写入的写点。
     instance_tables: ResMut<'w, InstanceTables>,
     pipeline: Res<'w, GraphicsPipeline>,
+    /// G-buffer 附件 + HDR 中间目标（8.1；闸门③随 swapchain 重建）。
+    gbuffer: ResMut<'w, GBufferTargets>,
+    /// 合成管线（G-buffer 光照 → HDR 目标，8.1）。
+    composite_pipeline: Res<'w, CompositePipeline>,
+    /// present blit 管线（HDR 目标 → swapchain，8.1）。
+    blit_pipeline: Res<'w, PresentBlitPipeline>,
     /// overlay 管线：UI 半边绑定用（init 链与场景管线同批创建）。
     overlay_pipeline: Res<'w, OverlayPipeline>,
     /// 上传器：普通帧只读票号，overlay 在场时图集整传要走它提交批次（独占写点）。
@@ -224,6 +231,9 @@ pub(crate) fn draw_frame(
         ref image_cache,
         ref mut instance_tables,
         ref pipeline,
+        ref mut gbuffer,
+        ref composite_pipeline,
+        ref blit_pipeline,
         ref overlay_pipeline,
         ref cameras,
         ref lights,
@@ -292,6 +302,13 @@ pub(crate) fn draw_frame(
             (0..MAX_FRAMES_IN_FLIGHT).map(|s| frames.depth_image(s)).collect();
         hiz.rebuild(ctx, swapchain.extent, &depth_images)
             .or_fatal("Hi-Z 金字塔重建失败，渲染链无法继续")?;
+        // G-buffer 附件随 swapchain 同批重建（幂等；自带 device_wait_idle；
+        // 深度视图已按新尺寸重建——采样集 b3 的重建依赖）
+        let depth_views: Vec<vk::ImageView> =
+            (0..MAX_FRAMES_IN_FLIGHT).map(|s| frames.depth_view(s)).collect();
+        gbuffer
+            .rebuild(ctx, swapchain.extent, &depth_views)
+            .or_fatal("G-buffer 附件重建失败，渲染链无法继续")?;
         gate.pending = false;
     }
 
@@ -310,7 +327,7 @@ pub(crate) fn draw_frame(
     let gpu_sections = timer
         .fetch(frames.current_index())
         .or_fatal("GPU 帧计时取回失败，渲染链无法继续")?
-        .unwrap_or([0.0; 4]);
+        .unwrap_or([0.0; 6]);
 
     // 2) acquire：拿到一张可画的 image；OUT_OF_DATE = 这个 swapchain 已不可用
     //（最小化/恢复/独占模式切换等），必须立即重建——等不得下一帧
@@ -783,6 +800,12 @@ pub(crate) fn draw_frame(
         // 命令环句柄在 count = 0 时不被读（record_frame 的场景绘制整段跳过）
         indirect_count,
         indirect_buffer: instance_tables.indirect_buffer(frames.current_index()),
+        gbuffer,
+        // FrameDraw 借 GBufferTargets 引用（record_frame 消费附件视图与采样集）
+        composite_pipeline: composite_pipeline.pipeline(),
+        composite_layout: composite_pipeline.layout(),
+        blit_pipeline: blit_pipeline.pipeline(),
+        blit_layout: blit_pipeline.layout(),
         overlay_pipeline: overlay_pipeline.pipeline(),
         overlay_layout: overlay_pipeline.layout(),
         ui: ui.as_ref().map(|(paint, _)| paint),
@@ -848,9 +871,11 @@ pub(crate) fn draw_frame(
         present_ms,
         cpu_total_ms,
         gpu_compute_ms: gpu_sections[0],
-        gpu_graphics_ms: gpu_sections[1],
-        gpu_hiz_ms: gpu_sections[2],
-        gpu_total_ms: gpu_sections[3],
+        gpu_gbuffer_ms: gpu_sections[1],
+        gpu_lighting_ms: gpu_sections[2],
+        gpu_hiz_ms: gpu_sections[3],
+        gpu_present_ms: gpu_sections[4],
+        gpu_total_ms: gpu_sections[5],
         instance_rows: indirect_count,
         visible_rows: visible_among_live,
     });

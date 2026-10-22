@@ -38,6 +38,7 @@ use crate::render::gpu::hiz::HizPyramid;
 use crate::render::gpu::indirect::IndirectDraw;
 use crate::render::gpu::lod::LodDraw;
 use crate::render::gpu::occlusion::OcclusionDraw;
+use crate::render::GBufferTargets;
 use crate::render::pipeline::overlay_pipeline::{pack_ui_push, UiPaint};
 use crate::render::perf::GpuTimer;
 use crate::render::Context;
@@ -69,6 +70,15 @@ pub struct FrameDraw<'a> {
     pub indirect_count: u32,
     /// 本帧槽命令环 buffer（build_indirect 每帧重写，`count > 0` 时消费）。
     pub indirect_buffer: vk::Buffer,
+    /// G-buffer 附件 + HDR 中间目标（8.1：多 pass 帧编排的附件面，采样集
+    /// 也在其上——合成 pass 与 present blit 消费）。
+    pub gbuffer: &'a GBufferTargets,
+    /// 合成管线（G-buffer 光照 → HDR 中间目标；全屏，无深度/混合）。
+    pub composite_pipeline: vk::Pipeline,
+    pub composite_layout: vk::PipelineLayout,
+    /// present blit 管线（HDR 中间目标 → swapchain；全屏，无深度/混合）。
+    pub blit_pipeline: vk::Pipeline,
+    pub blit_layout: vk::PipelineLayout,
     /// overlay 管线（UI 半边的绘制入口；深度格式与实例对齐声明，读/写全关）。
     pub overlay_pipeline: vk::Pipeline,
     /// overlay 自有 pipeline layout（只借 set0，无 set1）——换管线后描述符绑定
@@ -106,8 +116,9 @@ pub struct FrameDraw<'a> {
     pub ticket_semaphore: vk::Semaphore,
     /// 清屏颜色（线性域；SRGB view 的 ROP 编码在写出时做）。
     pub clear: [f32; 4],
-    /// GPU 帧计时（5.5，6.1.2 起五位）：Some = 帧首 reset+T0、段界 T1/T2/T3/T4
-    /// 采样；None = 计时器停用（队列族无 timestamp）。
+    /// GPU 帧计时（5.5，8.1 起七位）：Some = 帧首 reset+T0、段界 T1..T6
+    /// 采样（compute/G-buffer/合成/Hi-Z/blit/全帧）；None = 计时器停用
+    ///（队列族无 timestamp）。
     pub timer: Option<&'a GpuTimer>,
 }
 
@@ -206,6 +217,12 @@ impl FramePool {
     #[must_use]
     pub fn depth_image(&self, slot: usize) -> vk::Image {
         self.frames[slot].depth.image
+    }
+
+    /// 第 `slot` 帧槽的深度视图句柄（G-buffer 采样集 b3 的来源，8.1）。
+    #[must_use]
+    pub fn depth_view(&self, slot: usize) -> vk::ImageView {
+        self.frames[slot].depth.view
     }
 
     /// 轮转到下一组帧资源（提交完成后调）。
@@ -361,6 +378,40 @@ impl FramePool {
                 &[to_depth_attachment],
             );
 
+            // —— 进场 ③：G-buffer 附件（albedo/normal）UNDEFINED→附件布局。
+            // 每帧 loadOp CLEAR 覆写全部像素，本槽上一轮的使用已被 fence 等完
+            //（同深度进场②的证据），无需旧内容语义。
+            for gbuffer_image in [
+                draw.gbuffer.albedo_image(slot),
+                draw.gbuffer.normal_image(slot),
+                // HDR 中间目标同样首用 UNDEFINED 进场（下帧 UNDEFINED 进场丢弃
+                // 上一轮 SHADER_READ_ONLY 内容——loadOp CLEAR 覆写全像素）
+                draw.gbuffer.hdr_image(slot),
+            ] {
+                let to_gbuffer_attachment = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(gbuffer_image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .level_count(1)
+                            .layer_count(1),
+                    )
+                    .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+                device.cmd_pipeline_barrier(
+                    frame.command_buffer,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    slice::from_ref(&to_gbuffer_attachment),
+                );
+            }
+
             // —— 进场 ③：无——跨族贴图不走 release/acquire 让渡
             //（图像 CONCURRENT 双族共享，与池同款）；上传批次的图像布局收尾
             // （TRANSFER_DST→SHADER_READ_ONLY，IGNORED 族）由 uploader 图像段
@@ -403,26 +454,38 @@ impl FramePool {
                 timer.mark(frame.command_buffer, slot, 1);
             }
 
-            // —— dynamic rendering：清屏 + 绘制。颜色 loadOp CLEAR（线性域清值，
-            // SRGB view 的编码在 ROP 写出时做）；深度 loadOp CLEAR 清 0（reverse-Z
-            // 近平面），storeOp DON'T CARE（深度从不读回）。
-            let color_attachment = vk::RenderingAttachmentInfo::default()
-                .image_view(view)
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: draw.clear,
-                    },
-                });
+            // —— G-buffer pass（8.1 不透明 deferred 写入，多 color 附件首跑）：
+            // albedo/normal 双 color + 深度，loadOp 全 CLEAR（附件清 0——背景
+            // 像素内容无语义，合成端以 depth==0 判背景）；深度 loadOp CLEAR 清 0
+            //（reverse-Z 近平面），storeOp STORE（合成采样 + Hi-Z 归约消费）。
+            let gbuffer_attachments = [
+                vk::RenderingAttachmentInfo::default()
+                    .image_view(draw.gbuffer.albedo_view(slot))
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .clear_value(vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.0, 0.0, 0.0, 0.0],
+                        },
+                    }),
+                vk::RenderingAttachmentInfo::default()
+                    .image_view(draw.gbuffer.normal_view(slot))
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .clear_value(vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.0, 0.0, 0.0, 0.0],
+                        },
+                    }),
+            ];
             let depth_attachment = vk::RenderingAttachmentInfo::default()
                 .image_view(frame.depth.view)
                 .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
-                // 6.1.2 起 STORE（原 DON'T CARE）：本帧深度渲染后由 Hi-Z 归约
-                // 采样（同一条命令缓冲内，见帧尾的深度屏障）——采完即弃，
-                // 下帧 UNDEFINED 进场照常丢弃
+                // 6.1.2 起 STORE：本帧深度渲染后由合成（世界位置）与 Hi-Z 归约
+                // 采样（同一条命令缓冲内）——采完即弃，下帧 UNDEFINED 进场照常丢弃
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue {
                     depth_stencil: vk::ClearDepthStencilValue {
@@ -438,14 +501,15 @@ impl FramePool {
                         extent,
                     })
                     .layer_count(1)
-                    .color_attachments(slice::from_ref(&color_attachment))
+                    .color_attachments(&gbuffer_attachments)
                     .depth_attachment(&depth_attachment),
             );
 
             // —— 场景绘制（5.3 indirect 闭环）：一次 cmd_draw_indexed_indirect
             // 消费命令环——绘制调用数不随在场对象数增长（判定线 1 的代码面）。
             // 逐 draw 循环 + 逐对象 push 4B 已退役（firstInstance 携带实例槽号，
-            // VS 按 @builtin(instance_index) 读 set2）。
+            // VS 按 @builtin(instance_index) 读 set2）。UI 不在本 pass（挪到
+            // present blit 实例）。
             if draw.indirect_count > 0 {
                 // 在场行非空时池 buffer 必在（upload 链先于帧循环驻留成功才会有
                 // 在场行），None 是状态矛盾——返回 Err 经统一通道按 Tier②
@@ -517,10 +581,236 @@ impl FramePool {
                 );
             }
 
-            // —— UI 半边：同一 dynamic rendering 实例内接画——raster order
-            // 保证 UI 盖在场景之上，混合走 ROP（SRGB view 写出时编码，blend 在
-            // 线性域进行）。overlay 管线只声明 set0（UI 无 UBO），管线切换后 set0
-            // 须按 overlay 自己的 layout 对象重绑——描述符绑定随 layout，不随句柄。
+            device.cmd_end_rendering(frame.command_buffer);
+
+            // —— 帧计时 T2：G-buffer 区间结束点位。
+            if let Some(timer) = draw.timer {
+                timer.mark(frame.command_buffer, slot, 2);
+            }
+
+            // —— 附件转只读屏障：albedo/normal（COLOR_ATTACHMENT→SHADER_READ_
+            // ONLY，合成采样）与深度（附件→DEPTH_READ_ONLY，合成世界位置采样 +
+            // Hi-Z 归约）。消费发生在同一条命令缓冲内，无出场屏障；8.1.3 起
+            // 透明层在合成之后把深度转回 ATTACHMENT（附件重绑形态）。
+            let attachment_transitions = [
+                (
+                    draw.gbuffer.albedo_image(slot),
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::ImageAspectFlags::COLOR,
+                ),
+                (
+                    draw.gbuffer.normal_image(slot),
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::ImageAspectFlags::COLOR,
+                ),
+                (
+                    frame.depth.image,
+                    vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                    vk::ImageAspectFlags::DEPTH,
+                ),
+            ];
+            for (image, old_layout, new_layout, src_access, src_stage, aspect) in
+                attachment_transitions
+            {
+                let to_shader_read = vk::ImageMemoryBarrier::default()
+                    .old_layout(old_layout)
+                    .new_layout(new_layout)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(aspect)
+                            .level_count(1)
+                            .layer_count(1),
+                    )
+                    .src_access_mask(src_access)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                device.cmd_pipeline_barrier(
+                    frame.command_buffer,
+                    src_stage,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    slice::from_ref(&to_shader_read),
+                );
+            }
+
+            // —— 合成 pass（8.1 延迟合成，全屏）：读 G-buffer 出光照——HDR 中间
+            // 目标（8.4 起 tone mapping 插在本目标与 swapchain 之间；透明层
+            // 8.1.3 起混入同目标）。背景判定（depth==0 = reverse-Z 远平面）在
+            // shader 内承接 forward 直出的清屏语义。无深度附件。
+            let hdr_attachment = vk::RenderingAttachmentInfo::default()
+                .image_view(draw.gbuffer.hdr_view(slot))
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: draw.clear,
+                    },
+                });
+            device.cmd_begin_rendering(
+                frame.command_buffer,
+                &vk::RenderingInfo::default()
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D::default(),
+                        extent,
+                    })
+                    .layer_count(1)
+                    .color_attachments(slice::from_ref(&hdr_attachment)),
+            );
+            device.cmd_bind_pipeline(
+                frame.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                draw.composite_pipeline,
+            );
+            // set0 = 帧 UBO（与场景管线 set1 同一 layout 对象），set1 = G-buffer 采样集
+            let composite_sets = [draw.set1, draw.gbuffer.sampled_set(slot)];
+            device.cmd_bind_descriptor_sets(
+                frame.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                draw.composite_layout,
+                0,
+                &composite_sets,
+                &[],
+            );
+            device.cmd_set_viewport(
+                frame.command_buffer,
+                0,
+                &[vk::Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: extent.width as f32,
+                    height: extent.height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                }],
+            );
+            device.cmd_set_scissor(
+                frame.command_buffer,
+                0,
+                &[vk::Rect2D {
+                    offset: vk::Offset2D::default(),
+                    extent,
+                }],
+            );
+            // 全屏三角形（无顶点 buffer，VS 按 vertex_index 直出）
+            device.cmd_draw(frame.command_buffer, 3, 1, 0, 1);
+            device.cmd_end_rendering(frame.command_buffer);
+
+            // —— HDR 目标转只读（合成写 → present blit 采样）。8.1.3 起透明层
+            // 写入并入本区间，届时此屏障移到透明层收口之后。
+            let hdr_to_read = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(draw.gbuffer.hdr_image(slot))
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .level_count(1)
+                        .layer_count(1),
+                )
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ);
+            device.cmd_pipeline_barrier(
+                frame.command_buffer,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                slice::from_ref(&hdr_to_read),
+            );
+
+            // —— 帧计时 T3：合成区间（8.1.3 起透明层并入）结束点位。
+            if let Some(timer) = draw.timer {
+                timer.mark(frame.command_buffer, slot, 3);
+            }
+
+            // —— Hi-Z 归约链（6.1.2）：深度已在 READ_ONLY（合成前屏障），逐级
+            // dispatch 重写本帧槽金字塔（进场/级间屏障在 hiz::record_reduction
+            // 内）。采完即弃，下帧 UNDEFINED 进场照常丢弃。
+            if let Some(hiz) = draw.hiz {
+                hiz.record_reduction(device, frame.command_buffer, slot);
+            }
+
+            // —— 帧计时 T4：Hi-Z 归约区间结束点位。
+            if let Some(timer) = draw.timer {
+                timer.mark(frame.command_buffer, slot, 4);
+            }
+
+            // —— present blit + UI（8.1）：swapchain 只被全屏 blit 写——HDR 中间
+            // 目标采样写 swapchain（SRGB view 的 ROP 编码恰好一次）。loadOp
+            // DON'T CARE（blit 覆写全部像素，清屏无意义）；UI 同实例接画，
+            // raster order 保证 UI 盖在场景之上。overlay 管线只声明 set0（UI
+            // 无 UBO），管线切换后 set0 须按 overlay 自己的 layout 对象重绑——
+            // 描述符绑定随 layout，不随句柄。
+            let blit_attachment = vk::RenderingAttachmentInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .store_op(vk::AttachmentStoreOp::STORE);
+            device.cmd_begin_rendering(
+                frame.command_buffer,
+                &vk::RenderingInfo::default()
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D::default(),
+                        extent,
+                    })
+                    .layer_count(1)
+                    .color_attachments(slice::from_ref(&blit_attachment)),
+            );
+            device.cmd_bind_pipeline(
+                frame.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                draw.blit_pipeline,
+            );
+            let blit_sets = [draw.gbuffer.sampled_set(slot)];
+            device.cmd_bind_descriptor_sets(
+                frame.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                draw.blit_layout,
+                0,
+                &blit_sets,
+                &[],
+            );
+            device.cmd_set_viewport(
+                frame.command_buffer,
+                0,
+                &[vk::Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: extent.width as f32,
+                    height: extent.height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                }],
+            );
+            device.cmd_set_scissor(
+                frame.command_buffer,
+                0,
+                &[vk::Rect2D {
+                    offset: vk::Offset2D::default(),
+                    extent,
+                }],
+            );
+            device.cmd_draw(frame.command_buffer, 3, 1, 0, 1);
+
+            // —— UI 半边：present blit 实例内接画（同 raster order 语义）。
             if let Some(ui) = draw.ui {
                 device.cmd_bind_pipeline(
                     frame.command_buffer,
@@ -594,53 +884,13 @@ impl FramePool {
 
             device.cmd_end_rendering(frame.command_buffer);
 
-            // —— 帧计时 T2：图形区间（清屏+场景+UI）结束点位。
+            // —— 帧计时 T5：present blit + UI 区间结束点位。
             if let Some(timer) = draw.timer {
-                timer.mark(frame.command_buffer, slot, 2);
-            }
-
-            // —— Hi-Z 归约链（6.1.2，渲染收口后）：深度附件转只读（本帧渲染
-            // 写 → 归约采样），再逐级 dispatch 重写本帧槽金字塔（进场/级间
-            // 屏障在 hiz::record_reduction 内）。消费发生在同一条命令缓冲内
-            //（storeOp STORE 的深度采完即弃，下帧 UNDEFINED 进场照常丢弃），
-            // 故无深度出场屏障。
-            if draw.hiz.is_some() {
-                let depth_to_read = vk::ImageMemoryBarrier::default()
-                    .old_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                    .new_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(frame.depth_image())
-                    .subresource_range(
-                        vk::ImageSubresourceRange::default()
-                            .aspect_mask(vk::ImageAspectFlags::DEPTH)
-                            .level_count(1)
-                            .layer_count(1),
-                    )
-                    .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ);
-                device.cmd_pipeline_barrier(
-                    frame.command_buffer,
-                    vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[depth_to_read],
-                );
-                if let Some(hiz) = draw.hiz {
-                    hiz.record_reduction(device, frame.command_buffer, slot);
-                }
-            }
-
-            // —— 帧计时 T3：Hi-Z 归约区间结束点位。
-            if let Some(timer) = draw.timer {
-                timer.mark(frame.command_buffer, slot, 3);
+                timer.mark(frame.command_buffer, slot, 5);
             }
 
             // —— 出场：颜色画完到 present 引擎接管之间必须收口；PRESENT_SRC 是
-            // present 专用布局。深度无出场（storeOp DON'T CARE + 下帧 UNDEFINED 重进）。
+            // present 专用布局。深度无出场（storeOp 采完即弃 + 下帧 UNDEFINED 重进）。
             let to_present_src = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
@@ -663,9 +913,9 @@ impl FramePool {
                 &[],
                 &[to_present_src],
             );
-            // —— 帧计时 T4：全帧区间（T0→T4）结束点位，end_command_buffer 之前。
+            // —— 帧计时 T6：全帧区间（T0→T6）结束点位，end_command_buffer 之前。
             if let Some(timer) = draw.timer {
-                timer.mark(frame.command_buffer, slot, 4);
+                timer.mark(frame.command_buffer, slot, 6);
             }
 
             device.end_command_buffer(frame.command_buffer)?;

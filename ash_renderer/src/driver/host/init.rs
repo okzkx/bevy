@@ -24,9 +24,10 @@ use crate::{
     common::syntax::ResultTierExt,
     overlay::{AtlasGpu, UiVertexRing},
     render::{
-        BindlessTables, Context, CullPass, FramePool, GraphicsPipeline, GpuTimer, HizPyramid,
-        ImageCache, IndirectPass, InstanceTables, LodPass, MeshPool, OcclusionPass,
-        OverlayPipeline, Swapchain, Uploader, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
+        BindlessTables, CompositePipeline, Context, CullPass, FramePool, GBufferTargets,
+        GraphicsPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass, InstanceTables, LodPass,
+        MeshPool, OcclusionPass, OverlayPipeline, PresentBlitPipeline, Swapchain, Uploader,
+        ALBEDO_FORMAT, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT, NORMAL_FORMAT, TABLE_CAPACITY,
     },
 };
 
@@ -43,11 +44,11 @@ pub(super) fn init_vulkan(
     _main_thread: NonSendMarker,
     mut commands: Commands,
 ) -> Result<(), BevyError> {
-    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, lod_pass, ui_ring, gpu_timer) =
+    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer, pipeline, composite_pipeline, blit_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, lod_pass, ui_ring, gpu_timer) =
         try_init_vulkan(&wrapper)
             .or_fatal("Vulkan 初始化失败，资源束一个都不插入")?; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过帧循环
     info!(
-        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GraphicsPipeline + OverlayPipeline + CullPass（视锥剔除 compute）+ IndirectPass（indirect 命令组装 compute）+ HizPyramid（Hi-Z 金字塔）+ OcclusionPass（遮挡测试 compute）+ LodPass（LOD 选档 compute，6.2）+ UiVertexRing + GpuTimer（5.5 GPU 帧计时）；清屏+剔除+遮挡+选档+组装+绘制自下一帧（Last）起"
+        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GBufferTargets（G-buffer 附件 + HDR 中间目标，8.1）+ GraphicsPipeline + CompositePipeline + PresentBlitPipeline + OverlayPipeline + CullPass（视锥剔除 compute）+ IndirectPass（indirect 命令组装 compute）+ HizPyramid（Hi-Z 金字塔）+ OcclusionPass（遮挡测试 compute）+ LodPass（LOD 选档 compute，6.2）+ UiVertexRing + GpuTimer（5.5 GPU 帧计时）；清屏+剔除+遮挡+选档+组装+绘制自下一帧（Last）起"
     );
     // 插入顺序 = 创建顺序；World 清场顺序不定，退出时的反序拆除见 teardown_vulkan
     commands.insert_resource(ctx);
@@ -58,7 +59,10 @@ pub(super) fn init_vulkan(
     commands.insert_resource(image_cache);
     commands.insert_resource(tables);
     commands.insert_resource(instance_tables);
+    commands.insert_resource(gbuffer);
     commands.insert_resource(pipeline);
+    commands.insert_resource(composite_pipeline);
+    commands.insert_resource(blit_pipeline);
     commands.insert_resource(overlay_pipeline);
     commands.insert_resource(cull_pass);
     commands.insert_resource(indirect_pass);
@@ -126,14 +130,35 @@ fn try_init_vulkan(
         ctx.memory_contract(),
         &pool_sharing_families(&ctx),
     )?;
-    // 图形管线：吃 swapchain 的渲染 view 格式与帧槽深度格式，布局与常驻表同源
+    // G-buffer 附件 + HDR 中间目标（8.1）：随帧槽分配（深度视图取自已建成的
+    // FramePool），采样集以 SHADER_READ_ONLY 布局发布——合成/blit 的取数面
+    let depth_views: Vec<vk::ImageView> = (0..MAX_FRAMES_IN_FLIGHT)
+        .map(|s| frames.depth_view(s))
+        .collect();
+    let gbuffer = GBufferTargets::new(&ctx, swapchain.extent, &depth_views)?;
+    // 图形管线：G-buffer 写入 pass——双 color（albedo/normal）+ 深度，声明面 =
+    // 实例附件全集（VUID-08914 纪律），布局与常驻表同源
     let pipeline = GraphicsPipeline::new(
         &ctx,
-        swapchain.view_format,
+        &[ALBEDO_FORMAT, NORMAL_FORMAT],
         DEPTH_FORMAT,
         tables.set0_layout(),
         tables.set1_layout(),
         instance_tables.set2_layout(),
+    )?;
+    // 全屏对（8.1）：合成（G-buffer 光照 → HDR 目标，layout 借 set1+G-buffer 采样
+    // layout）与 present blit（HDR 目标 → swapchain，layout 只借 G-buffer 采样
+    // layout）——拆除序先于 GBufferTargets 与 BindlessTables（layout 借用关系）
+    let composite_pipeline = CompositePipeline::new(
+        &ctx,
+        crate::render::HDR_FORMAT,
+        tables.set1_layout(),
+        gbuffer.sampled_layout(),
+    )?;
+    let blit_pipeline = PresentBlitPipeline::new(
+        &ctx,
+        swapchain.view_format,
+        gbuffer.sampled_layout(),
     )?;
     // overlay 管线：UI 半边的第二管线——只借常驻表 set0（无 set1），预乘混合；
     // 深度格式与渲染实例对齐但读写全关（VUID-08914），与场景管线同批拆除（layout
@@ -171,8 +196,9 @@ fn try_init_vulkan(
     // 成功路径：护栏被 mem::forget 跳过 Drop，排空责任交还 teardown 序
     std::mem::forget(drain_guard);
     Ok((
-        ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, pipeline,
-        overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, lod_pass, ui_ring, gpu_timer,
+        ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer,
+        pipeline, composite_pipeline, blit_pipeline, overlay_pipeline, cull_pass, indirect_pass,
+        hiz, occlusion_pass, lod_pass, ui_ring, gpu_timer,
     ))
 }
 
@@ -220,9 +246,15 @@ pub(super) fn teardown_vulkan(world: &mut World) {
     // Hi-Z 家族先于帧级拆：OcclusionPass 的 layout 借用 hiz 的 occlusion
     // layout（先拆管线再拆 hiz），hiz 的视图引用各帧槽深度 image（视图先于
     // 深度 image 销毁——FramePool Drop 拆深度本体）。LodPass 只借 set2
-    // layout，随后于 InstanceTables 之前拆（与 CullPass 同组）
+    // layout，随后于 InstanceTables 之前拆（与 CullPass 同组）。
+    // 全屏对（8.1）：Composite/PresentBlit 的 layout 借用 GBufferTargets 的
+    // 采样 layout 与 BindlessTables 的 set1 layout——先拆管线，再拆
+    // GBufferTargets（其采样集里的深度视图必须先于 FramePool 的深度本体）。
     world.remove_resource::<OcclusionPass>();
     world.remove_resource::<HizPyramid>();
+    world.remove_resource::<CompositePipeline>();
+    world.remove_resource::<PresentBlitPipeline>();
+    world.remove_resource::<GBufferTargets>();
     world.remove_resource::<FramePool>();
     // UI 顶点环随帧级一批拆（帧内使用，无表/管线依赖；overlay 未装时缺席即 no-op）
     world.remove_resource::<UiVertexRing>();
@@ -266,7 +298,10 @@ type InitChain = (
     ImageCache,
     BindlessTables,
     InstanceTables,
+    GBufferTargets,
     GraphicsPipeline,
+    CompositePipeline,
+    PresentBlitPipeline,
     OverlayPipeline,
     CullPass,
     IndirectPass,

@@ -71,6 +71,10 @@ pub use assets::uploader::{
     CopyRegion, ImageRelease, Release, StagingCopy, StagingImageCopy, Ticket, UploadBatch, Uploader,
 };
 pub use perf::{FrameSample, GpuTimer, PerfLedger, QUERIES_PER_FRAME};
+pub use pipeline::fullscreen_pipeline::{CompositePipeline, PresentBlitPipeline};
+pub use pipeline::gbuffer::{
+    GBufferTargets, ALBEDO_FORMAT, HDR_FORMAT, NORMAL_FORMAT,
+};
 pub use pipeline::depth::{DepthTarget, DEPTH_FORMAT};
 pub use pipeline::frames::{FrameDraw, Frame, FramePool, MAX_FRAMES_IN_FLIGHT};
 pub use pipeline::overlay_pipeline::{

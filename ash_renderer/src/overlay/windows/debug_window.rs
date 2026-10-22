@@ -114,7 +114,7 @@ pub(in crate::overlay) struct PerfPanelCache {
     /// (p50, p95, p99, 样本数) 逐字段。
     pub(in crate::overlay) cpu: (f32, f32, f32, usize),
     pub(in crate::overlay) gpu_total: (f32, f32, f32, usize),
-    pub(in crate::overlay) gpu_graphics: (f32, f32, f32, usize),
+    pub(in crate::overlay) gpu_lighting: (f32, f32, f32, usize),
 }
 
 const PANEL_PS: [f32; 3] = [0.50, 0.95, 0.99];
@@ -133,7 +133,7 @@ impl PerfPanelCache {
         };
         self.cpu = take(perf.percentiles(&PANEL_PS, |s| s.cpu_total_ms));
         self.gpu_total = take(perf.percentiles(&PANEL_PS, |s| s.gpu_total_ms));
-        self.gpu_graphics = take(perf.percentiles(&PANEL_PS, |s| s.gpu_graphics_ms));
+        self.gpu_lighting = take(perf.percentiles(&PANEL_PS, |s| s.gpu_lighting_ms));
     }
 }
 
@@ -271,7 +271,7 @@ impl DebugWindow<'_> {
                 };
                 show_pct(ui, "CPU", pct.cpu);
                 show_pct(ui, "GPU 全帧", pct.gpu_total);
-                show_pct(ui, "GPU 图形", pct.gpu_graphics);
+                show_pct(ui, "GPU 图形", pct.gpu_lighting);
                 ui.monospace(format!(
                     "变更注入 {}（rows {}）——只进计量，诊断不驱动绘制",
                     if workload.enabled { "开" } else { "关" },
