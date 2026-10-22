@@ -19,7 +19,7 @@
 | 8.2.1 | 材质参数面扩容：`MaterialRecordLayout` 扩列（metallic/roughness 标量进记录、normal/AO 贴图槽进 bindless 双表）；扩列解冻清单（照 5.1.1 先例落清单）；glTF 侧 metallic/roughness/normal/AO 取数与域语义（roughness=perceptual 域）；7.3 供料四件（真 PBR 贴图面）接入验证 | ⬜ |
 | 8.2.2 | 光源常驻表：LightTable（storage，槽位+增量账本+free list，4.1 先例）；记录含 pos/radius、color×intensity、type、**shadow 标志位**；BRP 灯方法族扩（spawn/参数改/stats，`tools/brp.py` 子命令）；方向光归属钉明（set1 UBO 单光保留 vs 并表）；8.1 光源环（`TestPointLights` 每帧环）与 cluster 逐 tile 列表切表接线 | ⬜ |
 | 8.2.3 | 光照累积 pass：`gbuffer_composite.wgsl` 的 Lambert 换**照抄 Filament surfaceShading**（函数级移植：lobe 函数保留原名，NoL 折尾部、occlusion 乘光源贡献）；读 G-buffer（albedo/normal/深度重建世界位置）× 常驻灯表逐灯累加；输出直写 HDR 中间目标（8.1 HDR blending 前置闸门已实测通过）；间接光注入项立空接口不填内容（步骤 9） | ⬜ |
-| 8.2.4 | 多光源判定线：多光源开关 A/B（BRP 灯族驱动）；金属/粗糙度梯度读图（MetalRoughSpheres 式梯度球）；Khronos MetalRoughSpheres/DamagedHelmet 单体对照（3.5 受控对照法，漫反射项收敛口径见参考篇 §0/§3）——资产用 filament 仓库自带 + **编译 filament 本体做参照渲染**（gltf_viewer 同 glb 同参数对照，编译待实测）；透明层与不透明累积同光源同 BRDF 一致性 | ⬜ |
+| 8.2.4 | 多光源判定线：多光源开关 A/B（BRP 灯族驱动）；金属/粗糙度梯度读图（MetalRoughSpheres 式梯度球）；Khronos MetalRoughSpheres/DamagedHelmet 单体对照（3.5 受控对照法，漫反射项收敛口径见参考篇 §0/§3）——资产用 filament 仓库自带 + **编译 filament 本体做参照渲染**（gltf_viewer 同 glb 同参数对照，编译待实测）；透明层与不透明累积同光源同 BRDF 一致性 | ✅（2026-10-22，[施工记录](8.2.4-施工记录：多光源判定线.md)；主体+收尾全过：A/B/census/mutate ✅、梯度球读图 ✅、DamagedHelmet 参照渲染对照 ✅） |
 | 8.2.5 | 判定线总验收与计量：回归总跑（resize/最小化）、性能成组记录（光照累积计时并入 8.1 七位区间，5.5 计量底座复用）、既有判定线零回退 | ⬜ |
 | 8.2.6 | spawn 增量链缺陷修复（2026-10-22 用户指令追加，**施工顺序先于 8.2.5**）：缺陷②（运行期 spawn 无片元）与缺陷①（primitive 材质记录全零）定责+修复+判定线回归——8.2.5 调试仪器验收轮受控复现定案（证据 `.temp/8.2-gbuffer-sphere/`），详见[施工计划](施工计划：spawn增量链缺陷修复（8.2.6）.md) | ✅（2026-10-22，[施工记录](8.2.6-施工记录：spawn增量链缺陷修复.md)；根因=MaterialRecord WGSL 步长 80≠宿主 64，缺陷①②同根，build.rs 布局互证闸门防复发） |
 
