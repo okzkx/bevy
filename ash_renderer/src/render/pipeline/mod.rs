@@ -3,6 +3,7 @@
 
 pub(crate) mod depth;
 pub(crate) mod frames;
+pub(crate) mod cluster;
 pub(crate) mod fullscreen_pipeline;
 pub(crate) mod gbuffer;
 pub(crate) mod graphics_pipeline;

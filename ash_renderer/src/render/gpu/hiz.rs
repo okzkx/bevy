@@ -1050,6 +1050,89 @@ unsafe fn create_bound_memory(ctx: &Context, image: vk::Image) -> Result<vk::Dev
     }
 }
 
+/// 诊断回读助手：把一段 buffer 拷进一次性 staging 并回读（8.1.3 透明族判定线
+/// ③的索引列表读数面复用 hiz census 的一次性命令池 + staging 形状；低频 BRP
+/// 调用，不在帧循环内）。
+///
+/// # Errors
+/// staging 创建/提交/等待失败（设备丢失等）。
+pub(crate) fn readback_buffer(ctx: &Context, src: vk::Buffer, out: &mut [u8]) -> Result<()> {
+    unsafe {
+        let device = &ctx.device;
+        let byte_size = out.len() as u64;
+        let staging = device.create_buffer(
+            &vk::BufferCreateInfo::default()
+                .size(byte_size)
+                .usage(vk::BufferUsageFlags::TRANSFER_DST),
+            None,
+        )?;
+        let (memory, pool, cb, fence) = (|| -> Result<(vk::DeviceMemory, vk::CommandPool, vk::CommandBuffer, vk::Fence)> {
+            let reqs = device.get_buffer_memory_requirements(staging);
+            let memory_type = ctx.memory_contract().find_type(
+                reqs.memory_type_bits,
+                vk::MemoryPropertyFlags::HOST_VISIBLE,
+                vk::MemoryPropertyFlags::HOST_COHERENT,
+            )?;
+            let memory = device.allocate_memory(
+                &vk::MemoryAllocateInfo::default()
+                    .allocation_size(reqs.size)
+                    .memory_type_index(memory_type),
+                None,
+            )?;
+            device.bind_buffer_memory(staging, memory, 0)?;
+            let pool = device.create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                    .queue_family_index(ctx.queue_family_index),
+                None,
+            )?;
+            let cb = device
+                .allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .command_pool(pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(1),
+                )?[0];
+            let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
+            Ok((memory, pool, cb, fence))
+        })()?;
+        let record = (|| {
+            device.begin_command_buffer(
+                cb,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
+            let region = vk::BufferCopy::default().size(byte_size);
+            device.cmd_copy_buffer(cb, src, staging, std::slice::from_ref(&region));
+            device.end_command_buffer(cb)
+        })();
+        if let Err(e) = record {
+            device.destroy_fence(fence, None);
+            device.destroy_command_pool(pool, None);
+            device.destroy_buffer(staging, None);
+            device.free_memory(memory, None);
+            return Err(e.into());
+        }
+        device.queue_submit(
+            ctx.queue,
+            &[vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cb))],
+            fence,
+        )?;
+        device.wait_for_fences(std::slice::from_ref(&fence), true, u64::MAX)?;
+        let ptr = device
+            .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+            .map_err(VulkanError::from)?;
+        out.copy_from_slice(std::slice::from_raw_parts(ptr.cast::<u8>(), out.len()));
+        device.unmap_memory(memory);
+        device.destroy_fence(fence, None);
+        device.destroy_command_pool(pool, None);
+        device.destroy_buffer(staging, None);
+        device.free_memory(memory, None);
+        Ok(())
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::{occluded_reverse_z, occlusion_mip_level, reduce_tile_reverse_z};

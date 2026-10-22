@@ -18,6 +18,8 @@
 // - set0 b4：在场环（u32 可绘行槽号，draw_frame 全量重写——DrawList 槽位
 //   枚举进 GPU 的通道；退休槽/暂缓行不在列表 = 天然无命令，幽灵对象问题
 //   在列表源头关闭）。
+// - set0 b2：材质环（8.1.3 读 base_color.a——透明行 alpha<1 在本环
+//   instanceCount=0，由透明层 transparent_gather 出命令，不重复绘制）。
 // - set0 b5：命令环（read_write storage，20B/条 IndirectCommand）。
 // - set0 b7：LOD 变体表（6.2，48B/槽 = 4 条 LodEntry；index_count=0 = 该档
 //   未驻留哨兵——从选档结果向下找最近常驻档，判定线 3"不访问未驻留 LOD"）。
@@ -62,7 +64,15 @@ struct IndirectCommand {
     first_instance: u32,
 }
 
+struct MaterialRecord {
+    base_color: vec4f,
+    tex_index: u32,
+    sampler_index: u32,
+    _pad: vec2<u32>,
+}
+
 @group(0) @binding(0) var<storage, read> objects: array<ObjectRecord>;
+@group(0) @binding(2) var<storage, read> materials: array<MaterialRecord>;
 @group(0) @binding(3) var<storage, read> marks: array<u32>;
 @group(0) @binding(4) var<storage, read> presence: array<u32>;
 @group(0) @binding(5) var<storage, read_write> commands: array<IndirectCommand>;
@@ -116,8 +126,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     gap_marks[slot] = select(0u, 1u << selected, selected_entry.index_count == 0u);
     let pins = pick_lod_entry(rec, slot);
     let visible = marks[slot];
+    // 透明行（8.1.3）：alpha<1 在不透明环 instanceCount=0——命令由透明层
+    // transparent_gather 出（材质环驱动，GPU 决策，红线不碰）
+    let transparent = materials[rec.material_index].base_color.a < 1.0;
     // 引脚全缺（理论上不可达：可绘行基准恒驻留）防御为 0 实例——不画不悬空
-    let instance_count = select(visible, 0u, pins.index_count == 0u);
+    let opaque_count = select(visible, 0u, pins.index_count == 0u);
+    let instance_count = select(opaque_count, 0u, transparent);
     commands[i] = IndirectCommand(
         pins.index_count,
         instance_count,           // 不可见 → instanceCount = 0（判定线 2）

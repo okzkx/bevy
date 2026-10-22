@@ -39,6 +39,7 @@ use crate::render::gpu::indirect::IndirectDraw;
 use crate::render::gpu::lod::LodDraw;
 use crate::render::gpu::occlusion::OcclusionDraw;
 use crate::render::GBufferTargets;
+use crate::render::pipeline::cluster::TransparentFrame;
 use crate::render::pipeline::overlay_pipeline::{pack_ui_push, UiPaint};
 use crate::render::perf::GpuTimer;
 use crate::render::Context;
@@ -105,6 +106,10 @@ pub struct FrameDraw<'a> {
     /// 最细档，命令引脚回到对象记录基准）。录制在遮挡测试之后、indirect
     /// 组装之前（档位写 → 组装读的依赖由 lod::record 自带屏障收口）。
     pub lod: Option<LodDraw>,
+    /// 透明 Clustered Forward 层（8.1.3）：cluster 构建/收集/组装三 dispatch
+    ///（compute 区间录制）+ 透明绘制输入（合成 pass 之后、Hi-Z 之前）。
+    /// `transparent = None` = 空场（无在场行，三 dispatch 与绘制整段跳过）。
+    pub transparent: Option<TransparentFrame>,
     /// Hi-Z 金字塔归约链（6.1.2）：渲染后逐级重写本帧槽（Some = 恒 Some，
     /// 重建窗口期也录——warmup 由 hiz 内部走账）。深度屏障（附件 → 只读）
     /// 与进场/级间屏障在 hiz::record_reduction 内收口。
@@ -449,6 +454,38 @@ impl FramePool {
                 crate::render::gpu::indirect::record(device, frame.command_buffer, draw.set2, indirect);
             }
 
+            // —— 透明层三 dispatch（8.1.3，渲染进场之前）：cluster 光源列表
+            // 构建 → 透明行收集（alpha<1 紧凑 + 深度键）→ 命令组装。空场 =
+            // transparent None（三 dispatch 与透明绘制整段跳过）。
+            if let Some(t) = draw.transparent.as_ref() {
+                if let Some(build) = &t.cluster_build {
+                    crate::render::pipeline::cluster::record_cluster_build(
+                        device,
+                        frame.command_buffer,
+                        t.cluster_set,
+                        build,
+                    );
+                }
+                if let Some(collect) = &t.collect {
+                    crate::render::pipeline::cluster::record_transparent_collect(
+                        device,
+                        frame.command_buffer,
+                        draw.set2,
+                        t.cluster_set,
+                        collect,
+                    );
+                }
+                if let Some(gather) = &t.gather {
+                    crate::render::pipeline::cluster::record_transparent_gather(
+                        device,
+                        frame.command_buffer,
+                        draw.set2,
+                        t.cluster_set,
+                        gather,
+                    );
+                }
+            }
+
             // —— 帧计时 T1：compute 区间（cull+组装）结束点位。
             if let Some(timer) = draw.timer {
                 timer.mark(frame.command_buffer, slot, 1);
@@ -710,8 +747,122 @@ impl FramePool {
             device.cmd_draw(frame.command_buffer, 3, 1, 0, 1);
             device.cmd_end_rendering(frame.command_buffer);
 
-            // —— HDR 目标转只读（合成写 → present blit 采样）。8.1.3 起透明层
-            // 写入并入本区间，届时此屏障移到透明层收口之后。
+            // —— 透明前向层（8.1.3，合成之后同目标接画）：深度附件重绑回
+            // ATTACHMENT（READ_ONLY→ATTACHMENT，loadOp LOAD 只测不写），
+            // HDR 目标维持 COLOR_ATTACHMENT 布局继续写（loadOp LOAD 混合）。
+            if let Some(t) = draw.transparent.as_ref() {
+                let depth_to_attachment = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+                    .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(frame.depth_image())
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                            .level_count(1)
+                            .layer_count(1),
+                    )
+                    // src 含 WRITE：布局迁移本身是写，须覆盖前序 pass 的深度
+                    // store（syncval WRITE_AFTER_WRITE 执法面；透明 pass 本身只读）
+                    .src_access_mask(
+                        vk::AccessFlags::SHADER_READ | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    )
+                    .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ);
+                device.cmd_pipeline_barrier(
+                    frame.command_buffer,
+                    // src 双阶段：FRAGMENT_SHADER（合成对深度的采样读）+
+                    // LATE_FRAGMENT_TESTS（srcAccess 里的深度写访问位的支撑阶段）
+                    vk::PipelineStageFlags::FRAGMENT_SHADER
+                        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                    vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    slice::from_ref(&depth_to_attachment),
+                );
+                let transparent_attachment = vk::RenderingAttachmentInfo::default()
+                    .image_view(draw.gbuffer.hdr_view(slot))
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .load_op(vk::AttachmentLoadOp::LOAD)
+                    .store_op(vk::AttachmentStoreOp::STORE);
+                let transparent_depth = vk::RenderingAttachmentInfo::default()
+                    .image_view(frame.depth.view)
+                    .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .load_op(vk::AttachmentLoadOp::LOAD)
+                    .store_op(vk::AttachmentStoreOp::DONT_CARE);
+                device.cmd_begin_rendering(
+                    frame.command_buffer,
+                    &vk::RenderingInfo::default()
+                        .render_area(vk::Rect2D {
+                            offset: vk::Offset2D::default(),
+                            extent,
+                        })
+                        .layer_count(1)
+                        .color_attachments(slice::from_ref(&transparent_attachment))
+                        .depth_attachment(&transparent_depth),
+                );
+                device.cmd_bind_pipeline(
+                    frame.command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    t.pipeline,
+                );
+                let t_sets = [draw.set0, draw.set1, draw.set2, t.cluster_set];
+                device.cmd_bind_descriptor_sets(
+                    frame.command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    t.layout,
+                    0,
+                    &t_sets,
+                    &[],
+                );
+                device.cmd_set_viewport(
+                    frame.command_buffer,
+                    0,
+                    &[vk::Viewport {
+                        x: 0.0,
+                        y: 0.0,
+                        width: extent.width as f32,
+                        height: extent.height as f32,
+                        min_depth: 0.0,
+                        max_depth: 1.0,
+                    }],
+                );
+                device.cmd_set_scissor(
+                    frame.command_buffer,
+                    0,
+                    &[vk::Rect2D {
+                        offset: vk::Offset2D::default(),
+                        extent,
+                    }],
+                );
+                let vertex_buffer = draw.vertex_buffer.ok_or_else(|| {
+                    VulkanError::Upload("在场行非空但顶点池缺席——上传链与绘制链的状态矛盾".into())
+                })?;
+                let index_buffer = draw.index_buffer.ok_or_else(|| {
+                    VulkanError::Upload("在场行非空但索引池缺席——上传链与绘制链的状态矛盾".into())
+                })?;
+                device.cmd_bind_vertex_buffers(frame.command_buffer, 0, &[vertex_buffer], &[0]);
+                device.cmd_bind_index_buffer(
+                    frame.command_buffer,
+                    index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                // 一次 indirect 提交消费透明命令环（count = 在场行数上界，
+                // 非透明行 instanceCount=0）——透明 draw 调用数恒 ≤ 1（红线同 5.3）
+                device.cmd_draw_indexed_indirect(
+                    frame.command_buffer,
+                    t.t_commands,
+                    0,
+                    t.command_count,
+                    INDIRECT_COMMAND_STRIDE,
+                );
+                device.cmd_end_rendering(frame.command_buffer);
+            }
+
+            // —— HDR 目标转只读（合成 + 透明写 → present blit 采样）。
             let hdr_to_read = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
@@ -741,9 +892,42 @@ impl FramePool {
                 timer.mark(frame.command_buffer, slot, 3);
             }
 
-            // —— Hi-Z 归约链（6.1.2）：深度已在 READ_ONLY（合成前屏障），逐级
-            // dispatch 重写本帧槽金字塔（进场/级间屏障在 hiz::record_reduction
-            // 内）。采完即弃，下帧 UNDEFINED 进场照常丢弃。
+            // —— 透明层深度重绑归还：ATTACHMENT→READ_ONLY（Hi-Z 归约采样；
+            // transparent None 时深度已在 READ_ONLY，跳过）
+            if draw.transparent.is_some() {
+                let depth_back_to_read = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(frame.depth_image())
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                            .level_count(1)
+                            .layer_count(1),
+                    )
+                    // src 含 WRITE：同上——迁移写须覆盖 G-buffer pass 的深度 store
+                    .src_access_mask(
+                        vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                            | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    )
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                device.cmd_pipeline_barrier(
+                    frame.command_buffer,
+                    vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    slice::from_ref(&depth_back_to_read),
+                );
+            }
+
+            // —— Hi-Z 归约链（6.1.2）：深度已在 READ_ONLY，逐级 dispatch 重写
+            // 本帧槽金字塔（进场/级间屏障在 hiz::record_reduction 内）。
+            // 采完即弃，下帧 UNDEFINED 进场照常丢弃。
             if let Some(hiz) = draw.hiz {
                 hiz.record_reduction(device, frame.command_buffer, slot);
             }

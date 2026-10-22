@@ -26,6 +26,7 @@
 //! 安全边界：默认只绑 loopback、完全无鉴权，仅限本机调试使用，不改绑对外地址。
 
 pub mod assets;
+pub mod cluster;
 pub mod cull;
 pub mod draw;
 pub mod generate;
@@ -50,6 +51,7 @@ use serde_json::{json, Value};
 use self::{
     assets::{load_image_cmd, load_mesh_cmd, load_world_cmd, mutate_asset_cmd, reload_asset_cmd},
     cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
+    cluster::{cluster_census, cluster_lights},
     draw::{draw_stats, drawlist_verify_set},
     generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
     gap::{gap_census, gap_set, gap_stats},
@@ -101,6 +103,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/mouse_wheel", mouse_wheel)
                 .with_method_main("ash_renderer/mouse_status", mouse_status)
                 .with_method_main("ash_renderer/cull_stats", cull_stats)
+                .with_method_main("ash_renderer/cluster_lights", cluster_lights)
+                .with_method_main("ash_renderer/cluster_census", cluster_census)
                 .with_method_main("ash_renderer/hiz_census", hiz_census)
                 .with_method_main("ash_renderer/occlusion_probe", occlusion_probe)
                 .with_method_main("ash_renderer/occlusion_set_enabled", occlusion_set_enabled)

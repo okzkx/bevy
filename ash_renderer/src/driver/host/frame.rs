@@ -51,7 +51,11 @@ use crate::{
 };
 
 use super::drawlist;
-use crate::render::{CompositePipeline, GBufferTargets, PresentBlitPipeline};
+use crate::render::{
+    pack_cluster_uniforms, ClusterTargets, CompositePipeline, GBufferTargets,
+    PresentBlitPipeline, TestPointLights, TransparentFrame, TransparentPasses,
+    TransparentPipeline,
+};
 
 /// resize 闸门状态（`draw_frame` 的 `Local`，跨帧保持）。
 ///
@@ -118,6 +122,14 @@ pub(crate) struct FrameInput<'w, 's> {
     composite_pipeline: Res<'w, CompositePipeline>,
     /// present blit 管线（HDR 目标 → swapchain，8.1）。
     blit_pipeline: Res<'w, PresentBlitPipeline>,
+    /// 透明层资源（8.1.3：光源环/uniform/计数的宿主写点 + 集句柄）。
+    cluster_targets: ResMut<'w, ClusterTargets>,
+    /// 透明层 compute 三件（8.1.3：build/collect/gather dispatch 输入源）。
+    transparent_passes: Res<'w, TransparentPasses>,
+    /// 透明前向管线（8.1.3）。
+    transparent_pipeline: Res<'w, TransparentPipeline>,
+    /// 测试点光源（BRP 注入；8.2 光源驻留形态裁决前的透明层数据载体）。
+    test_lights: Res<'w, TestPointLights>,
     /// overlay 管线：UI 半边绑定用（init 链与场景管线同批创建）。
     overlay_pipeline: Res<'w, OverlayPipeline>,
     /// 上传器：普通帧只读票号，overlay 在场时图集整传要走它提交批次（独占写点）。
@@ -234,6 +246,10 @@ pub(crate) fn draw_frame(
         ref mut gbuffer,
         ref composite_pipeline,
         ref blit_pipeline,
+        ref mut cluster_targets,
+        ref transparent_passes,
+        ref transparent_pipeline,
+        ref test_lights,
         ref overlay_pipeline,
         ref cameras,
         ref lights,
@@ -309,6 +325,10 @@ pub(crate) fn draw_frame(
         gbuffer
             .rebuild(ctx, swapchain.extent, &depth_views)
             .or_fatal("G-buffer 附件重建失败，渲染链无法继续")?;
+        // 透明层 cluster 表随 swapchain 同批重建（幂等；自带 device_wait_idle）
+        cluster_targets
+            .rebuild(ctx, swapchain.extent)
+            .or_fatal("透明层 cluster 表重建失败，渲染链无法继续")?;
         gate.pending = false;
     }
 
@@ -500,6 +520,36 @@ pub(crate) fn draw_frame(
             }),
         )
         .or_fatal("帧 UBO 写失败，渲染链无法继续")?;
+
+    // 4a-0) 透明层帧侧宿主写（8.1.3，wait_for_slot 的 fence 纪律内）：
+    // cluster 均匀数据（view_proj/inv_view_proj/网格标量）、测试光源环、
+    // 透明行计数清零（collect 的 atomicAdd 基线）。
+    let slot_now = frames.current_index();
+    let cluster_uniform = pack_cluster_uniforms(
+        &view_proj,
+        &inv_view_proj,
+        swapchain.extent,
+        cluster_targets.grid(),
+        test_lights.0.len() as u32,
+    );
+    cluster_targets
+        .uniform(slot_now)
+        .write(0, &cluster_uniform)
+        .or_fatal("cluster 均匀数据写失败，渲染链无法继续")?;
+    {
+        let mut packed = Vec::with_capacity(test_lights.0.len() * 32);
+        for light in &test_lights.0 {
+            packed.extend_from_slice(&light.pack());
+        }
+        cluster_targets
+            .lights_ring(slot_now)
+            .write(0, &packed)
+            .or_fatal("光源环写失败，渲染链无法继续")?;
+    }
+    cluster_targets
+        .t_count(slot_now)
+        .write(0, &0u32.to_le_bytes())
+        .or_fatal("透明行计数清零失败，渲染链无法继续")?;
 
     // 4a) 双环写入（wait_for_slot 之后，与帧 UBO 同一条 fence 证据）：模型环
     // 增量重写（本帧奇偶集的改动行）+ 材质环全量重写（可绘行的材质从容器
@@ -795,6 +845,28 @@ pub(crate) fn draw_frame(
     // 的 fence"死锁面）。上传票据在 GPU 侧等待（ALL_COMMANDS），CPU 不阻塞。
     let image = swapchain.images[index as usize];
     let view = swapchain.views[index as usize];
+    // 透明层录制输入（8.1.3）：在场行 > 0 才录三 dispatch 与透明绘制；
+    // collect 可失败（透明行容量上界，显式报错）——组装提到 FrameDraw 之外。
+    let transparent_frame = if indirect_count > 0 {
+        let slot_now = frames.current_index();
+        Some(TransparentFrame {
+            cluster_build: Some(transparent_passes.build(cluster_targets.grid())),
+            cluster_set: cluster_targets.frame_set(slot_now),
+            collect: Some(
+                transparent_passes
+                    .collect(indirect_count)
+                    .or_fatal("透明行收集 dispatch 输入组装失败，渲染链无法继续")?,
+            ),
+            gather: Some(transparent_passes.gather(indirect_count)),
+            set2: instance_tables.frame_set2(slot_now),
+            pipeline: transparent_pipeline.pipeline(),
+            layout: transparent_pipeline.layout(),
+            t_commands: cluster_targets.t_command_buffer(slot_now),
+            command_count: indirect_count,
+        })
+    } else {
+        None
+    };
     let frame_draw = FrameDraw {
         pipeline: pipeline.pipeline(),
         layout: pipeline.layout(),
@@ -827,8 +899,10 @@ pub(crate) fn draw_frame(
         indirect: indirect_dispatch,
         occlusion: occl_dispatch,
         lod: lod_dispatch,
-        // 归约链恒录（深度每帧变，无隔帧空间；warmup 在 hiz 内走账——
-        // note_reduced 与录制一一对应，让路帧不经过此处不计数）
+        // 透明层（8.1.3）：在场行 > 0 才录三 dispatch 与透明绘制；cluster
+        // 构建与场景规模无关（按 cluster 网格），在场为 0 时整段跳过。
+        transparent: transparent_frame,
+        // 归约链恒录（见 FrameDraw.hiz），warmup 走账与录制一一对应
         hiz: Some(&*hiz),
         timer: timer.enabled.then_some(&*timer),
     };

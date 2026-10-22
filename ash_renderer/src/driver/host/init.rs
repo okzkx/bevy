@@ -24,12 +24,12 @@ use crate::{
     common::syntax::ResultTierExt,
     overlay::{AtlasGpu, UiVertexRing},
     render::{
-        BindlessTables, CompositePipeline, Context, CullPass, FramePool, GBufferTargets,
-        GraphicsPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass, InstanceTables, LodPass,
-        MeshPool, OcclusionPass, OverlayPipeline, PresentBlitPipeline, Swapchain, Uploader,
+        BindlessTables, ClusterTargets, CompositePipeline, Context, CullPass, FramePool,
+        GBufferTargets, GraphicsPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
+        InstanceTables, LodPass, MeshPool, OcclusionPass, OverlayPipeline, PresentBlitPipeline,
+        TestPointLights, TransparentPasses, TransparentPipeline, Swapchain, Uploader,
         ALBEDO_FORMAT, DEPTH_FORMAT, MAX_FRAMES_IN_FLIGHT, NORMAL_FORMAT, TABLE_CAPACITY,
-    },
-};
+    },};
 
 /// 初始化入口：取主窗口句柄，串链建全套 Vulkan 资源。`NonSendMarker` 把初始化
 /// 钉在主线程（Win32 句柄与 Vulkan 均主线程亲和）。
@@ -44,11 +44,11 @@ pub(super) fn init_vulkan(
     _main_thread: NonSendMarker,
     mut commands: Commands,
 ) -> Result<(), BevyError> {
-    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer, pipeline, composite_pipeline, blit_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, lod_pass, ui_ring, gpu_timer) =
+    let (ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer, pipeline, composite_pipeline, blit_pipeline, transparent_targets, transparent_passes, transparent_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass, lod_pass, ui_ring, gpu_timer) =
         try_init_vulkan(&wrapper)
             .or_fatal("Vulkan 初始化失败，资源束一个都不插入")?; // 资源一个都不插入（全有或全无），Update 由 run_if 守卫跳过帧循环
     info!(
-        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GBufferTargets（G-buffer 附件 + HDR 中间目标，8.1）+ GraphicsPipeline + CompositePipeline + PresentBlitPipeline + OverlayPipeline + CullPass（视锥剔除 compute）+ IndirectPass（indirect 命令组装 compute）+ HizPyramid（Hi-Z 金字塔）+ OcclusionPass（遮挡测试 compute）+ LodPass（LOD 选档 compute，6.2）+ UiVertexRing + GpuTimer（5.5 GPU 帧计时）；清屏+剔除+遮挡+选档+组装+绘制自下一帧（Last）起"
+        "Vulkan 全链就绪：Context + Swapchain + {MAX_FRAMES_IN_FLIGHT} 帧在飞（含深度附件）+ MeshPool/Uploader + ImageCache + BindlessTables（常驻表，容量 {TABLE_CAPACITY}）+ InstanceTables（GPU 常驻绘制数据）+ GBufferTargets（G-buffer 附件 + HDR 中间目标，8.1）+ GraphicsPipeline + CompositePipeline + PresentBlitPipeline + ClusterTargets/TransparentPasses/TransparentPipeline（透明 Clustered Forward 层，8.1.3）+ OverlayPipeline + CullPass（视锥剔除 compute）+ IndirectPass（indirect 命令组装 compute）+ HizPyramid（Hi-Z 金字塔）+ OcclusionPass（遮挡测试 compute）+ LodPass（LOD 选档 compute，6.2）+ UiVertexRing + GpuTimer（5.5 GPU 帧计时）；清屏+剔除+遮挡+选档+组装+绘制自下一帧（Last）起"
     );
     // 插入顺序 = 创建顺序；World 清场顺序不定，退出时的反序拆除见 teardown_vulkan
     commands.insert_resource(ctx);
@@ -63,6 +63,10 @@ pub(super) fn init_vulkan(
     commands.insert_resource(pipeline);
     commands.insert_resource(composite_pipeline);
     commands.insert_resource(blit_pipeline);
+    commands.insert_resource(transparent_targets);
+    commands.insert_resource(transparent_passes);
+    commands.insert_resource(transparent_pipeline);
+    commands.insert_resource(TestPointLights::default());
     commands.insert_resource(overlay_pipeline);
     commands.insert_resource(cull_pass);
     commands.insert_resource(indirect_pass);
@@ -160,6 +164,23 @@ fn try_init_vulkan(
         swapchain.view_format,
         gbuffer.sampled_layout(),
     )?;
+    // 透明 Clustered Forward 层（8.1.3）：资源（cluster 表/光源环/透明命令链）
+    // + compute 三件（[set2, cluster_set] 双集）+ 透明图形管线（HDR 混合 + 深度重绑）
+    let transparent_targets = ClusterTargets::new(&ctx, swapchain.extent)?;
+    let transparent_passes = TransparentPasses::new(
+        &ctx,
+        transparent_targets.set_layout(),
+        instance_tables.set2_layout(),
+    )?;
+    let transparent_pipeline = TransparentPipeline::new(
+        &ctx,
+        crate::render::HDR_FORMAT,
+        DEPTH_FORMAT,
+        tables.set0_layout(),
+        tables.set1_layout(),
+        instance_tables.set2_layout(),
+        transparent_targets.set_layout(),
+    )?;
     // overlay 管线：UI 半边的第二管线——只借常驻表 set0（无 set1），预乘混合；
     // 深度格式与渲染实例对齐但读写全关（VUID-08914），与场景管线同批拆除（layout
     // 借用 set0 layout，先于表）
@@ -197,8 +218,9 @@ fn try_init_vulkan(
     std::mem::forget(drain_guard);
     Ok((
         ctx, swapchain, frames, pool, uploader, image_cache, tables, instance_tables, gbuffer,
-        pipeline, composite_pipeline, blit_pipeline, overlay_pipeline, cull_pass, indirect_pass,
-        hiz, occlusion_pass, lod_pass, ui_ring, gpu_timer,
+        pipeline, composite_pipeline, blit_pipeline, transparent_targets, transparent_passes,
+        transparent_pipeline, overlay_pipeline, cull_pass, indirect_pass, hiz, occlusion_pass,
+        lod_pass, ui_ring, gpu_timer,
     ))
 }
 
@@ -254,6 +276,12 @@ pub(super) fn teardown_vulkan(world: &mut World) {
     world.remove_resource::<HizPyramid>();
     world.remove_resource::<CompositePipeline>();
     world.remove_resource::<PresentBlitPipeline>();
+    // 透明层（8.1.3）：TransparentPipeline 的 layout 借用 BindlessTables/
+    // InstanceTables/ClusterTargets 的 set layouts——先拆管线再拆资源
+    world.remove_resource::<TransparentPipeline>();
+    world.remove_resource::<TransparentPasses>();
+    world.remove_resource::<ClusterTargets>();
+    world.remove_resource::<TestPointLights>();
     world.remove_resource::<GBufferTargets>();
     world.remove_resource::<FramePool>();
     // UI 顶点环随帧级一批拆（帧内使用，无表/管线依赖；overlay 未装时缺席即 no-op）
@@ -302,6 +330,9 @@ type InitChain = (
     GraphicsPipeline,
     CompositePipeline,
     PresentBlitPipeline,
+    ClusterTargets,
+    TransparentPasses,
+    TransparentPipeline,
     OverlayPipeline,
     CullPass,
     IndirectPass,

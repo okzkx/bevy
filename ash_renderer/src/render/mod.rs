@@ -71,6 +71,13 @@ pub use assets::uploader::{
     CopyRegion, ImageRelease, Release, StagingCopy, StagingImageCopy, Ticket, UploadBatch, Uploader,
 };
 pub use perf::{FrameSample, GpuTimer, PerfLedger, QUERIES_PER_FRAME};
+pub use pipeline::cluster::{
+    cluster_grid, cluster_reference, pack_cluster_uniforms, slice_view_depth, ClusterBuildDraw,
+    TransparentFrame,
+    ClusterGrid, ClusterTargets, PointLightGpu, TestPointLights, TransparentCollectDraw,
+    TransparentGatherDraw, TransparentPasses, TransparentPipeline, CLUSTER_FAR, CLUSTER_NEAR,
+    CLUSTER_SLICES, CLUSTER_TILE_SIZE, MAX_PER_CLUSTER, TRANSPARENT_CAPACITY,
+};
 pub use pipeline::fullscreen_pipeline::{CompositePipeline, PresentBlitPipeline};
 pub use pipeline::gbuffer::{
     GBufferTargets, ALBEDO_FORMAT, HDR_FORMAT, NORMAL_FORMAT,
