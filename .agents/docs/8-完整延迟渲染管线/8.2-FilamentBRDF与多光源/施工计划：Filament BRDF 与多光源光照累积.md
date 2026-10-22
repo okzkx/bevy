@@ -2,7 +2,7 @@
 
 > 2026-10-22 立案（用户拍板光源驻留形态=常驻表后立案，纯文档）。对应[步骤级施工计划 §1 8.2 节](../施工计划：完整延迟渲染管线五段拆解.md)与[段 README](README.md)：把 Lambert 换成 Filament BRDF、把光照从"绘制时直算"改成"全屏光照累积 pass 读 G-buffer"。本文管 8.2 段做什么、按什么顺序、验收什么；"实际做了什么"开工后另立施工记录，不回写本文。
 >
-> **当前状态：⬜ 已立案（2026-10-22），未开工**。
+> **当前状态：🔧 施工中（2026-10-22 `$plan-execute 8.2` 开工，临时分支 `goal/8.2-filament-ref` 续工）**。
 
 **一句话说明**：本段把材质参数面扩成 PBR 四件（metallic/roughness/normal/AO）、把光源立成常驻表、把 8.1 合成 pass 的单方向光 Lambert 换成读 G-buffer × 逐灯累加的 Filament BRDF 光照累积——多光源自此与光源数解耦着色成本，为 8.3 阴影采样（shadow 标志位）与步骤 9 间接光注入（间接项只立接口）立接口；本段不主张阴影本体、IBL 与 GI，代码落 `render/shading/` 与既有 `render/pipeline/`/`render/assets/` 扩展。
 
