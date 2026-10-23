@@ -50,8 +50,9 @@ use crate::overlay::EguiState;
 use ash_macros::system;
 
 /// 环绕转速：拖满一个窗口高度 = 转一整圈（`2π·Δ/height` 归一，窗口 resize
-/// 后手感不漂移；位移用 points 域，DPI 无关）。
-const FULL_TURN_PER_HEIGHT: f32 = std::f32::consts::TAU;
+/// 后手感不漂移；位移用 points 域，DPI 无关）。机制半边拖拽控制（相机 /
+/// 日光）共用同一转速。
+pub(crate) const FULL_TURN_PER_HEIGHT: f32 = std::f32::consts::TAU;
 
 /// 每格滚轮的缩放系数：滚近 ×0.95、滚远 ×1/0.95，
 /// 指数缩放保证远近手感一致。
@@ -109,11 +110,12 @@ impl CameraOrbit {
 }
 
 /// 一次拖拽的跨帧会话：接管标志 + 上一帧指针位置（points 域）。
+/// 机制半边的拖拽控制（相机 / 日光）共用。
 #[derive(Default)]
-struct DragSession {
-    dragging: bool,
+pub(crate) struct DragSession {
+    pub(crate) dragging: bool,
     /// None = 指针离窗/未入场：不产生增量，重入时重新取基准（防跳变）。
-    last_cursor: Option<Vec2>,
+    pub(crate) last_cursor: Option<Vec2>,
 }
 
 /// CLI 相机给值命令：逐项可选（None = 不动该量）。角度用度数（与
@@ -269,13 +271,7 @@ fn camera_control(
     let cursor = window.cursor_position();
     // egui 仲裁（语义见模块文档）：光标 points 域与 egui 同域，直接问"这点
     // 上最顶层是谁"，非 Background 层 = 悬在调试面板上。
-    let egui_wants = match (egui.as_deref(), cursor) {
-        (Some(state), Some(pos)) => state
-            .ctx
-            .layer_id_at(egui::pos2(pos.x, pos.y))
-            .is_some_and(|layer| layer.order != egui::Order::Background),
-        _ => false,
-    };
+    let egui_wants = crate::scene::util::egui_wants_pointer(egui.as_deref(), cursor);
 
     if mouse.just_pressed(MouseButton::Left) && !egui_wants {
         session.dragging = cursor.is_some();

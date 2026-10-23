@@ -14,6 +14,7 @@
 //! | [`lod_registry`] | LOD 组登记处（6.2.2）：逻辑 mesh → 各档变体柄的 CPU 侧映射账（flush 盘点/draw_frame 表写/census 读数共用），LOD 阶梯 spawn 本体 |
 //! | [`camera_aspect`] | 宽高比补位：随窗口 resize 修正任意相机的 aspect_ratio |
 //! | [`camera_control`] | 相机轨道控制：左键拖拽环绕 + 滚轮推拉，目标点由组件携带 |
+//! | [`light_control`] | 日光方向控制：中键拖拽旋转太阳方位/仰角，方向光实体携带球坐标状态 |
 //! | [`visibility_exempt`] | 可见性集群豁免（7.10）：移除场景实体可见性三件套，bevy PostUpdate 可见性集群整体失明（零消费者治理） |
 //! | [`workload`] | 变更形态注入（5.5）：BRP 开关控制的每帧旋转工作源（压测矩阵的少量变化/全动态形态） |
 //!
@@ -27,6 +28,7 @@ mod camera_aspect;
 mod camera_guard;
 mod camera_control;
 mod ledger;
+mod light_control;
 mod lod_registry;
 mod residency;
 mod material_hook;
@@ -43,6 +45,7 @@ pub use camera_aspect::AshCameraAspectPlugin;
 pub use camera_guard::AshCameraGuardPlugin;
 pub use camera_control::{AshCameraControlPlugin, CameraOrbit};
 pub(crate) use camera_control::{apply_camera_command, CameraCommandError, CameraOrbitCommand};
+pub use light_control::{AshLightControlPlugin, SunOrbit};
 pub use ledger::{
     AshLedgerPlugin, IncrementStats, InstanceLedger, InstanceRow,
 };

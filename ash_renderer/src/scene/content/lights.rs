@@ -15,6 +15,7 @@ use bevy::{
     prelude::*,
 };
 
+use crate::scene::mechanism::SunOrbit;
 use crate::scene::util::fmt_vec3;
 
 use ash_macros::system;
@@ -24,18 +25,23 @@ use ash_macros::system;
 /// 兜底，对 20000 lx 满日照直射是 1:250 失衡（室内只剩环境项时黑死，8.4.1
 /// 实抓）。800 ≈ 直射日 4% 的天空补光，室内中灰面 ≈0.13 HDR（ACES 后 sRGB
 /// ≈0.40，暗部可读且与受光面保留对比）；步骤 9 IBL 落地后由真间接光接替。
+/// 太阳球坐标从进场朝向反解挂组件，机制半边（AshLightControlPlugin）中键
+/// 拖拽驱动写 Transform——首次拖拽前渲染语义零变化。
 #[system]
 pub(super) fn spawn_lights(mut commands: Commands) {
     commands.insert_resource(GlobalAmbientLight {
         brightness: 800.0,
         ..default()
     });
+    let rotation = Quat::from_euler(EulerRot::ZYX, 0.0, PI * -0.15, PI * -0.15);
     commands.spawn((
         DirectionalLight {
             illuminance: light_consts::lux::FULL_DAYLIGHT,
             ..default()
         },
-        Transform::from_rotation(Quat::from_euler(EulerRot::ZYX, 0.0, PI * -0.15, PI * -0.15)),
+        Transform::from_rotation(rotation),
+        // 太阳方向 = 灯光 forward 的反向（沿 forward 照射）。
+        SunOrbit::from_dir(-(rotation * Vec3::NEG_Z)),
     ));
     info!(
         "灯光进场：方向光 20000 lx（FULL_DAYLIGHT）沿实体 forward；环境光覆盖为 800（满日照 4% 天空补光，替换 LightPlugin 默认 80）"

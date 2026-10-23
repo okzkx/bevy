@@ -14,9 +14,9 @@ use ash_renderer::{
     overlay::OverlayPlugin,
     remote::AshRemotePlugin,
     scene::{
-        AshAssetEventPlugin, AshCameraAspectPlugin, AshCameraControlPlugin, AshCameraGuardPlugin, AshLedgerPlugin,
-        AshMaterialHookPlugin, AshReadinessPlugin, AshResidencyPlugin, AshVisibilityExemptPlugin,
-        AshWorkloadPlugin,
+        AshAssetEventPlugin, AshCameraAspectPlugin, AshCameraControlPlugin, AshCameraGuardPlugin,
+        AshLedgerPlugin, AshLightControlPlugin, AshMaterialHookPlugin, AshReadinessPlugin,
+        AshResidencyPlugin, AshVisibilityExemptPlugin, AshWorkloadPlugin,
         SceneEntryPlugin,
     },
 };
@@ -86,6 +86,8 @@ fn main() -> AppExit {
         .add_plugins(AshCameraGuardPlugin)
         // 相机轨道控制（机制半边）：左键拖拽环绕 + 滚轮推拉，驱动带 CameraOrbit 的相机
         .add_plugins(AshCameraControlPlugin)
+        // 日光方向控制（机制半边）：中键拖拽旋转太阳方位/仰角，驱动带 SunOrbit 的方向光
+        .add_plugins(AshLightControlPlugin)
         // 场景进场（业务半边）：load FlightHelmet + spawn WorldAssetRoot + 到货统计
         .add_plugins(SceneEntryPlugin)
         // 稳定槽账本（机制半边）：PostUpdate 传播后对账——Changed/Removed
