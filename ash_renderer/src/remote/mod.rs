@@ -39,6 +39,7 @@ pub mod perf;
 pub mod residency;
 pub mod ring_census;
 pub mod bloom;
+pub mod smaa;
 pub mod shapes;
 pub mod shadow;
 
@@ -66,6 +67,7 @@ use self::{
     ring_census::ring_census,
     perf::{perf_samples, perf_stats, workload},
     bloom::bloom_set,
+    smaa::smaa_set,
     shapes::{spawn_lod, spawn_shape},
     shadow::{shadow_set, shadow_stats},
 };
@@ -138,6 +140,7 @@ impl Plugin for AshRemotePlugin {
                     .with_method_main("ash_renderer/ring_census", ring_census)
                 .with_method_main("ash_renderer/shadow_set", shadow_set)
                 .with_method_main("ash_renderer/bloom_set", bloom_set)
+                .with_method_main("ash_renderer/smaa_set", smaa_set)
                 .with_method_main("ash_renderer/shadow_stats", shadow_stats),
             RemoteHttpPlugin::default(),
         ));

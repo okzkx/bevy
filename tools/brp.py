@@ -286,6 +286,10 @@ def cmd_cull_stats(args):
     out(rpc(args.host, args.port, "ash_renderer/cull_stats"))
 
 
+def cmd_smaa_set(args):
+    out(rpc(args.host, args.port, "ash_renderer/smaa_set", {"enabled": args.enabled.lower() == "true"}))
+
+
 def cmd_bloom_set(args):
     params = {}
     if args.enabled:
@@ -673,6 +677,10 @@ def main():
     sub.add_parser("stats", help="增量计量读数（ash_renderer/increment_stats）").set_defaults(func=cmd_stats)
 
     sub.add_parser("cull-stats", help="剔除读数对照：GPU 标记 vs CPU 参照逐实体 + 不一致清单（ash_renderer/cull_stats；读数陈旧 ≤2 帧，对照前等 ≥3 帧）").set_defaults(func=cmd_cull_stats)
+
+    p = sub.add_parser("smaa-set", help="SMAA 开关（ash_renderer/smaa_set：关 = neighborhood 直通回 8.4 基线）")
+    p.add_argument("enabled", choices=["true", "false"])
+    p.set_defaults(func=cmd_smaa_set)
 
     p = sub.add_parser("bloom-set", help="Bloom 开关/强度/tonemap 开关（ash_renderer/bloom_set）")
     p.add_argument("--enabled", choices=["true", "false"], help="Bloom 开关（默认 true）")

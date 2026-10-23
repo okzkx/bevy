@@ -83,9 +83,13 @@ pub struct FrameDraw<'a> {
     /// cluster 集（8.2.3：合成光照累积的取数面——b0 网格参数 / b1 光源常驻表
     /// / b2 逐 cluster 列表；与透明层同一 layout 对象）。
     pub cluster_set: vk::DescriptorSet,
-    /// present tonemap 管线（8.4：HDR + Bloom → ACES → swapchain）。
+    /// present tonemap 管线（8.4/8.5：HDR + Bloom → ACES → LDR 目标）。
     pub tonemap_pipeline: vk::Pipeline,
     pub tonemap_layout: vk::PipelineLayout,
+    /// SMAA 录制输入（8.5）：edge/blend 两 pass（关 = None，neighborhood
+    /// 直通）+ neighborhood 输入（恒 Some——swapchain 终点）。
+    pub smaa_edge_blend: Option<crate::render::pipeline::smaa::SmaaEdgeBlendDraw>,
+    pub smaa_nb: crate::render::pipeline::smaa::SmaaNbDraw,
     /// bloom 参数集（8.4：tonemap set2——up0 + 采样器 + 参数 UBO；恒 Some，
     /// 关闭帧 shader 内旁路 bloom 采样）。
     pub bloom_params_set: vk::DescriptorSet,
@@ -333,6 +337,7 @@ impl FramePool {
         ctx: &Context,
         render_finished: vk::Semaphore,
         image: vk::Image,
+        #[allow(unused_variables)]
         view: vk::ImageView,
         extent: vk::Extent2D,
         draw: &FrameDraw<'_>,
@@ -1490,8 +1495,36 @@ impl FramePool {
             // raster order 保证 UI 盖在场景之上。overlay 管线只声明 set0（UI
             // 无 UBO），管线切换后 set0 须按 overlay 自己的 layout 对象重绑——
             // 描述符绑定随 layout，不随句柄。
-            let blit_attachment = vk::RenderingAttachmentInfo::default()
-                .image_view(view)
+            // 8.5：tonemap 落点改 LDR 目标（UNORM 线性存储——编码仍在
+            // swapchain SRGB view 恰好一次；neighborhood 混合后经终点编码）
+            // 进场屏障：LDR 上一轮（同槽，fence 等完）停在 SHADER_READ_ONLY，
+            // UNDEFINED 进 = 内容可弃（tonemap 覆写全部像素），无屏障则是
+            // VUID-09592 布局竞争（UNDEFINED/SHADER_READ_ONLY 实抓）。
+            let ldr_to_color = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(draw.smaa_nb.ldr_image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .level_count(1)
+                        .layer_count(1),
+                )
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+            device.cmd_pipeline_barrier(
+                frame.command_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                std::slice::from_ref(&ldr_to_color),
+            );
+            let tonemap_extent = draw.smaa_nb.ldr_extent;
+            let tonemap_attachment = vk::RenderingAttachmentInfo::default()
+                .image_view(draw.smaa_nb.ldr_view)
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .store_op(vk::AttachmentStoreOp::STORE);
@@ -1500,10 +1533,10 @@ impl FramePool {
                 &vk::RenderingInfo::default()
                     .render_area(vk::Rect2D {
                         offset: vk::Offset2D::default(),
-                        extent,
+                        extent: tonemap_extent,
                     })
                     .layer_count(1)
-                    .color_attachments(slice::from_ref(&blit_attachment)),
+                    .color_attachments(slice::from_ref(&tonemap_attachment)),
             );
             device.cmd_bind_pipeline(
                 frame.command_buffer,
@@ -1529,6 +1562,188 @@ impl FramePool {
                 &[vk::Viewport {
                     x: 0.0,
                     y: 0.0,
+                    width: tonemap_extent.width as f32,
+                    height: tonemap_extent.height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                }],
+            );
+            device.cmd_set_scissor(
+                frame.command_buffer,
+                0,
+                &[vk::Rect2D {
+                    offset: vk::Offset2D::default(),
+                    extent: tonemap_extent,
+                }],
+            );
+            device.cmd_draw(frame.command_buffer, 3, 1, 0, 1);
+            device.cmd_end_rendering(frame.command_buffer);
+
+            // —— LDR 转只读（edge/neighborhood 采样）
+            let ldr_to_read = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(draw.smaa_nb.ldr_image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .level_count(1)
+                        .layer_count(1),
+                )
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ);
+            device.cmd_pipeline_barrier(
+                frame.command_buffer,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                std::slice::from_ref(&ldr_to_read),
+            );
+
+            // —— SMAA edge/blend（8.5，开 = Some）：LDR → edges → blend，
+            // 两 pass 中间目标进出屏障恒录（UNDEFINED 进 = 内容可弃）。
+            if let Some(smaa) = &draw.smaa_edge_blend {
+                for (view, image, ext, pipeline, layout, set) in [
+                    (smaa.edges_view, smaa.edges_image, smaa.extent, smaa.edge_pipeline, smaa.edge_layout, smaa.edge_set),
+                    (smaa.blend_view, smaa.blend_image, smaa.extent, smaa.blend_pipeline, smaa.blend_layout, smaa.blend_set),
+                ] {
+                    let to_color = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(image)
+                        .subresource_range(
+                            vk::ImageSubresourceRange::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .level_count(1)
+                                .layer_count(1),
+                        )
+                        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+                    device.cmd_pipeline_barrier(
+                        frame.command_buffer,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        std::slice::from_ref(&to_color),
+                    );
+                    let att = vk::RenderingAttachmentInfo::default()
+                        .image_view(view)
+                        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                        .store_op(vk::AttachmentStoreOp::STORE);
+                    device.cmd_begin_rendering(
+                        frame.command_buffer,
+                        &vk::RenderingInfo::default()
+                            .render_area(vk::Rect2D {
+                                offset: vk::Offset2D::default(),
+                                extent: ext,
+                            })
+                            .layer_count(1)
+                            .color_attachments(std::slice::from_ref(&att)),
+                    );
+                    device.cmd_bind_pipeline(
+                        frame.command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        pipeline,
+                    );
+                    let sets = [set];
+                    device.cmd_bind_descriptor_sets(
+                        frame.command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        layout,
+                        0,
+                        &sets,
+                        &[],
+                    );
+                    device.cmd_set_viewport(
+                        frame.command_buffer,
+                        0,
+                        &[vk::Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: ext.width as f32,
+                            height: ext.height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        }],
+                    );
+                    device.cmd_set_scissor(
+                        frame.command_buffer,
+                        0,
+                        &[vk::Rect2D { offset: vk::Offset2D::default(), extent: ext }],
+                    );
+                    device.cmd_draw(frame.command_buffer, 3, 1, 0, 1);
+                    device.cmd_end_rendering(frame.command_buffer);
+                    let to_read = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(image)
+                        .subresource_range(
+                            vk::ImageSubresourceRange::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .level_count(1)
+                                .layer_count(1),
+                        )
+                        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                    device.cmd_pipeline_barrier(
+                        frame.command_buffer,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        std::slice::from_ref(&to_read),
+                    );
+                }
+            }
+
+            // —— neighborhood 混合（8.5 终点）：LDR + blend → swapchain（SRGB
+            // view 编码恰好一次）；关 = shader 权重清零直通。UI 在本实例接画。
+            let nb_attachment = vk::RenderingAttachmentInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .store_op(vk::AttachmentStoreOp::STORE);
+            device.cmd_begin_rendering(
+                frame.command_buffer,
+                &vk::RenderingInfo::default()
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D::default(),
+                        extent,
+                    })
+                    .layer_count(1)
+                    .color_attachments(slice::from_ref(&nb_attachment)),
+            );
+            device.cmd_bind_pipeline(
+                frame.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                draw.smaa_nb.nb_pipeline,
+            );
+            let nb_sets = [draw.smaa_nb.nb_set];
+            device.cmd_bind_descriptor_sets(
+                frame.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                draw.smaa_nb.nb_layout,
+                0,
+                &nb_sets,
+                &[],
+            );
+            device.cmd_set_viewport(
+                frame.command_buffer,
+                0,
+                &[vk::Viewport {
+                    x: 0.0,
+                    y: 0.0,
                     width: extent.width as f32,
                     height: extent.height as f32,
                     min_depth: 0.0,
@@ -1545,7 +1760,6 @@ impl FramePool {
             );
             device.cmd_draw(frame.command_buffer, 3, 1, 0, 1);
 
-            // —— UI 半边：present blit 实例内接画（同 raster order 语义）。
             if let Some(ui) = draw.ui {
                 device.cmd_bind_pipeline(
                     frame.command_buffer,

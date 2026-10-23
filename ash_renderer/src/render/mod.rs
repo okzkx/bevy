@@ -104,6 +104,10 @@ pub use pipeline::overlay_pipeline::{
 };
 pub use pipeline::graphics_pipeline::GraphicsPipeline;
 pub use pipeline::shadow::{ShadowPipeline, ShadowTargets, ShadowWriteDraw, SHADOW_UBO_SIZE};
+pub use pipeline::smaa::{
+    SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
+    SMAA_INFO_SIZE,
+};
 pub use gpu::shadow_build::ShadowBuildPass;
 pub use shading::shadow::{
     cascade_matrices, cascade_slice_boundaries, pack_shadow_uniforms, ShadowCascadeInput,

@@ -6,21 +6,22 @@
 
 **一句话说明**：本段 tonemap 后接 SMAA 三 pass（边缘检测/权重计算/邻域混合），作为延迟管线的抗锯齿标准搭档收口步骤 8；本段不主张 TAA 与任何时域手段。
 
-**当前状态：⬜ 已立案（2026-10-21）**；段目录与段 README 预立（2026-10-22 用户增补，预施工文件夹先行）——段施工计划与任务编号仍随段开工立案，判定线以[步骤级施工计划 §1 8.5 节](../施工计划：完整延迟渲染管线五段拆解.md)为准。
+**当前状态：✅ 收官（2026-10-23）**——判定线四条全过、回归五脚本零回退；分支 `goal/8.5`（2026-10-22 代码完成时运行级验证未过如实留存，2026-10-23 续工修复三枚缺陷后收官）。判定线证据与缺陷实录见[施工记录](8.5-施工记录：SMAA三pass.md)；技术决策补档见[段施工计划](施工计划：SMAA三pass.md)。
 
-## 代码落点（提案）
+## 代码落点
 
-- **`render/post/`**（步骤级施工计划 §5 提案形状，与 8.4 同目录）；接线在 8.4 tone mapping 输出与 swapchain 直出之间。
+- `render/pipeline/smaa.rs`（SmaaTargets/SmaaPipelines）；`shaders/smaa_edge.wgsl`/`smaa_blend.wgsl`/`smaa_neighborhood.wgsl`（官方 1x 拆分）；接线 `render/pipeline/frames.rs`（tonemap 落点 LDR → edge/blend → neighborhood）+ `driver/host/frame.rs`（闸门③重建清单）。
+- BRP：`ash_renderer/smaa_set`（tools/brp.py `smaa-set true|false`）。
 
-## 任务面板（拆分占位）
+## 任务面板
 
-任务编号与逐任务交付随段施工计划立案钉明；下表为步骤级交付范围的预分，不预设编号。
-
-| 任务（占位） | 内容 |
-|---|---|
-| SMAA 三 pass | 边缘检测/权重计算/邻域混合（LDR 域、tonemap 后）；输入查找表（area/search 贴图）获取方式施工时钉明（官方预生成 texture vs 运行时计算） |
-| 判定线与计量 | 几何边缘锯齿读图对照（开关 A/B）；无时域类伪影（SMAA 非时域——静止与相机移动两种机位连拍）；性能成本成组记录；零 VUID、exit 0、clippy 全净 |
+| 任务 | 内容 | 状态 |
+|---|---|---|
+| SMAA 三 pass | 边缘检测/权重计算/邻域混合（LDR 域、tonemap 后）；LUT 来源=官方预生成 texture（bevy_anti_alias ktx2 → PNG 嵌入直传） | ✅ |
+| 判定线与计量 | 几何边缘锯齿读图 A/B（diff 热力图 + 4× 放大）、静止/相机移动连拍、性能成组（低于测量底噪）、零 VUID/exit 0/clippy 全净/回归五脚本 | ✅ |
 
 ## 材料清单
 
-- [施工计划：完整延迟渲染管线五段拆解](../施工计划：完整延迟渲染管线五段拆解.md)——§1 8.5 节（交付/判定线草案）、§4 边界（TAA 不做的理由）。
+- [施工计划：SMAA三pass（立案补档）](施工计划：SMAA三pass.md)——技术决策与任务拆解（as-built）。
+- [施工记录：SMAA三pass](8.5-施工记录：SMAA三pass.md)——判定线证据、续工三枚缺陷实录与回归矩阵。
+- [步骤级施工计划 §1 8.5 节](../施工计划：完整延迟渲染管线五段拆解.md)——判定线草案出处。

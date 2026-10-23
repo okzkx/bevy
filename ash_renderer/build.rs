@@ -62,6 +62,12 @@ fn main() {
         let out = out_dir.join(format!("{stem}.spv"));
         std::fs::write(&out, &bytes).unwrap_or_else(|e| panic!("写 {out:?} 失败: {e}"));
     }
+    // 8.5 起主线程栈余量临界：init 主链（Context::new 的 ash 枚举 + 24 元组 InitChain）
+    // + 后处理段帧增量在 MSVC 默认 1MB 主线程栈上稳定溢出（8.4 基线 0/2、
+    // 8.5 构建 2/2 复现，文件探针定位 Context::new surface 到 physical device
+    // 段）。主线程栈保留提到 16MB（Rust 子线程 2MB 默认不受影响）；init 链
+    // 深度治理（拆段）另立账，不阻塞本段。
+    println!("cargo:rustc-link-arg=/STACK:16777216");
 }
 
 /// WGSL → SPIR-V 词流。编译失败 = 构建错误（panic 带完整错误链，不静默）。
@@ -271,3 +277,5 @@ fn decode_spv_string(ws: &[u32]) -> String {
     }
     String::from_utf8_lossy(&bytes).into_owned()
 }
+
+

@@ -54,6 +54,7 @@ use super::drawlist;
 use crate::render::{
     cascade_matrices, pack_cluster_uniforms, pack_shadow_uniforms, ClusterTargets,
     BloomSettings, BloomTargets, CompositePipeline, GBufferTargets, LightTable,
+    SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
     PresentTonemapPipeline, ShadowBuildPass,
     ShadowCascadeInput, ShadowDiagnostics, ShadowPipeline, ShadowSettings, ShadowTargets,
     ShadowUniformsData, ShadowWriteDraw, TransparentFrame, TransparentPasses,
@@ -129,6 +130,10 @@ pub(crate) struct FrameInput<'w, 's> {
     /// Bloom 链资源与三全屏管线（8.4）。
     bloom_targets: ResMut<'w, BloomTargets>,
     bloom_pipelines: Res<'w, crate::render::BloomPipelines>,
+    /// SMAA 资源与三全屏管线（8.5）。
+    smaa_targets: ResMut<'w, SmaaTargets>,
+    smaa_pipelines: Res<'w, SmaaPipelines>,
+    smaa_settings: Res<'w, SmaaSettings>,
     bloom_settings: Res<'w, BloomSettings>,
     /// 透明层资源（8.1.3：光源环/uniform/计数的宿主写点 + 集句柄）。
     cluster_targets: ResMut<'w, ClusterTargets>,
@@ -266,6 +271,9 @@ pub(crate) fn draw_frame(
         ref tonemap_pipeline,
         ref mut bloom_targets,
         ref bloom_pipelines,
+        ref mut smaa_targets,
+        ref smaa_pipelines,
+        ref smaa_settings,
         ref bloom_settings,
         ref mut cluster_targets,
         ref transparent_passes,
@@ -363,6 +371,12 @@ pub(crate) fn draw_frame(
         cluster_targets
             .rebuild(ctx, swapchain.extent, &light_ring_buffers)
             .or_fatal("透明层 cluster 表重建失败，渲染链无法继续")?;
+        // SMAA 三目标（LDR/edges/blend）随 swapchain 同批重建（幂等；自带
+        // device_wait_idle；描述符集随 build_descriptors 重写）——resize 后
+        // tonemap/edge/blend 的 renderArea 与附件尺寸必须同帧对齐
+        smaa_targets
+            .rebuild(ctx, swapchain.extent)
+            .or_fatal("SMAA 三目标重建失败，渲染链无法继续")?;
         gate.pending = false;
     }
 
@@ -627,6 +641,30 @@ pub(crate) fn draw_frame(
             }),
         )
         .or_fatal("Bloom 参数 UBO 写失败，渲染链无法继续")?;
+
+    // 4a-0-3) SmaaInfo UBO（8.5，帧槽环同一 fence 证据）：rt_metrics + 开关。
+    let smaa_frame = frames.current_index();
+    let (sw, sh) = (smaa_targets.ldr_extent().width.max(1), smaa_targets.ldr_extent().height.max(1));
+    let mut smaa_info = [0u8; 32];
+    for (k, v) in [
+        1.0 / sw as f32,
+        1.0 / sh as f32,
+        sw as f32,
+        sh as f32,
+        f32::from(smaa_settings.enabled),
+        0.0,
+        0.0,
+        0.0,
+    ]
+    .iter()
+    .enumerate()
+    {
+        smaa_info[k * 4..k * 4 + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    smaa_targets
+        .info_mut(smaa_frame)
+        .write(0, &smaa_info)
+        .or_fatal("SmaaInfo UBO 写失败，渲染链无法继续")?;
 
     // 4a-0) 透明层帧侧宿主写（8.1.3，wait_for_slot 的 fence 纪律内）：
     // cluster 均匀数据（view_proj/inv_view_proj/网格标量）、光源常驻表脏行
@@ -1127,6 +1165,32 @@ pub(crate) fn draw_frame(
     } else {
         None
     };
+    // SMAA 录制输入（8.5）：edge/blend 开 = Some；neighborhood 恒 Some。
+    let smaa_edge_blend_input = if smaa_settings.enabled {
+        Some(SmaaEdgeBlendDraw {
+            edge_pipeline: smaa_pipelines.edge_pipeline(),
+            edge_layout: smaa_pipelines.edge_layout(),
+            blend_pipeline: smaa_pipelines.blend_pipeline(),
+            blend_layout: smaa_pipelines.blend_layout(),
+            edge_set: smaa_targets.set_edge(frames.current_index()),
+            blend_set: smaa_targets.set_blend(frames.current_index()),
+            edges_view: smaa_targets.edges_view(frames.current_index()),
+            edges_image: smaa_targets.edges_image(frames.current_index()),
+            blend_view: smaa_targets.blend_view(frames.current_index()),
+            blend_image: smaa_targets.blend_image(frames.current_index()),
+            extent: smaa_targets.ldr_extent(),
+        })
+    } else {
+        None
+    };
+    let smaa_nb_input = SmaaNbDraw {
+        nb_pipeline: smaa_pipelines.neighborhood_pipeline(),
+        nb_layout: smaa_pipelines.neighborhood_layout(),
+        nb_set: smaa_targets.set_nb(frames.current_index()),
+        ldr_view: smaa_targets.ldr_view(frames.current_index()),
+        ldr_image: smaa_targets.ldr_image(frames.current_index()),
+        ldr_extent: smaa_targets.ldr_extent(),
+    };
     let frame_draw = FrameDraw {
         pipeline: pipeline.pipeline(),
         layout: pipeline.layout(),
@@ -1148,6 +1212,8 @@ pub(crate) fn draw_frame(
         tonemap_layout: tonemap_pipeline.layout(),
         bloom_params_set: bloom_targets.params_set(frames.current_index()),
         bloom: bloom_frame_input,
+        smaa_edge_blend: smaa_edge_blend_input,
+        smaa_nb: smaa_nb_input,
         overlay_pipeline: overlay_pipeline.pipeline(),
         overlay_layout: overlay_pipeline.layout(),
         ui: ui.as_ref().map(|(paint, _)| paint),

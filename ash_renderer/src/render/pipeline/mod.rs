@@ -10,3 +10,4 @@ pub(crate) mod graphics_pipeline;
 pub(crate) mod overlay_pipeline;
 pub(crate) mod post;
 pub(crate) mod shadow;
+pub(crate) mod smaa;
