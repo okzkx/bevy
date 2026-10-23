@@ -20,6 +20,8 @@ pub(in crate::overlay) struct DebugWindowsOpen {
     pub(in crate::overlay) monitor: bool,
     /// 实体层级树窗口（[`super::entity_tree_window`]）
     pub(in crate::overlay) entity_tree: bool,
+    /// 管线控制窗口（[`super::pipeline_window`]）：阴影/后处理开关
+    pub(in crate::overlay) pipeline: bool,
     /// 右上角坐标轴指示器（[`crate::overlay::widgets::axis_gizmo`]，纯显示不可交互）
     pub(in crate::overlay) axis_gizmo: bool,
 }
@@ -42,6 +44,7 @@ impl DebugHubWindow<'_> {
                 ui.checkbox(&mut open.stats, "帧统计（ash 调试）");
                 ui.checkbox(&mut open.monitor, "持续监控");
                 ui.checkbox(&mut open.entity_tree, "实体层级树");
+                ui.checkbox(&mut open.pipeline, "管线控制");
                 ui.checkbox(&mut open.axis_gizmo, "坐标轴指示器");
             });
     }

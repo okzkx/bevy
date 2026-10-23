@@ -53,10 +53,11 @@ use crate::overlay::windows::entity_tree_window::{
     mark_tree_dirty_insert, mark_tree_dirty_remove,
 };
 use crate::overlay::windows::monitor_window::{MonitorHistory, MonitorWindow};
+use crate::overlay::windows::pipeline_window::PipelineWindow;
 use crate::scene::mechanism::WorkloadSettings;
 use crate::render::{
-    CullDiagnostics, CullSettings, Context, ImageCache, IndirectStats, MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics,
-    OcclusionSettings, PerfLedger,
+    BloomSettings, CullDiagnostics, CullSettings, Context, ImageCache, IndirectStats, MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics,
+    OcclusionSettings, PerfLedger, ShadowSettings, SmaaSettings,
 };
 
 use ash_macros::system;
@@ -258,6 +259,12 @@ struct DebugUiParams<'w, 's> {
     workload: Res<'w, WorkloadSettings>,
     /// 资产加载活跃 latch（7.12：菊花弹窗显示与面板直跑触发源）
     load_activity: Res<'w, LoadActivity>,
+    /// 阴影开关（8.x 管线控制：checkbox 写，draw_frame 读；BRP shadow_set 同源）
+    shadow_settings: ResMut<'w, ShadowSettings>,
+    /// Bloom/tonemap 开关与参数（8.4：checkbox/滑杆写；BRP bloom_set 同源）
+    bloom_settings: ResMut<'w, BloomSettings>,
+    /// SMAA 开关（8.5：checkbox 写；BRP smaa_set 同源）
+    smaa_settings: ResMut<'w, SmaaSettings>,
 }
 
 /// 节拍化的跨帧门控账（7.8）：pass 触发判定的全部 Local 状态收拢成束——
@@ -445,6 +452,16 @@ fn run_egui_pass(
                 image_cache: &ui.image_cache,
                 mesh_pool: &ui.mesh_pool,
                 chunks: &ui.chunks,
+            }
+            .show();
+        }
+        if ui.windows_open.pipeline {
+            PipelineWindow {
+                ctx: &state.ctx,
+                open: &mut ui.windows_open.pipeline,
+                shadow: &mut ui.shadow_settings,
+                bloom: &mut ui.bloom_settings,
+                smaa: &mut ui.smaa_settings,
             }
             .show();
         }
