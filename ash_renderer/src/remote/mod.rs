@@ -1,5 +1,6 @@
 //! BRP 远程直控通道：宿主 World 经 HTTP JSON-RPC 暴露在 127.0.0.1:15702
-//! （bevy_remote 默认端口，环境变量 `ASH_BRP_PORT` 可改），AI/脚本不开 UI
+//! （bevy_remote 默认端口；拷出 target 的正式版用 [`PUBLISHED_PORT`]，环境变量
+//! `ASH_BRP_PORT` 可改，见 [`brp_port`]），AI/脚本不开 UI
 //! 即可"查询 → 改
 //! Transform → 相机环绕推拉"。读侧零自研——官方 inspection 方法族
 //!（`world.query`/`world.inspect`/`world.summarize` 等）与内置 CRUD 随
@@ -91,18 +92,7 @@ pub struct AshRemotePlugin;
 
 impl Plugin for AshRemotePlugin {
     fn build(&self, app: &mut App) {
-        // 双实例并行取证会撞默认端口：ASH_BRP_PORT 改主端口（render subapp 跟随
-        // +1）；值非法时回落默认，不 panic
-        let port = match std::env::var("ASH_BRP_PORT") {
-            Ok(v) => match v.parse::<u16>() {
-                Ok(p) if p != 0 => p,
-                _ => {
-                    warn!("ASH_BRP_PORT='{v}' 不是合法端口，回落默认 {DEFAULT_PORT}");
-                    DEFAULT_PORT
-                }
-            },
-            Err(_) => DEFAULT_PORT,
-        };
+        let port = brp_port();
         app.add_plugins((
             RemotePlugin::default()
                 .with_method_main("ash_renderer/scene_tree", scene_tree)
@@ -168,8 +158,46 @@ impl Plugin for AshRemotePlugin {
         {
             host.0 = port + 1;
         }
-        info!("BRP: http://127.0.0.1:{port}（render subapp :{}）", port + 1);
+        info!(
+            "BRP（{}）: http://127.0.0.1:{port}（render subapp :{}）",
+            if is_dev_instance() { "开发实例" } else { "正式版" },
+            port + 1
+        );
     }
+}
+
+/// 正式版（publish 出去的 exe）的 BRP 默认端口，render subapp 用 +1。和开发
+/// 实例的默认端口错开，自动测试按默认端口连接时不会打到正在玩的正式版。
+pub const PUBLISHED_PORT: u16 = 15710;
+
+/// BRP 主端口（render subapp 跟随 +1，所以 65535 不可用）。环境变量
+/// `ASH_BRP_PORT` 优先（值非法 warn 后忽略）；否则开发实例用默认端口，
+/// 正式版用 [`PUBLISHED_PORT`]。
+fn brp_port() -> u16 {
+    if let Ok(v) = std::env::var("ASH_BRP_PORT") {
+        match v.parse::<u16>() {
+            Ok(p) if p != 0 && p != u16::MAX => return p,
+            _ => warn!("ASH_BRP_PORT='{v}' 不是合法端口，忽略"),
+        }
+    }
+    if is_dev_instance() { DEFAULT_PORT } else { PUBLISHED_PORT }
+}
+
+/// exe 是否从 cargo 的构建产物目录（`target/<profile>/` 及其子目录）启动。
+/// 同一个 exe 拷到别处就判为正式版：OUT_DIR 在编译期写死为
+/// `target/<profile>/build/<pkg>-<hash>/out`，运行时拿 exe 实际位置去比。
+/// 判不出来时按正式版处理——开发测试连不上会立刻暴露，比误连正式版安全。
+fn is_dev_instance() -> bool {
+    let Some(profile_dir) = std::path::Path::new(env!("OUT_DIR")).ancestors().nth(3) else {
+        return false;
+    };
+    let (Ok(exe), Ok(profile_dir)) = (
+        std::env::current_exe().and_then(std::fs::canonicalize),
+        std::fs::canonicalize(profile_dir),
+    ) else {
+        return false;
+    };
+    exe.starts_with(profile_dir)
 }
 
 /// 参数缺失/不合法的统一错误（JSON-RPC 标准段 -32602）。mouse 族方法

@@ -1,0 +1,7 @@
+interface:
+  display_name: "publish：发布可并行游玩的稳定版"
+  short_description: "编译 ash_renderer 并拷贝到 publish/，写独立 BRP 端口配置"
+  default_prompt: "$publish 把当前代码发布成稳定版"
+
+policy:
+  allow_implicit_invocation: false

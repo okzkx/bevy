@@ -18,6 +18,9 @@ Cargo.lock
 .cargo/config
 .cargo/config.toml
 
+# ash_renderer 稳定版发布目录（.agents/skills/publish）
+/publish
+
 # Bevy Assets
 assets/**/*.meta
 crates/bevy_asset/imported_assets
