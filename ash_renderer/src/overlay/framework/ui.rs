@@ -3,11 +3,11 @@
 //!
 //! overlay 按内容分两半：本文件是框架半边——"怎么跑"（Context/字体、pass、
 //! 纹理增量折叠、帧产出）；窗口内容"画什么"是业务，住
-//! [`crate::overlay::windows`]（本文件的 pass
-//! 只负责按总控开关在 begin/end 之间调它们）。
+//! [`crate::overlay::tool_window`]（本文件的 pass
+//! 只负责在 begin/end 之间建工具窗口并按当前页分发内容）。
 //!
-//! 节拍化（7.8）：pass 分两层——面板层（总控/监控/统计/树）由输入事件、
-//! 0.5s 快照、窗口开闭等触发；gizmo 层（坐标轴指示器）由相机旋转驱动。其余
+//! 节拍化（7.8）：pass 分两层——面板层（工具窗口）由输入事件、
+//! 0.5s 快照、切页/折叠等触发；gizmo 层（坐标轴指示器）由相机旋转驱动。其余
 //! 帧不跑 pass，`EguiFrame` 两层代数保持，绘制半边按代数命中镶嵌缓存
 //! （官方集成 eframe 的"空闲不重绘"在本宿主的等价物——本宿主每帧 present，
 //! 等价物落在 shapes 供给与镶嵌缓存两侧）。
@@ -43,17 +43,19 @@ use crate::driver::host::FrameSyncSettings;
 use crate::overlay::transform_edit::{TransformEditQueue, apply_transform_edits};
 use crate::overlay::widgets::axis_gizmo::AxisGizmo;
 use crate::overlay::widgets::load_popup::{load_activity_tick, AssetLoadPopup, LoadActivity};
-use crate::overlay::windows::debug_hub_window::{DebugHubWindow, DebugWindowsOpen};
-use crate::overlay::windows::debug_window::{
-    ChunkRows, DebugWindow, FpsMeter, PerfPanelCache, RenderMode, RendererStats,
-};
-use crate::overlay::windows::entity_tree_window::{
-    EntityTreeState, EntityTreeWindow, SelectedDetails, SelectedEntity, TransformDragCache,
+use crate::overlay::tool_window::culling::CullingPage;
+use crate::overlay::tool_window::entity_tree::{
+    EntityTreePage, EntityTreeState, SelectedDetails, SelectedEntity, TransformDragCache,
     collect_selected_details, maintain_entity_tree, mark_tree_dirty_despawn,
     mark_tree_dirty_insert, mark_tree_dirty_remove,
 };
-use crate::overlay::windows::monitor_window::{MonitorHistory, MonitorWindow};
-use crate::overlay::windows::pipeline_window::PipelineWindow;
+use crate::overlay::tool_window::frame_stats::{
+    ChunkRows, FpsMeter, FrameStatsPage, PerfPanelCache, RendererStats,
+};
+use crate::overlay::tool_window::monitor::{MonitorHistory, MonitorPage};
+use crate::overlay::tool_window::pipeline::PipelinePage;
+use crate::overlay::tool_window::shading::{RenderMode, ShadingPage};
+use crate::overlay::tool_window::{ToolPage, ToolWindow, ToolWindowState};
 use crate::scene::mechanism::WorkloadSettings;
 use crate::render::{
     BloomSettings, CullDiagnostics, CullSettings, Context, ImageCache, IndirectStats, MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics,
@@ -101,7 +103,7 @@ pub struct EguiState {
 /// 一帧 egui 输出（Update 产，`draw_frame` 内绘制半边消费）。
 #[derive(Resource, Default)]
 pub struct EguiFrame {
-    /// 面板层（总控/监控/统计/实体树，输入与快照节拍驱动）。
+    /// 面板层（工具窗口，输入与快照节拍驱动）。
     pub panel: EguiLayer,
     /// gizmo 层（坐标轴指示器，相机旋转驱动独立节拍）。
     pub gizmo: EguiLayer,
@@ -148,8 +150,8 @@ fn init_egui(mut commands: Commands) {
     commands.insert_resource(state);
     commands.insert_resource(EguiFrame::default());
     commands.insert_resource(RenderMode::from_env());
-    // 各调试窗口显隐总控：总控面板写、pass 显示门读，默认全开
-    commands.insert_resource(DebugWindowsOpen::default());
+    // 工具窗口导航状态：当前页 + 分组折叠
+    commands.insert_resource(ToolWindowState::default());
     // 层级树点选：属性面板的编辑目标来源
     commands.insert_resource(SelectedEntity::default());
     // 树拍平缓存（7.7）：脏信号观测器 + 维护系统重建，默认脏 = 首帧立树
@@ -206,14 +208,14 @@ fn load_fonts() -> egui::FontDefinitions {
     fonts
 }
 
-/// 各调试窗口面板的一次性参数束（ui.rs 接线层）：统计、着色模式、显隐总控、
+/// 工具窗口各页的一次性参数束（ui.rs 接线层）：统计、着色模式、导航状态、
 /// 点选与层级树查询合成一个 SystemParam——系统参数上限 16（FrameInput 同款式
 /// 的束打法），新增面板件全走这里，不撑大 pass 签名。
 #[derive(SystemParam)]
 struct DebugUiParams<'w, 's> {
     stats: RendererStats<'w>,
     mode: ResMut<'w, RenderMode>,
-    windows_open: ResMut<'w, DebugWindowsOpen>,
+    tool_state: ResMut<'w, ToolWindowState>,
     selected: ResMut<'w, SelectedEntity>,
     fps: ResMut<'w, FpsMeter>,
     /// egui pass 自计时（7.5）
@@ -283,8 +285,6 @@ struct PassGate<'w, 's> {
     last_size: Local<'s, [f32; 3]>,
     /// gizmo 上次绘制时读到的相机旋转（None = 相机缺席）
     last_cam_rot: Local<'s, Option<Option<Quat>>>,
-    /// gizmo 显隐上次快照
-    last_gizmo_open: Local<'s, bool>,
     /// 面板 pass 跳过帧标记（门控翻转帧补发一次当前位置）
     skipped_since_pass: Local<'s, bool>,
     /// egui 自身请求的立即重绘（动画/悬停渐变/光标闪烁）→ 下帧强制重跑
@@ -299,10 +299,10 @@ struct PassGate<'w, 's> {
 /// 保持、shapes 由绘制半边的镶嵌缓存接住（画面静止即正确）。
 ///
 /// 触发集（面板层）：首帧 ∨ fps 快照到期（0.5s）∨ 窗口尺寸/ppp 变化 ∨
-/// egui 自身请求立即重绘 ∨ 窗口开闭/点选/树形态变化（资源 Changed）∨
+/// egui 自身请求立即重绘 ∨ 切页折叠/点选/树形态变化（资源 Changed）∨
 /// 面板相关输入事件（键/滚轮/焦点/按键；指针移动仅当悬于 UI 层或拖拽始于
 /// UI——纯场景上的移动是漫游环视，面板静止不值得重跑）。gizmo 层：首帧 ∨
-/// 尺寸变化 ∨ 显隐变化 ∨ 相机旋转变化（gizmo 只表达旋转，平移不重画）。
+/// 尺寸变化 ∨ 相机旋转变化（gizmo 只表达旋转，平移不重画）。
 #[expect(
     clippy::too_many_arguments,
     reason = "bevy 系统的参数表即依赖注入清单：六个事件读取器 + 窗口/时间/按键 + egui 状态帧与图集镜像资源 + 调试窗口面板束 + 门控账束，逐项声明是框架惯例"
@@ -394,12 +394,11 @@ fn run_egui_pass(
         // 加载期直跑（7.12）：菊花相位逐帧推进（0.5s 快照节拍会看着卡顿）；
         // 加载完成弹窗隐藏后触发自然消失回落节拍
         || ui.load_activity.active
-        || ui.windows_open.is_changed()
+        || ui.tool_state.is_changed()
         || ui.selected.is_changed()
         || ui.tree_state.is_changed()
         || panel_events;
-    let gizmo_due =
-        !*gate.pass_ever_ran || size_changed || ui.windows_open.axis_gizmo != *gate.last_gizmo_open || cam_rot_changed;
+    let gizmo_due = !*gate.pass_ever_ran || size_changed || cam_rot_changed;
     *gate.force_next = false;
 
     if panel_due {
@@ -417,29 +416,10 @@ fn run_egui_pass(
         state.ctx.set_pixels_per_point(ppp);
         state.ctx.begin_pass(raw);
         let plugin_host = plugin_hooks_begin(&state);
-        // 总控先行（自身不可关），其余窗口按开关显隐；[×] 与 checkbox 写同一字段
-        DebugHubWindow { ctx: &state.ctx, open: &mut ui.windows_open }.show();
-        if ui.windows_open.monitor {
-            MonitorWindow {
-                ctx: &state.ctx,
-                open: &mut ui.windows_open.monitor,
-                history: &ui.history,
-                fps: ui.fps.snapshot,
-                mesh_pool: &ui.mesh_pool,
-                image_cache: &ui.image_cache,
-                frame_sync: &mut ui.frame_sync,
-            }
-            .show();
-        }
-        if ui.windows_open.stats {
-            DebugWindow {
-                ctx: &state.ctx,
-                open: &mut ui.windows_open.stats,
-                fps: ui.fps.snapshot,
-                window,
-                ppp,
-                mode: &mut ui.mode,
-                stats: &ui.stats,
+        let mut edit = None;
+        ToolWindow { ctx: &state.ctx, state: &mut ui.tool_state }.show(|body, page| match page {
+            ToolPage::Shading => ShadingPage { mode: &mut ui.mode }.show(body),
+            ToolPage::Culling => CullingPage {
                 cull_settings: &mut ui.cull_settings,
                 cull_diag: &ui.cull_diag,
                 occlusion_settings: &mut ui.occlusion_settings,
@@ -447,37 +427,46 @@ fn run_egui_pass(
                 lod_settings: &mut ui.lod_settings,
                 lod_diag: &ui.lod_diag,
                 indirect_stats: &ui.indirect_stats,
+            }
+            .show(body),
+            ToolPage::Pipeline => PipelinePage {
+                shadow: &mut ui.shadow_settings,
+                bloom: &mut ui.bloom_settings,
+                smaa: &mut ui.smaa_settings,
+            }
+            .show(body),
+            ToolPage::FrameStats => FrameStatsPage {
+                fps: ui.fps.snapshot,
+                window,
+                ppp,
+                stats: &ui.stats,
                 pct: &ui.pct_cache,
                 workload: &ui.workload,
                 image_cache: &ui.image_cache,
                 mesh_pool: &ui.mesh_pool,
                 chunks: &ui.chunks,
             }
-            .show();
-        }
-        if ui.windows_open.pipeline {
-            PipelineWindow {
-                ctx: &state.ctx,
-                open: &mut ui.windows_open.pipeline,
-                shadow: &mut ui.shadow_settings,
-                bloom: &mut ui.bloom_settings,
-                smaa: &mut ui.smaa_settings,
+            .show(body),
+            ToolPage::Monitor => MonitorPage {
+                history: &ui.history,
+                fps: ui.fps.snapshot,
+                mesh_pool: &ui.mesh_pool,
+                image_cache: &ui.image_cache,
+                frame_sync: &mut ui.frame_sync,
             }
-            .show();
-        }
-        if ui.windows_open.entity_tree {
-            let edit = EntityTreeWindow {
-                ctx: &state.ctx,
-                open: &mut ui.windows_open.entity_tree,
-                selected: &mut ui.selected,
-                state: &mut ui.tree_state,
-                details: &ui.details,
-                drag: &mut ui.drag_cache,
+            .show(body),
+            ToolPage::EntityTree => {
+                edit = EntityTreePage {
+                    selected: &mut ui.selected,
+                    state: &mut ui.tree_state,
+                    details: &ui.details,
+                    drag: &mut ui.drag_cache,
+                }
+                .show(body);
             }
-            .show();
-            if let Some(edit) = edit {
-                ui.edit_queue.0.push(edit);
-            }
+        });
+        if let Some(edit) = edit {
+            ui.edit_queue.0.push(edit);
         }
         // 加载指示弹窗（7.12）：最后画（右下角浮在窗区之上）；Background 层
         // 纯显示零交互，不进 panel_layers 之外的仲裁面
@@ -511,48 +500,42 @@ fn run_egui_pass(
         *gate.skipped_since_pass = true;
     }
     if gizmo_due {
-        if ui.windows_open.axis_gizmo {
-            // gizmo 纯显示零交互：空事件子 pass（指针/按键状态由 egui 跨
-            // pass 自持，不重复喂积压——事件只消费一次，归面板 pass）
-            state.ctx.set_pixels_per_point(ppp);
-            state.ctx.begin_pass(egui::RawInput {
-                screen_rect: raw_rect,
-                time: raw_time,
-                focused: raw_focused,
-                ..Default::default()
-            });
-            // 面板层可见性补记（7.8 面板消失修复）：egui 按"上一个 pass 画过谁"
-            // 记账窗口可见性（Areas::end_pass 换道 visible_areas_last_frame）——
-            // 本子 pass 不画任何窗口，若不补记，面板层会从账面蒸发，下个面板
-            // pass 被 egui 视为"窗口刚重新出现"而重触发淡入动画（Area::content_ui
-            // 的 multiply_opacity，~0.08s 爬升），该帧 shapes 带低 alpha 进冻结
-            // 缓存——表现即"相机移动中面板消失只剩阴影，停下后几十毫秒恢复"。
-            // move_to_top 顺带置 wants_to_be_on_top，但同 Order 桶内稳定排序不
-            // 改变面板间相对层序（副作用无害）。
-            state.ctx.memory_mut(|m| {
-                for layer in gate.panel_layers.iter() {
-                    m.areas_mut().move_to_top(*layer);
-                }
-            });
-            let plugin_host = plugin_hooks_begin(&state);
-            AxisGizmo {
-                ctx: &state.ctx,
-                cam_rotation: cam_rot,
+        // gizmo 纯显示零交互：空事件子 pass（指针/按键状态由 egui 跨
+        // pass 自持，不重复喂积压——事件只消费一次，归面板 pass）
+        state.ctx.set_pixels_per_point(ppp);
+        state.ctx.begin_pass(egui::RawInput {
+            screen_rect: raw_rect,
+            time: raw_time,
+            focused: raw_focused,
+            ..Default::default()
+        });
+        // 面板层可见性补记（7.8 面板消失修复）：egui 按"上一个 pass 画过谁"
+        // 记账窗口可见性（Areas::end_pass 换道 visible_areas_last_frame）——
+        // 本子 pass 不画任何窗口，若不补记，面板层会从账面蒸发，下个面板
+        // pass 被 egui 视为"窗口刚重新出现"而重触发淡入动画（Area::content_ui
+        // 的 multiply_opacity，~0.08s 爬升），该帧 shapes 带低 alpha 进冻结
+        // 缓存——表现即"相机移动中面板消失只剩阴影，停下后几十毫秒恢复"。
+        // move_to_top 顺带置 wants_to_be_on_top，但同 Order 桶内稳定排序不
+        // 改变面板间相对层序（副作用无害）。
+        state.ctx.memory_mut(|m| {
+            for layer in gate.panel_layers.iter() {
+                m.areas_mut().move_to_top(*layer);
             }
-            .show();
-            let egui::FullOutput {
-                shapes,
-                mut textures_delta,
-                ..
-            } = plugin_hooks_end(&state, plugin_host);
-            mirror.fold(&mut textures_delta);
-            frame.gizmo.shapes = shapes;
-        } else {
-            // 显隐关：shapes 清空（代数照常推进，绘制半边本层产空 → 无 gizmo）
-            frame.gizmo.shapes.clear();
+        });
+        let plugin_host = plugin_hooks_begin(&state);
+        AxisGizmo {
+            ctx: &state.ctx,
+            cam_rotation: cam_rot,
         }
+        .show();
+        let egui::FullOutput {
+            shapes,
+            mut textures_delta,
+            ..
+        } = plugin_hooks_end(&state, plugin_host);
+        mirror.fold(&mut textures_delta);
+        frame.gizmo.shapes = shapes;
         frame.gizmo.generation += 1;
-        *gate.last_gizmo_open = ui.windows_open.axis_gizmo;
         *gate.pass_ever_ran = true;
     }
     *gate.last_size = size;

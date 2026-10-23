@@ -13,8 +13,8 @@
 //! | 子模块 | 职责 |
 //! |---|---|
 //! | [`framework`] | 框架半边："怎么跑"——egui 状态（Context/字体含 CJK）+ Update 的 egui pass + 输入桥 + 绘制半边，产 [`EguiFrame`] |
-//! | [`windows`] | 业务半边："画什么"——调试窗口（帧统计/总控/实体层级树+属性编辑） |
-//! | [`widgets`] | 业务半边：屏幕空间非窗口 widget（右上角坐标轴指示器） |
+//! | [`tool_window`] | 业务半边："画什么"——工具窗口（左侧分组导航 + 右侧页面：着色/剔除/管线/帧统计/监控/实体树） |
+//! | [`widgets`] | 业务半边：屏幕空间非窗口 widget（右上角坐标轴指示器，永远显示；加载弹窗） |
 //! | [`transform_edit`] | 共享服务：Transform 编辑封装，BRP 写方法复用 |
 //!
 //! 机制与证据：`.agents/docs/3-静态取数链路/3.7-egui调试GUI/`、
@@ -23,15 +23,15 @@
 
 mod framework;
 pub(crate) mod transform_edit;
+mod tool_window;
 mod widgets;
-mod windows;
 
 pub use framework::paint::{AtlasGpu, AtlasMirror, UiVertexRing};
 pub use framework::ui::{EguiFrame, EguiPassTiming, EguiState, OverlayPlugin};
-pub use windows::debug_window::RenderMode;
+pub use tool_window::shading::RenderMode;
 
 pub(crate) use framework::paint::{paint_overlay, OverlayLogState, UiDrawData};
 // BRP scene_tree 复用树窗口的行数据、相关性过滤与节点命名——
 // CLI 树与 egui 树看到同一棵树、同一套"相关"语义，不养两份逻辑。
-pub(crate) use windows::entity_tree_window::{EntityRow, is_relevant, node_label};
-pub(crate) use windows::monitor_window::MonitorHistory;
+pub(crate) use tool_window::entity_tree::{EntityRow, is_relevant, node_label};
+pub(crate) use tool_window::monitor::MonitorHistory;

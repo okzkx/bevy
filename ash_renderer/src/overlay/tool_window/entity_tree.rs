@@ -1,10 +1,10 @@
-//! 实体层级树窗口（业务面板）：World 全部实体按 [`Children`]/[`ChildOf`]
+//! 实体层级树页：World 全部实体按 [`Children`]/[`ChildOf`]
 //! 关系递归展示，节点带 Name（无名按组件角色命名）+ 组件标签；点选节点落
 //! [`SelectedEntity`] 资源，面板下部是属性区——组件全清单、渲染语义
 //! 行（Mesh/材质/贴图槽）与 Transform 编辑（DragValue，写经
 //! [`crate::overlay::transform_edit`] 封装）。
 //!
-//! 取数分两层：树本身走 SystemParam 直查 World（参数束样式照 [`super::debug_window`]
+//! 取数分两层：树本身走 SystemParam 直查 World（参数束样式照 [`super::frame_stats`]
 //! 的 `RendererStats`），不另造快照通道；属性区走 [`SelectedDetails`] 纯数据
 //! 快照——采集系统（只读 &World）产、egui pass 消费，与官方"后端收集/前端展示"
 //! 分工同形（用户定案：学数据组织，不学 UI 表现）。机制与证据：
@@ -224,11 +224,8 @@ pub(in crate::overlay) fn maintain_entity_tree(
     st.dirty = false;
 }
 
-/// 层级树窗口的一次构建输入：框架 pass 每帧组好（借用样式照 [`super::debug_window`]）。
-pub(in crate::overlay) struct EntityTreeWindow<'a> {
-    pub(in crate::overlay) ctx: &'a egui::Context,
-    /// 显隐开关：总控 checkbox 与窗口 [×] 写同一字段（egui `Window::open` 借用）。
-    pub(in crate::overlay) open: &'a mut bool,
+/// 层级树页的一次构建输入：框架 pass 每帧组好。
+pub(in crate::overlay) struct EntityTreePage<'a> {
     /// 点选状态（资源借用，点选就地落账）。
     pub(in crate::overlay) selected: &'a mut SelectedEntity,
     /// 树拍平缓存（7.7）：维护系统产，pass 只读行切片；展开/收起写回。
@@ -239,64 +236,56 @@ pub(in crate::overlay) struct EntityTreeWindow<'a> {
     pub(in crate::overlay) drag: &'a mut TransformDragCache,
 }
 
-impl EntityTreeWindow<'_> {
+impl EntityTreePage<'_> {
     /// 面板本体：拍平行数组的视口裁剪渲染（`show_rows` 只构建可见行，
     /// 与实体总数解耦）+ 属性区。返回一次 Transform 编辑（有拖改时），
     /// 由 pass 落进编辑队列——本函数不碰写路径（展开态账与本缓存除外）。
-    pub(in crate::overlay) fn show(self) -> Option<(Entity, TransformEdit)> {
-        let Self { ctx, open, selected, state, details, drag } = self;
-        let mut edit = None;
-        egui::Window::new("实体层级树")
-            .open(open)
-            .default_pos(egui::pos2(250.0, 12.0))
-            .default_width(360.0)
-            .show(ctx, |ui| {
-                ui.monospace(format!("相关 {} / 全部 {}", state.relevant, state.total));
-                // 等高行高：可交互行（selectable_label）以 interact_size 为下限，
-                // 取两者大者保证逐行 stride 与声明一致（滚动算术不失真）。
-                let row_height = ui
-                    .spacing()
-                    .interact_size
-                    .y
-                    .max(ui.text_style_height(&egui::TextStyle::Monospace));
-                // 本帧点中的折叠行（展开/收起）——闭包只读行切片，写回在
-                // 闭包外做（展开态账 + 置脏，下帧重建生效）。
-                let mut toggles: Vec<Entity> = Vec::new();
-                egui::ScrollArea::vertical()
-                    .id_salt("实体层级树")
-                    .max_height(380.0)
-                    .show_rows(ui, row_height, state.rows.len(), |ui, range| {
-                        for i in range {
-                            let TreeRow { entity, depth, label, has_children, expanded } =
-                                &state.rows[i];
-                            let is_selected = selected.0 == Some(*entity);
-                            let indent = egui::vec2(*depth as f32 * ROW_INDENT, 0.0);
-                            ui.horizontal(|ui| {
-                                ui.set_height(row_height);
-                                ui.add_space(indent.x);
-                                if *has_children {
-                                    let arrow = if *expanded { "▼ " } else { "▶ " };
-                                    if ui
-                                        .selectable_label(is_selected, format!("{arrow}{label}"))
-                                        .clicked()
-                                    {
-                                        selected.0 = Some(*entity);
-                                        toggles.push(*entity);
-                                    }
-                                } else if ui.selectable_label(is_selected, label).clicked() {
-                                    selected.0 = Some(*entity);
-                                }
-                            });
+    pub(in crate::overlay) fn show(self, ui: &mut egui::Ui) -> Option<(Entity, TransformEdit)> {
+        let Self { selected, state, details, drag } = self;
+        ui.monospace(format!("相关 {} / 全部 {}", state.relevant, state.total));
+        // 等高行高：可交互行（selectable_label）以 interact_size 为下限，
+        // 取两者大者保证逐行 stride 与声明一致（滚动算术不失真）。
+        let row_height = ui
+            .spacing()
+            .interact_size
+            .y
+            .max(ui.text_style_height(&egui::TextStyle::Monospace));
+        // 本帧点中的折叠行（展开/收起）——闭包只读行切片，写回在
+        // 闭包外做（展开态账 + 置脏，下帧重建生效）。
+        let mut toggles: Vec<Entity> = Vec::new();
+        egui::ScrollArea::vertical()
+            .id_salt("实体层级树")
+            .max_height(380.0)
+            .show_rows(ui, row_height, state.rows.len(), |ui, range| {
+                for i in range {
+                    let TreeRow { entity, depth, label, has_children, expanded } =
+                        &state.rows[i];
+                    let is_selected = selected.0 == Some(*entity);
+                    let indent = egui::vec2(*depth as f32 * ROW_INDENT, 0.0);
+                    ui.horizontal(|ui| {
+                        ui.set_height(row_height);
+                        ui.add_space(indent.x);
+                        if *has_children {
+                            let arrow = if *expanded { "▼ " } else { "▶ " };
+                            if ui
+                                .selectable_label(is_selected, format!("{arrow}{label}"))
+                                .clicked()
+                            {
+                                selected.0 = Some(*entity);
+                                toggles.push(*entity);
+                            }
+                        } else if ui.selectable_label(is_selected, label).clicked() {
+                            selected.0 = Some(*entity);
                         }
                     });
-                for entity in toggles {
-                    let open = state.expanded.entry(entity).or_insert(true);
-                    *open = !*open;
-                    state.dirty = true;
                 }
-                edit = show_details(ui, details, selected, drag);
             });
-        edit
+        for entity in toggles {
+            let open = state.expanded.entry(entity).or_insert(true);
+            *open = !*open;
+            state.dirty = true;
+        }
+        show_details(ui, details, selected, drag)
     }
 }
 

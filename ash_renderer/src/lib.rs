@@ -30,10 +30,9 @@
 //!   `content`(FlightHelmet 进场/取景/灯光参数/进场核验),零 Vulkan 代码;
 //! - [`overlay`]:egui 调试 UI(裸接 ash——禁渲染宿主挂不上 bevy_egui/
 //!   egui-wgpu),框架/业务两半:`input`(bevy 事件→egui RawInput 输入桥)、`ui`
-//!   (框架半边:Update 的 egui pass,产 EguiFrame)、`debug_window`(业务半边:
-//!   帧统计窗口与 RenderMode 单选资源)、`debug_hub_window`(业务半边:调试窗口
-//!   总控,各窗口显隐开关 DebugWindowsOpen)、`entity_tree_window`(业务半边:
-//!   实体层级树 + 点选 SelectedEntity)、`paint`(draw_frame 内的绘制半边:
+//!   (框架半边:Update 的 egui pass,产 EguiFrame)、`tool_window`(业务半边:
+//!   单一工具窗口,左侧分组导航 + 右侧页面——着色模式/剔除与 LOD/管线控制/
+//!   帧统计/持续监控/实体层级树)、`axis_gizmo`(右上角坐标轴,永远显示)、`paint`(draw_frame 内的绘制半边:
 //!   图集 CPU 镜像/整传新槽/顶点环,paint_overlay→UiPaint);
 //!   overlay 管线与 UI 录制契约住 `render::pipeline::overlay_pipeline`(`OverlayPipeline`
 //!   共享 set0、`UiPaint`/`UiDrawCall` 供 `frames` 接画);
