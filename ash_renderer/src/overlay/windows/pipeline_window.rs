@@ -9,7 +9,7 @@
 //! - Bloom/tonemap 关 = composite 直出 HDR 线性值（8.4 前基线形态）；
 //! - SMAA 关 = composite 直出无边缘平滑（8.5 前基线形态）。
 
-use crate::render::{BloomSettings, ShadowSettings, SmaaSettings};
+use crate::render::{BloomSettings, ShadowSettings, SmaaSettings, TonemapCurve};
 
 /// 管线控制窗口的一次构建输入：框架 pass 每帧组好，开关就地写资源。
 pub(in crate::overlay) struct PipelineWindow<'a> {
@@ -45,6 +45,20 @@ impl PipelineWindow<'_> {
                             .fixed_decimals(3),
                     );
                     ui.checkbox(&mut bloom.tonemap, "ACES tone mapping");
+                    if bloom.tonemap {
+                        ui.horizontal(|ui| {
+                            ui.label("曲线");
+                            ui.radio_value(&mut bloom.curve, TonemapCurve::Narkowicz, "Narkowicz");
+                            ui.radio_value(&mut bloom.curve, TonemapCurve::FilamentAces, "Filament");
+                        });
+                        if bloom.curve == TonemapCurve::FilamentAces {
+                            ui.add(
+                                egui::Slider::new(&mut bloom.gain, 0.5..=2.5)
+                                    .text("亮度增益")
+                                    .fixed_decimals(3),
+                            );
+                        }
+                    }
                 }
                 ui.checkbox(&mut smaa.enabled, "SMAA 抗锯齿");
                 ui.monospace("BRP: ash_renderer/bloom_set / smaa_set");

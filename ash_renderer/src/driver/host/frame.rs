@@ -628,7 +628,7 @@ pub(crate) fn draw_frame(
         .or_fatal("shadow UBO 写失败，渲染链无法继续")?;
 
     // 4a-0-2) Bloom 参数 UBO（8.4，帧槽环与主 UBO 同一 fence 证据）：
-    // strength/enabled/tonemap 三个标量——BRP bloom_set 直达。
+    // strength/enabled/tonemap/curve/gain 五标量——BRP bloom_set 直达。
     let bloom_frame = frames.current_index();
     bloom_targets
         .ubo(bloom_frame)
@@ -638,6 +638,8 @@ pub(crate) fn draw_frame(
                 strength: bloom_settings.strength,
                 enabled: f32::from(bloom_settings.enabled),
                 tonemap: f32::from(bloom_settings.tonemap),
+                curve: bloom_settings.curve.as_f32(),
+                gain: bloom_settings.gain,
             }),
         )
         .or_fatal("Bloom 参数 UBO 写失败，渲染链无法继续")?;
