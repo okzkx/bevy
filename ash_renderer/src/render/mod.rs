@@ -111,8 +111,8 @@ pub use pipeline::smaa::{
 pub use gpu::shadow_build::ShadowBuildPass;
 pub use shading::shadow::{
     cascade_matrices, cascade_slice_boundaries, pack_shadow_uniforms, ShadowCascadeInput,
-    ShadowDiagnostics, ShadowSettings, ShadowUniformsData, SHADOW_CASCADES, SHADOW_MAP_SIZE,
-    SHADOW_MAX_DISTANCE, SHADOW_NEAR_DISTANCE,
+    ShadowCascades, ShadowDiagnostics, ShadowSettings, ShadowUniformsData, SHADOW_CASCADES,
+    SHADOW_FAR_MAX, SHADOW_FAR_MIN, SHADOW_MAP_SIZE, SHADOW_NEAR_DISTANCE,
 };
 pub use resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
 pub use swapchain::{AcquireOutcome, PresentOutcome, Swapchain};

@@ -23,8 +23,9 @@ use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 use super::depth::DepthTarget;
 
 /// shadow UBO 总长（`shading/shadow.rs::ShadowUniformsLayout` 静态互证）：
-/// cascade 矩阵 4×64B + 平面 24×16B + splits/forward/pos/map_size 各 16B。
-pub const SHADOW_UBO_SIZE: u32 = 704;
+/// cascade 矩阵 4×64B + 平面 24×16B + splits/forward/pos/map_size 各 16B
+/// + texel_world/inv_span 各 16B。
+pub const SHADOW_UBO_SIZE: u32 = 736;
 
 pub const SHADOW_BINDING_UNIFORM: u32 = 0;
 pub const SHADOW_BINDING_MAP0: u32 = 1;

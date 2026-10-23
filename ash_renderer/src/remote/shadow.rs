@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use crate::{
     common::error::VulkanError,
     render::{
-        aabb_visible, conservative_world_aabb, cascade_slice_boundaries, MeshPool,
+        aabb_visible, conservative_world_aabb, MeshPool,
         ShadowDiagnostics, ShadowSettings, ShadowTargets, OBJECT_TABLE_CAPACITY,
         SHADOW_CASCADES, SHADOW_UBO_SIZE,
     },
@@ -112,16 +112,33 @@ pub(crate) fn shadow_stats(In(_params): In<Option<Value>>, world: &mut World) ->
         }
     }
     let diag = world.resource::<ShadowDiagnostics>();
+    let splits: Vec<f32> = (0..SHADOW_CASCADES).map(|k| f32_at(640 + k * 4)).collect();
+    let mat_at = |c: usize, row: usize, col: usize| {
+        // to_cols_array 列主序：flat = col*4 + row
+        f32_at(c * 64 + (col * 4 + row) * 4)
+    };
+    let cascades_detail: Vec<serde_json::Value> = (0..SHADOW_CASCADES)
+        .map(|c| {
+            json!({
+                "gpu_visible": gpu_visible[c],
+                "cpu_visible": cpu_visible[c],
+                "mismatches": mismatches[c],
+                "cascade_view_proj": (0..4).map(|r| (0..4).map(|k| mat_at(c, r, k)).collect::<Vec<_>>()).collect::<Vec<_>>(),
+                "texel_world": f32_at(704 + c * 4),
+                "inv_span": f32_at(720 + c * 4),
+                "planes": (0..6).map(|p| {
+                    let base = 256 + (c * 6 + p) * 16;
+                    (0..4).map(|k| f32_at(base + k * 4)).collect::<Vec<_>>()
+                }).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
     Ok(json!({
         "enabled": diag_enabled,
         "bound": diag.bound,
         "marks_frame": marks_frame,
-        "splits": cascade_slice_boundaries().to_vec(),
-        "cascades": (0..SHADOW_CASCADES).map(|c| json!({
-            "gpu_visible": gpu_visible[c],
-            "cpu_visible": cpu_visible[c],
-            "mismatches": mismatches[c],
-        })).collect::<Vec<_>>(),
+        "splits": splits,
+        "cascades": cascades_detail,
         "note": "读数 = 本帧槽两帧前 compute 输出（fence 纪律内陈旧 ≤2 帧，主标记同款）",
     }))
 }

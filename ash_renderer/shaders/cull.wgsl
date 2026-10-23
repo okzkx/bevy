@@ -54,6 +54,8 @@ struct ShadowUniforms {
     camera_forward: vec4f,
     camera_pos: vec4f,
     map_size: vec4f,
+    texel_world: vec4f,
+    inv_span: vec4f,
 }
 
 var<immediate> push: PushCull;
