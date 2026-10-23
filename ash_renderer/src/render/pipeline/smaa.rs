@@ -430,10 +430,10 @@ impl SmaaTargets {
     /// # Errors
     /// 附件/描述符重建失败。
     pub fn rebuild(&mut self, ctx: &Context, extent: vk::Extent2D) -> Result<()> {
-        self.extent = extent;
         if self.ldr_extent() == extent {
             return Ok(());
         }
+        self.extent = extent;
         unsafe { ctx.device.device_wait_idle() }?;
         self.ldrs.clear();
         self.edges.clear();

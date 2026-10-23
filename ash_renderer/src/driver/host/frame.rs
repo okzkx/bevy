@@ -371,6 +371,12 @@ pub(crate) fn draw_frame(
         cluster_targets
             .rebuild(ctx, swapchain.extent, &light_ring_buffers)
             .or_fatal("透明层 cluster 表重建失败，渲染链无法继续")?;
+        // SMAA 三目标（LDR/edges/blend）随 swapchain 同批重建（幂等；自带
+        // device_wait_idle；描述符集随 build_descriptors 重写）——resize 后
+        // tonemap/edge/blend 的 renderArea 与附件尺寸必须同帧对齐
+        smaa_targets
+            .rebuild(ctx, swapchain.extent)
+            .or_fatal("SMAA 三目标重建失败，渲染链无法继续")?;
         gate.pending = false;
     }
 

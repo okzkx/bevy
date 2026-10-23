@@ -1497,6 +1497,31 @@ impl FramePool {
             // 描述符绑定随 layout，不随句柄。
             // 8.5：tonemap 落点改 LDR 目标（UNORM 线性存储——编码仍在
             // swapchain SRGB view 恰好一次；neighborhood 混合后经终点编码）
+            // 进场屏障：LDR 上一轮（同槽，fence 等完）停在 SHADER_READ_ONLY，
+            // UNDEFINED 进 = 内容可弃（tonemap 覆写全部像素），无屏障则是
+            // VUID-09592 布局竞争（UNDEFINED/SHADER_READ_ONLY 实抓）。
+            let ldr_to_color = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(draw.smaa_nb.ldr_image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .level_count(1)
+                        .layer_count(1),
+                )
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+            device.cmd_pipeline_barrier(
+                frame.command_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                std::slice::from_ref(&ldr_to_color),
+            );
             let tonemap_extent = draw.smaa_nb.ldr_extent;
             let tonemap_attachment = vk::RenderingAttachmentInfo::default()
                 .image_view(draw.smaa_nb.ldr_view)
