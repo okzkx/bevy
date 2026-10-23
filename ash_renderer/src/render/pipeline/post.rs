@@ -111,7 +111,9 @@ pub struct BloomSettings {
 
 impl Default for BloomSettings {
     fn default() -> Self {
-        Self { enabled: true, strength: 0.04, tonemap: true, curve: TonemapCurve::default(), gain: 1.0 }
+        // gain 默认 1.667 = Filament viewer 默认 ACES_LEGACY 口径（8.6.3 A/B：
+        // gain 1.0 画面过暗，均值亮度塌到 ~17%）；纯 ACES 观感拨 gain 1.0
+        Self { enabled: true, strength: 0.04, tonemap: true, curve: TonemapCurve::default(), gain: 1.667 }
     }
 }
 
