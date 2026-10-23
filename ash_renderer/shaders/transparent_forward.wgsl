@@ -91,7 +91,7 @@ struct ClusterRecord {
 @group(3) @binding(2) var<storage, read> clusters: array<ClusterRecord>;
 
 const PI: f32 = 3.14159265358979;
-const EXPOSURE: f32 = 0.00063;  // 8.2.4 重校准：20000 lx 下 albedo0.5·NoL0.5 漫反射 ≈1.0（8.4 换正式 tone mapping/预曝光口径）
+const EXPOSURE: f32 = 0.00032;  // 8.4.1 重校准：与 gbuffer_composite 同锚（ACES filmic，直射中灰面 ≈0.5 HDR）
 const MAX_PER_CLUSTER: u32 = 16u;
 const CLUSTER_TILE: f32 = 32.0;
 

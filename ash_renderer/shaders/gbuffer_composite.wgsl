@@ -118,7 +118,7 @@ const MODE_DEPTH: u32 = 8u;
 
 // 清屏色（与 host 侧 CLEAR_COLOR 同值——线性域，SRGB 编码在最终 ROP 一次）
 const CLEAR_COLOR: vec3f = vec3f(0.02, 0.06, 0.14);
-const EXPOSURE: f32 = 0.00063;  // 8.2.4 重校准：20000 lx 下 albedo0.5·NoL0.5 漫反射 ≈1.0（8.4 换正式 tone mapping/预曝光口径）
+const EXPOSURE: f32 = 0.00032;  // 8.4.1 重校准：ACES filmic 锚点——直射中灰面（albedo0.5·NoL0.5·20000lx）≈0.5 HDR，白墙≈1.7 进肩部不截断；原 0.00063 把中灰面钉在 1.0，ACES 下全顶白（0.00063 = 8.2.4 预曝光口径，按直出校准）
 
 // MAX_PER_CLUSTER（cluster.rs 同源）
 const MAX_PER_CLUSTER: u32 = 16u;
@@ -310,8 +310,10 @@ fn shadow_visibility(world_pos: vec3f, n: vec3f) -> f32 {
         return 1.0;
     }
     // 防自遮蔽：法线偏移（沿法线把采样点抬离表面，随级联指数放大——粗级联
-    // texel 世界尺寸更大）+ 深度 bias（比较时 own 打折，斜率面自挡主源）
-    let lifted = world_pos + n * (0.01 + 0.03 * f32(ci));
+    // texel 世界尺寸更大）+ 深度 bias（比较时 own 打折，斜率面自挡主源）。
+    // 8.4.1：法线偏移加大（0.01+0.03ci → 0.03+0.05ci）——边缘白漏光短划
+    // （阴影区 texel 级漏光）实抓后抬离量不足
+    let lifted = world_pos + n * (0.03 + 0.05 * f32(ci));
     let cs = shadow.cascade_view_proj[ci] * vec4f(lifted, 1.0);
     let ndc = cs.xyz / cs.w;
     if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z <= 0.0) {
@@ -327,8 +329,13 @@ fn shadow_visibility(world_pos: vec3f, n: vec3f) -> f32 {
     //（own - bias 会把表面自身 texel 判成遮挡物——全场景自挡实抓即修）。
     // 容差三因子：掠射面斜率（NoL 反比）+ 级联序号（远级联 texel 与 ndc
     // 范围更大，G-buffer 深度重建的世界坐标噪声在粗级联里被等比放大——
-    // 32× 差值可视化实抓 ±0.0156 抖动，施工记录钉明）
-    let no_l = saturate(dot(n, normalize(-shadow.camera_pos.xyz + lifted)));
+    // 32× 差值可视化实抓 ±0.0156 抖动，施工记录钉明）。
+    // 8.4.1 修真 bug：斜率因子此前对相机位置算 NoL（-camera_pos + lifted）
+    // ——方向光斜率 bias 随相机乱摆（太阳掠射+相机正对 → bias 过小出黑点；
+    // 太阳顶照+相机掠射 → bias 过大出白漏光）。改用帧 UBO 的 dir_to_light
+    // （与 fs_main 直射项同一 L），零向量兜底同款上向量。
+    let l_raw = frame.dir_to_light.xyz;
+    let no_l = saturate(dot(n, select(vec3f(0.0, 1.0, 0.0), normalize(l_raw), dot(l_raw, l_raw) > 1e-8)));
     let bias = 0.004 + 0.03 * (1.0 - no_l) + 0.012 * f32(ci);
     let own_cmp = own + bias;
     // —— blocker search（3×3）：遮挡物 = 比 own 更近（reverse-Z 更大值）
