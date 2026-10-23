@@ -91,7 +91,7 @@ struct ClusterRecord {
 @group(3) @binding(2) var<storage, read> clusters: array<ClusterRecord>;
 
 const PI: f32 = 3.14159265358979;
-const EXPOSURE: f32 = 0.00032;  // 8.4.1 重校准：与 gbuffer_composite 同锚（ACES filmic，直射中灰面 ≈0.5 HDR）
+const EXPOSURE: f32 = 0.00016;  // 与 gbuffer_composite 同锚（完整版 ACES 线性段口径）
 const MAX_PER_CLUSTER: u32 = 16u;
 const CLUSTER_TILE: f32 = 32.0;
 
@@ -149,6 +149,12 @@ fn computeDiffuseColor(baseColor: vec4f, metallic: f32) -> vec3f {
     return baseColor.rgb * (1.0 - metallic);
 }
 
+// reflectance 原值 → 介电体 F0（默认 0.5 → 0.04）
+fn computeDielectricF0(reflectance: f32) -> f32 {
+    return 0.16 * reflectance * reflectance;
+}
+
+// reflectance 参数是已换算的介电体 F0（见 computeDielectricF0）
 fn computeF0(baseColor: vec4f, metallic: f32, reflectance: f32) -> vec3f {
     return baseColor.rgb * metallic + (reflectance * (1.0 - metallic));
 }
@@ -164,7 +170,7 @@ fn getStandardPixelParams(albedo: vec3f, metallic: f32, perceptualRoughness: f32
     var pixel: PixelParams;
     pixel.roughness = perceptualRoughness * perceptualRoughness;
     pixel.diffuseColor = computeDiffuseColor(vec4f(albedo, 1.0), metallic);
-    pixel.f0 = computeF0(vec4f(albedo, 1.0), metallic, reflectance);
+    pixel.f0 = computeF0(vec4f(albedo, 1.0), metallic, computeDielectricF0(reflectance));
     return pixel;
 }
 

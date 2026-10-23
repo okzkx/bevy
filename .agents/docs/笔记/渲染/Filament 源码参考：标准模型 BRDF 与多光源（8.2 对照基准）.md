@@ -45,8 +45,11 @@ float perceptualRoughnessToRoughness(float p) { return p * p; }   // α = percep
 pixel.perceptualRoughness = clamp(material.roughness, MIN_PERCEPTUAL_ROUGHNESS, 1.0);
 pixel.roughness           = perceptualRoughnessToRoughness(pixel.perceptualRoughness);
 pixel.diffuseColor        = computeDiffuseColor(baseColor, metallic);  // = baseColor·(1−metallic)
-pixel.f0                  = computeF0(baseColor, metallic, reflectance); // reflectance 默认 0.5
+float reflectance         = computeDielectricF0(material.reflectance); // = 0.16·r²，默认 0.5 → 0.04
+pixel.f0                  = computeF0(baseColor, metallic, reflectance);
 ```
+
+- **换算不可省**（surface_shading_lit.fs:80）：`computeF0` 的第三参是已换算的介电体 F0，不是材质 reflectance 原值。8.2 照抄时漏了这一行，F0 成了 0.5，受光面整片叠白高光发灰，8.6.5 修复。
 
 - roughness 纹理采样后同样进 perceptual 域（`material.roughness` ← roughnessFactor/roughness 贴图）。
 - NoV 全程用 clamp 后的 `shading_NoV`（≥1e-4），防止掠射除零。

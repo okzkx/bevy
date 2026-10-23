@@ -10,7 +10,7 @@
 
 ## 代码落点
 
-- `shaders/present_tonemap.wgsl`（十步管线照抄 + curve/gain 参数）；`shaders/gbuffer_composite.wgsl`（EXPOSURE 锚点重校）。
+- `shaders/present_tonemap.wgsl`（十步管线照抄 + curve/gain 参数）；`shaders/gbuffer_composite.wgsl`（EXPOSURE 锚点重校；8.6.5 补介电体 F0 换算）；`shaders/transparent_forward.wgsl`（8.6.5 同步 F0 换算与曝光锚点）。
 - `render/pipeline/post.rs`（BloomParams/BloomSettings 扩容）；`remote/bloom.rs`（`ash_renderer/bloom_set` 扩 curve/gain）；`overlay/windows/pipeline_window.rs`（三态对照 UI）。
 - 前置件：`remote/mod.rs`（BRP 端口可配 `ASH_BRP_PORT`）。
 
@@ -22,6 +22,7 @@
 | 8.6.2 曲线替换与参数面 | present_tonemap 十步管线照抄 + curve/gain 参数面四件（UBO/资源/BRP/窗口） | ✅ |
 | 8.6.3 曝光锚点重校 | Sponza 三态 A/B：EXPOSURE 重标 0.00016 + 饱和度差实测 | ✅ |
 | 8.6.4 判定线总验收 | 判定线五条 + 回归五脚本 + 性能成组 | ✅ |
+| 8.6.5 收官后缺陷修复 | 介电体 F0 漏 `computeDielectricF0`（F0=0.5 致受光面叠白高光发灰）+ transparent 曝光同锚；Filament 同场景对照饱和度对齐 | ✅ |
 
 ## 材料清单
 

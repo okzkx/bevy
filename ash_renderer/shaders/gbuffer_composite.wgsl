@@ -10,7 +10,8 @@
 // - diffuse = Lambert（BRDF_DIFFUSE 默认宏，Burley 不取）
 // - 参数换算链：perceptualRoughness（G-buffer 现值，clamp 0.045 在写入端）→
 //   α = perceptual²；computeDiffuseColor = albedo·(1−m)；computeF0 = albedo·m +
-//   reflectance·(1−m)（reflectance 从 matparam.a）；clampNoV 1e-4
+//   computeDielectricF0(reflectance)·(1−m)（reflectance 原值从 matparam.a，
+//   介电体 F0 = 0.16·reflectance²）；clampNoV 1e-4
 // - punctual 衰减：getSquareFalloffAttenuation（smooth 因子平方，falloff =
 //   1/radius²）+ 1/max(d²,1e-4)；getAngleAttenuation（spot 角衰减，公式照抄，
 //   type 恒 POINT 本段不触发）
@@ -218,9 +219,11 @@ fn getStandardPixelParams(albedo: vec3f, matparam: vec4f) -> PixelParams {
     pixel.perceptualRoughness = matparam.b;
     pixel.roughness = pixel.perceptualRoughness * pixel.perceptualRoughness;
     pixel.diffuseColor = computeDiffuseColor(vec4f(albedo, 1.0), metallic);
-    // reflectance = matparam.a（glTF/材质原值；介电体 F0 = 0.16·reflectance²
-    // 由 computeF0 的 0.16·reflectance·reflectance 形态承载）
-    pixel.f0 = computeF0(vec4f(albedo, 1.0), metallic, matparam.a);
+    // matparam.a 存的是材质 reflectance 原值，必须先换成介电体 F0 再进
+    // computeF0——直接传原值 0.5 会让 F0 变成 0.5（应为 0.04），受光面整片
+    // 叠一层白色高光、颜色发灰
+    let reflectance = computeDielectricF0(matparam.a);
+    pixel.f0 = computeF0(vec4f(albedo, 1.0), metallic, reflectance);
     return pixel;
 }
 
@@ -229,7 +232,12 @@ fn computeDiffuseColor(baseColor: vec4f, metallic: f32) -> vec3f {
     return baseColor.rgb * (1.0 - metallic);
 }
 
-// reflectance 默认 0.5 → 介电体 F0 = 0.04（参考篇 §0）
+// reflectance 原值 → 介电体 F0（默认 0.5 → 0.04，空气到 IOR 1.5 界面）
+fn computeDielectricF0(reflectance: f32) -> f32 {
+    return 0.16 * reflectance * reflectance;
+}
+
+// reflectance 参数是已换算的介电体 F0（见 computeDielectricF0）
 fn computeF0(baseColor: vec4f, metallic: f32, reflectance: f32) -> vec3f {
     return baseColor.rgb * metallic + (reflectance * (1.0 - metallic));
 }
