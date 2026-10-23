@@ -1,5 +1,7 @@
 # 施工计划：还原 Filament 完整 ACES 与曝光锚点重校（8.6）
 
+**状态：✅ 收官（2026-10-23 当日立案当日施工，判定线五条全过，[施工记录](8.6-施工记录：还原Filament完整ACES与曝光重校.md)）**
+
 **段**：8.6（步骤 8 追加段，2026-10-23 用户增补立案；本计划随段开工立案）
 **分支**：`goal/8.6`（起点 cfb38bd66；常驻 worktree `F:\okzkx\bevy-wt` 施工）
 **施工依据**：[源码参考篇：色调映射与 Color Grading（8.6 对照基准）](../笔记/渲染/Filament%20源码参考：色调映射与%20Color%20Grading（8.6%20对照基准）.md)（开工前必读；本地检出 `F:\okzkx\filament` @ 373190d49）
@@ -13,16 +15,16 @@
 
 **开工拍板一（色域口径）**：Filament 的 `ToneMapper` 契约是 linear Rec.2020 进出（`ToneMapper.h:67-73`；grading 链经 `combinedInTransform`=sRGB_to_Rec2020 后才进 tonemapper，`ColorGrading.cpp:710/1073`）。本渲染器 HDR 链全程 linear sRGB，故 WGSL 内进曲线前 `sRGB_to_Rec2020`、出曲线后 `Rec2020_to_sRGB`；基底矩阵照 `ColorSpaceUtils.h` 逐值照抄，合成式同源（`sRGB_to_Rec2020 = XYZ_to_Rec2020 * sRGB_to_XYZ`）。输出编码仍归 swapchain SRGB view ROP 恰好一次（3.4 拍板不破）。
 
-**开工拍板二（增益位形状）**：`BloomParams`/`BloomSettings` 扩 `curve`（0=Narkowicz 基线 / 1=Filament ACES）与 `gain`（f32，默认 1.0）。LEGACY 形态=gain 1.667，不单设枚举位——增益与曝光锚点分离外露正是本段主张；三态 A/B=Narkowicz / ACES(gain 1.0) / ACES(gain 1.667)。曝光锚点仍挂 `gbuffer_composite.wgsl` 的 `EXPOSURE`，重校随 8.6.3 A/B 定值。
+**开工拍板二（增益位形状）**：`BloomParams`/`BloomSettings` 扩 `curve`（0=Narkowicz 基线 / 1=Filament ACES）与 `gain`（f32）。LEGACY 形态=gain 1.667，不单设枚举位——增益与曝光锚点分离外露正是本段主张；三态 A/B=Narkowicz / ACES(gain 1.0) / ACES(gain 1.667)。曝光锚点仍挂 `gbuffer_composite.wgsl` 的 `EXPOSURE`，重校随 8.6.3 A/B 定值。**施工期订正（8.6.3 A/B 实测）：gain 默认立案时拟 1.0，实测均值亮度塌到 ~17%（完整版 Hill 拟合中段比 Narkowicz 暗），按 Filament viewer 默认 ACES_LEGACY 口径钉 1.667**。
 
 ## 二、任务拆解
 
 | 任务 | 内容 | 状态 |
 |---|---|---|
 | 8.6.1 前置件 | BRP 端口可配：`ASH_BRP_PORT` 环境变量（默认 15702 不变，render subapp 跟随 +1），双实例并行取证各占一段端口 | ✅（2a164678d） |
-| 8.6.2 曲线替换与参数面 | `present_tonemap.wgsl` 十步管线照抄（矩阵/glow/红修正/Hill 常量/暗包围，执行序见参考篇 §二）；BloomParams/BloomSettings/`bloom_set`/管线控制窗口扩 curve+gain | ⬜ |
-| 8.6.3 曝光锚点重校 | Sponza 同机位三态 A/B：EXPOSURE 重标（受光面落线性段 ~0.5–0.8 而非肩部 1.7）、unlit vs shading 饱和度差实测；量纲改动如实留痕（8.2 DamagedHelmet 曝光标定口径受牵动，重标） | ⬜ |
-| 8.6.4 判定线总验收 | §三判定线逐条 + 回归五脚本 + 性能成组 | ⬜ |
+| 8.6.2 曲线替换与参数面 | `present_tonemap.wgsl` 十步管线照抄（矩阵/glow/红修正/Hill 常量/暗包围，执行序见参考篇 §二）；BloomParams/BloomSettings/`bloom_set`/管线控制窗口扩 curve+gain | ✅ |
+| 8.6.3 曝光锚点重校 | Sponza 同机位三态 A/B：EXPOSURE 重标（受光面落线性段 ~0.5–0.8 而非肩部 1.7）、unlit vs shading 饱和度差实测；量纲改动如实留痕（8.2 DamagedHelmet 曝光标定口径受牵动，重标） | ✅（锚点钉 0.00016） |
+| 8.6.4 判定线总验收 | §三判定线逐条 + 回归五脚本 + 性能成组 | ✅ |
 
 ## 三、判定线（验收）
 
