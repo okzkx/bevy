@@ -298,6 +298,10 @@ def cmd_bloom_set(args):
         params["strength"] = args.strength
     if args.tonemap:
         params["tonemap"] = args.tonemap.lower() == "true"
+    if args.curve:
+        params["curve"] = args.curve
+    if args.gain is not None:
+        params["gain"] = args.gain
     out(rpc(args.host, args.port, "ash_renderer/bloom_set", params))
 
 
@@ -682,10 +686,12 @@ def main():
     p.add_argument("enabled", choices=["true", "false"])
     p.set_defaults(func=cmd_smaa_set)
 
-    p = sub.add_parser("bloom-set", help="Bloom 开关/强度/tonemap 开关（ash_renderer/bloom_set）")
+    p = sub.add_parser("bloom-set", help="Bloom 开关/强度/tonemap 开关/曲线/亮度增益（ash_renderer/bloom_set）")
     p.add_argument("--enabled", choices=["true", "false"], help="Bloom 开关（默认 true）")
     p.add_argument("--strength", type=float, help="线性叠加系数（默认 0.04）")
     p.add_argument("--tonemap", choices=["true", "false"], help="tonemap 开关（默认 true）")
+    p.add_argument("--curve", choices=["narkowicz", "filament"], help="色调映射曲线（8.6 三态 A/B，默认 filament）")
+    p.add_argument("--gain", type=float, help="亮度增益位（ap1 *= gain；LEGACY 形态=1.667）")
     p.set_defaults(func=cmd_bloom_set)
 
     p = sub.add_parser("shadow-set", help="阴影开关（ash_renderer/shadow_set：false = 全链旁路，画面回 8.2 基线）")

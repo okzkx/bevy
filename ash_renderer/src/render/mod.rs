@@ -92,7 +92,7 @@ pub use pipeline::cluster::{
 pub use pipeline::fullscreen_pipeline::{CompositePipeline, PresentTonemapPipeline};
 pub use pipeline::post::{
     pack_bloom_params, BloomFrameDraw, BloomPipelines, BloomParamsData, BloomSettings,
-    BloomTargets, BLOOM_LEVELS,
+    BloomTargets, TonemapCurve, BLOOM_LEVELS,
 };
 pub use pipeline::gbuffer::{
     GBufferTargets, ALBEDO_FORMAT, HDR_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,

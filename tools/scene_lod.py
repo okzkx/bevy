@@ -37,9 +37,11 @@ except AttributeError:
     pass
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXE = os.path.join(REPO, "target", "debug", "ash_renderer.exe")
+# 环境变量旁路：worktree 双实例并行时指向错开的 exe 与端口（缺省主仓同名）
+HOST_NAME = os.environ.get("ASH_HOST_EXE_NAME", "ash_renderer.exe")
+EXE = os.environ.get("ASH_HOST_EXE", os.path.join(REPO, "target", "debug", HOST_NAME))
 HOST_LOG = os.path.join(REPO, ".temp", "scene_lod_host.log")
-BRP_PORT = 15702
+BRP_PORT = int(os.environ.get("ASH_BRP_PORT", "15702"))
 
 _results = []
 
@@ -123,7 +125,7 @@ def iter_processes():
     ).stdout.decode("gbk", errors="replace")
     rows = []
     for row in csv.reader(io.StringIO(out)):
-        if len(row) >= 2 and row[0] == "ash_renderer.exe":
+        if len(row) >= 2 and row[0] == HOST_NAME:
             rows.append((int(row[1]), row[0]))
     return rows
 

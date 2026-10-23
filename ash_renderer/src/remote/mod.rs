@@ -1,5 +1,6 @@
-//! BRP 远程直控通道：宿主 World 经 HTTP JSON-RPC 暴露在
-//! 127.0.0.1:15702（bevy_remote 默认端口），AI/脚本不开 UI 即可"查询 → 改
+//! BRP 远程直控通道：宿主 World 经 HTTP JSON-RPC 暴露在 127.0.0.1:15702
+//! （bevy_remote 默认端口，环境变量 `ASH_BRP_PORT` 可改），AI/脚本不开 UI
+//! 即可"查询 → 改
 //! Transform → 相机环绕推拉"。读侧零自研——官方 inspection 方法族
 //!（`world.query`/`world.inspect`/`world.summarize` 等）与内置 CRUD 随
 //! [`RemotePlugin`] 默认注册，`rpc.discover` 可列全量；写侧全部复用既有封装
@@ -47,8 +48,11 @@ use std::collections::HashMap;
 
 use bevy::{
     prelude::*,
-    remote::{error_codes, BrpError, BrpResult, RemotePlugin},
-    remote::http::RemoteHttpPlugin,
+    render::RenderApp,
+    remote::{
+        error_codes, BrpError, BrpResult, RemotePlugin,
+        http::{DEFAULT_PORT, HostPort, RemoteHttpPlugin},
+    },
 };
 use serde_json::{json, Value};
 
@@ -87,6 +91,18 @@ pub struct AshRemotePlugin;
 
 impl Plugin for AshRemotePlugin {
     fn build(&self, app: &mut App) {
+        // 双实例并行取证会撞默认端口：ASH_BRP_PORT 改主端口（render subapp 跟随
+        // +1）；值非法时回落默认，不 panic
+        let port = match std::env::var("ASH_BRP_PORT") {
+            Ok(v) => match v.parse::<u16>() {
+                Ok(p) if p != 0 => p,
+                _ => {
+                    warn!("ASH_BRP_PORT='{v}' 不是合法端口，回落默认 {DEFAULT_PORT}");
+                    DEFAULT_PORT
+                }
+            },
+            Err(_) => DEFAULT_PORT,
+        };
         app.add_plugins((
             RemotePlugin::default()
                 .with_method_main("ash_renderer/scene_tree", scene_tree)
@@ -142,8 +158,17 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/bloom_set", bloom_set)
                 .with_method_main("ash_renderer/smaa_set", smaa_set)
                 .with_method_main("ash_renderer/shadow_stats", shadow_stats),
-            RemoteHttpPlugin::default(),
+            RemoteHttpPlugin::default().with_port(port),
         ));
+        // render subapp 的 BRP 端口跟随主端口（HostPort 字段公开；build 时机早于
+        // RenderStartup，改写来得及）
+        if let Some(mut host) = app
+            .get_sub_app_mut(RenderApp)
+            .and_then(|render| render.world_mut().get_resource_mut::<HostPort>())
+        {
+            host.0 = port + 1;
+        }
+        info!("BRP: http://127.0.0.1:{port}（render subapp :{}）", port + 1);
     }
 }
 

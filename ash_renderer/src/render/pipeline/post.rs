@@ -35,8 +35,8 @@ pub const BLOOM_BINDING_TEX1: u32 = 1;
 pub const BLOOM_BINDING_SAMPLER: u32 = 2;
 pub const BLOOM_BINDING_PARAMS: u32 = 3;
 
-/// 参数 UBO 字节长（3×f32 + 13 垫）。
-pub const BLOOM_PARAMS_SIZE: u32 = 16;
+/// 参数 UBO 字节长（5×f32 + 垫，std140 对齐 16）。
+pub const BLOOM_PARAMS_SIZE: u32 = 32;
 
 /// 参数 UBO 宿主侧取数（pack_bloom_params 排布）。
 pub struct BloomParamsData {
@@ -47,6 +47,10 @@ pub struct BloomParamsData {
     /// tonemap 开关（0/1；debug 仪器模式由 render mode 旁路面承接，此旗标
     /// 供 BRP A/B 对照用）。
     pub tonemap: f32,
+    /// 曲线选型（0=Narkowicz 基线 / 1=Filament ACES，8.6 三态 A/B）。
+    pub curve: f32,
+    /// 亮度增益位（ap1 *= gain；ACES=1.0，LEGACY 形态=1.667）。
+    pub gain: f32,
 }
 
 #[repr(C)]
@@ -55,7 +59,9 @@ struct BloomParamsLayout {
     strength: f32,
     enabled: f32,
     tonemap: f32,
-    _pad: f32,
+    curve: f32,
+    gain: f32,
+    _pad: [f32; 3],
 }
 
 const _: () = {
@@ -69,7 +75,28 @@ pub fn pack_bloom_params(d: &BloomParamsData) -> [u8; BLOOM_PARAMS_SIZE as usize
     out[0..4].copy_from_slice(&d.strength.to_le_bytes());
     out[4..8].copy_from_slice(&d.enabled.to_le_bytes());
     out[8..12].copy_from_slice(&d.tonemap.to_le_bytes());
+    out[12..16].copy_from_slice(&d.curve.to_le_bytes());
+    out[16..20].copy_from_slice(&d.gain.to_le_bytes());
     out
+}
+
+/// 8.6 色调映射曲线选型（Narkowicz=8.4 基线对照，FilamentAces=完整版 aces::ACES）。
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum TonemapCurve {
+    Narkowicz,
+    #[default]
+    FilamentAces,
+}
+
+impl TonemapCurve {
+    /// UBO 标量（BloomParamsLayout.curve 偏移）。
+    #[must_use]
+    pub fn as_f32(self) -> f32 {
+        match self {
+            Self::Narkowicz => 0.0,
+            Self::FilamentAces => 1.0,
+        }
+    }
 }
 
 /// Bloom 开关与参数（BRP `bloom_set` 写，draw_frame 读）。
@@ -78,11 +105,15 @@ pub struct BloomSettings {
     pub enabled: bool,
     pub strength: f32,
     pub tonemap: bool,
+    pub curve: TonemapCurve,
+    pub gain: f32,
 }
 
 impl Default for BloomSettings {
     fn default() -> Self {
-        Self { enabled: true, strength: 0.04, tonemap: true }
+        // gain 默认 1.667 = Filament viewer 默认 ACES_LEGACY 口径（8.6.3 A/B：
+        // gain 1.0 画面过暗，均值亮度塌到 ~17%）；纯 ACES 观感拨 gain 1.0
+        Self { enabled: true, strength: 0.04, tonemap: true, curve: TonemapCurve::default(), gain: 1.667 }
     }
 }
 

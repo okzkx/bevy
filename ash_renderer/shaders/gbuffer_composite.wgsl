@@ -118,7 +118,7 @@ const MODE_DEPTH: u32 = 8u;
 
 // 清屏色（与 host 侧 CLEAR_COLOR 同值——线性域，SRGB 编码在最终 ROP 一次）
 const CLEAR_COLOR: vec3f = vec3f(0.02, 0.06, 0.14);
-const EXPOSURE: f32 = 0.00032;  // 8.4.1 重校准：ACES filmic 锚点——直射中灰面（albedo0.5·NoL0.5·20000lx）≈0.5 HDR，白墙≈1.7 进肩部不截断；原 0.00063 把中灰面钉在 1.0，ACES 下全顶白（0.00063 = 8.2.4 预曝光口径，按直出校准）
+const EXPOSURE: f32 = 0.00016;  // 8.6 重校：完整版 ACES 锚点——直射中灰面 ≈0.25 HDR、白墙 ≈0.85，落 Hill 拟合线性段（肩部压缩留给真高光）；原 0.00032 是 8.4.1 按 Narkowicz 肩部口径校的（白墙 1.7 进肩部），受光面大面积去饱和发灰的主源
 
 // MAX_PER_CLUSTER（cluster.rs 同源）
 const MAX_PER_CLUSTER: u32 = 16u;

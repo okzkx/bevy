@@ -6,7 +6,7 @@
 
 **一句话说明**：本步把现行"单方向光 Lambert 直出"改造成无烘焙、传统结构的 PC 端完整管线——Filament BRDF 材质、多光源光照累积、CSM+PCSS 级联软阴影、HDR/ToneMapping/Bloom/SMAA；本步不主张 GI 本体（归步骤 9）、反射与精确 OIT，也不把步骤 5/6 的 GPU-driven 骨架搬回 CPU（draw_calls 维持 5.3 口径是贯穿红线）。
 
-**当前验收状态：8.1~8.4 段 ✅ 收官（2026-10-22，均已并回推送），8.5 段 ✅ 收官（2026-10-23，分支 `goal/8.5`）——步骤 8 五段施工全部收官，步骤级验收归档待做**。范围 2026-10-19 用户增补定稿，管线形状 2026-10-20 拍板（deferred + Clustered Forward、开工即 3D cluster、GPU bitonic 透明排序、GPU-driven shadow pass、motion vectors 留位）；段级拆解施工计划已立案（2026-10-21，[施工计划：完整延迟渲染管线五段拆解](施工计划：完整延迟渲染管线五段拆解.md)）；8.1 段施工计划已立案（2026-10-22，[施工计划：G-buffer与透明层拆解](8.1-G-buffer与不透明几何/施工计划：G-buffer与透明层拆解.md)——世界位置取法=深度重建、render/ 全量一次迁移两枚拍板）；**8.2 段施工计划已立案（2026-10-22，[施工计划：Filament BRDF 与多光源光照累积](8.2-FilamentBRDF与多光源/施工计划：Filament%20BRDF%20与%20多光源光照累积.md)）**——立案期拍板=光源驻留形态**常驻表**；8.5 段施工计划立案补档（2026-10-23，[施工计划：SMAA三pass](8.5-SMAA抗锯齿/施工计划：SMAA三pass.md)，as-built）。
+**当前验收状态：8.1~8.4 段 ✅ 收官（2026-10-22，均已并回推送），8.5 段 ✅ 收官（2026-10-23，分支 `goal/8.5`）——步骤 8 五段施工全部收官，步骤级验收归档待做**。范围 2026-10-19 用户增补定稿，管线形状 2026-10-20 拍板（deferred + Clustered Forward、开工即 3D cluster、GPU bitonic 透明排序、GPU-driven shadow pass、motion vectors 留位）；段级拆解施工计划已立案（2026-10-21，[施工计划：完整延迟渲染管线五段拆解](施工计划：完整延迟渲染管线五段拆解.md)）；8.1 段施工计划已立案（2026-10-22，[施工计划：G-buffer与透明层拆解](8.1-G-buffer与不透明几何/施工计划：G-buffer与透明层拆解.md)——世界位置取法=深度重建、render/ 全量一次迁移两枚拍板）；**8.2 段施工计划已立案（2026-10-22，[施工计划：Filament BRDF 与多光源光照累积](8.2-FilamentBRDF与多光源/施工计划：Filament%20BRDF%20与%20多光源光照累积.md)）**——立案期拍板=光源驻留形态**常驻表**；8.5 段施工计划立案补档（2026-10-23，[施工计划：SMAA三pass](8.5-SMAA抗锯齿/施工计划：SMAA三pass.md)，as-built）。**追加段 8.6 ✅ 收官（2026-10-23 当日立案当日施工，分支 `goal/8.6`）：还原 Filament 完整 ACES 色调映射 + 曝光锚点重校**——起因=Sponza unlit vs shaded 发灰实测（曝光锚点落曲线肩部 + 裸 Narkowicz 高光压缩）；十步管线照抄 + curve/gain 参数面 + EXPOSURE 重校 0.00016，判定线五条全过（受光面饱和较 8.4 基线数量级改善），[施工记录](8.6-还原FilamentACES/8.6-施工记录：还原Filament完整ACES与曝光重校.md)；PBR Neutral 自决不做（理由与恢复条件见参考篇 §六），grading 全链与 EVILS 留拍板。
 
 ## 施工顺序
 
@@ -17,6 +17,7 @@
 | 8.3 | [8.3-CSM与PCSS级联阴影](8.3-CSM与PCSS级联阴影/) | shadow depth pass 逐 cascade 走 GPU-driven（标记链 + build_indirect，CPU 只发矩阵）、级联划分、PCSS 滤波半径、阴影采样进光照累积 | ✅ 收官（2026-10-22，[总验收账](8.3-CSM与PCSS级联阴影/8.3.5-施工记录：判定线总验收与计量.md)，分支 `goal/8.3` 待并回拍板） |
 | 8.4 | [8.4-HDR与ToneMapping](8.4-HDR与ToneMapping/) | 不透明+透明合成进 HDR 契约、Bloom（HDR 域）、ToneMapping、输出编码恰好一次（终结 swapchain 编码判定线悬案） | ✅ 收官（2026-10-22，[施工记录](8.4-HDR与ToneMapping/8.4-施工记录：HDR、ToneMapping与Bloom.md)，分支 `goal/8.4` 待并回拍板） |
 | 8.5 | [8.5-SMAA抗锯齿](8.5-SMAA抗锯齿/) | 边缘检测/权重计算/邻域混合三 pass（LDR 域、tonemap 后），延迟管线不用 MSAA 的标准搭档 | ✅ 收官（2026-10-23，[施工记录](8.5-SMAA抗锯齿/8.5-施工记录：SMAA三pass.md)，分支 `goal/8.5`） |
+| 8.6 | [8.6-还原FilamentACES](8.6-还原FilamentACES/) | present 曲线替换为 Filament 完整版 aces::ACES（AP0/AP1 + glow + 红修正 + Hill 拟合 + 暗包围，逐式照抄）+ 亮度增益位外露 + 曝光锚点重校（0.00016）；治"受光面进曲线肩部后饱和度坍塌"的发灰观感 | ✅ 收官（2026-10-23，[施工记录](8.6-还原FilamentACES/8.6-施工记录：还原Filament完整ACES与曝光重校.md)/[流程导读](8.6-还原FilamentACES/8.6-功能流程导读：色调映射三态曲线通道.md)，分支 `goal/8.6`） |
 
 一次只施工一段：8.1 是底座（G-buffer/透明拆分是后续全部的原料），依赖链 8.1 → 8.2 → 8.3 → 8.4 → 8.5 顺序不可倒。逐段独立验收以[路线图步骤 8 范围拆解表](../学习目标实现步骤.md)验收重点列为准；各段头号待决项与 SCGI 前置接口见[施工计划 §2/§3](施工计划：完整延迟渲染管线五段拆解.md)。
 
@@ -33,5 +34,6 @@
 - [Unity PBR 调研：材质模型、BRDF 与 IBL](../笔记/渲染/Unity%20PBR%20调研：材质模型、BRDF%20与%20IBL.md)——8.2 Filament BRDF 参照底座。
 - Filament 本地源码检出（`F:\okzkx\filament`，rc/1.78.1-cut 开发线，2026-10-22 登记）——8.2 BRDF 对照参考源；锚点、边界与开工前置（源码参考篇）见[8.2 段 README 参考底座节](8.2-FilamentBRDF与多光源/README.md)。
 - [Filament 源码参考：标准模型 BRDF 与多光源（8.2 对照基准）](../笔记/渲染/Filament%20源码参考：标准模型%20BRDF%20与%20多光源（8.2%20对照基准）.md)——8.2 开工前置源码参考篇（2026-10-22 产出：对照函数清单/宏默认组合/换算映射/驻留形态证据已钉明）。
+- [Filament 源码参考：色调映射与 Color Grading（8.6 对照基准）](../笔记/渲染/Filament%20源码参考：色调映射与%20Color%20Grading（8.6%20对照基准）.md)——8.6 开工前置源码参考篇（2026-10-23 产出：完整版 aces::ACES 十步管线/Hill 拟合常量/EVILS/grading LUT 管线顺序/viewer 默认配置/发灰归因基线已钉明）。
 - [体素渲染调研：VXGI 的大场景证伪与光源分簇的可行条件](../笔记/渲染/体素渲染调研：VXGI%20的大场景证伪与光源分簇的可行条件.md)——8.1 3D cluster 光源分簇参照。
 - [外置拓展需求条目 7：VSM](../外置拓展需求.md)——8.3 阴影技术边界（不进本步）。
