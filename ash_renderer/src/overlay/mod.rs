@@ -15,23 +15,21 @@
 //! | [`framework`] | 框架半边："怎么跑"——egui 状态（Context/字体含 CJK）+ Update 的 egui pass + 输入桥 + 绘制半边，产 [`EguiFrame`] |
 //! | [`tool_window`] | 业务半边："画什么"——工具窗口（左侧分组导航 + 右侧页面：着色/剔除/管线/帧统计/监控/实体树） |
 //! | [`widgets`] | 业务半边：屏幕空间非窗口 widget（右上角坐标轴指示器，永远显示；加载弹窗） |
-//! | [`transform_edit`] | 共享服务：Transform 编辑封装，BRP 写方法复用 |
+//!
+//! 与下层的接口：GPU 侧 UI 账面（`AtlasGpu`/`UiVertexRing`）、着色模式、监控账
+//! 与 pass 自计时等数据契约住 [`crate::render`]；Transform 编辑与层级树索引的
+//! 机制层、输入仲裁窄接口 `PointerCapture` 住 [`crate::scene::mechanism`]——
+//! 本模块只消费/写入这些契约，不被下层与 remote 引用。
 //!
 //! 机制与证据：`.agents/docs/3-静态取数链路/3.7-egui调试GUI/`、
 //! `.agents/docs/3-静态取数链路/3.10-egui实体层级树/`、
 //! `.agents/docs/3-静态取数链路/3.11-egui实体编辑/`。
 
 mod framework;
-pub(crate) mod transform_edit;
 mod tool_window;
 mod widgets;
 
-pub use framework::paint::{AtlasGpu, AtlasMirror, UiVertexRing};
-pub use framework::ui::{EguiFrame, EguiPassTiming, EguiState, OverlayPlugin};
-pub use tool_window::shading::RenderMode;
+pub use framework::paint::AtlasMirror;
+pub use framework::ui::{EguiFrame, EguiState, OverlayPlugin};
 
 pub(crate) use framework::paint::{paint_overlay, OverlayLogState, UiDrawData};
-// BRP scene_tree 复用树窗口的行数据、相关性过滤与节点命名——
-// CLI 树与 egui 树看到同一棵树、同一套"相关"语义，不养两份逻辑。
-pub(crate) use tool_window::entity_tree::{EntityRow, is_relevant, node_label};
-pub(crate) use tool_window::monitor::MonitorHistory;

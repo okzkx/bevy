@@ -1,5 +1,5 @@
-//! LOD 读数与开关方法族（6.2.5）：BRP 侧的验证通道——`lod_census` 做 GPU
-//! 档位 vs CPU 参照的逐实例对照（判定线 1 的直接证据 + 档位分布读数），
+//! LOD 读数与开关方法族：BRP 侧的验证通道——`lod_census` 做 GPU 档位 vs
+//! CPU 参照的逐实例对照（选档正确性的直接证据 + 档位分布读数），
 //! `lod_set_enabled`/`lod_set_params` 写开关与判据参数（数据层 A/B 的远程
 //! 驱动，egui checkbox 与此同源）。
 //!
@@ -13,10 +13,7 @@
 //! 就是它），公式同 [`lod_hysteresis_level`] 逐位同源——静态场景下对照逐
 //! 实例一致，带内微动不构成 mismatch。
 
-use bevy::{
-    camera::{Camera, Projection},
-    prelude::*,
-};
+use bevy::prelude::*;
 use serde_json::{json, Value};
 
 use ash_macros::system;
@@ -30,32 +27,24 @@ use crate::{
     },
 };
 
-use super::{error_codes, invalid_params, BrpError, BrpResult};
+use super::{
+    invalid_params,
+    params::{brp_view_proj, clamp_rect_to_screen, parse_params},
+    readback::u32_at,
+    BrpError, BrpResult,
+};
 
 /// `ash_renderer/lod_census`：LOD 档位对照（只读）。返回开关状态、判据参数、
 /// dispatch 上界、档位分布（GPU 两帧前读数）、逐实例 GPU/CPU 档位与不一致
-/// 清单——判定线 1 的证据形态。
+/// 清单。
 ///
 /// # Errors
 /// 相机缺席 / 档位环读失败（host-visible 契约被打破，Tier② 级）。
 #[system]
 pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    // —— 相机 view_proj（与 draw_frame 同一乘序；缺席 = 场景装配问题，报错）
-    let view_proj = {
-        let mut cameras =
-            world.query_filtered::<(&Projection, &GlobalTransform), With<Camera>>();
-        match cameras.single(world) {
-            Ok((projection, global)) => projection.get_clip_from_view() * global.affine().inverse(),
-            Err(_) => {
-                return Err(BrpError {
-                    code: error_codes::COMPONENT_ERROR,
-                    message: "World 里没有相机——投屏参照无法计算".to_owned(),
-                    data: None,
-                });
-            }
-        }
-    };
-    let screen = {
+    // 相机缺席 = 场景装配问题，报错
+    let view_proj = brp_view_proj(world, "投屏参照无法计算")?;
+    let (marks_frame, bound, enabled, threshold, hysteresis) = {
         let (diag, settings) = (
             world.resource::<LodDiagnostics>(),
             world.resource::<LodSettings>(),
@@ -68,7 +57,6 @@ pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> B
             settings.hysteresis,
         )
     };
-    let (marks_frame, bound, enabled, threshold, hysteresis) = screen;
     // —— CPU 参照：账本行 × 驻留局部包围盒 → 世界保守盒投屏（clamp 后最大边
     //    = 尺寸度量，与 shader 同式）→ 自然档位 + 迟滞裁决（prev = GPU 档位
     //    环本槽值，同源）。行先收拢（账本/pool 只读借用不与档位环写读并存）。
@@ -101,6 +89,9 @@ pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> B
             reference.push((entity, slot, 0, 0.0, in_group));
             continue;
         };
+        // 坑：必须与 lod_select.wgsl 同口径先钳进屏再量尺寸，否则离屏/半离屏
+        // 行 CPU 判细档、GPU 判粗档（完全离屏 → 0 → 最粗档）
+        let (px_min, px_max) = clamp_rect_to_screen(px_min, px_max, swapchain_extent);
         let size = (px_max.x - px_min.x).max(px_max.y - px_min.y);
         let raw = lod_raw_level(size, threshold, MAX_LOD_LEVELS);
         reference.push((entity, slot, raw, size, in_group));
@@ -113,25 +104,17 @@ pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> B
         .resource_mut::<InstanceTables>()
         .lod_level_ring(frame)
         .read(0, &mut gpu_bytes)
-        .map_err(|e: VulkanError| BrpError {
-            code: error_codes::COMPONENT_ERROR,
-            message: format!("档位环读失败: {e}"),
-            data: None,
-        })?;
-    let level_at = |slot: u32| {
-        let o = slot as usize * LOD_LEVEL_SIZE as usize;
-        u32::from_le_bytes(gpu_bytes[o..o + LOD_LEVEL_SIZE as usize].try_into().expect("4B"))
-    };
+        .map_err(|e: VulkanError| BrpError::internal(format!("档位环读失败: {e}")))?;
 
     let mut mismatches = Vec::new();
     let mut counts = [0u32; MAX_LOD_LEVELS as usize];
     let mut rows = Vec::with_capacity(reference.len());
     for (entity, slot, raw, size, in_group) in reference {
-        let gpu = level_at(slot).min(MAX_LOD_LEVELS - 1);
+        let gpu = u32_at(&gpu_bytes, slot as usize * LOD_LEVEL_SIZE as usize)?.min(MAX_LOD_LEVELS - 1);
         counts[gpu as usize] += 1;
         // CPU 参照 = 同一公式 + 同一迟滞状态（prev = GPU 档位环本槽值——
         // 与 GPU 下一次 dispatch 将读的迟滞输入同一来源；静止场景两者
-        // 收敛一致，判定线 1 的对照口径）
+        // 收敛一致，即对照口径）
         let cpu = lod_hysteresis_level(raw, gpu, size, threshold, hysteresis, MAX_LOD_LEVELS);
         if gpu != cpu {
             mismatches.push(json!({
@@ -179,8 +162,7 @@ struct SetEnabledParams {
 /// 参数缺失/类型错。
 #[system]
 pub(crate) fn lod_set_enabled(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let p: SetEnabledParams = serde_json::from_value(params.unwrap_or(Value::Null))
-        .map_err(|e| invalid_params(format!("enabled: {e}")))?;
+    let p: SetEnabledParams = parse_params(params, "params 缺失：需要 enabled")?;
     world.resource_mut::<LodSettings>().enabled = p.enabled;
     Ok(json!({ "enabled": p.enabled }))
 }
@@ -201,8 +183,8 @@ struct SetParams {
 /// 参数缺失/类型错/数值非法（threshold ≤ 0 或 hysteresis 出 [0,1)）。
 #[system]
 pub(crate) fn lod_set_params(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let p: SetParams = serde_json::from_value(params.unwrap_or(Value::Null))
-        .map_err(|e| invalid_params(format!("params: {e}")))?;
+    let p: SetParams =
+        parse_params(params, "params 缺失：需要对象（threshold_px/hysteresis 可选）")?;
     let mut settings = world.resource_mut::<LodSettings>();
     if let Some(threshold) = p.threshold_px {
         if threshold <= 0.0 || threshold.is_nan() {

@@ -39,10 +39,12 @@ except AttributeError:
     pass
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXE = os.path.join(REPO, "target", "debug", "ash_renderer.exe")
+# 环境变量旁路：worktree 双实例并行时指向错开的 exe 与端口（缺省主仓同名）
+HOST_NAME = os.environ.get("ASH_HOST_EXE_NAME", "ash_renderer.exe")
+EXE = os.environ.get("ASH_HOST_EXE", os.path.join(REPO, "target", "debug", HOST_NAME))
 GLB = os.path.join(REPO, "assets", "zero_day", "zero_day_measure_one.glb")
 HOST_LOG = os.path.join(REPO, ".temp", "scene_zero_day_host.log")
-BRP_PORT = 15702
+BRP_PORT = int(os.environ.get("ASH_BRP_PORT", "15702"))
 
 _results = []
 
@@ -221,12 +223,12 @@ def iter_processes():
     import csv
     import io
     out = subprocess.run(
-        ["tasklist", "/FI", "IMAGENAME eq ash_renderer.exe", "/FO", "CSV", "/NH"],
+        ["tasklist", "/FI", f"IMAGENAME eq {HOST_NAME}", "/FO", "CSV", "/NH"],
         capture_output=True,
     ).stdout.decode("gbk", errors="replace")
     rows = []
     for row in csv.reader(io.StringIO(out)):
-        if len(row) >= 2 and row[0] == "ash_renderer.exe":
+        if len(row) >= 2 and row[0] == HOST_NAME:
             rows.append((int(row[1]), row[0]))
     return rows
 
@@ -309,7 +311,7 @@ def main():
     print("\n== ② 规模账面成组记录（对照 Sponza 基线 mesh 9.3MB/贴图 362.8MB）==")
     perf = rpc("ash_renderer/perf_stats")
     print(f"  GPU 全帧 p50 {perf['gpu_total_ms']['p50']:.2f}ms · p95 {perf['gpu_total_ms']['p95']:.2f}ms；"
-          f"GPU 图形 p50 {perf['gpu_graphics_ms']['p50']:.2f}ms；CPU p50 {perf['cpu_total_ms']['p50']:.2f}ms；"
+          f"GPU 光照 p50 {perf['gpu_lighting_ms']['p50']:.2f}ms；CPU p50 {perf['cpu_total_ms']['p50']:.2f}ms；"
           f"实例行 {perf['scale']['instance_rows']}；显存贴图 "
           f"{perf['memory']['image_resident_bytes']/1e9:.2f}GB/{perf['memory']['image_resident_count']} 张")
     check("② 规模读数可测（全常驻 used_mesh > 0 且 GPU 计时开着）",

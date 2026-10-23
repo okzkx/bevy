@@ -1,5 +1,5 @@
-//! 相机控制（机制半边）：左键拖动绕目标点环绕、滚轮沿视线推拉缩放；5.4 起
-//! 追加 Unity Scene 式漫游——右键拖拽环视 + WASD 沿视线平移 + Q/E 世界升降。
+//! 相机控制（机制半边）：左键拖动绕目标点环绕、滚轮沿视线推拉缩放；另有
+//! Unity Scene 式漫游——右键拖拽环视 + WASD 沿视线平移 + Q/E 世界升降。
 //! 零 Vulkan 代码，也不含写死的场景参数——环绕目标由组件携带，进场时由
 //! 业务半边（[`crate::scene::content::camera`]）按取景参数给出。
 //! 输入源有两个：鼠标（左键 + 滚轮，逐帧增量）与 CLI 给值（BRP
@@ -16,22 +16,16 @@
 //! 环视 = 相机位置钉住、yaw/pitch 随拖拽旋转、环绕中心搬到新视线正前方
 //!（pivot 跟随，松开右键后左键轨道绕新中心继续——Unity Scene 同款）；
 //! WASD 沿相机视线系平移（W = 视线方向），Q/E 世界升降；速度 = radius·系数
-//! 每秒（缩放档位即速度档位，头盔近景与大场景俯瞰同一手感）。键盘侧仲裁 =
-//! egui `wants_keyboard_input()`（面板文本编辑中让键），鼠标侧同 layer_id_at
-//! 门。局限：环视不做指针抓取，光标拖出窗口即无增量（会话保活、回窗续拖，
-//! 与左键会话同款防跳变）。
+//! 每秒（缩放档位即速度档位，头盔近景与大场景俯瞰同一手感）。局限：环视不做
+//! 指针抓取，光标拖出窗口即无增量（会话保活、回窗续拖，与左键会话同款防跳变）。
 //!
 //! 帧内时序：Update 改 [`Transform`] → PostUpdate 传播（TransformSystems::Propagate）
 //! → Last 的 draw_frame 直读 `GlobalTransform` 建 VP（driver/host/frame.rs
 //! `FrameInput.cameras`）——同帧生效，无跨帧滞后。
 //!
-//! 与 egui 调试 UI 的仲裁：按下/滚轮时刻查指针位置上的最顶层
-//!（`layer_id_at`，egui 0.36.2 context.rs:3104）——非 Background 层 = 悬在
-//! 调试面板上，就让给 UI。不用 `is_pointer_over_egui()`：它依赖 `run_ui`
-//! 闭包 API 写入的 `root_ui_available_rect`，本集成的 `begin_pass`/`end_pass`
-//! 形状下该字段恒 None，指针在背景上时恒返回 true（实测门永远关死）。
-//! 光标 points 域与 egui 同域直比。查询读的是最近一次 pass 的层序，最多
-//! 滞后一帧——点击瞬间指针不会瞬移，调试 UI 场景可接受。
+//! 与调试 UI 的仲裁：只读 [`PointerCapture`]（排在 [`PointerCaptureSet`] 之后，
+//! 同帧写后读）——`over_ui` 时鼠标按下/滚轮让给 UI，`wants_keyboard` 时漫游键
+//! 让给 UI；判定逻辑归写方（overlay），未装 UI 时恒不让。
 
 use bevy::{
     camera::Camera,
@@ -45,7 +39,7 @@ use bevy::{
     window::{PrimaryWindow, Window},
 };
 
-use crate::overlay::EguiState;
+use super::pointer_capture::{PointerCapture, PointerCaptureSet};
 
 use ash_macros::system;
 
@@ -63,9 +57,8 @@ const ZOOM_PER_LINE: f32 = 0.95;
 const FLY_SPEED_FACTOR: f32 = 0.5;
 
 /// 环绕半径限位：下限防穿模（头盔半身尺 ~0.3，0.5 时贴脸近裁剪面也安全）；
-/// 上限原为 FlightHelmet 小场景钉 10.0，5.4 起常驻大场景（4096 实例铺
-/// ~256 单位）取景需要俯瞰全程，放宽到 2000（5.5 三档压测同够用——远平面
-/// 同步放宽，见 content/camera）。
+/// 上限 2000 覆盖常驻大场景（4096 实例铺 ~256 单位，及更大压测档）的俯瞰
+/// 全程——远平面同步放宽，见 content/camera。
 const MIN_ORBIT_RADIUS: f32 = 0.5;
 const MAX_ORBIT_RADIUS: f32 = 2000.0;
 
@@ -119,7 +112,7 @@ pub(crate) struct DragSession {
 }
 
 /// CLI 相机给值命令：逐项可选（None = 不动该量）。角度用度数（与
-/// [`crate::overlay::transform_edit::TransformEdit`] 的欧拉口径一致），zoom
+/// [`super::transform_edit::TransformEdit`] 的欧拉口径一致），zoom
 /// 与滚轮的指数缩放同语义（<1 推近、>1 拉远）。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CameraOrbitCommand {
@@ -232,18 +225,19 @@ pub struct AshCameraControlPlugin;
 
 impl Plugin for AshCameraControlPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, camera_control);
+        app.init_resource::<PointerCapture>()
+            .add_systems(Update, camera_control.after(PointerCaptureSet));
     }
 }
 
-/// 相机控制（Update）：左键按下且 egui 不感兴趣 → 开启轨道拖拽会话，按住
+/// 相机控制（Update）：左键按下且指针不在 UI 上 → 开启轨道拖拽会话，按住
 /// 期间逐帧位移换算 yaw/pitch；右键同款会话做环视（位置钉住、pivot 跟随）；
 /// 滚轮按格缩放半径；WASDQE 漫游平移。写 Transform 只在参数变化时，朝向恒
 /// 用 look_at 对准环绕中心（与业务半边进场的 looking_at 同语义，相机就位
 /// 核验的 0° 判定线在拖拽后仍成立）。
 #[expect(
     clippy::too_many_arguments,
-    reason = "bevy 系统的参数表即依赖注入清单：窗口/鼠标/键盘/滚轮/换算率/时间/egui 仲裁/相机组/双拖拽会话/首接管收账，逐项声明是框架惯例"
+    reason = "bevy 系统的参数表即依赖注入清单：窗口/鼠标/键盘/滚轮/换算率/时间/UI 仲裁/相机组/双拖拽会话/首接管收账，逐项声明是框架惯例"
 )]
 #[system]
 fn camera_control(
@@ -253,7 +247,7 @@ fn camera_control(
     scroll: Res<AccumulatedMouseScroll>,
     pixels_per_line: Res<MouseScrollPixelsPerLine>,
     time: Res<Time>,
-    egui: Option<Res<EguiState>>,
+    capture: Res<PointerCapture>,
     mut cameras: Query<(&mut Transform, &mut CameraOrbit), With<Camera>>,
     mut session: Local<DragSession>,
     mut look: Local<DragSession>,
@@ -269,11 +263,10 @@ fn camera_control(
         return;
     }
     let cursor = window.cursor_position();
-    // egui 仲裁（语义见模块文档）：光标 points 域与 egui 同域，直接问"这点
-    // 上最顶层是谁"，非 Background 层 = 悬在调试面板上。
-    let egui_wants = crate::scene::util::egui_wants_pointer(egui.as_deref(), cursor);
+    // UI 仲裁（语义见模块文档）：写方已按本帧光标算好
+    let ui_wants = capture.over_ui;
 
-    if mouse.just_pressed(MouseButton::Left) && !egui_wants {
+    if mouse.just_pressed(MouseButton::Left) && !ui_wants {
         session.dragging = cursor.is_some();
         session.last_cursor = cursor;
     }
@@ -281,7 +274,7 @@ fn camera_control(
         session.dragging = false;
         session.last_cursor = None;
     }
-    if mouse.just_pressed(MouseButton::Right) && !egui_wants {
+    if mouse.just_pressed(MouseButton::Right) && !ui_wants {
         look.dragging = cursor.is_some();
         look.last_cursor = cursor;
     }
@@ -294,7 +287,7 @@ fn camera_control(
     // 滚轮推拉：悬在 egui 区上滚轮让给调试窗口（该帧半径不动，扫出
     // 后恢复）；拖拽中指针扫过面板同理，推拉与环绕正交。
     let lines = scroll.to_lines(&pixels_per_line).delta.y;
-    if lines != 0.0 && !egui_wants {
+    if lines != 0.0 && !ui_wants {
         for (_, mut orbit) in &mut cameras {
             orbit.radius = (orbit.radius * ops::powf(ZOOM_PER_LINE, lines))
                 .clamp(MIN_ORBIT_RADIUS, MAX_ORBIT_RADIUS);
@@ -335,8 +328,7 @@ fn camera_control(
     }
     // WASDQE 漫游：WASD 沿视线系、Q/E 世界升降，速度随 radius 自适应；
     // egui 文本编辑中让键（面板输入不被相机劫持）。
-    let egui_wants_kb = egui.as_deref().is_some_and(|s| s.ctx.egui_wants_keyboard_input());
-    if !egui_wants_kb {
+    if !capture.wants_keyboard {
         let dt = time.delta_secs();
         for (_, mut orbit) in &mut cameras {
             let v = fly_vector(-orbit.offset().normalize_or_zero(), &keys);

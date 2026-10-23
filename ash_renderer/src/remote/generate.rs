@@ -1,11 +1,10 @@
-//! 常驻大场景生成与 chunk 组织方法族（5.4）：`generate_scene` 程序化铺
-//! 实例（批量克隆共享资产，账本链路自动入行，驻留资产零重传）；
+//! 常驻大场景生成与 chunk 组织方法族：`generate_scene` 程序化铺实例（批量
+//! 克隆共享资产，账本链路自动入行，驻留资产零重传）；
 //! `generate_chunks`/`chunk_census`/`chunk_despawn` 是 chunk 身份与整块
-//! 增删（5.4.2）——判定线 1（复用/块边界可观察）与判定线 2（整块增删
-//! 走账）的驱动面与证据通道。
+//! 增删——"资产复用/块边界可观察"与"整块增删走账"的驱动面与证据通道。
 //!
-//! 分工：操作本体在 [`crate::scene::mechanism::scene_gen`]（BRP 与将来
-//! egui 共用，object_ops 同款惯例），本模块只是协议薄壳。
+//! 分工：操作本体在 [`crate::scene::mechanism::scene_gen`]（BRP 与 egui
+//! 共用，object_ops 同款惯例），本模块只是协议薄壳。
 //!
 //! 红线边界：写操作是人/AI 的场景编辑意图（与 set_transform/spawn 同类），
 //! 不存在"读数回灌绘制决策"的通道（draw.rs 红线口径不受影响）。
@@ -20,7 +19,19 @@ use crate::scene::mechanism::{
     ChunkGenParams, SceneGenParams,
 };
 
-use super::{invalid_params, objects::object_op_error, BrpResult};
+use super::{invalid_params, objects::object_op_error, params::parse_params, BrpError, BrpResult};
+
+/// 生成源实体：显式给定直接用，缺省取场景里第一个可渲染 primitive。
+fn source_or_first_primitive(world: &mut World, source: Option<Entity>) -> Result<Entity, BrpError> {
+    if let Some(source) = source {
+        return Ok(source);
+    }
+    world
+        .query_filtered::<Entity, (With<Mesh3d>, With<MeshMaterial3d<StandardMaterial>>)>()
+        .iter(world)
+        .next()
+        .ok_or_else(|| invalid_params("场景无可渲染 primitive，source 不能缺省"))
+}
 
 /// `ash_renderer/generate_scene` 的请求参数：源实体缺省 = 场景里第一个
 /// 可渲染 primitive（省去先查再铺的两步）；其余全显式——复现的前提是
@@ -42,20 +53,8 @@ struct GenerateSceneParams {
 /// 首尾实体（入行对账锚点）。
 #[system]
 pub(crate) fn generate_scene(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value =
-        params.ok_or_else(|| invalid_params("params 缺失：需要 count/columns/spacing/seed"))?;
-    let p: GenerateSceneParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
-    let source = match p.source {
-        Some(s) => s,
-        None => {
-            let mut q = world
-                .query_filtered::<Entity, (With<Mesh3d>, With<MeshMaterial3d<StandardMaterial>>)>();
-            q.iter(world)
-                .next()
-                .ok_or_else(|| invalid_params("场景无可渲染 primitive，source 不能缺省"))?
-        }
-    };
+    let p: GenerateSceneParams = parse_params(params, "params 缺失：需要 count/columns/spacing/seed")?;
+    let source = source_or_first_primitive(world, p.source)?;
     let readback = generate_instances(
         world,
         SceneGenParams {
@@ -96,20 +95,11 @@ struct GenerateChunksParams {
 /// 计数与首尾根实体。
 #[system]
 pub(crate) fn generate_chunks_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params
-        .ok_or_else(|| invalid_params("params 缺失：需要 chunk_grid/instances_per_chunk/spacing/seed"))?;
-    let p: GenerateChunksParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
-    let source = match p.source {
-        Some(s) => s,
-        None => {
-            let mut q = world
-                .query_filtered::<Entity, (With<Mesh3d>, With<MeshMaterial3d<StandardMaterial>>)>();
-            q.iter(world)
-                .next()
-                .ok_or_else(|| invalid_params("场景无可渲染 primitive，source 不能缺省"))?
-        }
-    };
+    let p: GenerateChunksParams = parse_params(
+        params,
+        "params 缺失：需要 chunk_grid/instances_per_chunk/spacing/seed",
+    )?;
+    let source = source_or_first_primitive(world, p.source)?;
     let readback = generate_chunks(
         world,
         ChunkGenParams {
@@ -158,20 +148,19 @@ pub(crate) fn chunk_census(In(_params): In<Option<Value>>, world: &mut World) ->
     }))
 }
 
-/// `ash_renderer/chunk_despawn`：整块删除——按 id 找根，根连子树递归
-/// despawn；逐 primitive 的 Removed 通道自动清账（4.1 整树清账的批量
-/// 形态）。返回根实体（对账锚点：increment_stats 的 removed_rows 增量
-/// 应等于该块 members）。
+/// `ash_renderer/chunk_despawn` 的请求参数。
 #[derive(serde::Deserialize)]
 struct ChunkDespawnParams {
     id: u32,
 }
 
+/// `ash_renderer/chunk_despawn`：整块删除——按 id 找根，根连子树递归
+/// despawn；逐 primitive 的 Removed 通道自动清账（整树清账的批量形态）。
+/// 返回根实体（对账锚点：increment_stats 的 removed_rows 增量应等于该块
+/// members）。
 #[system]
 pub(crate) fn chunk_despawn(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 id"))?;
-    let p: ChunkDespawnParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let p: ChunkDespawnParams = parse_params(params, "params 缺失：需要 id")?;
     let root = despawn_chunk(world, p.id).map_err(object_op_error)?;
     Ok(json!({
         "chunk": p.id,

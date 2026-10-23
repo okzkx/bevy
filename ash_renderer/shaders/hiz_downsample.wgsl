@@ -1,11 +1,11 @@
-// 6.1.2 Hi-Z 深度金字塔归约（compute 单入口）：把源图逐 2×2 取 MIN 缩半写进
+// Hi-Z 深度金字塔归约（compute 单入口）：把源图逐 2×2 取 MIN 缩半写进
 // 金字塔下一级。每次 dispatch 只做一级——源 = 深度附件（level 0）或金字塔上
 // 一级（level L≥1，各带单级采样视图），目标 = 本级 storage view；逐级 dispatch
 // 由 Rust 侧按 mip 链长度串行录制（bevy experimental/downsample_depth.wesl 的
 // 单 pass SPD 形状不搬——批量重排换挡的复杂度对本段规模不划算，逐级串行
 // 是"学机制与保守化形状，不搬整套架构"的取舍钉明）。
 //
-// reverse-Z 保守方向（判定线 3，vulkan/hiz.rs 单测钉死）：本仓深度 reverse-Z
+// reverse-Z 保守方向（src/render/gpu/hiz.rs 单测钉死）：本仓深度 reverse-Z
 //（近平面 1、远平面 0，clear 0），深度值越小 = 越远。tile 的保守遮挡上界 =
 // tile 内"最远"的已缓冲表面 = 值最小者 → 归约取 MIN。正向 Z 的同类写法是
 // MAX，方向相反——取错 = 系统性错杀（最危险单点）。比较语义（遮挡判剔除）

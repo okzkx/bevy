@@ -1,4 +1,4 @@
-//! 8.4 Bloom 资源族（HDR 域 dual-Kawase 链）：半分辨率降采样链（prefilter
+//! Bloom 资源族（HDR 域 dual-Kawase 链）：半分辨率降采样链（prefilter
 //! 软膝阈值 → N-1 级 down）+ 升采样链（up[i] = tent(up[i+1]) + down[i]）+
 //! 参数 UBO（strength/enabled/tonemap）。
 //!
@@ -15,6 +15,7 @@
 use ash::{vk, Device};
 use bevy::log::info;
 
+use crate::common::bytes::put_f32;
 use crate::common::error::Result;
 use crate::render::resources::{BufferRole, GpuBuffer};
 use crate::render::{Context, HDR_FORMAT, MAX_FRAMES_IN_FLIGHT};
@@ -47,14 +48,13 @@ pub struct BloomParamsData {
     /// tonemap 开关（0/1；debug 仪器模式由 render mode 旁路面承接，此旗标
     /// 供 BRP A/B 对照用）。
     pub tonemap: f32,
-    /// 曲线选型（0=Narkowicz 基线 / 1=Filament ACES，8.6 三态 A/B）。
+    /// 曲线选型（0=Narkowicz 基线 / 1=Filament ACES，三态 A/B）。
     pub curve: f32,
     /// 亮度增益位（ap1 *= gain；ACES=1.0，LEGACY 形态=1.667）。
     pub gain: f32,
 }
 
 #[repr(C)]
-#[allow(dead_code)]
 struct BloomParamsLayout {
     strength: f32,
     enabled: f32,
@@ -68,19 +68,19 @@ const _: () = {
     assert!(std::mem::size_of::<BloomParamsLayout>() as u32 == BLOOM_PARAMS_SIZE);
 };
 
-/// 参数打包（偏移按 BloomParamsLayout 手工排布）。
+/// 参数打包（偏移按 BloomParamsLayout 排布，标量小端走 [`crate::common::bytes`]）。
 #[must_use]
 pub fn pack_bloom_params(d: &BloomParamsData) -> [u8; BLOOM_PARAMS_SIZE as usize] {
     let mut out = [0u8; BLOOM_PARAMS_SIZE as usize];
-    out[0..4].copy_from_slice(&d.strength.to_le_bytes());
-    out[4..8].copy_from_slice(&d.enabled.to_le_bytes());
-    out[8..12].copy_from_slice(&d.tonemap.to_le_bytes());
-    out[12..16].copy_from_slice(&d.curve.to_le_bytes());
-    out[16..20].copy_from_slice(&d.gain.to_le_bytes());
+    put_f32(&mut out, 0, d.strength);
+    put_f32(&mut out, 4, d.enabled);
+    put_f32(&mut out, 8, d.tonemap);
+    put_f32(&mut out, 12, d.curve);
+    put_f32(&mut out, 16, d.gain);
     out
 }
 
-/// 8.6 色调映射曲线选型（Narkowicz=8.4 基线对照，FilamentAces=完整版 aces::ACES）。
+/// 色调映射曲线选型（Narkowicz=基线对照，FilamentAces=完整版 aces::ACES）。
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum TonemapCurve {
     Narkowicz,
@@ -111,7 +111,7 @@ pub struct BloomSettings {
 
 impl Default for BloomSettings {
     fn default() -> Self {
-        // gain 默认 1.667 = Filament viewer 默认 ACES_LEGACY 口径（8.6.3 A/B：
+        // gain 默认 1.667 = Filament viewer 默认 ACES_LEGACY 口径（A/B 实测：
         // gain 1.0 画面过暗，均值亮度塌到 ~17%）；纯 ACES 观感拨 gain 1.0
         Self { enabled: true, strength: 0.04, tonemap: true, curve: TonemapCurve::default(), gain: 1.667 }
     }
@@ -141,7 +141,8 @@ pub struct BloomTargets {
 }
 
 impl BloomTargets {
-    /// 建资源链：mip 目标 → UBO → 布局 → pool + 描述符。
+    /// 建资源链：布局 + 采样器 + pool（尺寸无关，只建一次）→ mip 目标 → UBO →
+    /// 描述符集。
     ///
     /// # Errors
     /// 附件/描述符创建失败。
@@ -160,41 +161,14 @@ impl BloomTargets {
             extents: Vec::new(),
             sampler: vk::Sampler::null(),
         };
-        let built = (|| -> Result<()> {
-            let mut w = extent.width;
-            let mut h = extent.height;
-            for k in 0..BLOOM_LEVELS {
-                w = (w / 2).max(1);
-                h = (h / 2).max(1);
-                this.extents.push(vk::Extent2D { width: w, height: h });
-                this.down.push(ColorTarget::new(
-                    ctx,
-                    vk::Extent2D { width: w, height: h },
-                    HDR_FORMAT,
-                    false,
-                    "bloom down",
-                )?);
-                if k < BLOOM_LEVELS - 1 {
-                    // up 链少一级（最小级 down[N-1] 直接作 up 源）；up[i] 与
-                    // extents[i] 同尺寸（首版建在 extents[i+1] 上——renderArea
-                    // 越界 VUID 实抓即修）
-                    this.up.push(ColorTarget::new(
-                        ctx,
-                        vk::Extent2D { width: w, height: h },
-                        HDR_FORMAT,
-                        false,
-                        "bloom up",
-                    )?);
-                }
-            }
-            for _ in 0..MAX_FRAMES_IN_FLIGHT {
-                this.ubos.push(this
-                    .mk_buffer(ctx, BufferRole::FrameUniform, u64::from(BLOOM_PARAMS_SIZE))?);
-            }
-            unsafe { this.build_descriptors() }?;
-            Ok(())
-        })();
-        built?;
+        // 失败路径：已建对象都已落字段，由 Drop 回收
+        unsafe { this.build_static() }?;
+        this.build_targets(ctx, extent)?;
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            this.ubos.push(this
+                .mk_buffer(ctx, BufferRole::FrameUniform, u64::from(BLOOM_PARAMS_SIZE))?);
+        }
+        unsafe { this.build_descriptors() }?;
         info!(
             "Bloom 资源就绪: {BLOOM_LEVELS} 级 dual-Kawase（半分辨率起）× {} 帧槽参数 UBO，\
              阈值 1.0 + soft knee（线性叠加系数随 BRP bloom_set）",
@@ -203,9 +177,9 @@ impl BloomTargets {
         Ok(this)
     }
 
-    /// 随 swapchain 重建（闸门③，幂等——extent 不变空手而归）：销毁链目标与
-    /// 描述符重建（自带 device_wait_idle，在飞旧 bloom 目标不可能被引用）。
-    /// layout 本体不动（与尺寸无关，描述符指向重写）。
+    /// 随 swapchain 重建（闸门③，幂等——extent 不变空手而归）：链目标重建 +
+    /// pool reset 后重分配描述符集（自带 device_wait_idle，在飞旧 bloom 目标
+    /// 不可能被引用）。layout/采样器/pool 本体不动（与尺寸无关）。
     ///
     /// # Errors
     /// 附件/描述符重建失败。
@@ -217,55 +191,54 @@ impl BloomTargets {
             return Ok(());
         }
         unsafe { ctx.device.device_wait_idle() }?;
-        self.down.clear();
-        self.up.clear();
-        if self.pool != vk::DescriptorPool::null() {
-            unsafe { self.device.destroy_descriptor_pool(self.pool, None) };
-            self.pool = vk::DescriptorPool::null();
-        }
+        unsafe {
+            self.device
+                .reset_descriptor_pool(self.pool, vk::DescriptorPoolResetFlags::empty())
+        }?;
         self.sets_down.clear();
         self.sets_up.clear();
         self.sets_params.clear();
+        self.build_targets(ctx, extent)?;
+        unsafe { self.build_descriptors() }?;
+        info!(
+            "Bloom 链随 swapchain 重建: 级 0 = {}×{}",
+            self.extents[0].width, self.extents[0].height,
+        );
+        Ok(())
+    }
+
+    /// 尺寸相关目标：down[N] + up[N-1] + 各级 extent（旧目标先清）。
+    fn build_targets(&mut self, ctx: &Context, extent: vk::Extent2D) -> Result<()> {
+        self.down.clear();
+        self.up.clear();
+        self.extents.clear();
         let mut w = extent.width;
         let mut h = extent.height;
         for k in 0..BLOOM_LEVELS {
             w = (w / 2).max(1);
             h = (h / 2).max(1);
-            self.extents[k] = vk::Extent2D { width: w, height: h };
-            self.down.push(ColorTarget::new(
-                ctx,
-                vk::Extent2D { width: w, height: h },
-                HDR_FORMAT,
-                false,
-                "bloom down",
-            )?);
+            let level = vk::Extent2D { width: w, height: h };
+            self.extents.push(level);
+            self.down.push(ColorTarget::new(ctx, level, HDR_FORMAT, false, "bloom down")?);
             if k < BLOOM_LEVELS - 1 {
-                self.up.push(ColorTarget::new(
-                    ctx,
-                    vk::Extent2D { width: w, height: h },
-                    HDR_FORMAT,
-                    false,
-                    "bloom up",
-                )?);
+                // up 链少一级（最小级 down[N-1] 直接作 up 源）；up[i] 与
+                // extents[i] 同尺寸（建在 extents[i+1] 上会 renderArea 越界 VUID）
+                self.up.push(ColorTarget::new(ctx, level, HDR_FORMAT, false, "bloom up")?);
             }
         }
-        unsafe { self.build_descriptors() }?;
-        info!("Bloom 链随 swapchain 重建: 级 0 = {}×{}", w, h);
         Ok(())
     }
 
     fn mk_buffer(&self, ctx: &Context, role: BufferRole, size: u64) -> Result<GpuBuffer> {
-        let sharing: Vec<u32> = if ctx.transfer_queue_family_index != ctx.queue_family_index {
-            vec![ctx.transfer_queue_family_index, ctx.queue_family_index]
-        } else {
-            Vec::new()
-        };
+        let sharing = super::concurrent_families(ctx);
         GpuBuffer::create_with_families(&self.device, ctx.memory_contract(), size, role, &sharing)
     }
 
+    /// 尺寸无关对象：两套布局 + 自有采样器 + pool（容量只随级数/帧槽定）。
+    ///
     /// # Safety
-    /// 目标已建成功；失败路径由调用方回收。
-    unsafe fn build_descriptors(&mut self) -> Result<()> {
+    /// 只在 new 调一次；每个对象建成即落字段，失败路径由 Drop 回收。
+    unsafe fn build_static(&mut self) -> Result<()> {
         unsafe {
         let device = &self.device;
         let stages = vk::ShaderStageFlags::FRAGMENT;
@@ -304,7 +277,16 @@ impl BloomTargets {
             ]),
             None,
         )?;
-        let n = self.down.len();
+        // Bloom 链自有采样器（线性 + CLAMP_TO_EDGE；本体随本资源 Drop 销毁
+        // ——不走描述符表去重账，账本采样器槽留给贴图面）
+        self.sampler = crate::render::assets::images::sampler_key(
+            &bevy::image::ImageSamplerDescriptor::linear(),
+        )
+        .create_sampler(device)?;
+        // 池容量按布局消耗计（分配即按 layout 全 binding 扣，与是否写入无关）：
+        // down 集 (N-1)×slots 张 L_tex = 1 image + 1 sampler；up 集 (N-1)×slots
+        // 与 tonemap 集 slots 张 L_up = 2 image + 1 sampler + 1 UBO
+        let n = BLOOM_LEVELS;
         let slots = MAX_FRAMES_IN_FLIGHT;
         let sets_total = (n - 1) * slots + (n - 1) * slots + slots;
         self.pool = device.create_descriptor_pool(
@@ -313,7 +295,7 @@ impl BloomTargets {
                 .pool_sizes(&[
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                        .descriptor_count((3 * (n - 1) * slots + slots) as u32),
+                        .descriptor_count((3 * (n - 1) * slots + 2 * slots) as u32),
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::SAMPLER)
                         .descriptor_count(((n - 1) * 2 * slots + slots) as u32),
@@ -323,12 +305,20 @@ impl BloomTargets {
                 ]),
             None,
         )?;
-        // Bloom 链自有采样器（线性 + CLAMP_TO_EDGE；本体随本资源 Drop 销毁
-        // ——不走描述符表去重账，账本采样器槽留给贴图面）
-        let sampler = crate::render::assets::images::sampler_key(
-            &bevy::image::ImageSamplerDescriptor::linear(),
-        )
-        .create_sampler(device)?;
+        Ok(())
+        }
+    }
+
+    /// 从 pool 分配三组描述符集并写入（pool 须为空：新建或刚 reset）。
+    ///
+    /// # Safety
+    /// 静态对象与目标已建成功；失败路径由调用方回收。
+    unsafe fn build_descriptors(&mut self) -> Result<()> {
+        unsafe {
+        let device = &self.device;
+        let sampler = self.sampler;
+        let n = self.down.len();
+        let slots = MAX_FRAMES_IN_FLIGHT;
         let alloc = |layout: vk::DescriptorSetLayout, count: usize| -> Result<Vec<vk::DescriptorSet>> {
             let sets = device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
@@ -510,10 +500,6 @@ impl Drop for BloomTargets {
         }
     }
 }
-
-// # Safety:句柄本质是整数,创建/销毁只在持有方线程;方法只读句柄
-unsafe impl Send for BloomTargets {}
-unsafe impl Sync for BloomTargets {}
 
 /// Bloom 三全屏管线（prefilter/down/up；复用 FullscreenPipeline 脚手架）。
 /// （drop：FullscreenPipeline 自带 Drop，本结构只持句柄拷贝——layout/pipeline

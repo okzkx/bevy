@@ -1,19 +1,18 @@
-//! 测试实体方法族本体（6.1.1）：按形状 + 颜色程序化造单个测试体——
-//! 遮挡剔除（Hi-Z）段的遮挡对/墙体样本载具，也是通用的"快速摆一个几何体"
-//! 测试能力。与 5.4 生成器（[`super::scene_gen`]）同区同构：同为程序化造
-//! 测试内容的机制层，BRP 薄壳在 [`crate::remote::shapes`]，egui 面板将来
-//! 共用本层。
+//! 测试实体方法族本体：按形状 + 颜色程序化造单个测试体——遮挡剔除
+//!（Hi-Z）的遮挡对/墙体样本载具，也是通用的"快速摆一个几何体"测试能力。
+//! 与大场景生成器（[`super::scene_gen`]）同区同构：同为程序化造测试内容的
+//! 机制层，BRP 薄壳在 remote 的 shapes 方法族。
 //!
 //! 资产经济：mesh 按形状缓存、材质按颜色缓存（资源 [`TestShapeAssets`]，
 //! 惰性初始化）——同形状/同颜色重复 spawn 共享柄零新资产，防重复上传
-//! churn；首次出现的 mesh/材质照常走 4.1 上传链。实体带 `Mesh3d` +
+//! churn；首次出现的 mesh/材质照常走上传链。实体带 `Mesh3d` +
 //! `MeshMaterial3d` + `Transform` 走账本 Changed 通道自动入行，渲染路径
 //! 零触碰（与 [`spawn_primitive_clone`] 同一条进 GPU 的路）。
 //!
-//! 形状口径（立案拍板五形状，立方体承担墙体遮挡样本）：全部单位尺寸
+//! 形状口径（五形状，立方体承担墙体遮挡样本）：全部单位尺寸
 //!（半径 0.5 / 高 1.0 / 立方体 1³），尺寸缩放交给 Transform.scale——
 //! 墙体遮挡样本 = 立方体非均匀缩放直出。颜色 sRGB [0,1] 三元组；metallic/
-//! roughness 给值即进材质（8.2 PBR 参数面，缺省 = StandardMaterial 默认）。
+//! roughness 给值即进材质（PBR 参数面，缺省 = StandardMaterial 默认）。
 
 use std::collections::HashMap;
 
@@ -103,7 +102,7 @@ pub fn spawn_test_shape(
     name: Option<&str>,
     unique: bool,
 ) -> Result<TestShapeReadback, ObjectOpError> {
-    // unique（6.3 流送测试基建）：绕过形状缓存直接造新资产——每实体独立
+    // unique（流送测试基建）：绕过形状缓存直接造新资产——每实体独立
     // mesh 身份（内容相同身份不同），"世界大于驻留"的压测前提；缺省 false
     // 走缓存共享（同参零新上传的既有语义不变）。
     let (mesh_handle, mesh_created) = if unique {
@@ -143,7 +142,7 @@ pub fn spawn_test_shape(
                 .resource_mut::<Assets<StandardMaterial>>()
                 .add(StandardMaterial {
                     base_color: Color::srgb(color[0], color[1], color[2]),
-                    // 8.2 PBR 参数面：给值即设（缺省保持 StandardMaterial
+                    // PBR 参数面：给值即设（缺省保持 StandardMaterial
                     // 默认——metallic 0 / roughness 0.5，既有调用零变化）
                     metallic: metallic.unwrap_or(0.0),
                     perceptual_roughness: perceptual_roughness.unwrap_or(0.5),
@@ -171,6 +170,8 @@ pub fn spawn_test_shape(
     let name = name
         .map(str::to_owned)
         .unwrap_or_else(|| format!("测试体-{}", shape.as_str()));
+    let mesh = mesh_handle.id();
+    let material = material_handle.id();
     let entity = world
         .spawn((
             Mesh3d(mesh_handle),
@@ -179,15 +180,6 @@ pub fn spawn_test_shape(
             Name::new(name),
         ))
         .id();
-    // 刚 spawn 成功，两组件必在；unwrap 的是不变式而非外部输入（Tier② 语义）
-    let mesh = world
-        .get::<Mesh3d>(entity)
-        .map(|m| m.0.id())
-        .expect("spawn 带 Mesh3d 后立即查无");
-    let material = world
-        .get::<MeshMaterial3d<StandardMaterial>>(entity)
-        .map(|m| m.0.id())
-        .expect("spawn 带 MeshMaterial3d 后立即查无");
     Ok(TestShapeReadback {
         entity,
         shape,
@@ -197,8 +189,7 @@ pub fn spawn_test_shape(
     })
 }
 
-/// 五形状 → `Mesh`：bevy 基础体构造（出处核实 2026-10-19，`examples/3d/3d_shapes.rs`
-/// 同款调用面）——四形 builder `.build()` 直出，球体 ico 细分返回 Result
+/// 五形状 → `Mesh`：bevy 基础体构造（`examples/3d/3d_shapes.rs` 同款调用面）——四形 builder `.build()` 直出，球体 ico 细分返回 Result
 ///（细分上限内不失败，越限 = 参数非法回协议错误不 panic）。
 fn build_shape_mesh(shape: TestShape) -> Result<Mesh, ObjectOpError> {
     match shape {

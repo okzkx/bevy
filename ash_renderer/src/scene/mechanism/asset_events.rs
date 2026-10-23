@@ -127,7 +127,7 @@ impl AssetRetirements {
         self.stats.removed_meshes_total += 1;
     }
 
-    /// 记一笔管理器发起的 mesh 淘汰（6.3 驻留管理器：非 `Removed` 事件，
+    /// 记一笔驻留管理器发起的 mesh 淘汰（非 `Removed` 事件，
     /// 不进事件累计——淘汰计数归 [`crate::scene::ResidencyStats`]，账面
     /// 出账与停尸房复用与 [`Self::retire_mesh`] 完全同路）。
     pub fn eject_mesh(&mut self, id: AssetId<Mesh>) {
@@ -140,7 +140,7 @@ impl AssetRetirements {
         self.stats.removed_images_total += 1;
     }
 
-    /// 记一笔管理器发起的贴图淘汰（6.4 驻留管理器：非 `Removed` 事件，
+    /// 记一笔驻留管理器发起的贴图淘汰（非 `Removed` 事件，
     /// 不进事件累计；出账与停尸房复用与 [`Self::retire_image`] 完全同路）。
     pub fn eject_image(&mut self, id: AssetId<Image>) {
         self.images.insert(id);
@@ -280,7 +280,7 @@ pub(crate) fn propagate_asset_changes(
             }
             AssetEvent::Removed { id } => {
                 readiness.clear_failure_material(*id);
-                // 组装联动（7.9）：材质离容器 = 引用行失去可绘腿（材质在容器
+                // 组装联动：材质离容器 = 引用行失去可绘腿（材质在容器
                 // 查无 = 行暂缓），反查引用行标记组装重估——无事件通道则增量
                 // 缓存会保留幽灵可绘行。重挂走重插 Added 通道（与 mesh 同款）。
                 for entity in ledger.rows_with_material(*id) {

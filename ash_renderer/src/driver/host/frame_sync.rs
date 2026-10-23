@@ -1,6 +1,5 @@
-//! 帧率同步底座（7.6）：把宿主帧循环节奏从写死的 reactive(1/60) 变成
-//! 可观察可控制——[`apply_frame_sync`] 每帧读主窗所在显示器的刷新率回填
-//! [`FrameSyncSettings::refresh_millihertz`]，并按同步开关改写
+//! 帧率同步：宿主帧循环节奏可观察可控制——[`apply_frame_sync`] 每帧读主窗所在显示器的刷新率回填
+//! [`FrameSyncSettings::refresh_millihertz`]（设置契约住 render），并按同步开关改写
 //! `WinitSettings` 两档 update mode（bevy_winit 每轮循环重提取
 //! update_mode，写后下轮循环生效）。
 //!
@@ -15,32 +14,14 @@ use bevy::winit::{UpdateMode, WinitSettings};
 
 use ash_macros::system;
 
-/// 帧率同步设置：开关 + 主屏刷新率读数。
-///
-/// `enabled` 默认 true = 首次运行自动同步（显示器信息就绪后自动对齐）；
-/// `refresh_millihertz` 由 [`apply_frame_sync`] 每帧回填（UI/BRP 只读），
-/// None = 刷新率不可用（保持现状 1/60，读数如实显示"不可用"）。
-#[derive(Resource, Debug)]
-pub(crate) struct FrameSyncSettings {
-    pub(crate) enabled: bool,
-    pub(crate) refresh_millihertz: Option<u32>,
-}
-
-impl Default for FrameSyncSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            refresh_millihertz: None,
-        }
-    }
-}
+use crate::render::FrameSyncSettings;
 
 /// 帧率同步应用系统（Update）：读刷新率 → 回填读数 → 按开关算两档目标
 /// update mode → 与当前 `WinitSettings` 逐位不等才写（避免逐帧 insert 的
 /// change detection 噪声）。
 ///
 /// 目标两档：同步开（有刷新率读数）聚焦/非聚焦都取 1/刷新率 wait，非聚焦
-/// 保持 reactive_low_power 的节能形态（对齐历史两档同 1/60 的对应关系）；
+/// 保持 reactive_low_power 的节能形态；
 /// 同步关联焦 `Continuous` 跑满（MAILBOX 无背压）、非聚焦保
 /// reactive_low_power(1/60) 节能。刷新率不可用（None）时同步开档位退回
 /// 现状 1/60，与"保持现状"分支同值。

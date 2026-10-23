@@ -11,7 +11,7 @@
 //!
 //! 输出编码定案：image 保持 UNORM 底板，view 套 SRGB 别名当渲染附件（needs
 //! `VK_KHR_swapchain_mutable_format` + VkImageFormatListCreateInfo，见 `new` 内定案
-//! 注释）——本结构新增 `view_format` 字段承载"底板 vs 渲染 view"两个格式。
+//! 注释）——`view_format` 字段承载"底板 vs 渲染 view"两个格式。
 
 use ash::{khr::swapchain, vk, Device};
 use bevy::log::info;
@@ -43,7 +43,7 @@ pub struct Swapchain {
     pub images: Vec<vk::Image>,
     pub views: Vec<vk::ImageView>,
     /// 按 image index 分配的 present-wait 信号量（render_finished）。
-    /// host.rs 按 acquire 返回的 index 取用，**不是**按帧槽轮转；生命周期与
+    /// 帧循环（`driver::host`）按 acquire 返回的 index 取用，**不是**按帧槽轮转；生命周期与
     /// swapchain 绑定，重建时随旧 image 集合一起销毁。
     pub render_finished: Vec<vk::Semaphore>,
     /// swapchain 底板格式（present engine 的母语；present 路径不碰 view）。
@@ -164,7 +164,7 @@ impl Swapchain {
                     .clipped(true)
                     // 双格式清单必须配本旗标：swapchain image 由此按 MUTABLE_FORMAT
                     // 形态创建，SRGB view 别名才合法（VUID-VkSwapchainCreateInfoKHR-
-                    // flags-01977；首跑验证层实抓）
+                    // flags-01977；验证层实抓）
                     .flags(if srgb_alias.is_some() {
                         vk::SwapchainCreateFlagsKHR::MUTABLE_FORMAT
                     } else {
@@ -265,7 +265,7 @@ impl Swapchain {
 
     /// resize 后重建。两个幂等出口：
     /// - 最小化时 current_extent=0，建 0 尺寸 swapchain 非法——保留旧的，恢复后靠下一次 resize 消息重建；
-    /// - 尺寸没变就不动。
+    /// - 尺寸没变且 swapchain 句柄非 null 就不动（空壳无论尺寸都重建）。
     ///
     /// 单次真重建 ≈ 60ms（wait_idle+destroy+create）——调用方必须
     /// 去抖（host::draw_frame 的 `ResizeGate`），不要在拖拽的每个尺寸步进上调用。
@@ -278,7 +278,10 @@ impl Swapchain {
             info!("窗口最小化（extent=0），swapchain 暂不重建");
             return Ok(());
         }
-        if caps.current_extent == self.extent {
+        // 尺寸相等只在 swapchain 仍在时可跳过：上次重建失败留下空壳（句柄
+        // null、extent 仍是旧值），窗口回到原尺寸若在此早退，之后每帧都拿
+        // null 句柄 acquire
+        if caps.current_extent == self.extent && self.swapchain != vk::SwapchainKHR::null() {
             return Ok(());
         }
         // 在飞帧还在引用旧 image，必须先等全部完成再拆。WSI 边界：
@@ -289,7 +292,7 @@ impl Swapchain {
         // Win32 的 WSI 限制：同一个 hwnd 同时只能挂一个 swapchain——
         // 必须先拆旧再建新（`*self = Self::new(ctx)` 的 RHS 先求值，是"先建后拆"，必炸）
         self.destroy();
-        *self = Self::new(ctx)?; // 失败时 self 已是空壳（句柄为 null），下一帧 resize 消息进来重试
+        *self = Self::new(ctx)?; // 失败时 self 已是空壳（句柄为 null），下次调用不论尺寸都重试
         Ok(())
     }
 
@@ -359,7 +362,7 @@ impl Swapchain {
 impl Drop for Swapchain {
     fn drop(&mut self) {
         // view 先于 swapchain。Device/Instance 的存活由拆除顺序保证：
-        // 正常退出走 driver::host 的 teardown_vulkan（FramePool → 本结构 → Context）；
+        // 正常退出走 driver::host 的 teardown_vulkan（FramePool → 本结构 → … → Context）；
         // panic 时 Resource drop 顺序不定，进程本就注定终止。
         self.destroy();
     }

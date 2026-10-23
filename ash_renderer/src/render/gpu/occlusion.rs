@@ -1,4 +1,4 @@
-//! Hi-Z 遮挡测试 compute 半边（6.1.3）：管线 + push 排布 + CPU 参照投屏 +
+//! Hi-Z 遮挡测试 compute 半边：管线 + push 排布 + CPU 参照投屏 +
 //! 诊断账面。第二 compute pass——在视锥剔除之后、indirect 组装之前（标记的
 //! 合并语义：遮挡把视锥标记清零，b3 = 视锥 ∧ 遮挡，build_indirect 消费形状
 //! 不变；遮挡独立标记 b6 只进计量通道，判定线 4 的 A/B 归因读数口）。
@@ -14,16 +14,18 @@
 //!   布局断言与 WGSL `PushOcclusion` 静态互证（cull 112B 同款纪律）。
 //! - **CPU 参照**：`aabb_screen_rect` 投屏（8 角点 → 像素矩形 + NDC z max，
 //!   w ≤ 0 → None）——`occluded_reverse_z`/`occlusion_mip_level`（hiz 模块
-//!   纯函数）拼出完整判定，供库测试与 6.1.5 的对照读数（不进绘制路径）。
+//!   纯函数）拼出完整判定，供库测试与对照读数（不进绘制路径）。
 //! - **标记环纪律**：b3/b6 读写都在 `wait_for_slot` fence 内（host 诊断读数
-//!   = 本帧槽两帧前输出）；dispatch 上界 = 实例槽 bump bound（5.2 同款）。
+//!   = 本帧槽两帧前输出）；dispatch 上界 = 实例槽 bump bound（cull 同款）。
 
 use ash::vk;
 use bevy::math::{Mat4, Vec2, Vec4};
 use bevy::prelude::Resource;
 
+use crate::common::bytes::{put_f32s, put_mat4, put_u32};
 use crate::common::error::Result;
 
+use crate::render::gpu::compute::{ComputeHandles, ComputePipeline, Handoff};
 use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物，spirv-val 已过）。
@@ -31,12 +33,11 @@ const OCCLUSION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/occlusion
 
 /// compute push 总长（layout 声明 + WGSL `PushOcclusion` 同源）：
 /// mat4（64B）+ screen（8B @64）+ bound（u32 @72）+ 垫（到 16 对齐）= 80B。
-pub const OCCLUSION_PUSH_SIZE: u32 = 80;
+pub(crate) const OCCLUSION_PUSH_SIZE: u32 = 80;
 
 /// [`pack_occlusion_push`] 的 WGSL 布局镜像（与 `occlusion.wgsl::PushOcclusion`
 /// 静态互证）。
 #[repr(C)]
-#[allow(dead_code)]
 struct OcclusionPushLayout {
     view_proj: [[f32; 4]; 4],
     screen: [f32; 2],
@@ -50,19 +51,14 @@ const _: () = {
     assert!(std::mem::size_of::<OcclusionPushLayout>() as u32 == OCCLUSION_PUSH_SIZE);
 };
 
-/// view_proj + 屏幕尺寸 + dispatch 上界 → 80B compute push 字节。
+/// view_proj + 屏幕尺寸 + dispatch 上界 → 80B compute push 字节（偏移按
+/// [`OcclusionPushLayout`] 静态断言表排布，标量小端走 [`crate::common::bytes`]）。
 #[must_use]
-pub fn pack_occlusion_push(view_proj: &Mat4, screen: [f32; 2], bound: u32) -> [u8; OCCLUSION_PUSH_SIZE as usize] {
+pub(crate) fn pack_occlusion_push(view_proj: &Mat4, screen: [f32; 2], bound: u32) -> [u8; OCCLUSION_PUSH_SIZE as usize] {
     let mut out = [0u8; OCCLUSION_PUSH_SIZE as usize];
-    for (i, col) in view_proj.to_cols_array_2d().iter().enumerate() {
-        for (k, v) in col.iter().enumerate() {
-            let o = i * 16 + k * 4;
-            out[o..o + 4].copy_from_slice(&v.to_le_bytes());
-        }
-    }
-    out[64..68].copy_from_slice(&screen[0].to_le_bytes());
-    out[68..72].copy_from_slice(&screen[1].to_le_bytes());
-    out[72..76].copy_from_slice(&bound.to_le_bytes());
+    put_mat4(&mut out, 0, view_proj);
+    put_f32s(&mut out, 64, &screen);
+    put_u32(&mut out, 72, bound);
     out
 }
 
@@ -107,7 +103,7 @@ pub fn aabb_screen_rect(
 
 /// 遮挡开关（egui checkbox 与 BRP `occlusion_set_enabled` 写，draw_frame 读）。
 /// 关 = 不 dispatch 遮挡测试，b3 保持视锥纯结果、b6 host 填全可见——数据层
-/// A/B 的 B 面（判定线 4）；与 5.2 的 `CullSettings` 分立（两个开关独立成组）。
+/// A/B 的 B 面（判定线 4）；与 `CullSettings` 分立（两个开关独立成组）。
 #[derive(Resource)]
 pub struct OcclusionSettings {
     pub enabled: bool,
@@ -133,7 +129,7 @@ pub enum OcclusionFallback {
 }
 
 /// 遮挡诊断账面（每帧 draw_frame 刷新，egui 面板/BRP 读数口；只进计量，
-/// 任何系统不得读它决定画什么——5.2 同款边界）。读数 = 本帧槽两帧前 compute
+/// 任何系统不得读它决定画什么——同剔除诊断边界）。读数 = 本帧槽两帧前 compute
 /// 的输出（HOST_VISIBLE 直读，fence 纪律内）。
 #[derive(Resource, Default)]
 pub struct OcclusionDiagnostics {
@@ -151,15 +147,12 @@ pub struct OcclusionDiagnostics {
     pub rows_compared: usize,
     /// 读数所属帧槽。
     pub marks_frame: usize,
-    /// 闸门空转首跑留痕旗标（首个 dispatch 帧收账一次）。
-    pub first_run_logged: bool,
 }
 
 /// 一帧遮挡 dispatch 的录制输入（draw_frame 组装，`record_frame` 消费）。
 #[derive(Clone, Copy)]
 pub struct OcclusionDraw {
-    pub pipeline: vk::Pipeline,
-    pub layout: vk::PipelineLayout,
+    pub pass: ComputeHandles,
     /// 80B push：view_proj + screen + bound（[`pack_occlusion_push`] 产物）。
     pub push: [u8; OCCLUSION_PUSH_SIZE as usize],
     /// dispatch 组数 = bound 取整到 workgroup（64）。
@@ -168,66 +161,26 @@ pub struct OcclusionDraw {
     pub hiz_set: vk::DescriptorSet,
 }
 
-/// 遮挡 compute 管线 + pipeline layout（[set2, hiz] 双集 + 80B push）。
+/// 遮挡 compute 管线（[set2, hiz] 双集 + 80B push）。
 #[derive(bevy::prelude::Resource)]
 pub struct OcclusionPass {
-    device: ash::Device,
-    layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
+    pipeline: ComputePipeline,
 }
 
 impl OcclusionPass {
-    /// 建管线链：shader module（build.rs 产物）→ layout（set2 借用 + Hi-Z
-    /// 独立小集 + 80B push）→ ComputePipeline（CullPass 同款形状）。
+    /// 建管线：layout 借用 set2 + Hi-Z 独立小集布局。
     ///
     /// # Errors
     /// shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, set2_layout: vk::DescriptorSetLayout, hiz_layout: vk::DescriptorSetLayout) -> Result<Self> {
-        let device = &ctx.device;
-        let words: Vec<u32> = OCCLUSION_SPV
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| u32::from_le_bytes(*c))
-            .collect();
-        let module = unsafe {
-            device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
-        }?;
-        let push_range = vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::COMPUTE)
-            .offset(0)
-            .size(OCCLUSION_PUSH_SIZE);
-        let sets = [set2_layout, hiz_layout];
-        unsafe {
-            let layout = device
-                .create_pipeline_layout(
-                    &vk::PipelineLayoutCreateInfo::default()
-                        .set_layouts(&sets)
-                        .push_constant_ranges(std::slice::from_ref(&push_range)),
-                    None,
-                )
-                .inspect_err(|_| device.destroy_shader_module(module, None))?;
-            let stage = vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::COMPUTE)
-                .module(module)
-                .name(c"cs_main");
-            let info = vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout);
-            match device.create_compute_pipelines(vk::PipelineCache::null(), &[info], None) {
-                Ok(mut pipelines) => {
-                    let pipeline = pipelines.pop().expect("单 info 必返单管线");
-                    device.destroy_shader_module(module, None);
-                    Ok(Self { device: ctx.device.clone(), layout, pipeline })
-                }
-                Err((pipelines, e)) => {
-                    for p in pipelines {
-                        device.destroy_pipeline(p, None);
-                    }
-                    device.destroy_pipeline_layout(layout, None);
-                    device.destroy_shader_module(module, None);
-                    Err(e.into())
-                }
-            }
-        }
+        let pipeline = ComputePipeline::new(
+            &ctx.device,
+            OCCLUSION_SPV,
+            &[set2_layout, hiz_layout],
+            OCCLUSION_PUSH_SIZE,
+            c"cs_main",
+        )?;
+        Ok(Self { pipeline })
     }
 
     /// 组一帧 dispatch 输入。draw_frame 消费，录制走 [`record`]。
@@ -240,8 +193,7 @@ impl OcclusionPass {
         hiz_set: vk::DescriptorSet,
     ) -> OcclusionDraw {
         OcclusionDraw {
-            pipeline: self.pipeline,
-            layout: self.layout,
+            pass: self.pipeline.handles(),
             push: pack_occlusion_push(view_proj, screen, bound),
             groups: bound.div_ceil(64),
             hiz_set,
@@ -250,66 +202,23 @@ impl OcclusionPass {
 }
 
 /// 录制一帧遮挡 dispatch（视锥剔除之后、build_indirect 之前）：绑管线 →
-/// [set2, hiz] 双集 → push → dispatch → 屏障（遮挡写标记/标记合并 →
-/// build_indirect 读；与 cull::record 的预置屏障同形状——compute 写 →
-/// 图形/计算读）。
+/// [set2, hiz] 双集 → push → dispatch → 交接屏障。合并标记写 → build_indirect
+/// 读：cull::record 的屏障只覆盖视锥段，本段的写需要自己的收口；dst 超集盖
+/// 图形 VS 读与计算组装读两种消费形态。
 pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     set2: vk::DescriptorSet,
     occlusion: &OcclusionDraw,
 ) {
-    unsafe {
-        device.cmd_bind_pipeline(
-            command_buffer,
-            vk::PipelineBindPoint::COMPUTE,
-            occlusion.pipeline,
-        );
-        let sets = [set2, occlusion.hiz_set];
-        device.cmd_bind_descriptor_sets(
-            command_buffer,
-            vk::PipelineBindPoint::COMPUTE,
-            occlusion.layout,
-            0,
-            &sets,
-            &[],
-        );
-        device.cmd_push_constants(
-            command_buffer,
-            occlusion.layout,
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            &occlusion.push,
-        );
-        device.cmd_dispatch(command_buffer, occlusion.groups, 1, 1);
-        // 合并标记写 → build_indirect 读（cull::record 的既有屏障只覆盖
-        // 视锥段，本段的写需要自己的收口；dst 超集照抄——图形 VS 读与
-        // 计算组装读两种消费形态）
-        let barrier = vk::MemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ);
-        device.cmd_pipeline_barrier(
-            command_buffer,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::PipelineStageFlags::VERTEX_SHADER | vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::DependencyFlags::empty(),
-            std::slice::from_ref(&barrier),
-            &[],
-            &[],
-        );
-    }
-}
-
-impl Drop for OcclusionPass {
-    fn drop(&mut self) {
-        // 契约边界：不等 GPU——退出排空由 teardown_vulkan 的 device_wait_idle
-        // 先于一切资源 Drop 完成（先拆管线再拆 layout；set2/hiz layout 都是
-        // 借用，不在此拆）
-        unsafe {
-            self.device.destroy_pipeline(self.pipeline, None);
-            self.device.destroy_pipeline_layout(self.layout, None);
-        }
-    }
+    occlusion.pass.record(
+        device,
+        command_buffer,
+        &[set2, occlusion.hiz_set],
+        &occlusion.push,
+        occlusion.groups,
+        Handoff::VertexComputeRead,
+    );
 }
 
 #[cfg(test)]

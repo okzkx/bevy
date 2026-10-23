@@ -14,6 +14,8 @@ use bevy::log::info;
 use crate::common::error::Result;
 use crate::render::Context;
 
+use super::pipeline_handle::PipelineHandle;
+
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与主管线同一编译路径）。
 const GBUFFER_COMPOSITE_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer_composite.spv"));
@@ -23,9 +25,7 @@ const PRESENT_TONEMAP_SPV: &[u8] =
 /// 全屏管线 + pipeline layout（dynamic rendering 形态）。
 #[derive(bevy::prelude::Resource)]
 pub struct FullscreenPipeline {
-    device: Device,
-    layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
+    handle: PipelineHandle,
 }
 
 impl FullscreenPipeline {
@@ -155,9 +155,7 @@ impl FullscreenPipeline {
                 "全屏管线就绪: color {color_format:?}（无顶点输入全屏三角形 / 无深度 / 无混合，动态 viewport）"
             );
             Ok(Self {
-                device: device.clone(),
-                layout,
-                pipeline,
+                handle: PipelineHandle::new(device, layout, pipeline),
             })
         }
     }
@@ -165,28 +163,13 @@ impl FullscreenPipeline {
     /// 管线句柄（帧录制绑定用）。
     #[must_use]
     pub fn pipeline(&self) -> vk::Pipeline {
-        self.pipeline
+        self.handle.pipeline()
     }
 
     /// pipeline layout 句柄（描述符绑定与管线同源）。
     #[must_use]
     pub fn layout(&self) -> vk::PipelineLayout {
-        self.layout
-    }
-}
-
-// # Safety:句柄本质是整数,创建/销毁只在持有方线程;方法只读句柄(与 GraphicsPipeline 同款约定)
-unsafe impl Send for FullscreenPipeline {}
-unsafe impl Sync for FullscreenPipeline {}
-
-impl Drop for FullscreenPipeline {
-    fn drop(&mut self) {
-        // 契约边界:不等 GPU,退出排空由 teardown 的 device_wait_idle 先行;
-        // pipeline 先于 layout(layout 借用的 set layouts 归调用方拆除)
-        unsafe {
-            self.device.destroy_pipeline(self.pipeline, None);
-            self.device.destroy_pipeline_layout(self.layout, None);
-        }
+        self.handle.layout()
     }
 }
 
@@ -234,10 +217,6 @@ impl CompositePipeline {
     }
 }
 
-// # Safety:同 FullscreenPipeline 约定
-unsafe impl Send for CompositePipeline {}
-unsafe impl Sync for CompositePipeline {}
-
 /// present tonemap 管线资源（8.4 接缝正式启用；8.1 的 blit 退役）：HDR + Bloom
 /// → ACES → swapchain。layout = [帧 UBO, G-buffer 采样集, bloom 参数集]——
 /// mode 旁路面（debug 仪器直出）+ hdr + bloom/参数。
@@ -278,7 +257,3 @@ impl PresentTonemapPipeline {
         self.inner.layout()
     }
 }
-
-// # Safety:同 FullscreenPipeline 约定
-unsafe impl Send for PresentTonemapPipeline {}
-unsafe impl Sync for PresentTonemapPipeline {}

@@ -53,7 +53,7 @@ pub struct PoolRange {
     pub size: u64,
 }
 
-/// 一个已驻留网格的账本行:池内区间 + 3.4 绘制引脚 + 完成票据。
+/// 一个已驻留网格的账本行:池内区间 + 绘制引脚 + 完成票据。
 #[derive(Clone, Copy, Debug)]
 pub struct MeshSlot {
     /// 顶点区间(顶点池内,offset 按 32B 对齐)。
@@ -64,7 +64,7 @@ pub struct MeshSlot {
     pub index_count: u32,
     /// 局部包围盒(min,max;转换器逐点扫出)——对象表记录的包围体素材。
     pub local_aabb: ([f32; 3], [f32; 3]),
-    /// 发布本内容的上传批次完成票据(3.4 图形提交按它等数据;CPU 侧仅在
+    /// 发布本内容的上传批次完成票据(图形提交按它等数据;CPU 侧仅在
     /// 复用/维护/退出时等待)。0 = 初始分配批(无拷贝)。
     pub ticket: u64,
 }
@@ -226,7 +226,7 @@ impl MeshPool {
     ///
     /// `wait_draws`:销毁旧池前的"图形最后使用"等待(责任边界契约②的
     /// 图形半边)——调用方经它等全部帧槽 fence,保证没有在飞 draw 还在读旧池。
-    /// 池不认识帧资源,以回调接线保持依赖单向(vulkan 层内 pool 不依赖 frames)。
+    /// 池不认识帧资源,以回调接线保持依赖单向(pool 不依赖 frames)。
     ///
     /// # Errors
     /// 新池分配/迁移拷贝提交失败,或等待在飞票据/帧侧等待失败。
@@ -248,7 +248,9 @@ impl MeshPool {
         }
         let new_vertex_cap = Self::next_capacity(need_vertex, self.capacity_vertex);
         let new_index_cap = Self::next_capacity(need_index, self.capacity_index);
-        let migrating = self.vertex.is_some();
+        // 旧池总是成对存在(只在本函数尾部成对换上)
+        let old_pools = self.vertex_buffer().zip(self.index_buffer());
+        let migrating = old_pools.is_some();
         let pause = Instant::now();
         // 迁移的源(旧池)可能正被上一批上传在写:维护路径的第一步就是等全部
         // 在飞票据——这是"维护停顿"的本体,计入分账,不冒充正常上传零 idle。
@@ -269,7 +271,7 @@ impl MeshPool {
             BufferRole::DevicePool,
             &self.sharing_families,
         )?;
-        if migrating {
+        if let Some((old_vertex, old_index)) = old_pools {
             // 已驻留内容整段迁移:bump 布局保证 [0, used) 就是全部有效数据。
             // 迁移批自己的票据在销毁旧池前等完——覆盖上传侧;图形侧在下面
             // wait_draws 里收口
@@ -277,14 +279,14 @@ impl MeshPool {
                 .submit_batch(UploadBatch {
                     device_copies: vec![
                         CopyRegion {
-                            src: self.vertex_buffer().expect("迁移时旧顶点池必在"),
+                            src: old_vertex,
                             dst: new_vertex.buffer(),
                             src_offset: 0,
                             dst_offset: 0,
                             size: self.used_vertex,
                         },
                         CopyRegion {
-                            src: self.index_buffer().expect("迁移时旧索引池必在"),
+                            src: old_index,
                             dst: new_index.buffer(),
                             src_offset: 0,
                             dst_offset: 0,
@@ -293,7 +295,7 @@ impl MeshPool {
                     ],
                     ..Default::default()
                 })?
-                .expect("迁移批含拷贝,必有票据");
+                .ok_or_else(|| VulkanError::Upload("内部矛盾:迁移批含拷贝却未产生提交".into()))?;
             uploader.wait_until(ticket)?;
             // 图形最后使用:等全部帧槽 fence——没有命令缓冲还在 GPU 上执行,
             // 在飞 draw 对旧池的读取必然已收口(契约②的双条件至此补齐)
@@ -469,7 +471,7 @@ impl MeshPool {
     /// 停尸房——在飞 draw 可能还在读旧内容,排空(等"图形最后使用")
     /// 后归还 free list 可复用。与
     /// [`Self::commit`] 的分工:编排层持失效凭据(AssetInvalidations)才允许
-    /// 走 replace,纪律边界在编排层,vulkan 层只提供换条目的能力。
+    /// 走 replace,纪律边界在编排层,本层只提供换条目的能力。
     #[must_use]
     #[expect(
         clippy::too_many_arguments,
@@ -508,7 +510,7 @@ impl Drop for MeshPool {
     fn drop(&mut self) {
         // 契约边界(与 GpuBuffer::Drop 同款):不等 GPU。在飞上传票据与图形侧
         // 最后使用由容量维护在销毁旧池前等待(双条件);退出排空由
-        // teardown_vulkan 的 device_wait_idle 先于一切 Drop 完成(D4)。
+        // teardown_vulkan 的 device_wait_idle 先于一切 Drop 完成。
         self.vertex = None;
         self.index = None;
     }

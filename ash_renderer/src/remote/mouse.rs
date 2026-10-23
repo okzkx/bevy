@@ -32,23 +32,19 @@ use bevy::{
     },
     math::DVec2,
     prelude::*,
-    remote::{error_codes, BrpError, BrpResult},
+    remote::{BrpError, BrpResult},
     window::{PrimaryWindow, RawCursorMoved, Window, WindowEvent},
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::invalid_params;
+use super::{invalid_params, params::parse_params};
 
 use ash_macros::system;
 
 /// 主窗不存在/被关掉的统一错误（与 `set_camera` 的 NoCamera 同码）。
 fn no_primary_window() -> BrpError {
-    BrpError {
-        code: error_codes::COMPONENT_ERROR,
-        message: "World 里没有主窗口（PrimaryWindow）".to_owned(),
-        data: None,
-    }
+    BrpError::component_error("World 里没有主窗口（PrimaryWindow）")
 }
 
 /// 主窗实体与 scale factor：换算与事件装配共用。宿主单窗，取 PrimaryWindow。
@@ -98,8 +94,7 @@ struct MouseMoveParams {
 /// 逐帧差分（`DragSession`），操作者只需按轨迹逐点发绝对位置。
 #[system]
 pub(crate) fn mouse_move(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 x/y（points 域逻辑像素）"))?;
-    let p: MouseMoveParams = serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let p: MouseMoveParams = parse_params(params, "params 缺失：需要 x/y（points 域逻辑像素）")?;
     if !p.x.is_finite() || !p.y.is_finite() {
         return Err(invalid_params("x/y 必须是有限数"));
     }
@@ -135,11 +130,10 @@ struct MouseButtonParams {
 /// 同帧连发时（按压尚未落账）释放不到，需隔一帧。
 #[system]
 pub(crate) fn mouse_button(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| {
-        invalid_params("params 缺失：需要 action（press/release）与 button（或 all=true）")
-    })?;
-    let p: MouseButtonParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let p: MouseButtonParams = parse_params(
+        params,
+        "params 缺失：需要 action（press/release）与 button（或 all=true）",
+    )?;
     let state = match p.action.as_str() {
         "press" => ButtonState::Pressed,
         "release" => ButtonState::Released,
@@ -208,9 +202,7 @@ struct MouseWheelParams {
 ///（相机侧 `radius × 0.95^lines`）。lines/pixels 恰好其一。
 #[system]
 pub(crate) fn mouse_wheel(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| invalid_params("params 缺失：lines 与 pixels 二选一"))?;
-    let p: MouseWheelParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let p: MouseWheelParams = parse_params(params, "params 缺失：lines 与 pixels 二选一")?;
     match (p.lines, p.pixels) {
         (Some(lines), None) if lines.is_finite() => {
             let (window, _) = primary_window(world)?;

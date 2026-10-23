@@ -1,42 +1,40 @@
-//! GPU 常驻绘制数据（5.1）：对象表 + 模型环 + 材质环 + set2 描述符 + 实例槽账。
+//! GPU 常驻绘制数据：对象表 + 九种帧槽环 + set2 描述符 + 实例槽账。
 //!
-//! 三份数据按"写形状"分家，各自 hazard 闭合（本模块的核心设计，与责任边界
+//! 各表按"写形状"分家，各自 hazard 闭合（本模块的核心设计，与责任边界
 //! 契约同源——"覆盖仍被在飞命令读取的内容"一律不走）：
 //!
 //! | 表 | 内存 | 写形状 | 消费者 |
 //! |---|---|---|---|
-//! | 对象表 | DEVICE_LOCAL（新 [`BufferRole::DeviceStorage`]） | **每槽写一次**：分配经 staging 批次写入，更新（换绑/换内容）走"新槽 + 旧槽停尸房"，从不原地覆盖 | VS 读范围/材质索引/局部包围盒（5.2 compute 读包围盒） |
+//! | 对象表 | DEVICE_LOCAL（[`BufferRole::DeviceStorage`]） | **每槽写一次**：分配经 staging 批次写入，更新（换绑/换内容）走"新槽 + 旧槽停尸房"，从不原地覆盖 | VS 读范围/材质索引；compute 读局部包围盒 |
 //! | 模型环 | HOST_VISIBLE（Storage 角色）×`MAX_FRAMES_IN_FLIGHT` | **draw_frame 每帧增量重写**（只写改动行；新槽两帧写满两个帧槽），复用安全 = `wait_for_slot` fence（与帧 UBO 同一纪律） | VS 读 model |
 //! | 材质环 | 同上 | **draw_frame 每帧全量重写**（量级 = 可绘唯一材质数），内容每帧从资产容器现读——材质/贴图内容变化自动次帧生效，无需任何失效通道 | FS 读 base_color/贴图槽 |
-//! | 标记环（5.2） | 同上 | **compute 每帧全量重写**（dispatch 上界 = 实例槽 bump bound）；A/B 关闭时 host 填全可见——同一 fence 纪律 | compute 写（cull.wgsl），读者 = 宿主诊断读数（5.3 起 build_indirect 也读） |
-//! | 在场环（5.3） | 同上 | **draw_frame 每帧全量重写**（可绘行的实例槽号列表，量级 = 可绘行数）——DrawList 槽位枚举的 GPU 形态，记录层的"逐 draw 循环"由此退役 | compute 读（build_indirect.wgsl） |
-//! | 命令环（5.3） | DEVICE_LOCAL（[`BufferRole::IndirectCommands`]）×2 | **compute 每帧全量重写**（在场槽逐行一条 `VkDrawIndexedIndirectCommand`，不可见 `instanceCount=0`） | `cmd_draw_indexed_indirect`（DRAW_INDIRECT 阶段读；纯设备侧，宿主零参与） |
-//! | LOD 变体表环（6.2） | HOST_VISIBLE（Storage 角色）×2 | **draw_frame 对脏行增量重写**（槽 → 各档绘制引脚 48B/槽，模型环同款两帧奇偶纪律；未写条目 = 0 哨兵 → 消费端回退对象记录基准引脚） | compute 读（build_indirect.wgsl b7，按选档取引脚） |
-//! | LOD 档位环（6.2） | HOST_VISIBLE（Storage 角色）×2 | **选档 compute 每帧重写**（本帧档位 u32/槽，迟滞状态载体）；LOD 关闭时 host 填 0 = 最细档 | 选档 compute 读写（b8），build_indirect 读 |
-//! | 缺口标记环（6.6） | HOST_VISIBLE（Storage 角色）×2 | **cull 清零（dispatch 覆盖全部槽）+ build_indirect 置位**（选中档未驻留的在场槽写 `1<<level` 位图）——标记环同款两帧奇偶纪律 | 宿主诊断读数/BRP census/驻留管理器缺口合并（fence 纪律内读本帧槽 = 两帧前输出） |
+//! | 标记环 | 同上 | **compute 每帧全量重写**（dispatch 上界 = 实例槽 bump bound）；A/B 关闭时 host 填全可见——同一 fence 纪律 | compute 写（cull.wgsl），build_indirect 读，宿主诊断读数 |
+//! | 遮挡标记环 | 同上 | **遮挡测试 compute 每帧重写**；fallback 时 host 填全可见——同一 fence 纪律 | 遮挡独立标记位，宿主诊断读数（A/B 归因） |
+//! | 在场环 | 同上 | **draw_frame 每帧全量重写**（可绘行的实例槽号列表，量级 = 可绘行数）——DrawList 槽位枚举的 GPU 形态 | compute 读（build_indirect.wgsl） |
+//! | 命令环 | DEVICE_LOCAL（[`BufferRole::IndirectCommands`]）×`MAX_FRAMES_IN_FLIGHT` | **compute 每帧全量重写**（在场槽逐行一条 `VkDrawIndexedIndirectCommand`，不可见 `instanceCount=0`） | `cmd_draw_indexed_indirect`（DRAW_INDIRECT 阶段读；纯设备侧，宿主零参与） |
+//! | LOD 变体表环 | HOST_VISIBLE（Storage 角色）×`MAX_FRAMES_IN_FLIGHT` | **draw_frame 对脏行增量重写**（槽 → 各档绘制引脚 48B/槽，模型环同款两帧奇偶纪律；未写条目 = 0 哨兵 → 消费端回退对象记录基准引脚） | compute 读（build_indirect.wgsl b7，按选档取引脚） |
+//! | LOD 档位环 | 同上 | **选档 compute 每帧重写**（本帧档位 u32/槽，迟滞状态载体）；LOD 关闭时 host 填 0 = 最细档 | 选档 compute 读写（b8），build_indirect 读 |
+//! | 缺口标记环 | 同上 | **cull 清零（dispatch 覆盖全部槽）+ build_indirect 置位**（选中档未驻留的在场槽写 `1<<level` 位图）——标记环同款两帧奇偶纪律 | 宿主诊断读数/BRP census/驻留管理器缺口合并（fence 纪律内读本帧槽 = 两帧前输出） |
 //!
 //! 槽位纪律：实例槽（对象表下标）first-fit free list + bump，回收经停尸房
 //! （等"图形最后使用"——在飞 draw 可能还在读旧记录，排空后才能复用）；
 //! 材质槽 bump-only 不回收（量级 = 唯一材质数，泄漏有界，材质 Removed 无
-//! 驻留内容不进回收账——与 4.2/4.4 的口径一致）。
+//! 驻留内容不进回收账）。
 //!
-//! 描述符：set2 = 三条只读 storage binding（b0 对象表 / b1 本帧模型环 /
-//! b2 本帧材质环）+ compute 专属 b3（剔除标记，read_write，5.2）+ compute
-//! 专属 b4（在场环，5.3）+ compute 专属 b5（indirect 命令环，5.3）+ compute
-//! 专属 b6（遮挡标记，read_write，6.1——Hi-Z 遮挡判定的独立标记位，A/B 归因
-//! 读数口）+ compute 专属 b7（LOD 变体表，read，6.2——槽 → 各档绘制引脚）+
-//! compute 专属 b8（LOD 档位环，read_write，6.2——选档状态），按帧槽各一套，
-//! **描述符 init 一次写入永不更新**（buffer 固定容量
-//! 不重建——容量不够 Init 出局，与 TABLE_CAPACITY 同纪律）。自建 pool 不占
-//! BindlessTables 的 UAB pool——生命周期与消费面都不同，分开建。layout 声明
-//! `VERTEX|FRAGMENT|COMPUTE` 超集（b0/b1/b2 图形+compute 共读；b3/b4/b5/b6/b7/b8
-//! COMPUTE-only——b5 的另一读者是 cmd_draw_indexed_indirect，走命令参数不进
-//! 描述符 stage，图形 shader 不声明不使用）。Hi-Z 金字塔采样视图不进 set2：
-//! 它随 swapchain 重建整体换 image，"init 一次写入"纪律不为它开口，独立小
-//! 布局收在 hiz 模块（6.1.2 施工钉明）。
+//! 描述符：set2 = 三条图形+compute 共读的只读 storage binding（b0 对象表 /
+//! b1 本帧模型环 / b2 本帧材质环）+ 七条 compute 专属 storage binding（b3 剔除
+//! 标记 read_write / b4 在场环 / b5 indirect 命令环 / b6 遮挡标记 read_write /
+//! b7 LOD 变体表 / b8 LOD 档位环 read_write / b9 缺口标记 read_write），按帧槽
+//! 各一套，**描述符 init 一次写入永不更新**（buffer 固定容量不重建——槽位用尽报
+//! `Capacity` 出局，与 TABLE_CAPACITY 同纪律）。自建 pool 不占 BindlessTables
+//! 的 UAB pool——生命周期与消费面都不同，分开建。layout 的 b0/b1/b2 声明
+//! `VERTEX|FRAGMENT|COMPUTE` 超集，b3..b9 收窄到 COMPUTE（b5 的另一读者是
+//! cmd_draw_indexed_indirect，走命令参数不进描述符 stage）。Hi-Z 金字塔采样视图
+//! 不进 set2：它随 swapchain 重建整体换 image，"init 一次写入"纪律不为它开口，
+//! 独立小布局收在 hiz 模块。
 //!
-//! push 常量从 96B 缩到 4B（实例槽号）：shader 按实例索引读表——逐对象绘制
-//! 参数不再走 CPU 推送（判定线 1 的结构前提）。
+//! 场景绘制无 push 常量：实例槽号经 indirect 命令的 `firstInstance` 携带，shader
+//! 按实例索引读表——逐对象绘制参数不走 CPU 推送。
 
 use std::collections::HashMap;
 
@@ -46,61 +44,60 @@ use bevy::log::info;
 use bevy::math::Mat4;
 use bevy::pbr::StandardMaterial;
 
+use crate::common::bytes::{put_f32s, put_mat4, put_u32, put_u32s, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
 use crate::render::resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
-/// 对象表容量（实例槽数）。覆盖步骤 5 压测的 10 万档（131072 ≥ 100000）；
+/// 对象表容量（实例槽数）。覆盖 10 万实例压测档（131072 ≥ 100000）；
 /// 用尽报错出局不静默截断（TABLE_CAPACITY 同纪律）。48B/记录。
 pub const OBJECT_TABLE_CAPACITY: u32 = 1 << 17;
 
 /// 材质槽容量（唯一材质数上界；bump-only 不回收）。
-pub const MATERIAL_TABLE_CAPACITY: u32 = 1 << 16;
+pub(crate) const MATERIAL_TABLE_CAPACITY: u32 = 1 << 16;
 
 /// 对象记录字节数（storage 布局，与 WGSL `ObjectRecord` 互证）。
 pub const OBJECT_RECORD_SIZE: u64 = 48;
 /// 模型环步长（mat4x4f）。按实例槽索引，与对象表同一索引空间。
 pub const MODEL_STRIDE: u64 = 64;
-/// 材质记录字节数（8.2.1 扩列 32→64：vec4 + PBR 标量 ×3 + 贴图槽 ×4 + 采样器
-/// + 垫，对齐 16）。
+/// 材质记录字节数（vec4 + PBR 标量 ×3 + 垫 + 贴图槽 ×4 + 采样器 + 垫，对齐 16）。
 pub const MATERIAL_RECORD_SIZE: u64 = 64;
 
-/// 贴图槽缺席哨兵（8.2.1）：材质未挂该贴图时槽位字段写本值，shader 端
+/// 贴图槽缺席哨兵：材质未挂该贴图时槽位字段写本值，shader 端
 /// 分支跳过采样（base_color 恒在场走 fallback 白图，不适用本哨兵）。
 pub const NO_TEXTURE_INDEX: u32 = u32::MAX;
-/// 剔除可见标记字节数（u32/实例槽，5.2）。
+/// 剔除可见标记字节数（u32/实例槽）。
 pub const MARK_SIZE: u64 = 4;
-/// 遮挡标记字节数（u32/实例槽，6.1——遮挡独立标记位，A/B 归因读数）。
-pub const OCC_MARK_SIZE: u64 = 4;
+/// 遮挡标记字节数（u32/实例槽——遮挡独立标记位，A/B 归因读数）。
+pub(crate) const OCC_MARK_SIZE: u64 = 4;
 /// indirect 命令字节数（`VkDrawIndexedIndirectCommand`：indexCount/instanceCount/
-/// firstIndex/vertexOffset/firstInstance 五个 u32，5.3——与 WGSL `IndirectCommand`
+/// firstIndex/vertexOffset/firstInstance 五个 u32——与 WGSL `IndirectCommand`
 /// 布局互证，`vertex_offset` 为 i32 位型按 u32 存储）。
 pub const INDIRECT_COMMAND_SIZE: u64 = 20;
-/// 在场环条目字节数（u32 实例槽号/可绘行，5.3）。
-pub const PRESENCE_ENTRY_SIZE: u64 = 4;
-/// LOD 档位上限（6.2）：每实例槽的 LOD 变体条目数。level 0 = 基准 mesh
+/// 在场环条目字节数（u32 实例槽号/可绘行）。
+pub(crate) const PRESENCE_ENTRY_SIZE: u64 = 4;
+/// LOD 档位上限：每实例槽的 LOD 变体条目数。level 0 = 基准 mesh
 ///（与对象记录同引脚），1..3 = 渐粗变体（或缺席哨兵）。
 pub const MAX_LOD_LEVELS: u32 = 4;
 /// LOD 变体条目字节数（3×u32：first_index/index_count/vertex_base——与
 /// [`MeshSlot`](super::pool::MeshSlot) 引脚同源；`index_count = 0` = 该档
 /// 未驻留（哨兵，消费端向更细档回退））。
 pub const LOD_ENTRY_SIZE: u64 = 12;
-/// LOD 变体表步长（每实例槽 [`MAX_LOD_LEVELS`] 条，6.2——按槽直址的
+/// LOD 变体表步长（每实例槽 [`MAX_LOD_LEVELS`] 条——按槽直址的
 /// "槽 → 各档绘制引脚"表，host 每帧槽环增量写）。
 pub const LOD_TABLE_STRIDE: u64 = LOD_ENTRY_SIZE * MAX_LOD_LEVELS as u64;
 /// LOD 档位环字节数（u32/实例槽——选档 compute 写的本帧档位，迟滞状态
 /// 的载体；host 关闭档填充 0 = 最细档）。
 pub const LOD_LEVEL_SIZE: u64 = 4;
-/// 缺口标记环字节数（u32/实例槽，6.6——逐槽位图：bit L = 该槽选中档 L
+/// 缺口标记环字节数（u32/实例槽——逐槽位图：bit L = 该槽选中档 L
 /// 未驻留。cull 清零（dispatch 覆盖全部槽）+ build_indirect 置位（在场行
 /// 查引脚处），宿主按帧奇偶纪律读两帧前快照——GPU 一手缺口证据的读回通道）。
 pub const GAP_MARK_SIZE: u64 = 4;
 
-/// 对象记录的 Rust 布局镜像（[`pack_object_record`] 手工排布的对账表，
-/// 与 pipeline.rs 的 PushLayout 同款纪律：不参与运行时，静态断言钉三方）。
+/// 对象记录的 Rust 布局镜像（[`pack_object_record`] 手工排布的对账表：
+/// 不参与运行时，静态断言钉 WGSL/CPU 两方）。
 #[repr(C)]
-#[allow(dead_code)]
 struct ObjectRecordLayout {
     first_index: u32,
     index_count: u32,
@@ -108,7 +105,7 @@ struct ObjectRecordLayout {
     vertex_base: u32,
     /// 材质环下标（材质槽，跨帧稳定）。
     material_index: u32,
-    /// 局部包围盒（转换器逐点扫出；世界空间推导与消费归 5.2）。
+    /// 局部包围盒（转换器逐点扫出；compute 侧推导世界空间包围盒）。
     aabb_min: [f32; 4],
     aabb_max: [f32; 4],
 }
@@ -121,11 +118,10 @@ const _: () = {
     assert!(std::mem::size_of::<ObjectRecordLayout>() as u64 == OBJECT_RECORD_SIZE);
 };
 
-/// 材质记录布局镜像（8.2.1 PBR 扩列：标量域语义照 Filament——roughness 记
-/// perceptual 域，clamp 与 α=p² 换算在 shader 端做；reflectance 默认 0.5，
-/// 介电体 F0 = 0.16·reflectance²）。
+/// 材质记录布局镜像（标量域语义照 Filament——roughness 记 perceptual 域，
+/// clamp 与 α=p² 换算在 shader 端做；reflectance 默认 0.5，介电体
+/// F0 = 0.16·reflectance²）。
 #[repr(C)]
-#[allow(dead_code)]
 struct MaterialRecordLayout {
     base_color: [f32; 4],
     metallic: f32,
@@ -155,7 +151,7 @@ const _: () = {
 };
 
 /// 对象记录 → 48B storage 字节（偏移按 [`ObjectRecordLayout`] 静态断言表手工
-/// 排布，与 pack_push 同一纪律）。
+/// 排布；aabb 的 w 垫保持 0）。
 #[must_use]
 pub fn pack_object_record(
     first_index: u32,
@@ -166,23 +162,13 @@ pub fn pack_object_record(
     aabb_max: [f32; 3],
 ) -> [u8; OBJECT_RECORD_SIZE as usize] {
     let mut out = [0u8; OBJECT_RECORD_SIZE as usize];
-    let mut put = |offset: usize, bytes: &[u8]| {
-        out[offset..offset + bytes.len()].copy_from_slice(bytes);
-    };
-    put(0, &first_index.to_le_bytes());
-    put(4, &index_count.to_le_bytes());
-    put(8, &vertex_base.to_le_bytes());
-    put(12, &material_index.to_le_bytes());
-    for (i, v) in aabb_min.into_iter().enumerate() {
-        put(16 + i * 4, &v.to_le_bytes());
-    }
-    for (i, v) in aabb_max.into_iter().enumerate() {
-        put(32 + i * 4, &v.to_le_bytes());
-    }
+    put_u32s(&mut out, 0, &[first_index, index_count, vertex_base, material_index]);
+    put_f32s(&mut out, 16, &aabb_min);
+    put_f32s(&mut out, 32, &aabb_max);
     out
 }
 
-/// 材质记录 → 64B storage 字节（8.2.1 扩列：PBR 三标量 + 四贴图槽，偏移按
+/// 材质记录 → 64B storage 字节（PBR 三标量 + 四贴图槽，偏移按
 /// [`MaterialRecordLayout`] 静态断言表手工排布）。
 #[must_use]
 pub fn pack_material_record(
@@ -194,19 +180,10 @@ pub fn pack_material_record(
     sampler_index: u32,
 ) -> [u8; MATERIAL_RECORD_SIZE as usize] {
     let mut out = [0u8; MATERIAL_RECORD_SIZE as usize];
-    let mut put = |offset: usize, bytes: &[u8]| {
-        out[offset..offset + bytes.len()].copy_from_slice(bytes);
-    };
-    for (i, v) in base_color.iter().enumerate() {
-        put(i * 4, &v.to_le_bytes());
-    }
-    put(16, &metallic.to_le_bytes());
-    put(20, &perceptual_roughness.to_le_bytes());
-    put(24, &reflectance.to_le_bytes());
-    for (i, slot) in tex_slots.iter().enumerate() {
-        put(32 + i * 4, &slot.to_le_bytes());
-    }
-    put(48, &sampler_index.to_le_bytes());
+    put_vec4(&mut out, 0, &base_color);
+    put_f32s(&mut out, 16, &[metallic, perceptual_roughness, reflectance]);
+    put_u32s(&mut out, 32, &tex_slots);
+    put_u32(&mut out, 48, sampler_index);
     out
 }
 
@@ -215,25 +192,21 @@ pub fn pack_material_record(
 #[must_use]
 pub fn pack_lod_entry(first_index: u32, index_count: u32, vertex_base: u32) -> [u8; LOD_ENTRY_SIZE as usize] {
     let mut out = [0u8; LOD_ENTRY_SIZE as usize];
-    out[0..4].copy_from_slice(&first_index.to_le_bytes());
-    out[4..8].copy_from_slice(&index_count.to_le_bytes());
-    out[8..12].copy_from_slice(&vertex_base.to_le_bytes());
+    put_u32s(&mut out, 0, &[first_index, index_count, vertex_base]);
     out
 }
 
-/// 模型矩阵 → 64B 模型环字节（列主序，与 push 时代同一展平约定）。
+/// 模型矩阵 → 64B 模型环字节（列主序）。
 #[must_use]
 pub fn pack_model(model: &Mat4) -> [u8; MODEL_STRIDE as usize] {
     let mut out = [0u8; MODEL_STRIDE as usize];
-    for (i, v) in model.to_cols_array().iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
-    }
+    put_mat4(&mut out, 0, model);
     out
 }
 
 /// 局部包围盒经 model 的世界空间保守包围盒：8 角点全变换后重收紧。
 /// 保守性由构造保证（全部角点在内），不追求紧致最优；非均匀缩放 + 旋转
-/// 正确性由本模块单测钉住（5.1 只交数据，消费归 5.2）。
+/// 正确性由本模块单测钉住。
 #[must_use]
 pub fn conservative_world_aabb(
     model: &Mat4,
@@ -257,7 +230,7 @@ pub fn conservative_world_aabb(
     (min, max)
 }
 
-/// GPU 常驻绘制数据三表 + 实例槽账本 + set2 描述符。
+/// GPU 常驻绘制数据（对象表 + 九种帧槽环）+ 实例槽账本 + set2 描述符。
 #[derive(bevy::prelude::Resource)]
 pub struct InstanceTables {
     device: Device,
@@ -270,22 +243,24 @@ pub struct InstanceTables {
     /// 剔除标记环 ×`MAX_FRAMES_IN_FLIGHT`（HOST_VISIBLE，compute 每帧重写 /
     /// A/B 关闭时 host 填全可见；宿主诊断直读）。见 cull 模块文档。
     mark_rings: Vec<GpuBuffer>,
-    /// 遮挡标记环 ×`MAX_FRAMES_IN_FLIGHT`（HOST_VISIBLE，6.1：遮挡测试
+    /// 遮挡标记环 ×`MAX_FRAMES_IN_FLIGHT`（HOST_VISIBLE：遮挡测试
     /// compute 写 / fallback 时 host 填全可见 / 宿主诊断直读——A/B 归因读数口）。
     occ_mark_rings: Vec<GpuBuffer>,
     /// 在场环 ×`MAX_FRAMES_IN_FLIGHT`（HOST_VISIBLE，draw_frame 每帧全量重写
-    /// 可绘行槽号列表——DrawList 槽位枚举进 GPU 的通道，5.3）。
+    /// 可绘行槽号列表——DrawList 槽位枚举进 GPU 的通道）。
     presence_rings: Vec<GpuBuffer>,
     /// indirect 命令环 ×`MAX_FRAMES_IN_FLIGHT`（DEVICE_LOCAL，build_indirect
-    /// 每帧重写、`cmd_draw_indexed_indirect` 消费，5.3；纯设备侧）。
+    /// 每帧重写、`cmd_draw_indexed_indirect` 消费；纯设备侧）。
     command_rings: Vec<GpuBuffer>,
-    /// LOD 变体表环 ×`MAX_FRAMES_IN_FLIGHT`（HOST_VISIBLE，6.2：draw_frame
+    /// LOD 变体表环 ×`MAX_FRAMES_IN_FLIGHT`（HOST_VISIBLE：draw_frame
     /// 对脏行增量重写"槽 → 各档绘制引脚"——模型环同款增量纪律，未写槽的
     /// 条目 = 0 哨兵，消费端回退对象记录基准引脚）。
     lod_table_rings: Vec<GpuBuffer>,
-    /// LOD 档位环 ×`MAX_FRAMES_IN_FLIGHT`（HOST_VISIBLE，6.2：选档 compute
+    /// LOD 档位环 ×`MAX_FRAMES_IN_FLIGHT`（HOST_VISIBLE：选档 compute
     /// 写本帧档位 / LOD 关闭时 host 填 0 / 宿主诊断直读；迟滞状态随环轮转）。
     lod_level_rings: Vec<GpuBuffer>,
+    /// 缺口标记环 ×`MAX_FRAMES_IN_FLIGHT`（HOST_VISIBLE：cull 清零 +
+    /// build_indirect 置位 / 宿主诊断读两帧前快照）。
     gap_mark_rings: Vec<GpuBuffer>,
     capacity_objects: u32,
     capacity_materials: u32,
@@ -308,13 +283,13 @@ pub struct InstanceTables {
 }
 
 impl InstanceTables {
-    /// 建表链：九份 buffer（对象表按 CONCURRENT 双族，transfer 写 graphics 读；
-    /// 环 host-visible 单创建；命令环 DEVICE_LOCAL 单创建）→ set2 layout（三条
-    /// 只读 storage + 六条 compute 专属）→ pool + 每帧槽 set → 描述符一次写入。
-    /// 任何失败回收已建对象（全有或全无）。
+    /// 建表链：十种 buffer（对象表按 CONCURRENT 双族，transfer 写 graphics 读；
+    /// 九种环各 `MAX_FRAMES_IN_FLIGHT` 份，命令环 DEVICE_LOCAL、其余 host-visible）
+    /// → set2 layout（三条只读 storage + 七条 compute 专属）→ pool + 每帧槽 set →
+    /// 描述符一次写入 → 档位环零填充。任何失败回收已建对象（全有或全无）。
     ///
     /// # Errors
-    /// buffer/描述符创建失败。
+    /// buffer/描述符创建失败、档位环写入失败。
     pub fn new(
         device: &Device,
         contract: &MemoryContract,
@@ -348,86 +323,22 @@ impl InstanceTables {
             BufferRole::DeviceStorage,
             sharing_families,
         )?;
-        let mut model_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut material_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut mark_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut occ_mark_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut presence_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut command_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut lod_table_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut lod_level_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut gap_mark_rings = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut fail = None;
-        for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            match GpuBuffer::create(device, contract, model_bytes, BufferRole::Storage) {
-                Ok(b) => model_rings.push(b),
-                Err(e) => {
-                    fail = Some(e);
-                    break;
-                }
-            }
-            match GpuBuffer::create(device, contract, material_bytes, BufferRole::Storage) {
-                Ok(b) => material_rings.push(b),
-                Err(e) => {
-                    fail = Some(e);
-                    break;
-                }
-            }
-            match GpuBuffer::create(device, contract, mark_bytes, BufferRole::Storage) {
-                Ok(b) => mark_rings.push(b),
-                Err(e) => {
-                    fail = Some(e);
-                    break;
-                }
-            }
-            match GpuBuffer::create(device, contract, occ_mark_bytes, BufferRole::Storage) {
-                Ok(b) => occ_mark_rings.push(b),
-                Err(e) => {
-                    fail = Some(e);
-                    break;
-                }
-            }
-            match GpuBuffer::create(device, contract, presence_bytes, BufferRole::Storage) {
-                Ok(b) => presence_rings.push(b),
-                Err(e) => {
-                    fail = Some(e);
-                    break;
-                }
-            }
-            match GpuBuffer::create(device, contract, command_bytes, BufferRole::IndirectCommands)
-            {
-                Ok(b) => command_rings.push(b),
-                Err(e) => {
-                    fail = Some(e);
-                    break;
-                }
-            }
-            match GpuBuffer::create(device, contract, lod_table_bytes, BufferRole::Storage) {
-                Ok(b) => lod_table_rings.push(b),
-                Err(e) => {
-                    fail = Some(e);
-                    break;
-                }
-            }
-            match GpuBuffer::create(device, contract, lod_level_bytes, BufferRole::Storage) {
-                Ok(b) => lod_level_rings.push(b),
-                Err(e) => {
-                    fail = Some(e);
-                    break;
-                }
-            }
-            match GpuBuffer::create(device, contract, gap_mark_bytes, BufferRole::Storage) {
-                Ok(b) => gap_mark_rings.push(b),
-                Err(e) => {
-                    fail = Some(e);
-                    break;
-                }
-            }
-        }
-        if let Some(e) = fail {
-            return Err(e); // 已建 buffer 均未进 Self，随局部变量逆序 Drop 自拆
-        }
-        let set2_result = unsafe {
+        // 失败即 `?` 早退：已建 buffer 均未进 Self，随局部变量逆序 Drop 自拆
+        let ring = |bytes: u64, role: BufferRole| -> Result<Vec<GpuBuffer>> {
+            (0..MAX_FRAMES_IN_FLIGHT)
+                .map(|_| GpuBuffer::create(device, contract, bytes, role))
+                .collect::<Result<_>>()
+        };
+        let model_rings = ring(model_bytes, BufferRole::Storage)?;
+        let material_rings = ring(material_bytes, BufferRole::Storage)?;
+        let mark_rings = ring(mark_bytes, BufferRole::Storage)?;
+        let occ_mark_rings = ring(occ_mark_bytes, BufferRole::Storage)?;
+        let presence_rings = ring(presence_bytes, BufferRole::Storage)?;
+        let command_rings = ring(command_bytes, BufferRole::IndirectCommands)?;
+        let lod_table_rings = ring(lod_table_bytes, BufferRole::Storage)?;
+        let lod_level_rings = ring(lod_level_bytes, BufferRole::Storage)?;
+        let gap_mark_rings = ring(gap_mark_bytes, BufferRole::Storage)?;
+        let (set2_layout, frame_sets, pool) = unsafe {
             Self::create_descriptor_objects(
                 device,
                 &object_buffer,
@@ -441,59 +352,56 @@ impl InstanceTables {
                 &lod_level_rings,
                 &gap_mark_rings,
             )
+        }?;
+        // 先组装 Self 再写档位环：写失败时 Self 的 Drop 回收 pool/layout
+        let mut tables = Self {
+            device: device.clone(),
+            object_buffer,
+            model_rings,
+            material_rings,
+            mark_rings,
+            occ_mark_rings,
+            presence_rings,
+            command_rings,
+            lod_table_rings,
+            lod_level_rings,
+            gap_mark_rings,
+            capacity_objects: OBJECT_TABLE_CAPACITY,
+            capacity_materials: MATERIAL_TABLE_CAPACITY,
+            used_objects: 0,
+            free_objects: Vec::new(),
+            graveyard: Vec::new(),
+            material_slots: HashMap::new(),
+            used_materials: 0,
+            set2_layout,
+            frame_sets,
+            pool,
+            slots_retired_total: 0,
         };
-        match set2_result {
-            Ok((set2_layout, frame_sets, pool)) => {
-                // 档位环零填充：迟滞状态的 prev 语义需要"未派发前 = 最细档 0"
-                //（未定义内容会让首帧迟滞读垃圾档位）。表环不填——条目哨兵
-                // 0 = 未驻留，消费端回退对象记录基准引脚，语义自洽。
-                let zeros = vec![0u8; lod_level_bytes as usize];
-                for ring in &mut lod_level_rings {
-                    ring.write(0, &zeros)?;
-                }
-                info!(
-                    "GPU 常驻绘制数据就绪:对象表 {OBJECT_TABLE_CAPACITY} 槽({object_bytes}B,DEVICE_LOCAL,记录 48B/槽写一次)\
-                     + 模型环 {MODEL_STRIDE}B ×{MAX_FRAMES_IN_FLIGHT}({model_bytes}B/槽)\
-                     + 材质环 {MATERIAL_RECORD_SIZE}B ×{MAX_FRAMES_IN_FLIGHT}({material_bytes}B/槽,\
-                     容量 {MATERIAL_TABLE_CAPACITY} 材质槽 bump-only)\
-                     + 标记环 {MARK_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({mark_bytes}B/槽,5.2 剔除可见标记)\
-                     + 遮挡标记环 {OCC_MARK_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({occ_mark_bytes}B/槽,6.1 遮挡独立标记)\
-                     + 在场环 {MARK_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({presence_bytes}B/槽,5.3 可绘行槽号列表)\
-                     + 命令环 {INDIRECT_COMMAND_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({command_bytes}B/槽,\
-                     5.3 indirect 命令,DEVICE_LOCAL)\
-                     + LOD 变体表环 {LOD_TABLE_STRIDE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({lod_table_bytes}B/槽,\
-                     6.2 槽→各档绘制引脚,{MAX_LOD_LEVELS} 档)\
-                     + LOD 档位环 {LOD_LEVEL_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({lod_level_bytes}B/槽,6.2 选档状态,零填充)\
-                     + 缺口标记环 {GAP_MARK_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({gap_mark_bytes}B/槽,6.6 逐槽缺口位图,cull 清零+build_indirect 置位);\
-                     set2 三条只读 storage + compute 专属 b3/b4/b5/b6/b7/b8/b9 ×{MAX_FRAMES_IN_FLIGHT} 帧,描述符 init 一次写入"
-                );
-                Ok(Self {
-                    device: device.clone(),
-                    object_buffer,
-                    model_rings,
-                    material_rings,
-                    mark_rings,
-                    occ_mark_rings,
-                    presence_rings,
-                    command_rings,
-                    lod_table_rings,
-                    lod_level_rings,
-                    gap_mark_rings,
-                    capacity_objects: OBJECT_TABLE_CAPACITY,
-                    capacity_materials: MATERIAL_TABLE_CAPACITY,
-                    used_objects: 0,
-                    free_objects: Vec::new(),
-                    graveyard: Vec::new(),
-                    material_slots: HashMap::new(),
-                    used_materials: 0,
-                    set2_layout,
-                    frame_sets,
-                    pool,
-                    slots_retired_total: 0,
-                })
-            }
-            Err(e) => Err(e),
+        // 档位环零填充：迟滞状态的 prev 语义需要"未派发前 = 最细档 0"
+        //（未定义内容会让首帧迟滞读垃圾档位）。表环不填——条目哨兵
+        // 0 = 未驻留，消费端回退对象记录基准引脚，语义自洽。
+        let zeros = vec![0u8; lod_level_bytes as usize];
+        for ring in &mut tables.lod_level_rings {
+            ring.write(0, &zeros)?;
         }
+        info!(
+            "GPU 常驻绘制数据就绪:对象表 {OBJECT_TABLE_CAPACITY} 槽({object_bytes}B,DEVICE_LOCAL,记录 48B/槽写一次)\
+             + 模型环 {MODEL_STRIDE}B ×{MAX_FRAMES_IN_FLIGHT}({model_bytes}B/槽)\
+             + 材质环 {MATERIAL_RECORD_SIZE}B ×{MAX_FRAMES_IN_FLIGHT}({material_bytes}B/槽,\
+             容量 {MATERIAL_TABLE_CAPACITY} 材质槽 bump-only)\
+             + 标记环 {MARK_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({mark_bytes}B/槽,5.2 剔除可见标记)\
+             + 遮挡标记环 {OCC_MARK_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({occ_mark_bytes}B/槽,6.1 遮挡独立标记)\
+             + 在场环 {PRESENCE_ENTRY_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({presence_bytes}B/槽,5.3 可绘行槽号列表)\
+             + 命令环 {INDIRECT_COMMAND_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({command_bytes}B/槽,\
+             5.3 indirect 命令,DEVICE_LOCAL)\
+             + LOD 变体表环 {LOD_TABLE_STRIDE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({lod_table_bytes}B/槽,\
+             6.2 槽→各档绘制引脚,{MAX_LOD_LEVELS} 档)\
+             + LOD 档位环 {LOD_LEVEL_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({lod_level_bytes}B/槽,6.2 选档状态,零填充)\
+             + 缺口标记环 {GAP_MARK_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({gap_mark_bytes}B/槽,6.6 逐槽缺口位图,cull 清零+build_indirect 置位);\
+             set2 三条只读 storage + compute 专属 b3/b4/b5/b6/b7/b8/b9 ×{MAX_FRAMES_IN_FLIGHT} 帧,描述符 init 一次写入"
+        );
+        Ok(tables)
     }
 
     /// set2 布局 + pool + 每帧槽 set + 描述符一次写入。失败路径逐段回收
@@ -530,8 +438,8 @@ impl InstanceTables {
                     .stage_flags(stages)
             };
             // b3/b4/b5/b6/b7/b8/b9 = 剔除标记(read_write)/在场环/命令环/遮挡标记
-            // (read_write, 6.1)/LOD 变体表(read, 6.2)/LOD 档位环(read_write, 6.2)/
-            // 缺口标记环(read_write, 6.6) storage：compute 专属——图形 shader 不
+            // (read_write)/LOD 变体表(read)/LOD 档位环(read_write)/缺口标记环
+            // (read_write) storage：compute 专属——图形 shader 不
             // 声明不使用，stage 收窄到 COMPUTE（b0/b1/b2 的超集声明不动）。b5 的
             // 另一读者 cmd_draw_indexed_indirect 不经描述符（命令参数直取 buffer），
             // 不在此 stage 面内。
@@ -554,7 +462,7 @@ impl InstanceTables {
                     .max_sets(MAX_FRAMES_IN_FLIGHT as u32)
                     .pool_sizes(&[vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count((MAX_FRAMES_IN_FLIGHT * 10) as u32)]),
+                        .descriptor_count((MAX_FRAMES_IN_FLIGHT * bindings.len()) as u32)]),
                 None,
             ) {
                 Ok(p) => p,
@@ -575,10 +483,10 @@ impl InstanceTables {
                     return Err(VulkanError::from(e));
                 }
             };
-            // 描述符一次写入:b0 对象表(全量)、b1/b2/.../b8 各帧槽自己的环(全量)。
+            // 描述符一次写入:b0 对象表(全量)、b1..b9 各帧槽自己的环(全量)。
             // info 先收齐再构造 write——write 持有 info 的引用,infos 之后不再变
-            let mut infos = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * 10);
-            let mut meta = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * 10);
+            let mut infos = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * bindings.len());
+            let mut meta = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * bindings.len());
             for (frame, set) in sets.iter().enumerate() {
                 for (binding, buffer, range) in [
                     (
@@ -694,7 +602,7 @@ impl InstanceTables {
         &mut self.mark_rings[frame]
     }
 
-    /// 第 `frame` 帧槽的遮挡标记环（6.1：遮挡测试 compute 写 / fallback 时
+    /// 第 `frame` 帧槽的遮挡标记环（遮挡测试 compute 写 / fallback 时
     /// host 填全可见 / 宿主诊断读——A/B 归因读数口，fence 纪律同上）。
     #[must_use]
     pub fn occ_mark_ring(&mut self, frame: usize) -> &mut GpuBuffer {
@@ -702,34 +610,34 @@ impl InstanceTables {
     }
 
     /// 第 `frame` 帧槽的在场环（draw_frame 全量重写可绘行槽号列表，
-    /// `wait_for_slot` 之后——与帧 UBO/双环同一 fence 证据，5.3）。
+    /// `wait_for_slot` 之后——与帧 UBO/双环同一 fence 证据）。
     #[must_use]
     pub fn presence_ring(&mut self, frame: usize) -> &mut GpuBuffer {
         &mut self.presence_rings[frame]
     }
 
     /// 第 `frame` 帧槽的 indirect 命令环 buffer 句柄（build_indirect compute
-    /// 写、`cmd_draw_indexed_indirect` 读——纯设备侧，宿主零访问，5.3）。
+    /// 写、`cmd_draw_indexed_indirect` 读——纯设备侧，宿主零访问）。
     #[must_use]
     pub fn indirect_buffer(&self, frame: usize) -> vk::Buffer {
         self.command_rings[frame].buffer()
     }
 
-    /// 第 `frame` 帧槽的 LOD 变体表环（6.2：draw_frame 对脏行增量重写
+    /// 第 `frame` 帧槽的 LOD 变体表环（draw_frame 对脏行增量重写
     /// "槽 → 各档绘制引脚"，`wait_for_slot` fence 纪律同模型环）。
     #[must_use]
     pub fn lod_table_ring(&mut self, frame: usize) -> &mut GpuBuffer {
         &mut self.lod_table_rings[frame]
     }
 
-    /// 第 `frame` 帧槽的 LOD 档位环（6.2：选档 compute 写 / 关闭档 host 填 0 /
+    /// 第 `frame` 帧槽的 LOD 档位环（选档 compute 写 / 关闭档 host 填 0 /
     /// 宿主诊断直读——迟滞状态随环轮转，fence 纪律同标记环）。
     #[must_use]
     pub fn lod_level_ring(&mut self, frame: usize) -> &mut GpuBuffer {
         &mut self.lod_level_rings[frame]
     }
 
-    /// 第 `frame` 帧槽的缺口标记环（6.6）：cull 清零 + build_indirect 置位，
+    /// 第 `frame` 帧槽的缺口标记环：cull 清零 + build_indirect 置位，
     /// 宿主诊断读数/BRP census 走 `read`（帧奇偶纪律 = 本帧槽内容是两帧前
     /// compute 的输出）。
     pub fn gap_mark_ring(&mut self, frame: usize) -> &mut GpuBuffer {
@@ -749,7 +657,7 @@ impl InstanceTables {
             self.used_objects += 1;
             Ok(slot)
         } else {
-            Err(VulkanError::Upload(format!(
+            Err(VulkanError::Capacity(format!(
                 "对象表容量耗尽:已用 {}/{OBJECT_TABLE_CAPACITY}——超过压测口径的实例规模,\
                  显式报错,不静默截断",
                 self.used_objects
@@ -791,7 +699,7 @@ impl InstanceTables {
             return Ok(slot);
         }
         if self.used_materials >= self.capacity_materials {
-            return Err(VulkanError::Upload(format!(
+            return Err(VulkanError::Capacity(format!(
                 "材质槽容量耗尽:{}/{MATERIAL_TABLE_CAPACITY}——唯一材质数超出上界,显式报错不截断",
                 self.used_materials
             )));
@@ -847,16 +755,11 @@ impl InstanceTables {
     }
 }
 
-// # Safety:句柄本质是整数;槽位账本/材质映射是纯 Rust 数据;buffer 的 Send/Sync
-// 随 GpuBuffer。多线程共享由外部纪律保证(与 MeshPool 同款约定)。
-unsafe impl Send for InstanceTables {}
-unsafe impl Sync for InstanceTables {}
-
 impl Drop for InstanceTables {
     fn drop(&mut self) {
         // 契约边界:不等 GPU——退出排空由 teardown_vulkan 的 device_wait_idle
         // 先于一切资源 Drop 完成。pool 先拆(frees sets),layout 次拆;
-        // 九份 buffer 随字段 Drop。
+        // 对象表与九种环(共 1 + 9×MAX_FRAMES_IN_FLIGHT 个 buffer)随字段 Drop。
         unsafe {
             self.device.destroy_descriptor_pool(self.pool, None);
             self.device.destroy_descriptor_set_layout(self.set2_layout, None);
@@ -873,7 +776,7 @@ mod tests {
     use bevy::math::{Mat4, Vec3};
 
     /// 非均匀缩放 + 旋转下包围盒保守包住几何:任取盒内样本点,变换后必在
-    /// 保守盒内(判定线 3 的数据形状,5.2 消费端到端)。
+    /// 保守盒内。
     #[test]
     fn conservative_transform_bounds_sampled_points() {
         // 单位盒 × 非均匀缩放 (2, 0.5, 3) × 绕 Y 旋转 30°
@@ -915,7 +818,7 @@ mod tests {
         assert_eq!(wmax, [1.0, 3.0, 2.0]);
     }
 
-    /// 打包函数与布局断言的一致性抽查(48B/64B/32B 三表字节契约)。
+    /// 对象记录 48B 打包与布局断言的一致性抽查。
     #[test]
     fn pack_object_record_layout() {
         let bytes = pack_object_record(7, 99, 11, 3, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
@@ -943,7 +846,7 @@ mod tests {
         assert_eq!(m.to_cols_array(), cols);
     }
 
-    /// 材质记录 64B 布局（8.2.1 扩列）：PBR 三标量 + 四贴图槽 + 采样器偏移
+    /// 材质记录 64B 布局：PBR 三标量 + 四贴图槽 + 采样器偏移
     /// 逐项互证，缺席哨兵按位写入。
     #[test]
     fn pack_material_record_layout() {
@@ -972,7 +875,7 @@ mod tests {
         assert_eq!(read_u32(52), 0);
     }
 
-    /// LOD 变体条目 12B 布局（6.2）：first_index/index_count/vertex_base 同序
+    /// LOD 变体条目 12B 布局：first_index/index_count/vertex_base 同序
     /// 互证（与 WGSL `LodEntry` 同源；0 哨兵 = index_count 为 0 的条目）。
     #[test]
     fn pack_lod_entry_layout() {

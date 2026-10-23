@@ -1,4 +1,4 @@
-//! GPU 缺口请求读数与模式（6.6.5）：BRP 侧的验证通道——`gap_stats` 聚合
+//! GPU 缺口请求读数与模式：BRP 侧的验证通道——`gap_stats` 聚合
 //! 读数（缺口槽数/去重身份数/触发行数/陈旧丢弃），`gap_census` 逐槽位图
 //! 清单（GPU 缺口 vs CPU 参照对账的原始证据），`gap_set` 写三态模式。
 //!
@@ -17,7 +17,7 @@ use ash_macros::system;
 use crate::scene::{GapMode, GapSnapshot, ResidencySettings, ResidencyStats};
 use crate::render::MAX_LOD_LEVELS;
 
-use super::{invalid_params, BrpResult};
+use super::{invalid_params, params::parse_params, BrpResult};
 
 /// `ash_renderer/gap_stats`：缺口请求聚合读数（只读）——模式快照 + 快照槽
 /// 数 + 本 tick 触发行数/累计/陈旧丢弃。
@@ -83,8 +83,7 @@ struct GapSetParams {
 /// 参数缺失/未知形态名。
 #[system]
 pub(crate) fn gap_set(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let p: GapSetParams = serde_json::from_value(params.unwrap_or(Value::Null))
-        .map_err(|e| invalid_params(format!("params: {e}")))?;
+    let p: GapSetParams = parse_params(params, "params 缺失：需要对象（mode 可选）")?;
     let mut settings = world.resource_mut::<ResidencySettings>();
     if let Some(mode) = &p.mode {
         let parsed = GapMode::parse(mode).map_err(invalid_params)?;

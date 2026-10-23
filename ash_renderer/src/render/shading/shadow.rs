@@ -32,11 +32,11 @@ pub const SHADOW_CASCADES: usize = 4;
 /// shadow map 边长（D32_SFLOAT，正方形）。
 pub const SHADOW_MAP_SIZE: u32 = 2048;
 /// 级联覆盖近端（米；主相机 near 以内不进 shadow 覆盖面）。
-pub const SHADOW_NEAR_DISTANCE: f32 = 0.5;
+pub(crate) const SHADOW_NEAR_DISTANCE: f32 = 0.5;
 /// 级联覆盖远端下限（米）：场景很小或无场景时也保证这么远有阴影。
-pub const SHADOW_FAR_MIN: f32 = 80.0;
+pub(crate) const SHADOW_FAR_MIN: f32 = 80.0;
 /// 级联覆盖远端上限（米）：防超大地面把末级 texel 拉到米级。
-pub const SHADOW_FAR_MAX: f32 = 400.0;
+pub(crate) const SHADOW_FAR_MAX: f32 = 400.0;
 /// PSSM 混合系数：1 = 纯 log（近级极窄），0 = 均匀（近处分辨率不足）。
 pub const SHADOW_SPLIT_LAMBDA: f32 = 0.75;
 
@@ -44,7 +44,7 @@ pub const SHADOW_SPLIT_LAMBDA: f32 = 0.75;
 /// split_i = λ·near·(far/near)^(i/n) + (1−λ)·(near + (far−near)·i/n)；
 /// n=4 的 log 公比用双平方根展开。
 #[must_use]
-pub fn cascade_slice_boundaries(near: f32, far: f32) -> [f32; SHADOW_CASCADES + 1] {
+pub(crate) fn cascade_slice_boundaries(near: f32, far: f32) -> [f32; SHADOW_CASCADES + 1] {
     let step = (far / near).max(1.0).sqrt().sqrt();
     let mut bounds = [0.0_f32; SHADOW_CASCADES + 1];
     let mut log = near;
@@ -201,7 +201,6 @@ pub struct ShadowUniformsData {
 /// [`pack_shadow_uniforms`] 的 WGSL 布局镜像（`shadow_write.wgsl`/`shadow_build.wgsl`/
 /// `gbuffer_composite.wgsl` 的 `ShadowUniforms` 同序静态互证）。
 #[repr(C)]
-#[allow(dead_code)]
 struct ShadowUniformsLayout {
     cascade_view_proj: [[f32; 4]; 4 * 4],
     planes: [[f32; 4]; 24],
@@ -284,8 +283,6 @@ pub struct ShadowDiagnostics {
     pub bound: u32,
     /// 逐 cascade GPU 可见标记数（在场可绘行中 mark=1）。
     pub gpu_visible: [u32; SHADOW_CASCADES],
-    /// 逐 cascade CPU 参照可见数（cull_stats 同款保守 AABB × cascade 平面）。
-    pub cpu_visible: [u32; SHADOW_CASCADES],
     /// 读数所属帧槽（0/1，陈旧度 ≤2 帧的来源标注）。
     pub marks_frame: usize,
 }

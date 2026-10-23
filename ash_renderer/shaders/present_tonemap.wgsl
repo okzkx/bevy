@@ -1,20 +1,21 @@
-// 8.6 present tonemap（全屏）：HDR 中间目标 + Bloom 叠加 → 色调映射 → swapchain。
-// 输出编码恰好一次的落点不变：本 shader 全程线性，swapchain 的 SRGB view 在
-// ROP 写出时做唯一一次编码（3.4 拍板）。
+// present tonemap（全屏）：HDR 中间目标 + Bloom 叠加 → 色调映射 → swapchain。
+// 本 shader 全程线性，swapchain 的 SRGB view 在 ROP 写出时做唯一一次编码。
 //
-// 曲线选型（8.6 拍板，三态 A/B 挂 bloom_set/管线控制窗口）：
-// curve=0 Narkowicz 2015 逐通道拟合（8.4 基线，保留作对照）；
+// 曲线（bloom_params.curve，A/B 挂 bloom_set / 管线控制窗口）：
+// curve=0 Narkowicz 2015 逐通道拟合（对照基线）；
 // curve=1 Filament 完整版 aces::ACES——十步管线函数级照抄、命名保留原名
 //   （filament/src/ToneMapper.cpp:133-193 + ColorSpaceUtils.h @ 373190d49），
 //   契约域 linear Rec.2020 进出（ToneMapper.h），本 shader 的 HDR 是 linear
 //   sRGB，进曲线前 sRGB→Rec2020、出曲线后 Rec2020→sRGB 各转一次。
-// gain=亮度增益位（ap1 *= brightness；ACES=1.0，LEGACY 形态=1.667），与曝光
-// 锚点（gbuffer_composite 的 EXPOSURE）分离外露。
+// gain = 亮度增益位（ap1 *= brightness；ACES=1.0，LEGACY 形态=1.667），与曝光
+// 锚点（common/brdf.wgsl 的 EXPOSURE）分离外露。
 //
 // 接口：set0 = 帧 UBO（mode 旁路面）；set1 = G-buffer 采样集（b2 hdr）；set2 =
 // bloom 参数集（b0 up0 / b1 合法闲置 / b2 采样器 / b3 参数 UBO）。
-// debug 仪器旁路：mode != filament(0) 时 HDR 内是直出可视化——跳过 bloom
-// 叠加与色调映射（写后读面失真即仪器失真）。
+// debug 仪器旁路：mode != 0 时 HDR 内是直出可视化——跳过 bloom 叠加与色调映射
+//（写后读面失真即仪器失真）。
+// #import frame
+// #import fullscreen
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(1) @binding(2) var hdr_tex: texture_2d<f32>;
@@ -23,34 +24,12 @@
 @group(2) @binding(2) var bloom_sampler: sampler;
 @group(2) @binding(3) var<uniform> bloom_params: BloomParams;
 
-struct FrameUniforms {
-    view_proj: mat4x4f,
-    dir_to_light: vec4f,
-    ambient_color: vec4f,
-    light_color: vec4f,
-    mode: u32,
-}
-
 struct BloomParams {
     strength: f32,
     enabled: f32,
     tonemap: f32,
     curve: f32,
     gain: f32,
-}
-
-struct VsOut {
-    @builtin(position) clip: vec4f,
-    @location(0) uv: vec2f,
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
-    var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
-    var out: VsOut;
-    out.clip = vec4f(p[vi], 0.0, 1.0);
-    out.uv = vec2f(p[vi].x * 0.5 + 0.5, 0.5 - p[vi].y * 0.5);
-    return out;
 }
 
 // Narkowicz ACES 拟合（线性域输入/输出，编码在 SRGB view ROP 恰好一次）

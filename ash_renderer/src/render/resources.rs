@@ -65,9 +65,9 @@ pub enum BufferRole {
     /// 回读验证:transfer 写 + 宿主读(HOST_CACHED 优先,加速宿主读侧)。
     Readback,
     /// 每帧 UBO(set1 的载体):着色器读,宿主按帧写(在飞安全由帧槽
-    /// 轮转保证——每帧一个 buffer,复用前等对应帧完成,wait_for_slot 已生效)。
+    /// 轮转保证——每帧一个 buffer,复用前 wait_for_slot 等对应帧完成)。
     FrameUniform,
-    /// 宿主可见 storage(探针 I/O;未来 GPU 可索引参数表的宿主侧形态):
+    /// 宿主可见 storage(帧槽环/探针 I/O——GPU 按索引读写、宿主直写/直读的参数表):
     /// 设备读写 + 宿主写(staging 直写)/读(回读)。
     Storage,
     /// UI 顶点/索引:每帧整换、宿主直写、着色器读本帧内容——不经
@@ -81,7 +81,7 @@ pub enum BufferRole {
     /// 从不覆盖仍被在飞 draw 读取的记录(对象记录按槽分配写一次,
     /// 更新走"新槽 + 旧槽停尸房",见 instance_table 模块)。
     DeviceStorage,
-    /// indirect 绘制命令环(5.3):compute 每帧全量重写、`cmd_draw_indexed_indirect`
+    /// indirect 绘制命令环:compute 每帧全量重写、`cmd_draw_indexed_indirect`
     /// 按 DRAW_INDIRECT 阶段读——纯设备侧双端(宿主零参与),DEVICE_LOCAL;
     /// usage 带 INDIRECT_BUFFER(cmdDrawIndexedIndirect 的 VUID-00533 硬要求)。
     /// 复用安全与标记环同一条 fence 纪律(帧槽 ×2,wait_for_slot 先行)。
@@ -115,7 +115,7 @@ impl BufferRole {
             Self::IndirectCommands => {
                 vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::INDIRECT_BUFFER
-                    // BRP 环内容对账（ring_census，8.2.6）经 staging 读回命令环：
+                    // BRP 环内容对账（ring_census）经 staging 读回命令环：
                     // 与 DevicePool/DeviceStorage 同款"内容抽查以本 buffer 为拷贝源"
                     // 纪律，TRANSFER_SRC 一并冻结（VUID-vkCmdCopyBuffer-srcBuffer-00118）
                     | vk::BufferUsageFlags::TRANSFER_SRC
@@ -292,7 +292,7 @@ impl GpuBuffer {
     /// CONCURRENT 用显式族集合换掉所有权跟踪,与 wgpu-hal 同构。内存可见性不因此
     /// 放松:transfer 写 → graphics 读仍由票据信号量的内存依赖收口(帧录制在
     /// ALL_COMMANDS 等票据)。图像侧不走本变体——图像一次性发布,EXCLUSIVE 的
-    /// release/acquire 成对语义已由探针组 C 实证,维持原形状。
+    /// release/acquire 成对语义已由探针实证。
     ///
     /// # Errors
     /// 同 [`Self::create`]。
@@ -450,7 +450,7 @@ impl GpuBuffer {
     /// buffer 非 host-visible,或写入范围越出分配整体。
     pub fn write(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
         if !self.host_visible() {
-            return Err(VulkanError::Init(format!(
+            return Err(VulkanError::Upload(format!(
                 "host 写要求 HOST_VISIBLE,本 buffer 类型属性 {:?}",
                 self.property_flags
             )));
@@ -483,7 +483,7 @@ impl GpuBuffer {
     /// buffer 非 host-visible,或读取范围越出分配整体。
     pub fn read(&mut self, offset: u64, out: &mut [u8]) -> Result<()> {
         if !self.host_visible() {
-            return Err(VulkanError::Init(format!(
+            return Err(VulkanError::Upload(format!(
                 "host 读要求 HOST_VISIBLE,本 buffer 类型属性 {:?}",
                 self.property_flags
             )));
@@ -514,7 +514,7 @@ impl GpuBuffer {
             .checked_add(len)
             .is_none_or(|end| end > self.allocation_size)
         {
-            return Err(VulkanError::Init(format!(
+            return Err(VulkanError::Capacity(format!(
                 "host {what}越界:[{offset}, {}) 超出分配 {}B",
                 offset.saturating_add(len),
                 self.allocation_size

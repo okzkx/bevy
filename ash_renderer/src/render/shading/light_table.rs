@@ -1,6 +1,5 @@
-//! 光源常驻表（8.2.2）：punctual 光源的 set2 式常驻 storage 表——槽位 +
-//! 增量账本 + free list（4.1 对象增量先例），替代 8.1 的 `TestPointLights`
-//! 每帧全量环（用户拍板光源驻留形态=常驻表，段施工计划 §0）。
+//! 光源常驻表：punctual 光源的常驻 storage 表——槽位 + 增量账本 + free list
+//! （与对象表同款增量形态）。
 //!
 //! 三条设计钉：
 //! - **帧槽双缓冲 + fence 纪律**：表本体 HOST_VISIBLE ×`MAX_FRAMES_IN_FLIGHT`
@@ -13,30 +12,31 @@
 //!   语义：cluster 求交与着色双侧按 `r > 0` 门卫跳过），停尸房不设——1 帧
 //!   内旧列表引用已换内容的槽最坏产生一次视觉闪变，无悬空读（内容恒有效），
 //!   灯量级（百以内）不值得对象表级 graveyard 机器。
-//! - **方向光不进表**（8.2.2 钉明）：方向光是全局量语义，维持 set1 UBO 单光
-//!   现役链（bevy GPU 同款）不动；表只装 punctual（点光，type 字段预留 spot）。
+//! - **方向光不进表**：方向光是全局量语义，走 set1 UBO 单光链（bevy GPU 同款）；
+//!   表只装 punctual（点光，type 字段预留 spot）。
 //!
-//! shadow 标志位（flags bit0）本段只记账不消费——8.3 阴影采样接管选择权。
+//! shadow 标志位（flags bit0）本表只记账不消费，由阴影采样侧决定是否使用。
 
-use ash::{vk, Device};
+use ash::vk;
 use bevy::log::info;
 
+use crate::common::bytes::{put_u32, put_vec4};
 use crate::common::error::{Result, VulkanError};
 use crate::render::resources::{BufferRole, GpuBuffer, MemoryContract};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
 /// 光源表容量（槽位数；BRP 注入的测试灯与远期场景灯共用）。
-pub const LIGHT_TABLE_CAPACITY: u32 = 256;
+pub(crate) const LIGHT_TABLE_CAPACITY: u32 = 256;
 
 /// 光源记录字节数（vec4×2 + flags + 垫 = 64B，对齐 16；与 WGSL `LightRecord`
 /// 互证。注意 WGSL 侧 `_pad: vec3<u32>` 的成员对齐把步长撑到 64（pad 落
 /// @48）——Rust 侧 pack 按 64B 排布，36..48 区保持 0）。
-pub const LIGHT_RECORD_SIZE: u64 = 64;
+pub(crate) const LIGHT_RECORD_SIZE: u64 = 64;
 
-/// 光源类型（flags bits 8..15）：点光已实现；spot 记录形状预留（角度衰减
-/// 公式随 8.2.3 照抄进 shader，锥体簇求交归后续段）。
+/// 光源类型（flags bits 8..15）：点光已实现；spot 只预留记录形状（锥体簇求交
+/// 未实现）。
 pub const LIGHT_TYPE_POINT: u32 = 0;
-#[expect(dead_code, reason = "spot 本体归后续段；记录形状预留（type 域契约钉）")]
+#[expect(dead_code, reason = "spot 未实现；记录形状预留（type 域契约）")]
 pub const LIGHT_TYPE_SPOT: u32 = 1;
 
 pub const LIGHT_FLAG_SHADOW: u32 = 1 << 0;
@@ -49,7 +49,7 @@ pub struct LightRecord {
     pub pos_radius: [f32; 4],
     /// 颜色（rgb 线性）× 强度（w，candela 域；曝光换算归消费端）。
     pub color_intensity: [f32; 4],
-    /// bit0 = shadow（8.3 预留）；bits 8..15 = type（[`LIGHT_TYPE_POINT`]）。
+    /// bit0 = shadow；bits 8..15 = type（[`LIGHT_TYPE_POINT`]）。
     pub flags: u32,
 }
 
@@ -66,15 +66,9 @@ impl LightRecord {
     #[must_use]
     pub fn pack(&self) -> [u8; LIGHT_RECORD_SIZE as usize] {
         let mut out = [0u8; LIGHT_RECORD_SIZE as usize];
-        for (i, v) in self
-            .pos_radius
-            .iter()
-            .chain(self.color_intensity.iter())
-            .enumerate()
-        {
-            out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
-        }
-        out[32..36].copy_from_slice(&self.flags.to_le_bytes());
+        put_vec4(&mut out, 0, &self.pos_radius);
+        put_vec4(&mut out, 16, &self.color_intensity);
+        put_u32(&mut out, 32, self.flags);
         out
     }
 
@@ -88,8 +82,6 @@ impl LightRecord {
 /// 光源常驻表：双帧槽 storage 环 + 槽位账本 + 脏行增量重写。
 #[derive(bevy::prelude::Resource)]
 pub struct LightTable {
-    #[allow(dead_code)]
-    device: Device,
     rings: Vec<GpuBuffer>,
     /// 槽位镜像（None = 空槽；census CPU 参照与 BRP 读数共用）。
     records: Vec<Option<LightRecord>>,
@@ -123,7 +115,6 @@ impl LightTable {
              (HOST_VISIBLE,脏行增量重写,fence 纪律同模型环;方向光不进表,set1 UBO 单光现役链保留)"
         );
         Ok(Self {
-            device: ctx.device.clone(),
             rings,
             records: Vec::new(),
             used_cursor: 0,
@@ -145,21 +136,17 @@ impl LightTable {
             self.used_cursor += 1;
             slot
         } else {
-            return Err(VulkanError::Upload(format!(
+            return Err(VulkanError::Capacity(format!(
                 "光源表容量耗尽:{LIGHT_TABLE_CAPACITY} 槽——显式报错,不静默截断"
             )));
         };
-        self.records.resize(
-            usize::try_from(self.used_cursor).expect("容量 256 远小于 usize 上界"),
-            None,
-        );
+        self.records.resize(self.used_cursor as usize, None);
         self.records[slot as usize] = Some(record);
         self.mark_dirty(slot);
         Ok(slot)
     }
 
-    /// 原位更新一盏灯的记录（槽号不变——cluster 列表引用稳定，4.1 换内容
-    /// 语义：改槽内容不换槽）。
+    /// 原位更新一盏灯的记录（槽号不变——cluster 列表引用稳定：改槽内容不换槽）。
     ///
     /// # Errors
     /// 槽号越界或槽位为空。
@@ -219,11 +206,10 @@ impl LightTable {
     /// 在场槽号列表（BRP stats 读数面）。
     #[must_use]
     pub fn active_slots(&self) -> Vec<u32> {
-        self.records
-            .iter()
-            .enumerate()
+        (0u32..)
+            .zip(&self.records)
             .filter(|(_, e)| e.is_some())
-            .map(|(i, _)| u32::try_from(i).expect("槽号上界 256"))
+            .map(|(i, _)| i)
             .collect()
     }
 
@@ -269,11 +255,6 @@ impl LightTable {
         }
     }
 }
-
-// # Safety:句柄本质是整数;槽位账本是纯 Rust 数据;buffer 的 Send/Sync 随
-// GpuBuffer。多线程共享由外部纪律保证(与 InstanceTables 同款约定)。
-unsafe impl Send for LightTable {}
-unsafe impl Sync for LightTable {}
 
 #[cfg(test)]
 mod tests {
@@ -367,7 +348,7 @@ mod tests {
         assert_eq!(entry.1, 2, "复用 spawn 重置剩余写");
     }
 
-    /// pack 布局抽查：48B、pos_radius/color_intensity/flags 同序、死灯全零。
+    /// pack 布局抽查：64B、pos_radius/color_intensity/flags 同序、死灯全零。
     #[test]
     fn pack_layout() {
         let r = LightRecord {

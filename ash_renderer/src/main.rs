@@ -2,7 +2,7 @@
 //!
 //! main 只做统筹：决定装哪些插件、禁哪些插件，然后交出调度——**不执行任何
 //! Vulkan 调用**。Vulkan 侧的编排（init / draw_frame / teardown）住在
-//! [`ash_renderer::host`]（装配与编排分家）；ECS 侧材质缝在 [`ash_renderer::scene`]。
+//! [`ash_renderer::driver::host`]（装配与编排分家）；ECS 侧材质缝在 [`ash_renderer::scene`]。
 //!
 //! 禁用名单 = 渲染族 8 件（0.20.0-dev 下路径逐一复核未变）。
 //! 帧循环住在 bevy runner 里（侦察篇 §4）：winit `about_to_wait` 驱动 `app.update()`。
@@ -112,7 +112,7 @@ fn main() -> AppExit {
         // 官方 inspection 方法族 + 场景语义自定义方法（查询/改 Transform/相机给值）
         .add_plugins(AshRemotePlugin)
         // egui 调试 UI 的 ECS 半边（裸接 ash）：Update 里输入桥 + pass + 调试窗口，
-        // 产 EguiFrame/RenderMode 给帧循环
+        // 产 EguiFrame 给帧循环、发布 PointerCapture 给相机/日光控制
         .add_plugins(OverlayPlugin)
         // buffer 侧上传：Last 里快照去重 → 合批进 GPU 池,先于帧循环
         .add_plugins(AshUploadPlugin)

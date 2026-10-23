@@ -1,8 +1,8 @@
 //! 日光方向控制（机制半边）：中键拖拽旋转方向光——水平拖 = 太阳方位角
 //! 绕世界 Y 转、垂直拖 = 太阳仰角升降，"抓住太阳拖"的手感。零 Vulkan 代码，
 //! 也不含写死的场景参数。与 [`super::camera_control`] 同一套输入形态：跨帧
-//! 拖拽会话（[`DragSession`]）+ egui 指针仲裁（[`super::util::egui_wants_pointer`]，
-//! 悬在调试面板上让给 UI）。
+//! 拖拽会话（[`DragSession`]）+ UI 指针仲裁（[`PointerCapture`]，悬在调试
+//! 面板上让给 UI）。
 //!
 //! 状态真源 = 方向光实体携带的 [`SunOrbit`] 球坐标组件（方位角/仰角），业务
 //! 半边（[`crate::scene::content::lights`]）进场时从初始朝向反解挂上，机制
@@ -23,10 +23,8 @@ use bevy::{
     input::{mouse::MouseButton, ButtonInput},
 };
 
-use crate::overlay::EguiState;
-
 use super::camera_control::{DragSession, FULL_TURN_PER_HEIGHT};
-use crate::scene::util::egui_wants_pointer;
+use super::pointer_capture::{PointerCapture, PointerCaptureSet};
 
 use ash_macros::system;
 
@@ -85,18 +83,19 @@ pub struct AshLightControlPlugin;
 
 impl Plugin for AshLightControlPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, light_control);
+        app.init_resource::<PointerCapture>()
+            .add_systems(Update, light_control.after(PointerCaptureSet));
     }
 }
 
-/// 日光方向控制（Update）：中键按下且 egui 不感兴趣 → 开拖拽会话，按住期间
+/// 日光方向控制（Update）：中键按下且指针不在 UI 上 → 开拖拽会话，按住期间
 /// 逐帧位移换算方位/仰角。写 Transform 只在参数变化时——进场朝向（与官方
 /// 对照进程同源）在首次中键拖拽前原样保留。
 #[system]
 fn light_control(
     windows: Query<&Window, With<PrimaryWindow>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    egui: Option<Res<EguiState>>,
+    capture: Res<PointerCapture>,
     mut lights: Query<(&mut Transform, &mut SunOrbit), With<DirectionalLight>>,
     mut session: Local<DragSession>,
     mut engaged: Local<bool>,
@@ -112,7 +111,7 @@ fn light_control(
     }
     let cursor = window.cursor_position();
 
-    if mouse.just_pressed(MouseButton::Middle) && !egui_wants_pointer(egui.as_deref(), cursor) {
+    if mouse.just_pressed(MouseButton::Middle) && !capture.over_ui {
         session.dragging = cursor.is_some();
         session.last_cursor = cursor;
     }

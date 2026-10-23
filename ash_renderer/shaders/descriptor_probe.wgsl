@@ -1,9 +1,9 @@
-// 3.3.3 描述符链路探针着色器：形状 = 前置闸门冻结的正式 set/binding 表。
+// 描述符链路探针着色器（examples/descriptor_probe.rs）：形状 = 主管线冻结的 set/binding 表。
 //
 // - set0 b0/b1：纹理数组 + sampler 数组（WGSL texture/sampler 分离），本版不带
 //   长度 = runtime array（SPIR-V OpTypeRuntimeArray；build.rs 补丁器补
-//   RuntimeDescriptorArray capability，见前置闸门施工记录 §4 定案）。
-// - set1 b0：每帧 UBO（FrameUniforms = 64B mat4）。
+//   RuntimeDescriptorArray capability）。
+// - set1 b0：主管线每帧 UBO（探针只声明 view_proj 前缀 64B）。
 // - push constant：每 draw 参数（model/tex_index/sampler_index/base_color，
 //   96B，偏移 0/64/68/80，与 Rust 镜像 offset_of! 互证）。
 // - set2：探针专用 I/O（每调用 storage 索引 + 输出）——**不属于生产表**，仅给

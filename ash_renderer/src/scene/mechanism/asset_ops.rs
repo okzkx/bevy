@@ -1,5 +1,5 @@
 //! 资产写操作封装："改资产内容"四类驱动的可复用实现——BRP 方法族
-//! （[`crate::remote::assets`]）与将来 egui 面板共用这一层，不养两份逻辑
+//! （remote 的 assets 薄壳）与其他写入方共用这一层，不养两份逻辑
 //! （apply_transform_edit / object_ops 同款惯例）。
 //!
 //! 定位锚定实体（与换柄同口径）：BRP 参数给 entity，取它身上的
@@ -57,9 +57,9 @@ pub enum AssetOpError {
 pub struct MutateAsset {
     /// 改材质参数：base_color（线性域 RGBA）。
     pub base_color: Option<[f32; 4]>,
-    /// 改材质参数：metallic（[0,1]，8.2 PBR 面）。
+    /// 改材质参数：metallic（[0,1]，PBR 面）。
     pub metallic: Option<f32>,
-    /// 改材质参数：perceptual_roughness（[0,1]，8.2 PBR 面）。
+    /// 改材质参数：perceptual_roughness（[0,1]，PBR 面）。
     pub perceptual_roughness: Option<f32>,
     /// 换材质贴图槽：把源实体的 base_color_texture 柄拷过来（None 源 = 清槽）。
     pub slot_base_color_from: Option<Entity>,
@@ -111,7 +111,7 @@ pub fn mutate_asset(
     {
         return Err(AssetOpError::NothingToDo);
     }
-    // PBR 标量域校验（[0,1]；8.2 shader 端也有 clamp，这里把误用挡在入口）
+    // PBR 标量域校验（[0,1]；shader 端也有 clamp，这里把误用挡在入口）
     if p.metallic.is_some_and(|m| !(0.0..=1.0).contains(&m))
         || p.perceptual_roughness.is_some_and(|r| !(0.0..=1.0).contains(&r))
     {
@@ -255,8 +255,8 @@ pub fn mutate_asset(
         readback.image = Some(texture_handle.id());
     }
 
-    // 组装联动（7.9）：BRP 内容写入落在 RemoteLast——资产事件读侧隔帧才可读，
-    // 等事件链标记重估会让组装缓存对全量路径晚一帧（对照模式实抓）。写入点
+    // 组装联动：BRP 内容写入落在 RemoteLast——资产事件读侧隔帧才可读，
+    // 等事件链标记重估会让组装缓存对全量路径晚一帧（对照模式可见）。写入点
     // 直接标记材质引用行重估，同帧 draw_frame 即收敛（材质内容进组装判定
     // 的是 alpha 计数；贴图槽/mesh 内容不进元组，重估幂等无害）。
     if (p.base_color.is_some() || new_slot.is_some())

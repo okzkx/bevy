@@ -1,11 +1,10 @@
-//! Transform 编辑操作封装：egui 拖值与 BRP `set_transform`
+//! Transform 编辑操作封装（机制层）：egui 拖值与 BRP `set_transform`
 //! 共用的唯一实现，不养两份逻辑。
 //!
-//! 显示读
-//! [`crate::overlay::tool_window::entity_tree::SelectedDetails`] 的同帧快照；写值走
-//! [`TransformEditQueue`]——egui pass 里组好编辑，[`apply_transform_edits`]
-//! 在 Update 内紧随 pass 清账（链式排程），PostUpdate 传播 → 账本对账
-//!（update_ledger 增量维护）→ Last 绘制，画面当帧跟随。写值直接改
+//! 两条写入口：UI 侧走 [`TransformEditQueue`]——egui pass 里组好编辑，
+//! [`apply_transform_edits`] 在 Update 内紧随 pass 清账（overlay 链式排程），
+//! PostUpdate 传播 → 账本对账（update_ledger 增量维护）→ Last 绘制，画面当帧
+//! 跟随；BRP 侧持 &mut World 直调 [`apply_transform_edit`]。写值直接改
 //! `Transform` 组件，不走反射。
 
 use bevy::{math::EulerRot, prelude::*};
@@ -66,7 +65,7 @@ pub fn apply_transform_edit(
 /// Update 清账：把队列里的编辑逐条写进 World，链在 egui pass 之后、传播之前。
 /// 单条失败 warn 丢弃继续（Tier①：调试编辑不影响帧循环）。
 #[system]
-pub(super) fn apply_transform_edits(world: &mut World) {
+pub(crate) fn apply_transform_edits(world: &mut World) {
     let edits = std::mem::take(&mut world.resource_mut::<TransformEditQueue>().0);
     for (entity, edit) in edits {
         if let Err(e) = apply_transform_edit(world, entity, edit.clone()) {

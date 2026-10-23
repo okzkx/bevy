@@ -234,7 +234,8 @@ def main():
     seq = []
     for radius in (8.0, 12.0, 16.0, 24.0):
         rpc("ash_renderer/set_camera", {"radius": radius})
-        wait_settle(2.5)
+        # 3.5s 而非 2.5s：档位环两帧陈旧 + BRP 读数与在飞帧竞争，2.5s 在慢机上会读到收敛中值
+        wait_settle(3.5)
         c = read_census()
         top = max(i for i, v in enumerate(c["level_counts"]) if v > 0) if any(c["level_counts"]) else 0
         seq.append(top)

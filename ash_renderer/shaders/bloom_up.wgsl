@@ -1,26 +1,13 @@
-// 8.4 Bloom 升采样（全屏，dual-Kawase up）：up[i] = tent(up[i+1]) + down[i]
+// Bloom 升采样（全屏，dual-Kawase up）：up[i] = tent(up[i+1]) + down[i]
 // ——4 tap 双线性 tent 近似 + 对应降采样级直加（shader 内求和，无混合状态）。
 //
 // 接口：set0 = b0 up 源（最小级时 = down[N-1]）+ b1 down 对应级 + b2 采样器
 // + b3 参数 UBO（BloomTargets set_layout_up；b1/b3 在最小级直通场景合法在用）。
+// #import fullscreen
 
 @group(0) @binding(0) var up_tex: texture_2d<f32>;
 @group(0) @binding(1) var down_tex: texture_2d<f32>;
 @group(0) @binding(2) var src_sampler: sampler;
-
-struct VsOut {
-    @builtin(position) clip: vec4f,
-    @location(0) uv: vec2f,
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
-    var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
-    var out: VsOut;
-    out.clip = vec4f(p[vi], 0.0, 1.0);
-    out.uv = vec2f(p[vi].x * 0.5 + 0.5, 0.5 - p[vi].y * 0.5);
-    return out;
-}
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {

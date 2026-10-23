@@ -16,8 +16,7 @@ use ash_macros::system;
 use crate::scene::mechanism::CameraOrbit;
 use crate::scene::util::fmt_vec3;
 
-/// 相机取景参数：Sponza 中庭机位（BRP 现场四候选实拍选型，读图证据
-/// .temp/7.1/cam_C.png——彩旗拱廊狮头喷泉全景）。Sponza 世界 AABB ≈
+/// 相机取景参数：Sponza 中庭机位（彩旗拱廊狮头喷泉全景）。Sponza 世界 AABB ≈
 /// 30×12.4×18.3 米（节点 scale 0.008），中庭中心 ≈ (0, 3, 0)：机位在
 /// 中庭东端沿长轴向西看（球坐标 yaw 90°/pitch 5°/radius 5 的直角反解）。
 /// `--scene` 指定其他场景时机位不适配（可能埋进几何里），用 WASDQE 漫游/
@@ -48,7 +47,7 @@ pub(super) fn spawn_camera(
         && let Projection::Perspective(ref mut persp) = projection
     {
         persp.aspect_ratio = window.resolution.width() / window.resolution.height();
-        // 远平面随 5.4 大场景取景放宽（默认 1000 不够俯瞰 256+ 单位场景）
+        // 远平面放宽：默认 1000 不够俯瞰 256+ 单位的常驻大场景
         persp.far = 4000.0;
         aspect_note = "按主窗口";
     }

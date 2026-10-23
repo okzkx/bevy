@@ -6,14 +6,14 @@
 //! `world.spawn_entity` 经反射构造组件值，表达不了"引用既有资产的柄"
 //!（Handle 无法经反射指到现有资产身份），克隆/拷柄是场景语义操作。统计读数
 //! `increment_stats` 自研：账本是普通 Rust 结构（BTreeMap + 柄），反射序列化
-//! 不可读，定制 JSON 才能按判定线口径报数。
+//! 不可读，定制 JSON 才能按验收口径报数。
 //!
 //! 机制与边界：handler 是 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍
-//! 执行——写操作下一帧生效（spawn/despawn 在次帧画面可见，实测钉明）；操作
-//! 本体在 [`crate::scene::mechanism::object_ops`]（与将来 egui 面板共用的可复用
-//! 实现），本模块只是协议薄壳。安全边界：默认只绑 loopback、无鉴权，仅限本机。
+//! 执行——写操作下一帧生效（spawn/despawn 在次帧画面可见）；操作
+//! 本体在 [`crate::scene::mechanism::object_ops`]（可供 egui 面板复用的实现），
+//! 本模块只是协议薄壳。安全边界：默认只绑 loopback、无鉴权，仅限本机。
 
-use bevy::{pbr::StandardMaterial, prelude::*, remote::{error_codes, BrpError, BrpResult}};
+use bevy::{pbr::StandardMaterial, prelude::*, remote::{BrpError, BrpResult}};
 use serde_json::{json, Value};
 
 use crate::{
@@ -24,7 +24,7 @@ use crate::{
     render::{BindlessTables, ImageCache, InstanceTables, MeshPool, OBJECT_TABLE_CAPACITY},
 };
 
-use super::invalid_params;
+use super::{invalid_params, params::parse_params};
 
 use ash_macros::system;
 
@@ -47,20 +47,16 @@ struct SpawnPrimitiveParams {
 pub(crate) fn object_op_error(err: ObjectOpError) -> BrpError {
     match err {
         ObjectOpError::EntityMissing(e) => BrpError::entity_not_found(e),
-        ObjectOpError::SourceNotPrimitive(e) => BrpError {
-            code: error_codes::COMPONENT_ERROR,
-            message: format!("源实体 {e:?} 不是可渲染 primitive（缺 Mesh3d/MeshMaterial3d）"),
-            data: None,
-        },
+        ObjectOpError::SourceNotPrimitive(e) => BrpError::component_error(format!(
+            "源实体 {e:?} 不是可渲染 primitive（缺 Mesh3d/MeshMaterial3d）"
+        )),
         ObjectOpError::ComponentMissing(name, entity) => {
             BrpError::component_not_present(name, entity)
         }
         ObjectOpError::NothingToDo => invalid_params("至少一项变更（mesh_from / material_from）"),
-        ObjectOpError::MaterialAssetMissing(e) => BrpError {
-            code: error_codes::COMPONENT_ERROR,
-            message: format!("实体 {e:?} 的材质资产不在容器中，槽写拒绝"),
-            data: None,
-        },
+        ObjectOpError::MaterialAssetMissing(e) => {
+            BrpError::component_error(format!("实体 {e:?} 的材质资产不在容器中，槽写拒绝"))
+        }
         ObjectOpError::InvalidAssetPath(what) => invalid_params(format!(
             "资产路径解析失败（坏标签/坏 source 语法）：{what}"
         )),
@@ -76,13 +72,11 @@ pub(crate) fn object_op_error(err: ObjectOpError) -> BrpError {
 /// 返回新实体号与柄身份（写后读对账用）。
 #[system]
 pub(crate) fn spawn_primitive(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 source"))?;
-    let p: SpawnPrimitiveParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let p: SpawnPrimitiveParams = parse_params(params, "params 缺失：需要 source")?;
     let offset = p.offset.map(Vec3::from_array).unwrap_or(Vec3::ZERO);
     let entity = spawn_primitive_clone(world, p.source, offset, p.name_suffix.as_deref().unwrap_or("（副本）"))
         .map_err(object_op_error)?;
-    // 刚克隆成功，组件必在；unwrap 的是不变式而非外部输入（Tier② 语义）
+    // 刚克隆成功，组件必在；查无按空串读回，不报错
     let mesh = world
         .get::<Mesh3d>(entity)
         .map(|m| m.0.id().to_string())
@@ -114,9 +108,7 @@ struct ReplaceHandlesParams {
 /// 回收由回收链另管，本方法只保证"不画旧对象"。返回换后柄身份读回。
 #[system]
 pub(crate) fn replace_handles(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 entity 与至少一项 from"))?;
-    let p: ReplaceHandlesParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let p: ReplaceHandlesParams = parse_params(params, "params 缺失：需要 entity 与至少一项 from")?;
     let HandleSwapReadback { mesh, material } =
         apply_handle_swap(world, p.entity, p.mesh_from, p.material_from).map_err(object_op_error)?;
     Ok(json!({
@@ -126,7 +118,7 @@ pub(crate) fn replace_handles(In(params): In<Option<Value>>, world: &mut World) 
     }))
 }
 
-/// `ash_renderer/increment_stats`：账本与增量计量读数（只读，判定线证据通道）。
+/// `ash_renderer/increment_stats`：账本与增量计量读数（只读，验收证据通道）。
 /// 处理数/扫描数分列——"零上传"不说成"零 CPU 每对象成本"。readiness 段
 /// 报异步就绪账（pending/等待/到货/失败/取消分列）；recycle 段报卸载回收
 /// 账（事件/出账/驻留存量/停尸房/free list 分列——"存量回基线"的读数口）。
@@ -184,8 +176,8 @@ pub(crate) fn increment_stats(
             "object_retired_total": instance_tables.slots_retired_total(),
             "material_slots": s.material_slots,
             "material_capacity": instance_tables.capacity_materials(),
-            // 5.3 起图形 push 退役（firstInstance 携带槽号）——场景绘制 push
-            // 字节恒 0；字段保留供 5.4/5.5 压测对照（读数从硬编码 4 订正为 0）
+            // 图形 push 已退役（firstInstance 携带槽号）——场景绘制 push 字节
+            // 恒 0；字段保留供压测脚本对照
             "push_bytes_per_draw": 0,
         },
         "readiness": {
@@ -228,4 +220,4 @@ pub(crate) fn increment_stats(
 // `world.despawn_entity`（0.20-dev 默认递归删 `Children` 子树）、后者=官方
 // `world.remove_components`，反射通道按组件名操作即可（无值构造），brp.py
 // 直接封装官方方法名——object_ops 的 despawn_tree/remove_component 封装留给
-// 将来 egui 面板复用（组件白名单见 `RemovableComponent`）。
+// egui 面板复用（组件白名单见 `RemovableComponent`）。

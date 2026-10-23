@@ -1,13 +1,13 @@
-//! bevy 可见性集群豁免（7.10 治理）：把场景实体的可见性三件套
+//! bevy 可见性集群豁免：把场景实体的可见性三件套
 //!（`Visibility`/`InheritedVisibility`/`ViewVisibility`）移除，让 bevy 的
 //! PostUpdate 可见性集群（calculate_bounds/visibility_propagate/reset_view_
 //! visibility/check_visibility_cpu_culling/mark_newly_hidden）对它们整体失明。
 //!
-//! 依据（7.10.1 归因实数，zero_day 7160 实体）：PostUpdate ~8ms 的大头是可见性
+//! 依据（zero_day 7160 实体的归因实测）：PostUpdate ~8ms 的大头是可见性
 //! 集群 ~5.8ms/帧（check_visibility_cpu_culling 3.75ms + visibility_propagate
 //! 1.1ms + reset 0.39 + mark_newly_hidden 0.33 + calculate_bounds 0.17）——每帧
 //! 对全部 primitive 重算 CPU 可见性。而本渲染器**零消费**这三件套（全仓 grep
-//! 无引用）：可见性归 GPU 剔除/LOD/遮挡自算（5.x 设计成果），宿主没有 bevy
+//! 无引用）：可见性归 GPU 剔除/LOD/遮挡自算，宿主没有 bevy
 //! 渲染管线，`ViewVisibility` 无人读。整条集群是纯浪费的每帧 O(N)。
 //!
 //! 治理形状（业务侧，不 fork 引擎）：逐实体幂等移除三件套——移除后查询不再

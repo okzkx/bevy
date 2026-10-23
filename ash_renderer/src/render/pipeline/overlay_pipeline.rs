@@ -1,6 +1,6 @@
 //! overlay 图形管线：egui 镶嵌顶点的第二 GraphicsPipeline。
 //!
-//! 与场景管线（[`crate::render::pipeline::pipeline`]）的关系是"**布局共享、状态各管**"：
+//! 与场景管线（[`crate::render::pipeline::graphics_pipeline`]）的关系是"**布局共享、状态各管**"：
 //! - **set0 共享**：layout 只声明常驻表 set0（UI 无 UBO，不声明 set1），表在飞
 //!   更新对两管线同时生效——"布局=未来管线公共 ABI"的兑现位。切换管线后 set0
 //!   需按本布局对象重绑（同句柄、不同 layout 对象）。
@@ -14,29 +14,31 @@
 //!   管线的 depthAttachmentFormat 必须与实例深度附件**相等**（"管线不用即可
 //!   UNDEFINED"不成立，首跑被验证层逐 draw 抓获）；深度测试/写入保持关闭 =
 //!   UI 不读不写深度（官方 wgpu 后端同款形状）。
-//! - **混合开启**（egui 官方 wgpu 后端 0.36.2 判据，计划 §2.2）：color =
+//! - **混合开启**（egui 官方 wgpu 后端 0.36.2 判据）：color =
 //!   (ONE, ONE_MINUS_SRC_ALPHA)，alpha = (ONE_MINUS_DST_ALPHA, ONE)——egui 顶点
 //!   色是预乘，src 因子 ONE 即成；alpha 通式让 alpha 通道走出"预乘 over"。
 //! - **剔除 NONE**：epaint 明言 UI 顶点绕向不保证一致（官方同款）。
 //!
 //! UI 录制契约 [`UiPaint`]/[`UiDrawCall`] 也住本模块：录制层 [`crate::render::pipeline::frames`]
-//! 与生产方 `overlay::framework::paint` 同层消费，vulkan 不引上层类型。
+//! 与生产方 `overlay::framework::paint` 同层消费，render 不引上层类型。
 
 use ash::{vk, Device};
 use bevy::log::info;
 
+use crate::common::bytes::{put_f32s, put_u32};
 use crate::common::error::Result;
 
 use crate::render::Context;
+
+use super::pipeline_handle::PipelineHandle;
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与场景管线同一编译路径）。
 const OVERLAY_DRAW_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/overlay_draw.spv"));
 
 /// push constant 冻结布局（16B）的 Rust 镜像：不参与运行时（字节由 [`pack_ui_push`]
 /// 按偏移常量手工排布），存在的意义是让 `offset_of!` 静态断言把 WGSL/管线/CPU
-/// 三方钉在一起（同 [`crate::render::pipeline::pipeline::PushLayout`] 的纪律）。
+/// 三方钉在一起。
 #[repr(C)]
-#[allow(dead_code)]
 struct UiPushLayout {
     screen_size: [f32; 2],
     tex_index: u32,
@@ -51,30 +53,29 @@ const _: () = {
 };
 
 /// overlay push constant 总长（pipeline layout 声明 + 排布 + WGSL 三方同源）。
-pub const UI_PUSH_CONSTANTS_SIZE: u32 = 16;
+pub(crate) const UI_PUSH_CONSTANTS_SIZE: u32 = 16;
 
-/// UI 顶点步长 20B（epaint 顶点镜像 `overlay::framework::paint::UiVertex` 的 pos8+uv8+color4；
+/// UI 顶点步长 20B（epaint 顶点镜像 [`super::ui_vertex_ring::UiVertex`] 的 pos8+uv8+color4；
 /// 写入侧的 `size_of` 断言与本常量互证）。
-pub const UI_VERTEX_STRIDE: u32 = 20;
+pub(crate) const UI_VERTEX_STRIDE: u32 = 20;
 
-/// overlay push 参数 → 16B 字节（偏移按 [`UiPushLayout`] 静态断言表手工排布；
-/// screen_size 是 points 域，与镶嵌顶点同域——见 [`UiPaint::screen_pt`]）。
+/// overlay push 参数 → 16B 字节（偏移按 [`UiPushLayout`] 静态断言表排布，
+/// 标量小端走 [`crate::common::bytes`]；screen_size 是 points 域，与镶嵌顶点
+/// 同域——见 [`UiPaint::screen_pt`]）。
 #[must_use]
-pub fn pack_ui_push(
+pub(crate) fn pack_ui_push(
     screen_size: [f32; 2],
     tex_index: u32,
     sampler_index: u32,
 ) -> [u8; UI_PUSH_CONSTANTS_SIZE as usize] {
     let mut out = [0u8; UI_PUSH_CONSTANTS_SIZE as usize];
-    for (i, v) in screen_size.iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
-    }
-    out[8..12].copy_from_slice(&tex_index.to_le_bytes());
-    out[12..16].copy_from_slice(&sampler_index.to_le_bytes());
+    put_f32s(&mut out, 0, &screen_size);
+    put_u32(&mut out, 8, tex_index);
+    put_u32(&mut out, 12, sampler_index);
     out
 }
 
-/// 一个 UI clip 的 draw 参数（overlay 版 [`crate::render::pipeline::frames::DrawCall`]）：UI 环内
+/// 一个 UI clip 的 draw 参数：UI 环内
 /// 引脚 + scissor（物理像素）。宿主侧的组装形态，录制层只消费。
 #[derive(Clone, Copy, Debug)]
 pub struct UiDrawCall {
@@ -103,9 +104,7 @@ pub struct UiPaint {
 /// overlay 图形管线 + pipeline layout（只声明 set0 + 16B push）。
 #[derive(bevy::prelude::Resource)]
 pub struct OverlayPipeline {
-    device: Device,
-    layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
+    handle: PipelineHandle,
 }
 
 impl OverlayPipeline {
@@ -230,7 +229,7 @@ impl OverlayPipeline {
                 .depth_write_enable(false);
             let blend_attachment = [vk::PipelineColorBlendAttachmentState::default()
                 .blend_enable(true)
-                // egui 顶点色预乘 → src 用 ONE（官方 wgpu 后端 0.36.2 判据，计划 §2.2）
+                // egui 顶点色预乘 → src 用 ONE（官方 wgpu 后端 0.36.2 判据）
                 .src_color_blend_factor(vk::BlendFactor::ONE)
                 .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
                 .color_blend_op(vk::BlendOp::ADD)
@@ -277,9 +276,7 @@ impl OverlayPipeline {
                  共享常驻表，push 16B（0/8/12）"
             );
             Ok(Self {
-                device: device.clone(),
-                layout,
-                pipeline,
+                handle: PipelineHandle::new(device, layout, pipeline),
             })
         }
     }
@@ -287,28 +284,12 @@ impl OverlayPipeline {
     /// 管线句柄（帧录制绑定用）。
     #[must_use]
     pub fn pipeline(&self) -> vk::Pipeline {
-        self.pipeline
+        self.handle.pipeline()
     }
 
     /// pipeline layout 句柄（push/描述符绑定与管线同源）。
     #[must_use]
     pub fn layout(&self) -> vk::PipelineLayout {
-        self.layout
-    }
-}
-
-// # Safety:句柄本质是整数,创建/销毁只在持有方线程;方法只读句柄(与场景管线同款约定)
-unsafe impl Send for OverlayPipeline {}
-unsafe impl Sync for OverlayPipeline {}
-
-impl Drop for OverlayPipeline {
-    fn drop(&mut self) {
-        // 契约边界:不等 GPU,退出排空由 teardown 的 device_wait_idle 先行;
-        // pipeline 先于 layout(引用方向),layout 先于它借用的 set0 layout(在
-        // BindlessTables 里,拆除序由 host 的 remove_resource 顺序保证)
-        unsafe {
-            self.device.destroy_pipeline(self.pipeline, None);
-            self.device.destroy_pipeline_layout(self.layout, None);
-        }
+        self.handle.layout()
     }
 }

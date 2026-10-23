@@ -1,20 +1,20 @@
-//! GPU LOD 选档 compute 半边（6.2.3）：管线 + push 排布 + CPU 参照纯函数 +
+//! GPU LOD 选档 compute 半边：管线 + push 排布 + CPU 参照纯函数 +
 //! 诊断账面。第三 compute pass——在遮挡测试之后、indirect 组装之前（档位
 //! 环 b8 由本段写、build_indirect 读：命令三字段从 LOD 变体表按档直址，
 //! instanceCount 语义不变）。
 //!
 //! 机制（对应 lod_select.wgsl 头注，此处只记 Rust 侧契约）：
-//! - **判据**：屏幕覆盖尺寸（AABB 投屏 clamp 后最大边）——与 6.1 金字塔
-//!   选层同族（一次投影两个消费端，段计划待决 1 倾向采纳）。自然档位 =
+//! - **判据**：屏幕覆盖尺寸（AABB 投屏 clamp 后最大边）——与 hiz 金字塔
+//!   选层同族（一次投影两个消费端）。自然档位 =
 //!   floor(log2(threshold / s))，阈值/迟滞随 96B push 每帧进 compute。
 //! - **迟滞**（判定线 2 口径）：向粗切换需越过自然边界 ×(1−h)，向细切换
 //!   即时；prev 读档位环本槽 = 两帧前本帧槽输出（fence 纪律同标记环，
-//!   2 帧滞后由迟滞带吸收，静态场景收敛值不受影响——6.2.3 钉明）。
+//!   2 帧滞后由迟滞带吸收，静态场景收敛值不受影响）。
 //! - **fallback 无需专段**：选档每帧从当前相机现算，无跨帧状态依赖
 //!   （档位环只是迟滞状态，不是真值）；未驻留档由 build_indirect 的
 //!   表内回退承担（本段不做，见 indirect 模块）。
 //! - **A/B 开关**（[`LodSettings`]）：关 = 不 dispatch，档位环 host 填 0
-//!   （最细档）——命令三字段回到对象记录基准，画面语义 = 5.3 基线。
+//!   （最细档）——命令三字段回到对象记录基准，画面语义与 indirect 闭环基线一致。
 //! - **push**：view_proj（64B）+ screen（8B @64）+ bound（u32 @72）+
 //!   threshold（f32 @76）+ hysteresis（f32 @80）+ 垫（到 96B 对齐 16），
 //!   布局断言与 WGSL `PushLod` 静态互证（occlusion 80B 同款纪律；
@@ -27,8 +27,10 @@ use ash::vk;
 use bevy::math::Mat4;
 use bevy::prelude::Resource;
 
+use crate::common::bytes::{put_f32, put_f32s, put_mat4, put_u32};
 use crate::common::error::Result;
 
+use crate::render::gpu::compute::{ComputeHandles, ComputePipeline, Handoff};
 use crate::render::Context;
 use crate::render::MAX_LOD_LEVELS;
 
@@ -38,11 +40,10 @@ const LOD_SELECT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/lod_sele
 /// compute push 总长（layout 声明 + WGSL `PushLod` 同源）：
 /// mat4（64B）+ screen（8B @64）+ bound（u32 @72）+ threshold（f32 @76）+
 /// hysteresis（f32 @80）+ 垫（到 16 对齐）= 96B。
-pub const LOD_PUSH_SIZE: u32 = 96;
+pub(crate) const LOD_PUSH_SIZE: u32 = 96;
 
 /// [`pack_lod_push`] 的 WGSL 布局镜像（与 `lod_select.wgsl::PushLod` 静态互证）。
 #[repr(C)]
-#[allow(dead_code)]
 struct LodPushLayout {
     view_proj: [[f32; 4]; 4],
     screen: [f32; 2],
@@ -60,9 +61,10 @@ const _: () = {
     assert!(std::mem::size_of::<LodPushLayout>() as u32 == LOD_PUSH_SIZE);
 };
 
-/// view_proj + 屏幕尺寸 + dispatch 上界 + 判据参数 → 96B compute push 字节。
+/// view_proj + 屏幕尺寸 + dispatch 上界 + 判据参数 → 96B compute push 字节
+///（偏移按 [`LodPushLayout`] 静态断言表排布，标量小端走 [`crate::common::bytes`]）。
 #[must_use]
-pub fn pack_lod_push(
+pub(crate) fn pack_lod_push(
     view_proj: &Mat4,
     screen: [f32; 2],
     bound: u32,
@@ -70,17 +72,11 @@ pub fn pack_lod_push(
     hysteresis: f32,
 ) -> [u8; LOD_PUSH_SIZE as usize] {
     let mut out = [0u8; LOD_PUSH_SIZE as usize];
-    for (i, col) in view_proj.to_cols_array_2d().iter().enumerate() {
-        for (k, v) in col.iter().enumerate() {
-            let o = i * 16 + k * 4;
-            out[o..o + 4].copy_from_slice(&v.to_le_bytes());
-        }
-    }
-    out[64..68].copy_from_slice(&screen[0].to_le_bytes());
-    out[68..72].copy_from_slice(&screen[1].to_le_bytes());
-    out[72..76].copy_from_slice(&bound.to_le_bytes());
-    out[76..80].copy_from_slice(&threshold_px.to_le_bytes());
-    out[80..84].copy_from_slice(&hysteresis.to_le_bytes());
+    put_mat4(&mut out, 0, view_proj);
+    put_f32s(&mut out, 64, &screen);
+    put_u32(&mut out, 72, bound);
+    put_f32(&mut out, 76, threshold_px);
+    put_f32(&mut out, 80, hysteresis);
     out
 }
 
@@ -142,7 +138,7 @@ impl Default for LodSettings {
 }
 
 /// LOD 诊断账面（每帧 draw_frame 刷新，egui 面板/BRP 读数口；只进计量，
-/// 任何系统不得读它决定画什么——5.2 同款边界）。档位读数 = 本帧槽两帧前
+/// 任何系统不得读它决定画什么——同剔除诊断边界）。档位读数 = 本帧槽两帧前
 /// compute 的输出（HOST_VISIBLE 直读，fence 纪律内）。
 #[derive(Resource, Default)]
 pub struct LodDiagnostics {
@@ -158,81 +154,32 @@ pub struct LodDiagnostics {
     pub rows_compared: usize,
     /// 读数所属帧槽。
     pub marks_frame: usize,
-    /// 闸门空转首跑留痕旗标（首个 dispatch 帧收账一次）。
-    pub first_run_logged: bool,
 }
 
 /// 一次选档 dispatch 的录制输入（draw_frame 组装，`record` 消费）。
 #[derive(Clone, Copy)]
 pub struct LodDraw {
-    pub pipeline: vk::Pipeline,
-    pub layout: vk::PipelineLayout,
+    pub pass: ComputeHandles,
     /// 96B push：view_proj + screen + bound + threshold + hysteresis。
     pub push: [u8; LOD_PUSH_SIZE as usize],
     /// dispatch 组数 = bound 取整到 workgroup（64）。
     pub groups: u32,
 }
 
-/// 选档 compute 管线 + pipeline layout（set2 单集 + 96B push）。
+/// 选档 compute 管线（set2 单集 + 96B push）。
 #[derive(bevy::prelude::Resource)]
 pub struct LodPass {
-    device: ash::Device,
-    layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
+    pipeline: ComputePipeline,
 }
 
 impl LodPass {
-    /// 建管线链：shader module（build.rs 产物）→ layout（set2 借用 + 96B
-    /// push）→ ComputePipeline（OcclusionPass 同款形状——本段只读 set2 的
-    /// b0/b1、写 b8，无第二描述符集）。
+    /// 建管线：layout 只借 set2（本段只读 set2 的 b0/b1、写 b8，无第二描述符集）。
     ///
     /// # Errors
     /// shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, set2_layout: vk::DescriptorSetLayout) -> Result<Self> {
-        let device = &ctx.device;
-        let words: Vec<u32> = LOD_SELECT_SPV
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| u32::from_le_bytes(*c))
-            .collect();
-        let module = unsafe {
-            device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
-        }?;
-        let push_range = vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::COMPUTE)
-            .offset(0)
-            .size(LOD_PUSH_SIZE);
-        unsafe {
-            let layout = device
-                .create_pipeline_layout(
-                    &vk::PipelineLayoutCreateInfo::default()
-                        .set_layouts(std::slice::from_ref(&set2_layout))
-                        .push_constant_ranges(std::slice::from_ref(&push_range)),
-                    None,
-                )
-                .inspect_err(|_| device.destroy_shader_module(module, None))?;
-            let stage = vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::COMPUTE)
-                .module(module)
-                .name(c"cs_main");
-            let info = vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout);
-            match device.create_compute_pipelines(vk::PipelineCache::null(), &[info], None) {
-                Ok(mut pipelines) => {
-                    let pipeline = pipelines.pop().expect("单 info 必返单管线");
-                    device.destroy_shader_module(module, None);
-                    Ok(Self { device: ctx.device.clone(), layout, pipeline })
-                }
-                Err((pipelines, e)) => {
-                    for p in pipelines {
-                        device.destroy_pipeline(p, None);
-                    }
-                    device.destroy_pipeline_layout(layout, None);
-                    device.destroy_shader_module(module, None);
-                    Err(e.into())
-                }
-            }
-        }
+        let pipeline = ComputePipeline::new(&ctx.device, LOD_SELECT_SPV, &[set2_layout], LOD_PUSH_SIZE, c"cs_main")?;
+        Ok(Self { pipeline })
     }
 
     /// 组一帧 dispatch 输入。draw_frame 消费，录制走 [`record`]。
@@ -246,8 +193,7 @@ impl LodPass {
         hysteresis: f32,
     ) -> LodDraw {
         LodDraw {
-            pipeline: self.pipeline,
-            layout: self.layout,
+            pass: self.pipeline.handles(),
             push: pack_lod_push(view_proj, screen, bound, threshold_px, hysteresis),
             groups: bound.div_ceil(64),
         }
@@ -255,62 +201,15 @@ impl LodPass {
 }
 
 /// 录制一帧选档 dispatch（遮挡测试之后、build_indirect 之前）：绑管线 →
-/// set2 → push → dispatch → 屏障（档位环写 → build_indirect 读；与
-/// occlusion::record 的合并标记收口同形状——compute 写 → 计算/图形读）。
+/// set2 → push → dispatch → 交接屏障（档位环写 → build_indirect 读；与
+/// occlusion::record 的收口同形状，dst 超集盖图形 VS 读与计算组装读）。
 pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     set2: vk::DescriptorSet,
     lod: &LodDraw,
 ) {
-    unsafe {
-        device.cmd_bind_pipeline(
-            command_buffer,
-            vk::PipelineBindPoint::COMPUTE,
-            lod.pipeline,
-        );
-        device.cmd_bind_descriptor_sets(
-            command_buffer,
-            vk::PipelineBindPoint::COMPUTE,
-            lod.layout,
-            0,
-            std::slice::from_ref(&set2),
-            &[],
-        );
-        device.cmd_push_constants(
-            command_buffer,
-            lod.layout,
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            &lod.push,
-        );
-        device.cmd_dispatch(command_buffer, lod.groups, 1, 1);
-        // 档位环写 → build_indirect 读（occlusion::record 的收口同形状：
-        // dst 超集盖图形 VS 读与计算组装读两种消费形态）
-        let barrier = vk::MemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ);
-        device.cmd_pipeline_barrier(
-            command_buffer,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::PipelineStageFlags::VERTEX_SHADER | vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::DependencyFlags::empty(),
-            std::slice::from_ref(&barrier),
-            &[],
-            &[],
-        );
-    }
-}
-
-impl Drop for LodPass {
-    fn drop(&mut self) {
-        // 契约边界：不等 GPU——退出排空由 teardown_vulkan 的 device_wait_idle
-        // 先于一切资源 Drop 完成。先拆管线再拆 layout（set2 layout 是借用）。
-        unsafe {
-            self.device.destroy_pipeline(self.pipeline, None);
-            self.device.destroy_pipeline_layout(self.layout, None);
-        }
-    }
+    lod.pass.record(device, command_buffer, &[set2], &lod.push, lod.groups, Handoff::VertexComputeRead);
 }
 
 #[cfg(test)]

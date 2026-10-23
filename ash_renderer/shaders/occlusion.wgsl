@@ -1,11 +1,10 @@
-// 6.1.3 Hi-Z 遮挡测试（compute 第二 pass，在视锥剔除之后、indirect 组装之前）：
-// 逐实例做"AABB 投屏 vs 前帧深度金字塔"保守遮挡判定——被完全遮挡的实例把
-// 视锥标记清零（marks = 视锥 ∧ 遮挡，build_indirect 消费形状不变，
-// instanceCount=0），遮挡独立标记 occ[slot] 供 A/B 归因读数（视锥剔除量/
-// 遮挡剔除量分列，判定线 4）。
+// Hi-Z 遮挡测试（compute，在视锥剔除之后、indirect 组装之前）：逐实例做
+// "AABB 投屏 vs 前帧深度金字塔"保守遮挡判定——被完全遮挡的实例把视锥标记清零
+//（marks = 视锥 ∧ 遮挡，build_indirect 消费形状不变，instanceCount=0），遮挡
+// 独立标记 occ[slot] 供 A/B 归因读数（视锥剔除量/遮挡剔除量分列）。
 //
 // 判定语义（与 bevy occlusion_culling.wesl 同构，reverse-Z 各项钉明；CPU 参照
-// = vulkan/hiz.rs 纯函数三件 + occlusion.rs 投屏参照）：
+// = src/render/gpu/hiz.rs 的 reduce_tile_reverse_z / occlusion_mip_level 等纯函数）：
 // - 8 角点世界推导同 cull.wgsl（与 conservative_world_aabb 逐位可比）；
 // - 投屏：clip = view_proj × corner；任一 w ≤ 0（角点在相机平面背后/过近）
 //   → 恒判可见（透视除法无意义，保守方向）；px = (ndc·(0.5,−0.5)+0.5)×屏幕，
@@ -25,8 +24,8 @@
 //   → occluder = 0 → 恒不剔除。
 //
 // 接口：group(0) = set2 家族（b0 对象表 / b1 模型环 / b3 视锥标记
-// read_write / b6 遮挡标记 read_write——组号随管线布局走，5.2 首钉同款：
-// 图形布局里它叫 set2，遮挡 compute 布局 [set2, hiz] 里它叫 group 0）；
+// read_write / b6 遮挡标记 read_write——组号随管线布局走：图形布局里它叫
+// set2，遮挡 compute 布局 [set2, hiz] 里它叫 group 0）；
 // group(1) b0 = Hi-Z 金字塔全链采样视图（独立小布局，金字塔随 swapchain
 // 重建的描述符 churn 隔离在 hiz 模块，不破 set2"init 一次写入"冻结纪律）；
 // push（var<immediate>，80B）：view_proj + screen + bound。
@@ -35,15 +34,7 @@
 // 无需原子；bound 外的槽不写（内容为陈旧值，只被停尸房/free list 在途槽
 // 占用，在场行永不枚举）。fallback 帧（相机跳变/金字塔未就绪）由 Rust 侧
 // 整段跳过本 dispatch——b3 保持视锥纯结果，b6 由 host 填全可见。
-
-struct ObjectRecord {
-    first_index: u32,
-    index_count: u32,
-    vertex_base: u32,
-    material_index: u32,
-    aabb_min: vec4f,
-    aabb_max: vec4f,
-}
+// #import instance
 
 @group(0) @binding(0) var<storage, read> objects: array<ObjectRecord>;
 @group(0) @binding(1) var<storage, read> models: array<mat4x4f>;
@@ -78,40 +69,29 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn occlusion_verdict(slot: u32) -> u32 {
     let rec = objects[slot];
     let model = models[slot];
-    // —— 8 角点世界推导 + 投屏（wmin/wmax 仅供读者对照 cull.wgsl——遮挡
-    // 需要逐角点投影，不能坍缩成世界 AABB 再投影：矩形 ≠ 投影后的矩形）
+    // —— 8 角点世界推导 + 投屏（坑点：遮挡需要逐角点投影，不能坍缩成世界
+    // AABB 再投影——世界盒的投影矩形 ≠ 逐角点投影后的矩形）
     var px_min = vec2f(1e30);
     var px_max = vec2f(-1e30);
     var obj_depth_max = -1e30;
-    for (var x = 0u; x < 2u; x = x + 1u) {
-        for (var y = 0u; y < 2u; y = y + 1u) {
-            for (var z = 0u; z < 2u; z = z + 1u) {
-                let corner = vec3f(
-                    select(rec.aabb_min.x, rec.aabb_max.x, x == 1u),
-                    select(rec.aabb_min.y, rec.aabb_max.y, y == 1u),
-                    select(rec.aabb_min.z, rec.aabb_max.z, z == 1u),
-                );
-                let p = (model * vec4f(corner, 1.0)).xyz;
-                let clip = push.view_proj * vec4f(p, 1.0);
-                if (clip.w <= 0.0) {
-                    return 1u; // 透视无意义，恒保守可见
-                }
-                let ndc = clip.xy / clip.w;
-                let px = (ndc * vec2f(0.5, -0.5) + vec2f(0.5)) * push.screen;
-                px_min = min(px_min, px);
-                px_max = max(px_max, px);
-                obj_depth_max = max(obj_depth_max, clip.z / clip.w);
-            }
+    for (var k = 0u; k < 8u; k = k + 1u) {
+        let p = (model * vec4f(aabb_corner(rec, k), 1.0)).xyz;
+        let clip = push.view_proj * vec4f(p, 1.0);
+        if (clip.w <= 0.0) {
+            return 1u; // 透视无意义，恒保守可见
         }
+        let ndc = clip.xy / clip.w;
+        let px = (ndc * vec2f(0.5, -0.5) + vec2f(0.5)) * push.screen;
+        px_min = min(px_min, px);
+        px_max = max(px_max, px);
+        obj_depth_max = max(obj_depth_max, clip.z / clip.w);
     }
     // —— 矩形 clamp 到屏内（离屏部分不渲染，不参与判定）
     px_min = clamp(px_min, vec2f(0.0), push.screen);
     px_max = clamp(px_max, vec2f(0.0), push.screen);
-    // —— mip 层：ceil(log2(像素最大边))，clamp 进级数（log2(0) 无意义，
-    // max 1.0 兜底 → level 0）
-    // —— mip 层选择：ceil(log2(像素最大边))，下限 1、clamp 进级数——本仓
-    // 金字塔 level 0 不派发（无内容：省一次全量拷贝，bevy 的 mip0=深度本体
-    // 形状不搬，取舍见 hiz.rs 记录），可查层从 1 起（2px tile）
+    // —— mip 层选择：ceil(log2(像素最大边))（max 1.0 兜底 log2(0)），下限 1、
+    // clamp 进级数——本仓金字塔 level 0 不派发（无内容：省一次全量拷贝，
+    // bevy 的 mip0=深度本体形状不搬），可查层从 1 起（2px tile）
     let levels = u32(textureNumLevels(hiz));
     let max_px = max(px_max.x - px_min.x, px_max.y - px_min.y);
     let wanted = u32(ceil(log2(max(max_px, 1.0))));

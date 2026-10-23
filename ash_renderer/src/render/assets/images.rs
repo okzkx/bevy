@@ -17,9 +17,9 @@
 //!（bevy_image/src/image.rs:181 `ImagePlugin::default()` = `ImageSamplerDescriptor::linear()`），
 //! 禁渲染宿主里照该常量解析，不发明新默认。
 //!
-//! mip 策略（5.4.3 起修订，静态 mip0 退役）：资产侧数据按 mip0 收（图片
-//! 加载器只给 level 0，带链数据解析不归本层——TextureDataOrder 排布复杂度
-//! 不引入），mip 链由 GPU blit 逐级缩生成（传输批内完成，一次性非每帧）；
+//! mip 策略：资产侧数据按 mip0 收（图片加载器只给 level 0，带链数据解析不归
+//! 本层——TextureDataOrder 排布复杂度不引入），mip 链由 GPU blit 逐级缩生成
+//!（传输批内完成，一次性非每帧）；
 //! 采样端 `max_lod` 放开到 `VK_LOD_CLAMP_NONE`，可用 LOD 上界 = 实际链级数。
 //! 格式缺 blit/线性过滤支持的贴图降级单级创建（能力判定在
 //! [`GpuImage::create`]，降级有日志）。
@@ -161,8 +161,8 @@ impl GpuImage {
         spec: &ImageSpec,
         sharing_families: &[u32],
     ) -> Result<Self> {
-        // 使用角色三用途:上传拷贝写(TRANSFER_DST)、读回校验拷贝读(TRANSFER_SRC,
-        // 显存机制篇读回条款)、着色器采样(SAMPLED)。RGBA8 两档对这三用途都是
+        // 使用角色三用途:上传拷贝写(TRANSFER_DST)、读回校验拷贝读(TRANSFER_SRC)、
+        // 着色器采样(SAMPLED)。RGBA8 两档对这三用途都是
         // mandatory format support,但"必真"也要查过才用——证据落日志。
         let usage = vk::ImageUsageFlags::TRANSFER_DST
             | vk::ImageUsageFlags::TRANSFER_SRC
@@ -181,7 +181,7 @@ impl GpuImage {
                 spec.format
             )));
         }
-        // mip 链能力判定（5.4.3）：blit 逐级缩要求 BLIT_SRC/DST + 线性过滤
+        // mip 链能力判定：blit 逐级缩要求 BLIT_SRC/DST + 线性过滤
         // 位；缺任一 → 降级单级创建（RGBA8 两档本机均全含，判定留证据日志）
         let blit_ok = features.contains(
             vk::FormatFeatureFlags::BLIT_SRC
@@ -398,7 +398,7 @@ impl ImageCache {
         self.graveyard.len()
     }
 
-    /// 在场贴图 dedicated 分配字节合计(显存读数口径,5.5:requirements.size
+    /// 在场贴图 dedicated 分配字节合计(显存读数口径:requirements.size
     /// 真值求和,停尸房残图不计——回收后才出账)。
     #[must_use]
     pub fn resident_bytes(&self) -> u64 {
@@ -528,7 +528,7 @@ fn filter(f: ImageFilterMode) -> vk::Filter {
 /// - **格式解释挂 image view,VkSampler 无格式参数**,所以
 ///   sRGB/线性色彩角色不进键——同键贴图共享采样器槽,与色彩角色无关;
 /// - lod clamp 与 anisotropy 在 [`SamplerKey::create_sampler`] 里按全局策略
-///   固定(max_lod=VK_LOD_CLAMP_NONE——5.4.3 起 mip 链全放开,可用层级由
+///   固定(max_lod=VK_LOD_CLAMP_NONE——mip 链全放开,可用层级由
 ///   view 级数决定;aniso off、bias 0),对全部采样器同值,不进键。
 ///
 /// 同键 ⇒ 同一 VkSampler 配方 ⇒ 可共享描述符槽位。
@@ -567,7 +567,7 @@ pub fn sampler_key(d: &ImageSamplerDescriptor) -> SamplerKey {
 impl SamplerKey {
     /// 从功能键创建 VkSampler 本体（采样器归描述符表所有，键即完整
     /// 配方——raw 值即 vk 枚举）。
-    /// lod 上限放开到 VK_LOD_CLAMP_NONE（5.4.3 起 mip 链全采样，可用层级由
+    /// lod 上限放开到 VK_LOD_CLAMP_NONE（mip 链全采样，可用层级由
     /// view 级数决定；单级贴图该值无害——只有 0 级可采）、anisotropy 不启用
     ///（需独立 feature，不开启）——两条全局策略随键固化。
     ///

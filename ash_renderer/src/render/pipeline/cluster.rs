@@ -1,26 +1,26 @@
-//! 透明 Clustered Forward 层（8.1.3/8.1.4）：3D cluster 光源分簇 + 透明命令
+//! 透明 Clustered Forward 层：3D cluster 光源分簇 + 透明命令
 //! GPU 组装 + 透明前向绘制管线。
 //!
 //! 数据流（全部 GPU 侧决策——GPU-driven 红线：透明行的筛选/排序/命令组装
 //! 都在 compute，CPU 只发在账上界）：
 //! 1. `cluster_build`（compute）：视锥按 32px tile × 32 深度片分簇（**开工即
-//!    3D cluster**，用户 2026-10-20 拍板），逐 cluster 以世界空间 AABB（
+//!    3D cluster**），逐 cluster 以世界空间 AABB（
 //!    inv_view_proj 投 8 角点）与点光球求交，写光源索引表（DEVICE_LOCAL）+
 //!    逐 cluster 计数（HOST_VISIBLE——`ash_renderer/cluster_census` 逐 tile
 //!    对照的读数面，判定线②）。
 //! 2. `transparent_collect`（compute）：从在场环筛材质 alpha<1 的行，atomicAdd
-//!    紧凑成"透明行索引 + 深度键"列表——深度键是 8.1.4 bitonic 排序的输入，
-//!    本段先按在场序画（物体级排序归 8.1.4）。
-//! 3. `transparent_gather`（compute）：索引列表 → 透明命令环（与 5.3 命令同
+//!    紧凑成"透明行索引 + 深度键"列表——深度键是 bitonic 排序的输入，
+//!    本段先按在场序画（物体级排序归 transparent_sort）。
+//! 3. `transparent_gather`（compute）：索引列表 → 透明命令环（与场景命令同
 //!    20B 布局，LOD 引脚选择同 build_indirect 语义）。
 //! 4. 透明前向绘制：`cmd_draw_indexed_indirect`（count = 在场行数上界，非
 //!    透明行 instanceCount=0），alpha blending 落 HDR 中间目标；不透明深度对
-//!    透明的复用形态 = **附件重绑**（施工钉明：6.1 已实证深度附件不可采样，
-//!    取数通道要多一张取数目标+拷贝，附件重绑免拷贝零带宽——透明 pass 把
+//!    透明的复用形态 = **附件重绑**（坑点：深度附件不可采样，
+//!    取数通道要多一张取数目标+拷贝；附件重绑免拷贝零带宽——透明 pass 把
 //!    G-buffer 深度再挂回 depth attachment，loadOp LOAD、只测不写）。
 //!
-//! 光源数据 = **光源常驻表**（8.2.2 起切表：[`crate::render::shading::LightTable`]，
-//! 用户拍板常驻表形态）——本模块只持有描述符引用（b1 绑定表环），表的槽位
+//! 光源数据 = **光源常驻表**（[`crate::render::shading::LightTable`]）——本模块
+//! 只持有描述符引用（b1 绑定表环），表的槽位
 //! 账本/脏行重写归 light_table 模块；光源注入经 BRP `ash_renderer/light_*`
 //! 方法族。
 //!
@@ -31,7 +31,9 @@ use ash::{vk, Device};
 use bevy::log::info;
 use bevy::prelude::Resource;
 
+use crate::common::bytes::{put_f32, put_mat4, put_u32};
 use crate::common::error::{Result, VulkanError};
+use crate::render::gpu::compute::{create_shader_module, ComputeHandles, ComputePipeline, Handoff};
 use crate::render::resources::{BufferRole, GpuBuffer};
 use crate::render::shading::LightRecord;
 use crate::render::Context;
@@ -47,14 +49,14 @@ const TRANSPARENT_FORWARD_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/transparent_forward.spv"));
 
 /// cluster 屏幕 tile 边长（px）。
-pub const CLUSTER_TILE_SIZE: u32 = 32;
+pub(crate) const CLUSTER_TILE_SIZE: u32 = 32;
 /// 深度分片数（视图深度指数划分）。
-pub const CLUSTER_SLICES: u32 = 32;
+pub(crate) const CLUSTER_SLICES: u32 = 32;
 /// 单 cluster 光源索引容量（超出截断——CPU 参照同语义，计数面照实对照）。
-pub const MAX_PER_CLUSTER: u32 = 16;
+pub(crate) const MAX_PER_CLUSTER: u32 = 16;
 /// 深度分片区间（视图深度，米）。
-pub const CLUSTER_NEAR: f32 = 0.1;
-pub const CLUSTER_FAR: f32 = 200.0;
+pub(crate) const CLUSTER_NEAR: f32 = 0.1;
+pub(crate) const CLUSTER_FAR: f32 = 200.0;
 /// 透明行列表容量（索引/键/命令三环同容量；在场行数作上界在此截断并在
 /// 诊断读数显式报——与对象表容量纪律同族，学习项目规模下不预期触顶）。
 pub const TRANSPARENT_CAPACITY: u32 = 16384;
@@ -93,7 +95,7 @@ impl ClusterGrid {
 /// 由 extent 推 cluster 网格（tile 取整到屏幕边缘，最后一块不满 tile 也成簇
 /// ——cluster_build 的像素→tile 映射同式）。
 #[must_use]
-pub fn cluster_grid(extent: vk::Extent2D) -> ClusterGrid {
+pub(crate) fn cluster_grid(extent: vk::Extent2D) -> ClusterGrid {
     ClusterGrid {
         tiles_x: extent.width.div_ceil(CLUSTER_TILE_SIZE),
         tiles_y: extent.height.div_ceil(CLUSTER_TILE_SIZE),
@@ -105,7 +107,7 @@ pub fn cluster_grid(extent: vk::Extent2D) -> ClusterGrid {
 /// [near·(far/near)^(s/S), near·(far/near)^((s+1)/S))——指数分片（近密远疏，
 /// 点光源作用域集中在近中景的行业默认）。CPU 参照与 GPU 同公式。
 #[must_use]
-pub fn slice_view_depth(slice: u32, grid: ClusterGrid) -> (f32, f32) {
+pub(crate) fn slice_view_depth(slice: u32, grid: ClusterGrid) -> (f32, f32) {
     let ratio = CLUSTER_FAR / CLUSTER_NEAR;
     // libm powf（bevy_math::ops——仓库 disallowed-methods 纪律；WGSL 端 pow 同式）
     let z0 = CLUSTER_NEAR * bevy::math::ops::powf(ratio, slice as f32 / grid.slices as f32);
@@ -113,12 +115,22 @@ pub fn slice_view_depth(slice: u32, grid: ClusterGrid) -> (f32, f32) {
     (z0, z1)
 }
 
-/// 视图深度 → NDC z（与 GPU 同式：clip = view_proj × (0,0,−z,1) 取 z/w）。
-/// bevy 视图空间右手系（相机看 −z），距离取 −z 进投影。
+/// 视图深度 → NDC z（与 cluster_build.wgsl 同式）。透视投影下 clip.w = 视图
+/// 深度 d，NDC z = a + b/d 恒成立（正反 Z、有限/无限远平面皆然）：反投影中心
+/// 射线上两个已知 NDC 深度的点量出 d，即可解出 a、b。
+/// 坑点：不能把视空间点 (0,0,−z) 直接乘 view_proj——那是把视空间当世界空间，
+/// 相机不在原点时深度片整体错位，cluster 列表按 tile 阶梯状漏灯。
 #[must_use]
-fn slice_ndc_z(view_proj: bevy::math::Mat4, z_view: f32) -> f32 {
-    let clip = view_proj * bevy::math::Vec4::new(0.0, 0.0, -z_view, 1.0);
-    clip.z / clip.w
+fn slice_ndc_z(view_proj: bevy::math::Mat4, inv_view_proj: bevy::math::Mat4, z_view: f32) -> f32 {
+    let depth_at = |ndc_z: f32| {
+        let p = inv_view_proj * bevy::math::Vec4::new(0.0, 0.0, ndc_z, 1.0);
+        (view_proj * (p.truncate() / p.w).extend(1.0)).w
+    };
+    let (n0, n1) = (0.5, 0.25);
+    let (d0, d1) = (depth_at(n0), depth_at(n1));
+    let b = (n0 - n1) / (1.0 / d0 - 1.0 / d1);
+    let a = n0 - b / d0;
+    a + b / z_view
 }
 
 /// 像素 → shader-NDC（y 翻转约定与 gbuffer_composite 同源：顶行 ↔ +1）。
@@ -149,7 +161,8 @@ pub fn cluster_reference(
         let tx = tile % grid.tiles_x;
         let ty = tile / grid.tiles_x;
         let (z0, z1) = slice_view_depth(slice, grid);
-        let (cz0, cz1) = (slice_ndc_z(view_proj, z0), slice_ndc_z(view_proj, z1));
+        let (cz0, cz1) =
+            (slice_ndc_z(view_proj, inv_view_proj, z0), slice_ndc_z(view_proj, inv_view_proj, z1));
         let (nx0, ny0) = pixel_ndc(
             (tx * CLUSTER_TILE_SIZE) as f32,
             (ty * CLUSTER_TILE_SIZE) as f32,
@@ -174,7 +187,7 @@ pub fn cluster_reference(
         for (l, light) in lights.iter().enumerate() {
             let c = bevy::math::Vec3::from_slice(&light.pos_radius[..3]);
             let r = light.pos_radius[3];
-            // 死灯门卫（8.2.2：回收槽清零 radius=0，与 cluster_build.wgsl 同式）
+            // 死灯门卫（回收槽清零 radius=0，与 cluster_build.wgsl 同式）
             if r <= 0.0 {
                 continue;
             }
@@ -202,18 +215,8 @@ pub fn pack_cluster_uniforms(
     light_count: u32,
 ) -> [u8; CLUSTER_UNIFORM_SIZE] {
     let mut out = [0u8; CLUSTER_UNIFORM_SIZE];
-    let put_f32 = |out: &mut [u8], off: usize, v: f32| {
-        out[off..off + 4].copy_from_slice(&v.to_le_bytes());
-    };
-    let put_u32 = |out: &mut [u8], off: usize, v: u32| {
-        out[off..off + 4].copy_from_slice(&v.to_le_bytes());
-    };
-    for (i, v) in view_proj.to_cols_array().iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
-    }
-    for (i, v) in inv_view_proj.to_cols_array().iter().enumerate() {
-        out[64 + i * 4..64 + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
-    }
+    put_mat4(&mut out, 0, view_proj);
+    put_mat4(&mut out, 64, inv_view_proj);
     put_f32(&mut out, 128, CLUSTER_NEAR);
     put_f32(&mut out, 132, CLUSTER_FAR);
     put_u32(&mut out, 136, grid.tiles_x);
@@ -254,8 +257,8 @@ pub struct ClusterTargets {
 }
 
 impl ClusterTargets {
-    /// 建资源链：逐槽 buffer → set 布局（b0..b7）→ pool + 描述符写入。
-    /// 半建失败逐层回收（全有或全无）。
+    /// 建资源链：逐槽 buffer → set 布局（b0..b7，尺寸无关只建一次）→ pool +
+    /// 描述符写入。半建失败由 Drop 回收（全有或全无）。
     ///
     /// # Errors
     /// buffer 创建/内存分配/描述符对象创建失败。
@@ -278,12 +281,13 @@ impl ClusterTargets {
         };
         let slots = slot_count();
         this.build_buffers(ctx, slots)?;
-        this.build_descriptors(ctx, slots, light_buffers)?;
+        this.build_set_layout(ctx)?;
+        unsafe { this.build_descriptors(ctx, slots, light_buffers) }?;
         this.extent = extent;
         info!(
             "透明层资源就绪: cluster 网格 {}×{}×{}（{} clusters，tile {CLUSTER_TILE_SIZE}px）\
              × {} 帧槽；光源 = 常驻灯表(b1 绑定)、单 cluster 上限 {MAX_PER_CLUSTER}、\
-             透明行容量 {TRANSPARENT_CAPACITY}（命令环 + 索引/键列表；排序归 8.1.4）",
+             透明行容量 {TRANSPARENT_CAPACITY}（命令环 + 索引/键列表；排序归 transparent_sort）",
             grid.tiles_x,
             grid.tiles_y,
             grid.slices,
@@ -322,12 +326,7 @@ impl ClusterTargets {
         Ok(())
     }
 
-    fn build_descriptors(
-        &mut self,
-        ctx: &Context,
-        slots: usize,
-        light_buffers: &[vk::Buffer],
-    ) -> Result<()> {
+    fn build_set_layout(&mut self, ctx: &Context) -> Result<()> {
         let device = &ctx.device;
         let stages = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT;
         let storage = |binding: u32| {
@@ -353,17 +352,14 @@ impl ClusterTargets {
                 None,
             )
         }?;
-        let result = unsafe { self.build_descriptors_inner(ctx, slots, light_buffers) };
-        if result.is_err() {
-            unsafe { device.destroy_descriptor_set_layout(self.set_layout, None) };
-            self.set_layout = vk::DescriptorSetLayout::null();
-        }
-        result
+        Ok(())
     }
 
+    /// 建 pool + 逐槽分配写入描述符集（旧 pool 须已由 drop_resources 销毁）。
+    ///
     /// # Safety
     /// `set_layout` 须已创建成功。
-    unsafe fn build_descriptors_inner(
+    unsafe fn build_descriptors(
         &mut self,
         ctx: &Context,
         slots: usize,
@@ -392,8 +388,7 @@ impl ClusterTargets {
             };
             let mut infos = Vec::with_capacity(8 * slots);
             for slot in 0..slots {
-                // b1 = 光源常驻表本帧槽环（本体住 LightTable，本结构只持描述符
-                // 引用——8.2.2 切表）
+                // b1 = 光源常驻表本帧槽环（本体住 LightTable，本结构只持描述符引用）
                 let light = *light_buffers.get(slot % light_buffers.len()).ok_or_else(|| {
                     VulkanError::Init("光源常驻表帧槽环数量少于 cluster 帧槽".into())
                 })?;
@@ -481,7 +476,7 @@ impl ClusterTargets {
         self.t_commands[slot % self.t_commands.len()].buffer()
     }
 
-    /// 第 `slot` 帧槽的深度键 buffer 句柄（帧首 -inf fill 的目标，8.1.4）。
+    /// 第 `slot` 帧槽的深度键 buffer 句柄（帧首 -inf fill 的目标）。
     #[must_use]
     pub fn t_key_buffer(&self, slot: usize) -> vk::Buffer {
         self.t_keys[slot % self.t_keys.len()].buffer()
@@ -499,12 +494,12 @@ impl ClusterTargets {
         indices: &mut [u8],
         keys: &mut [u8],
     ) -> Result<()> {
-        crate::render::gpu::hiz::readback_buffer(
+        crate::render::readback::readback_buffer(
             ctx,
             self.t_index_lists[slot % self.t_index_lists.len()].buffer(),
             indices,
         )?;
-        crate::render::gpu::hiz::readback_buffer(
+        crate::render::readback::readback_buffer(
             ctx,
             self.t_keys[slot % self.t_keys.len()].buffer(),
             keys,
@@ -523,13 +518,13 @@ impl ClusterTargets {
         { let n = self.cluster_counts.len(); &mut self.cluster_counts[slot % n] }
     }
 
-    /// 第 `slot` 帧槽的透明行索引列表回读（判定线③对照面；诊断提交走
-    /// hiz readback 同款一次性 staging——调用方为低频 BRP，不在帧循环内）。
+    /// 第 `slot` 帧槽的透明行索引列表回读（判定线③对照面；诊断一次性
+    /// staging，调用方为低频 BRP，不在帧循环内）。
     ///
     /// # Errors
     /// 读回提交失败（设备丢失等）。
     pub fn readback_index_list(&self, ctx: &Context, slot: usize, bytes: &mut [u8]) -> Result<()> {
-        crate::render::gpu::hiz::readback_buffer(
+        crate::render::readback::readback_buffer(
             ctx,
             self.t_index_lists[slot % self.t_index_lists.len()].buffer(),
             bytes,
@@ -537,7 +532,7 @@ impl ClusterTargets {
     }
 
     /// 随 swapchain 尺寸重建（幂等：extent 没变就空手而归）。cluster 表随
-    /// 网格重建（buffer 重建 + 描述符重写）；透明命令链与尺寸无关不动。
+    /// 网格重建（buffer + pool/描述符重建）；set 布局与尺寸无关不动。
     ///
     /// # Errors
     /// 等待排空或新 buffer/描述符创建失败。
@@ -555,7 +550,7 @@ impl ClusterTargets {
         self.drop_resources();
         self.grid = cluster_grid(extent);
         self.build_buffers(ctx, slots)?;
-        self.build_descriptors(ctx, slots, light_buffers)?;
+        unsafe { self.build_descriptors(ctx, slots, light_buffers) }?;
         self.extent = extent;
         info!(
             "透明层资源随 swapchain 重建: cluster 网格 {}×{}×{}（{} clusters）",
@@ -617,7 +612,7 @@ pub struct TransparentFrame {
     /// 透明行收集 + 命令组装 dispatch（count = 在场行数 > 0 才 Some）。
     pub collect: Option<TransparentCollectDraw>,
     pub gather: Option<TransparentGatherDraw>,
-    /// bitonic 排序计划（8.1.4；prev 透明计数 = 0 的让路帧 None——数组未排，
+    /// bitonic 排序计划（prev 透明计数 = 0 的让路帧 None——数组未排，
     /// gather 尾部反向读取仍覆盖全部真实行，只丢一帧排序）。
     pub sort: Option<TransparentSortPlan>,
     /// set2（常驻表，gather 读；透明绘制也绑）。
@@ -627,7 +622,7 @@ pub struct TransparentFrame {
     pub layout: vk::PipelineLayout,
     /// 本帧槽透明命令环（`command_count` 上界内有效）。
     pub t_commands: vk::Buffer,
-    /// 本帧槽深度键 buffer（帧首 -inf fill 目标，8.1.4）。
+    /// 本帧槽深度键 buffer（帧首 -inf fill 目标）。
     pub t_keys: vk::Buffer,
     /// 命令上界 = 在场行数（CPU 在账；非透明行 instanceCount=0）。
     pub command_count: u32,
@@ -636,16 +631,14 @@ pub struct TransparentFrame {
 /// cluster 构建 dispatch 输入（组数 = cluster 总数取整到 workgroup 64）。
 #[derive(Clone, Copy)]
 pub struct ClusterBuildDraw {
-    pub pipeline: vk::Pipeline,
-    pub layout: vk::PipelineLayout,
+    pub pass: ComputeHandles,
     pub groups: u32,
 }
 
 /// 透明行收集 dispatch 输入（push = 在场行数上界）。
 #[derive(Clone, Copy)]
 pub struct TransparentCollectDraw {
-    pub pipeline: vk::Pipeline,
-    pub layout: vk::PipelineLayout,
+    pub pass: ComputeHandles,
     pub push: [u8; TRANSPARENT_PUSH_SIZE as usize],
     pub groups: u32,
 }
@@ -653,8 +646,7 @@ pub struct TransparentCollectDraw {
 /// 透明命令组装 dispatch 输入（push = 在场行数上界，guard 用）。
 #[derive(Clone, Copy)]
 pub struct TransparentGatherDraw {
-    pub pipeline: vk::Pipeline,
-    pub layout: vk::PipelineLayout,
+    pub pass: ComputeHandles,
     pub push: [u8; TRANSPARENT_PUSH_SIZE as usize],
     pub groups: u32,
 }
@@ -664,8 +656,7 @@ pub const TRANSPARENT_SORT_PUSH: u32 = 8;
 
 /// bitonic 排序 dispatch 输入（管线 + 组数 + 预生成 (k,j) 派发序列）。
 pub struct TransparentSortPlan {
-    pub pipeline: vk::Pipeline,
-    pub layout: vk::PipelineLayout,
+    pub pass: ComputeHandles,
     /// 每派发组数 = CAPACITY/2 取整到 workgroup（容量恒定，序列恒定）。
     pub groups: u32,
     /// (k, j) 段参数序列（建管线时预生成，恒 105 项；逐帧 clone 840B——
@@ -673,26 +664,21 @@ pub struct TransparentSortPlan {
     pub passes: Vec<[u8; TRANSPARENT_SORT_PUSH as usize]>,
 }
 
-/// compute 半边三件：build（[cluster_set] 单集）/ collect + gather（[set2,
-/// cluster_set] 双集）——与 hiz/occlusion 的双集先例同形状。
+/// compute 半边四件：build / sort（[cluster_set] 单集）与 collect / gather
+///（[set2, cluster_set] 双集）——与 hiz/occlusion 的双集先例同形状。
 #[derive(bevy::prelude::Resource)]
 pub struct TransparentPasses {
-    device: Device,
-    sort_layout: vk::PipelineLayout,
-    sort_pipeline: vk::Pipeline,
+    sort: ComputePipeline,
     /// bitonic (k, j) 派发序列（容量恒定 → 建成时一次生成）。
     sort_passes: Vec<[u8; TRANSPARENT_SORT_PUSH as usize]>,
-    build_layout: vk::PipelineLayout,
-    build_pipeline: vk::Pipeline,
-    collect_layout: vk::PipelineLayout,
-    collect_pipeline: vk::Pipeline,
-    gather_layout: vk::PipelineLayout,
-    gather_pipeline: vk::Pipeline,
+    build: ComputePipeline,
+    collect: ComputePipeline,
+    gather: ComputePipeline,
 }
 
 impl TransparentPasses {
-    /// 建三管线链：shader module → layout → ComputePipeline。半建失败逆序回收
-    ///（全有或全无）。
+    /// 建四条 compute 管线。半建失败时已建成的 [`ComputePipeline`] 随作用域
+    /// 回收（全有或全无）；layout 借用的 set2/cluster layout 归各自 Resource 拆。
     ///
     /// # Errors
     /// shader module / layout / pipeline 任一创建失败。
@@ -701,86 +687,33 @@ impl TransparentPasses {
         cluster_set_layout: vk::DescriptorSetLayout,
         set2_layout: vk::DescriptorSetLayout,
     ) -> Result<Self> {
-        let mut this = Self {
-            device: ctx.device.clone(),
-            sort_layout: vk::PipelineLayout::null(),
-            sort_pipeline: vk::Pipeline::null(),
-            sort_passes: bitonic_sequence(TRANSPARENT_CAPACITY),
-            build_layout: vk::PipelineLayout::null(),
-            build_pipeline: vk::Pipeline::null(),
-            collect_layout: vk::PipelineLayout::null(),
-            collect_pipeline: vk::Pipeline::null(),
-            gather_layout: vk::PipelineLayout::null(),
-            gather_pipeline: vk::Pipeline::null(),
-        };
-        let result: Result<()> = (|| {
-            // cluster_build：单集、无 push（参数全在 uniform buffer）
-            let (build_pipeline, build_layout) =
-                make_compute(ctx, CLUSTER_BUILD_SPV, &[cluster_set_layout], 0)?;
-            this.build_pipeline = build_pipeline;
-            this.build_layout = build_layout;
-            let (sort_pipeline, sort_layout) =
-                make_compute(ctx, TRANSPARENT_SORT_SPV, &[cluster_set_layout], TRANSPARENT_SORT_PUSH)?;
-            this.sort_pipeline = sort_pipeline;
-            this.sort_layout = sort_layout;
-            let (collect_pipeline, collect_layout) = make_compute(
-                ctx,
-                TRANSPARENT_COLLECT_SPV,
-                &[set2_layout, cluster_set_layout],
-                TRANSPARENT_PUSH_SIZE,
-            )?;
-            this.collect_pipeline = collect_pipeline;
-            this.collect_layout = collect_layout;
-            let (gather_pipeline, gather_layout) = make_compute(
-                ctx,
-                TRANSPARENT_GATHER_SPV,
-                &[set2_layout, cluster_set_layout],
-                TRANSPARENT_PUSH_SIZE,
-            )?;
-            this.gather_pipeline = gather_pipeline;
-            this.gather_layout = gather_layout;
-            Ok(())
-        })();
-        if result.is_err() {
-            this.drop_pipelines();
-        }
-        result?;
+        let device = &ctx.device;
+        let sort_passes = bitonic_sequence(TRANSPARENT_CAPACITY)?;
+        // cluster_build：单集、无 push（参数全在 uniform buffer）
+        let build = ComputePipeline::new(device, CLUSTER_BUILD_SPV, &[cluster_set_layout], 0, c"cs_main")?;
+        let sort = ComputePipeline::new(
+            device,
+            TRANSPARENT_SORT_SPV,
+            &[cluster_set_layout],
+            TRANSPARENT_SORT_PUSH,
+            c"cs_main",
+        )?;
+        let pair = [set2_layout, cluster_set_layout];
+        let collect =
+            ComputePipeline::new(device, TRANSPARENT_COLLECT_SPV, &pair, TRANSPARENT_PUSH_SIZE, c"cs_main")?;
+        let gather =
+            ComputePipeline::new(device, TRANSPARENT_GATHER_SPV, &pair, TRANSPARENT_PUSH_SIZE, c"cs_main")?;
         info!(
             "透明层 compute 三件就绪: cluster_build（单集）/ transparent_collect + gather（[set2, cluster_set] 双集 + 4B push）"
         );
-        Ok(this)
-    }
-
-    fn drop_pipelines(&mut self) {
-        for (pipeline, layout) in [
-            (self.sort_pipeline, self.sort_layout),
-            (self.build_pipeline, self.build_layout),
-            (self.collect_pipeline, self.collect_layout),
-            (self.gather_pipeline, self.gather_layout),
-        ] {
-            if pipeline != vk::Pipeline::null() {
-                unsafe { self.device.destroy_pipeline(pipeline, None) };
-            }
-            if layout != vk::PipelineLayout::null() {
-                unsafe { self.device.destroy_pipeline_layout(layout, None) };
-            }
-        }
-        self.sort_pipeline = vk::Pipeline::null();
-        self.sort_layout = vk::PipelineLayout::null();
-        self.build_pipeline = vk::Pipeline::null();
-        self.build_layout = vk::PipelineLayout::null();
-        self.collect_pipeline = vk::Pipeline::null();
-        self.collect_layout = vk::PipelineLayout::null();
-        self.gather_pipeline = vk::Pipeline::null();
-        self.gather_layout = vk::PipelineLayout::null();
+        Ok(Self { sort, sort_passes, build, collect, gather })
     }
 
     /// cluster 构建 dispatch 输入。
     #[must_use]
     pub fn build(&self, grid: ClusterGrid) -> ClusterBuildDraw {
         ClusterBuildDraw {
-            pipeline: self.build_pipeline,
-            layout: self.build_layout,
+            pass: self.build.handles(),
             groups: grid.cluster_count().div_ceil(64),
         }
     }
@@ -796,10 +729,9 @@ impl TransparentPasses {
             )));
         }
         let mut push = [0u8; TRANSPARENT_PUSH_SIZE as usize];
-        push.copy_from_slice(&count.to_le_bytes());
+        put_u32(&mut push, 0, count);
         Ok(TransparentCollectDraw {
-            pipeline: self.collect_pipeline,
-            layout: self.collect_layout,
+            pass: self.collect.handles(),
             push,
             groups: count.div_ceil(64),
         })
@@ -809,22 +741,20 @@ impl TransparentPasses {
     #[must_use]
     pub fn gather(&self, count: u32) -> TransparentGatherDraw {
         let mut push = [0u8; TRANSPARENT_PUSH_SIZE as usize];
-        push.copy_from_slice(&count.to_le_bytes());
+        put_u32(&mut push, 0, count);
         TransparentGatherDraw {
-            pipeline: self.gather_pipeline,
-            layout: self.gather_layout,
+            pass: self.gather.handles(),
             push,
             groups: count.div_ceil(64),
         }
     }
 
-    /// bitonic 排序计划（8.1.4）：管线 + 组数 + 恒定 (k, j) 序列（逐帧
+    /// bitonic 排序计划：管线 + 组数 + 恒定 (k, j) 序列（逐帧
     /// clone——840B，免借用纠缠）。序列在建管线时预生成（容量恒 16384）。
     #[must_use]
     pub fn sort_plan(&self) -> TransparentSortPlan {
         TransparentSortPlan {
-            pipeline: self.sort_pipeline,
-            layout: self.sort_layout,
+            pass: self.sort.handles(),
             groups: (TRANSPARENT_CAPACITY / 2).div_ceil(64),
             passes: self.sort_passes.clone(),
         }
@@ -832,89 +762,28 @@ impl TransparentPasses {
 }
 
 /// bitonic (k, j) 派发序列：`for k in 2..=N { for j in k/2..=1 { (k, j) } }`
-/// （升序网络；N 必须为 2 的幂——容量常量由调用方保证）。
-fn bitonic_sequence(n: u32) -> Vec<[u8; TRANSPARENT_SORT_PUSH as usize]> {
-    assert!(n.is_power_of_two(), "bitonic 容量必须是 2 的幂");
+/// （升序网络；N 必须为 2 的幂）。
+///
+/// # Errors
+/// N 不是 2 的幂。
+fn bitonic_sequence(n: u32) -> Result<Vec<[u8; TRANSPARENT_SORT_PUSH as usize]>> {
+    if !n.is_power_of_two() {
+        return Err(VulkanError::Init(format!("bitonic 容量 {n} 不是 2 的幂")));
+    }
     let mut passes = Vec::new();
     let mut k = 2u32;
     while k <= n {
         let mut j = k / 2;
         while j >= 1 {
             let mut push = [0u8; TRANSPARENT_SORT_PUSH as usize];
-            push[0..4].copy_from_slice(&k.to_le_bytes());
-            push[4..8].copy_from_slice(&j.to_le_bytes());
+            put_u32(&mut push, 0, k);
+            put_u32(&mut push, 4, j);
             passes.push(push);
             j /= 2;
         }
         k <<= 1;
     }
-    passes
-}
-
-/// compute 管线制式件（与 cull.rs 同形状；`push_size` = 0 表示无 push range）。
-fn make_compute(
-    ctx: &Context,
-    spv: &[u8],
-    set_layouts: &[vk::DescriptorSetLayout],
-    push_size: u32,
-) -> Result<(vk::Pipeline, vk::PipelineLayout)> {
-    let device = &ctx.device;
-    let words: Vec<u32> = spv
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|c| u32::from_le_bytes(*c))
-        .collect();
-    let module = unsafe {
-        device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
-    }?;
-    let mut push_ranges = Vec::new();
-    if push_size > 0 {
-        push_ranges.push(
-            vk::PushConstantRange::default()
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .offset(0)
-                .size(push_size),
-        );
-    }
-    unsafe {
-        let layout = device
-            .create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(set_layouts)
-                    .push_constant_ranges(&push_ranges),
-                None,
-            )
-            .inspect_err(|_| device.destroy_shader_module(module, None))?;
-        let stage = vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::COMPUTE)
-            .module(module)
-            .name(c"cs_main");
-        let info = vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout);
-        match device.create_compute_pipelines(vk::PipelineCache::null(), &[info], None) {
-            Ok(mut pipelines) => {
-                let pipeline = pipelines.pop().expect("单 info 必返单管线");
-                device.destroy_shader_module(module, None);
-                Ok((pipeline, layout))
-            }
-            Err((pipelines, e)) => {
-                for p in pipelines {
-                    device.destroy_pipeline(p, None);
-                }
-                device.destroy_pipeline_layout(layout, None);
-                device.destroy_shader_module(module, None);
-                Err(e.into())
-            }
-        }
-    }
-}
-
-impl Drop for TransparentPasses {
-    fn drop(&mut self) {
-        // 契约边界：不等 GPU——退出排空由 teardown 的 device_wait_idle 先行；
-        // layout 借用的 set2/cluster layout 归各自 Resource 拆
-        self.drop_pipelines();
-    }
+    Ok(passes)
 }
 
 /// 录制 cluster 构建 dispatch（渲染进场前的 compute 区间）：绑管线 →
@@ -926,30 +795,7 @@ pub(crate) fn record_cluster_build(
     cluster_set: vk::DescriptorSet,
     draw: &ClusterBuildDraw,
 ) {
-    unsafe {
-        device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, draw.pipeline);
-        device.cmd_bind_descriptor_sets(
-            command_buffer,
-            vk::PipelineBindPoint::COMPUTE,
-            draw.layout,
-            0,
-            std::slice::from_ref(&cluster_set),
-            &[],
-        );
-        device.cmd_dispatch(command_buffer, draw.groups, 1, 1);
-        let barrier = vk::MemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ);
-        device.cmd_pipeline_barrier(
-            command_buffer,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::DependencyFlags::empty(),
-            std::slice::from_ref(&barrier),
-            &[],
-            &[],
-        );
-    }
+    draw.pass.record(device, command_buffer, &[cluster_set], &[], draw.groups, Handoff::ComputeFragmentRead);
 }
 
 /// 录制透明行收集 dispatch：dispatch → 列表/键/计数的 compute 写读屏障。
@@ -960,85 +806,25 @@ pub(crate) fn record_transparent_collect(
     cluster_set: vk::DescriptorSet,
     draw: &TransparentCollectDraw,
 ) {
-    unsafe {
-        device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, draw.pipeline);
-        let sets = [set2, cluster_set];
-        device.cmd_bind_descriptor_sets(
-            command_buffer,
-            vk::PipelineBindPoint::COMPUTE,
-            draw.layout,
-            0,
-            &sets,
-            &[],
-        );
-        device.cmd_push_constants(
-            command_buffer,
-            draw.layout,
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            &draw.push,
-        );
-        device.cmd_dispatch(command_buffer, draw.groups, 1, 1);
-        let barrier = vk::MemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ);
-        device.cmd_pipeline_barrier(
-            command_buffer,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::DependencyFlags::empty(),
-            std::slice::from_ref(&barrier),
-            &[],
-            &[],
-        );
-    }
+    draw.pass.record(device, command_buffer, &[set2, cluster_set], &draw.push, draw.groups, Handoff::ComputeRead);
 }
 
-/// 录制 bitonic 排序链（8.1.4，collect 与 gather 之间）：逐 (k, j) 派发 +
-/// 派发间 compute rw 屏障（上一段的排序写 → 下一段的排序读写）。
+/// 录制 bitonic 排序链（collect 与 gather 之间）：绑一次管线与集，逐 (k, j)
+/// 派发 + 派发间 compute rw 屏障（上一段的排序写 → 下一段的排序读写）。
 pub(crate) fn record_transparent_sort(
     device: &Device,
     command_buffer: vk::CommandBuffer,
     cluster_set: vk::DescriptorSet,
     plan: &TransparentSortPlan,
 ) {
-    unsafe {
-        device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, plan.pipeline);
-        device.cmd_bind_descriptor_sets(
-            command_buffer,
-            vk::PipelineBindPoint::COMPUTE,
-            plan.layout,
-            0,
-            std::slice::from_ref(&cluster_set),
-            &[],
-        );
-        let barrier = vk::MemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
-        for pass in &plan.passes {
-            device.cmd_push_constants(
-                command_buffer,
-                plan.layout,
-                vk::ShaderStageFlags::COMPUTE,
-                0,
-                pass,
-            );
-            device.cmd_dispatch(command_buffer, plan.groups, 1, 1);
-            device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                std::slice::from_ref(&barrier),
-                &[],
-                &[],
-            );
-        }
+    plan.pass.bind(device, command_buffer, &[cluster_set]);
+    for pass in &plan.passes {
+        plan.pass.dispatch(device, command_buffer, pass, plan.groups, Handoff::ComputeReadWrite);
     }
 }
 
 /// 录制透明命令组装 dispatch：dispatch → 命令环屏障（compute 写 →
-/// DRAW_INDIRECT 读，与 5.3 组装同形状）。
+/// DRAW_INDIRECT 读，与 indirect 组装同形状）。
 pub(crate) fn record_transparent_gather(
     device: &Device,
     command_buffer: vk::CommandBuffer,
@@ -1046,38 +832,14 @@ pub(crate) fn record_transparent_gather(
     cluster_set: vk::DescriptorSet,
     draw: &TransparentGatherDraw,
 ) {
-    unsafe {
-        device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, draw.pipeline);
-        let sets = [set2, cluster_set];
-        device.cmd_bind_descriptor_sets(
-            command_buffer,
-            vk::PipelineBindPoint::COMPUTE,
-            draw.layout,
-            0,
-            &sets,
-            &[],
-        );
-        device.cmd_push_constants(
-            command_buffer,
-            draw.layout,
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            &draw.push,
-        );
-        device.cmd_dispatch(command_buffer, draw.groups, 1, 1);
-        let barrier = vk::MemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-            .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ);
-        device.cmd_pipeline_barrier(
-            command_buffer,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::PipelineStageFlags::DRAW_INDIRECT,
-            vk::DependencyFlags::empty(),
-            std::slice::from_ref(&barrier),
-            &[],
-            &[],
-        );
-    }
+    draw.pass.record(
+        device,
+        command_buffer,
+        &[set2, cluster_set],
+        &draw.push,
+        draw.groups,
+        Handoff::IndirectCommandRead,
+    );
 }
 
 // ============ 透明图形管线 ============
@@ -1107,15 +869,7 @@ impl TransparentPipeline {
         cluster_layout: vk::DescriptorSetLayout,
     ) -> Result<Self> {
         let device = &ctx.device;
-        let words: Vec<u32> = TRANSPARENT_FORWARD_SPV
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| u32::from_le_bytes(*c))
-            .collect();
-        let module = unsafe {
-            device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
-        }?;
+        let module = create_shader_module(device, TRANSPARENT_FORWARD_SPV)?;
         let result = unsafe {
             Self::new_inner(
                 device, color_format, depth_format, set0_layout, set1_layout, set2_layout,
@@ -1258,7 +1012,8 @@ impl TransparentPipeline {
             let pipeline = device
                 .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
                 .map_err(|(_, e)| e)?
-                .remove(0);
+                .pop()
+                .ok_or_else(|| VulkanError::Init("透明前向管线：单 info 未返回管线".into()))?;
             device.destroy_shader_module(module, None);
             info!(
                 "透明前向管线就绪: HDR {color_format:?}（SRC_ALPHA 混合）+ 深度 {depth_format:?}（重绑只测不写），常驻三集 + cluster 小集"
@@ -1295,6 +1050,31 @@ impl Drop for TransparentPipeline {
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slice_ndc_z;
+    use bevy::math::{Mat4, Vec3};
+
+    /// 相机不在原点时，深度片的 NDC z 必须等于"视深为 z 的真实点"的 NDC z
+    ///（bevy 同款无限远 reverse-Z 透视 + 偏离原点的 look_at 视图）。
+    #[test]
+    #[expect(deprecated, reason = "基准矩阵沿用退役构造器：bevy_math 只重导出 proj 族，view 族的 look_to_mat4 不在出口内，本测试不改写投影语义")]
+    fn slice_ndc_z_matches_off_origin_camera() {
+        let eye = Vec3::new(5.0, 2.0, 1.0);
+        let forward = Vec3::new(-1.0, -0.1, 0.0).normalize();
+        let view = Mat4::look_to_rh(eye, forward, Vec3::Y);
+        let proj = Mat4::perspective_infinite_reverse_rh(1.0, 16.0 / 9.0, 0.1);
+        let view_proj = proj * view;
+        let inv_view_proj = view_proj.inverse();
+        for z in [0.5_f32, 3.0, 20.0, 150.0] {
+            let p = view_proj * (eye + forward * z).extend(1.0);
+            let expected = p.z / p.w;
+            let got = slice_ndc_z(view_proj, inv_view_proj, z);
+            assert!((got - expected).abs() < 1e-5, "z={z}: got {got}, expected {expected}");
         }
     }
 }

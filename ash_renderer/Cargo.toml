@@ -20,6 +20,12 @@ license = "MIT OR Apache-2.0"
 # 7.1 起加开 jpeg：bevy 默认特征面只开 png/hdr，真实资产包贴图常为 .jpg
 #（Sponza 69 张全 jpg）——缺 feature 时 loader 按 invalid image extension 拒载，
 # 材质贴图槽挂着永不到货的 Handle，画面静默回退。
+# worktree 本地改动（不提交）：bin 名错开主工作区，双实例并行时
+# target/debug/ash_renderer_wt.exe 与主仓 ash_renderer.exe 互不锁文件
+[[bin]]
+name = "ash_renderer_wt"
+path = "src/main.rs"
+
 [dependencies]
 bevy = { path = "..", features = ["debug", "bevy_remote", "file_watcher", "jpeg"] }
 ash = "0.38.0"

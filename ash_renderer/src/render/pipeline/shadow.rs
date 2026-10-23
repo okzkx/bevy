@@ -21,6 +21,7 @@ use crate::render::shading::shadow::{SHADOW_CASCADES, SHADOW_MAP_SIZE};
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
 use super::depth::DepthTarget;
+use super::pipeline_handle::PipelineHandle;
 
 /// shadow UBO 总长（`shading/shadow.rs::ShadowUniformsLayout` 静态互证）：
 /// cascade 矩阵 4×64B + 平面 24×16B + splits/forward/pos/map_size 各 16B
@@ -109,11 +110,7 @@ impl ShadowTargets {
     /// 深度图已建成功；失败路径由调用方回收已建半成品。
     unsafe fn build(&mut self, ctx: &Context) -> Result<()> {
         let slots = MAX_FRAMES_IN_FLIGHT;
-        let sharing: Vec<u32> = if ctx.transfer_queue_family_index != ctx.queue_family_index {
-            vec![ctx.transfer_queue_family_index, ctx.queue_family_index]
-        } else {
-            Vec::new()
-        };
+        let sharing = super::concurrent_families(ctx);
         let mk = |role: BufferRole, size: u64| -> Result<GpuBuffer> {
             GpuBuffer::create_with_families(&ctx.device, ctx.memory_contract(), size, role, &sharing)
         };
@@ -356,9 +353,7 @@ impl Drop for ShadowTargets {
 /// GREATER 与主链成套）。
 #[derive(bevy::prelude::Resource)]
 pub struct ShadowPipeline {
-    device: Device,
-    layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
+    handle: PipelineHandle,
 }
 
 const SHADOW_WRITE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shadow_write.spv"));
@@ -412,8 +407,7 @@ impl ShadowPipeline {
                         .set_layouts(&set_layouts)
                         .push_constant_ranges(std::slice::from_ref(&push_range)),
                     None,
-                )
-                .inspect_err(|_| device.destroy_shader_module(module, None))?;
+                )?;
             let result = Self::create_pipeline(device, layout, module);
             if result.is_err() {
                 device.destroy_pipeline_layout(layout, None);
@@ -496,42 +490,26 @@ impl ShadowPipeline {
             let pipeline = device
                 .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
                 .map_err(|(_, e)| e)?
-                .remove(0);
+                .pop()
+                .ok_or_else(|| VulkanError::Init("shadow 管线：单 info 未返回管线".into()))?;
             device.destroy_shader_module(module, None);
             info!(
                 "shadow 管线就绪: depth-only dynamic rendering（D32 reverse-Z GREATER），\
                  顶点输入 32B 交错 pos 位，4B push cascade 索引，[set2, shadow set]"
             );
-            Ok(Self { device: device.clone(), layout, pipeline })
+            Ok(Self { handle: PipelineHandle::new(device, layout, pipeline) })
         }
     }
 
     /// 管线句柄。
     #[must_use]
     pub fn pipeline(&self) -> vk::Pipeline {
-        self.pipeline
+        self.handle.pipeline()
     }
 
     /// layout 句柄。
     #[must_use]
     pub fn layout(&self) -> vk::PipelineLayout {
-        self.layout
+        self.handle.layout()
     }
 }
-
-impl Drop for ShadowPipeline {
-    fn drop(&mut self) {
-        // 契约边界：不等 GPU——退出排空由 teardown_vulkan 的 device_wait_idle
-        // 先于一切资源 Drop 完成；pipeline 先于 layout（引用方向），layout 借用
-        // 的 set layouts 归 InstanceTables/ShadowTargets，拆除序由 host 的
-        // remove_resource 顺序保证
-        unsafe {
-            self.device.destroy_pipeline(self.pipeline, None);
-            self.device.destroy_pipeline_layout(self.layout, None);
-        }
-    }
-}
-
-// # Safety:句柄本质是整数,创建/销毁只在持有方线程;方法只读句柄(与 GraphicsPipeline 同款约定)
-unsafe impl Send for ShadowPipeline {}
-unsafe impl Sync for ShadowPipeline {}
