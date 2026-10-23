@@ -40,7 +40,8 @@ use crate::{
         GapSnapshot, InstanceLedger, LodGroups, ResidencySettings,
     },
     render::{
-        frustum_planes, pack_frame_uniforms, AcquireOutcome, BindlessTables, Context,
+        conservative_world_aabb, frustum_planes, pack_frame_uniforms, AcquireOutcome,
+        BindlessTables, Context,
         CullDiagnostics, CullPass, CullSettings, FrameDraw, FramePool, FrameSample,
         FrameUniformsData, GraphicsPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
         IndirectStats, InstanceTables, LOD_LEVEL_SIZE, LodDiagnostics, LodPass,
@@ -56,7 +57,8 @@ use crate::render::{
     BloomSettings, BloomTargets, CompositePipeline, GBufferTargets, LightTable,
     SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
     PresentTonemapPipeline, ShadowBuildPass,
-    ShadowCascadeInput, ShadowDiagnostics, ShadowPipeline, ShadowSettings, ShadowTargets,
+    ShadowCascadeInput, ShadowCascades, ShadowDiagnostics, ShadowPipeline, ShadowSettings,
+    ShadowTargets,
     ShadowUniformsData, ShadowWriteDraw, TransparentFrame, TransparentPasses,
     TransparentPipeline,
     SHADOW_CASCADES, SHADOW_MAP_SIZE,
@@ -590,28 +592,44 @@ pub(crate) fn draw_frame(
     //+ 分割带/相机基（composite cascade 选择）。相机缺席帧 = identity 矩阵
     //（画面不可读属预期，与帧 UBO 兜底同口径）。
     let shadow_frame = frames.current_index();
-    let (shadow_cascades, shadow_splits) = match cam_now {
-        Some((pos, rot)) => {
-            let forward = rot * Vec3::NEG_Z;
-            let input = ShadowCascadeInput {
-                inv_view_proj,
-                camera_pos: pos,
-                camera_forward: forward,
-                near: camera_near,
-                dir_to_light: Vec3::from_slice(&dir_to_light[..3]).normalize_or_zero(),
-            };
-            cascade_matrices(&input)
-        }
-        None => ([Mat4::IDENTITY; SHADOW_CASCADES], [f32::INFINITY; SHADOW_CASCADES]),
+    // 场景世界 AABB 并集（级联 far 外扩 + 深度盒向太阳侧延伸到场景顶的输入）：
+    // 账本可绘行 × 驻留局部包围盒 → 世界保守盒（cull_stats CPU 参照同款走访）。
+    let mut scene_aabb: Option<(Vec3, Vec3)> = None;
+    for (_, row) in ledger.rows() {
+        let Some(mesh_slot) = pool.resident(row.mesh.id()) else { continue };
+        let (wmin, wmax) =
+            conservative_world_aabb(&row.model, mesh_slot.local_aabb.0, mesh_slot.local_aabb.1);
+        let (wmin, wmax) = (Vec3::from_array(wmin), Vec3::from_array(wmax));
+        scene_aabb = Some(match scene_aabb {
+            None => (wmin, wmax),
+            Some((mn, mx)) => (mn.min(wmin), mx.max(wmax)),
+        });
+    }
+    let shadow_fit = match cam_now {
+        Some((pos, rot)) => cascade_matrices(&ShadowCascadeInput {
+            inv_view_proj,
+            camera_pos: pos,
+            camera_forward: rot * Vec3::NEG_Z,
+            near: camera_near,
+            dir_to_light: Vec3::from_slice(&dir_to_light[..3]),
+            scene_aabb,
+        }),
+        None => ShadowCascades {
+            view_proj: [Mat4::IDENTITY; SHADOW_CASCADES],
+            splits: [f32::INFINITY; SHADOW_CASCADES],
+            texel_world: [1.0; SHADOW_CASCADES],
+            inv_span: [0.0; SHADOW_CASCADES],
+        },
     };
-    let shadow_planes: Vec<Vec4> = shadow_cascades
+    let shadow_planes: Vec<Vec4> = shadow_fit
+        .view_proj
         .iter()
         .flat_map(|m| frustum_planes(m).to_vec())
         .collect();
     let shadow_uniform = ShadowUniformsData {
-        cascade_view_proj: shadow_cascades,
+        cascade_view_proj: shadow_fit.view_proj,
         planes: shadow_planes.try_into().expect("4×6 平面"),
-        splits: shadow_splits,
+        splits: shadow_fit.splits,
         camera_forward: cam_now
             .map(|(_, r)| {
                 let f = r * Vec3::NEG_Z;
@@ -621,6 +639,8 @@ pub(crate) fn draw_frame(
         camera_pos: cam_now.map(|(t, _)| [t.x, t.y, t.z, 0.0]).unwrap_or([0.0; 4]),
         map_size: SHADOW_MAP_SIZE as f32,
         enabled: f32::from(shadow_settings.enabled),
+        texel_world: shadow_fit.texel_world,
+        inv_span: shadow_fit.inv_span,
     };
     shadow_targets
         .ubo(shadow_frame)

@@ -104,6 +104,10 @@ struct ShadowUniforms {
     camera_pos: vec4f,
     // x = map_size（PCSS texel 归一）、y = enabled 旗标（0/1）
     map_size: vec4f,
+    // 逐级联 texel 世界边长（米）/ 1÷光向盒深（米 → NDC 深度）——bias、
+    // 法线抬升、半影都按米算再换算，换级联不失真
+    texel_world: vec4f,
+    inv_span: vec4f,
 }
 
 const MODE_SHADING: u32 = 0u;   // FRAME_MODE_LAMBERT（值不变，语义升级为 BRDF）
@@ -275,76 +279,46 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     return out;
 }
 
-// 深度反投影：uv → shader-NDC（uv.y = 0.5 - 0.5·ndc.y 的逆变换）→ clip → world
-// —— 8.3 PCSS 软阴影（立案拍板 texture_load 路线）：
-// cascade 选择按视深（dot(world-cam, forward) vs 分割带）；盒外/带外保守无影；
-// blocker search 3×3 取"比片段更近"的平均深度（reverse-Z：更近 = 值更大），
-// 半影半径 = 深度差的相对比值放大（立案允许的简化估计，非物理量纲），
-// PCF 3×3 随半径采样。开关旗标（UBO y）= 全链旁路面。
+// —— 8.3 PCSS 软阴影（textureLoad 路线）：
+// 按视深选级联；法线抬升后的投影点落出本级盒（含采样核余量）就退到更粗
+// 一级，四级都出盒才判无影。深度比较 reverse-Z：更近太阳 = 值更大。
+// bias / 法线抬升 / 半影都按米计算（texel_world、inv_span 换算），换级联
+// 世界尺度一致。开关旗标（UBO map_size.y）= 全链旁路面。
+
+// 半影宽度 / 遮挡体到接收面距离（米/米），约等于把太阳当成有面积的光源
+const SHADOW_PENUMBRA_SCALE: f32 = 0.02;
+// 半影半径上限（texel）；同时是出盒判定的采样核余量
+const SHADOW_MAX_RADIUS: f32 = 4.0;
+
 fn shadow_map_load(ci: u32, px: vec2<i32>) -> f32 {
-    return select(
-        select(
-            select(
-                textureLoad(shadow_map0, px, 0).r,
-                textureLoad(shadow_map1, px, 0).r, ci != 0u),
-            textureLoad(shadow_map2, px, 0).r, ci != 1u),
-        textureLoad(shadow_map3, px, 0).r, ci != 2u);
+    let last = i32(shadow.map_size.x) - 1;
+    let p = clamp(px, vec2<i32>(0), vec2<i32>(last));
+    switch ci {
+        case 0u: { return textureLoad(shadow_map0, p, 0).r; }
+        case 1u: { return textureLoad(shadow_map1, p, 0).r; }
+        case 2u: { return textureLoad(shadow_map2, p, 0).r; }
+        default: { return textureLoad(shadow_map3, p, 0).r; }
+    }
 }
 
-fn shadow_visibility(world_pos: vec3f, n: vec3f) -> f32 {
-    if (shadow.map_size.y < 0.5) {
-        return 1.0;
-    }
-    let view_depth = dot(world_pos - shadow.camera_pos.xyz, shadow.camera_forward.xyz);
-    var ci = 4u;
-    if (view_depth <= shadow.splits.x) {
-        ci = 0u;
-    } else if (view_depth <= shadow.splits.y) {
-        ci = 1u;
-    } else if (view_depth <= shadow.splits.z) {
-        ci = 2u;
-    } else if (view_depth <= shadow.splits.w) {
-        ci = 3u;
-    }
-    if (ci == 4u) {
-        return 1.0;
-    }
-    // 防自遮蔽：法线偏移（沿法线把采样点抬离表面，随级联指数放大——粗级联
-    // texel 世界尺寸更大）+ 深度 bias（比较时 own 打折，斜率面自挡主源）。
-    // 8.4.1：法线偏移加大（0.01+0.03ci → 0.03+0.05ci）——边缘白漏光短划
-    // （阴影区 texel 级漏光）实抓后抬离量不足
-    let lifted = world_pos + n * (0.03 + 0.05 * f32(ci));
-    let cs = shadow.cascade_view_proj[ci] * vec4f(lifted, 1.0);
-    let ndc = cs.xyz / cs.w;
-    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z <= 0.0) {
-        return 1.0;
-    }
-    let uv = vec2f(ndc.x * 0.5 + 0.5, 0.5 - 0.5 * ndc.y);
-    let size = shadow.map_size.x;
-    let texel = 1.0 / size;
-    let base = vec2<i32>(vec2f(uv.x * size, uv.y * size));
-    let own = ndc.z;
-    // —— blocker search（3×3）：遮挡物 = 比 own 更近（reverse-Z 更大值）
-    // 比较 bias：reverse-Z 下"更近 = 值更大"，遮挡须 d > own + bias 才成立
-    //（own - bias 会把表面自身 texel 判成遮挡物——全场景自挡实抓即修）。
-    // 容差三因子：掠射面斜率（NoL 反比）+ 级联序号（远级联 texel 与 ndc
-    // 范围更大，G-buffer 深度重建的世界坐标噪声在粗级联里被等比放大——
-    // 32× 差值可视化实抓 ±0.0156 抖动，施工记录钉明）。
-    // 8.4.1 修真 bug：斜率因子此前对相机位置算 NoL（-camera_pos + lifted）
-    // ——方向光斜率 bias 随相机乱摆（太阳掠射+相机正对 → bias 过小出黑点；
-    // 太阳顶照+相机掠射 → bias 过大出白漏光）。改用帧 UBO 的 dir_to_light
-    // （与 fs_main 直射项同一 L），零向量兜底同款上向量。
-    let l_raw = frame.dir_to_light.xyz;
-    let no_l = saturate(dot(n, select(vec3f(0.0, 1.0, 0.0), normalize(l_raw), dot(l_raw, l_raw) > 1e-8)));
-    let bias = 0.004 + 0.03 * (1.0 - no_l) + 0.012 * f32(ci);
-    let own_cmp = own + bias;
-    // —— blocker search（3×3）：遮挡物 = 比 own 更近（reverse-Z 更大值）
+// 单级联 PCSS：px = 接收点 texel 坐标，own = 接收点 reverse-Z 光深度。
+// 斜面上采样点离中心越远，表面自身在图里越"高"，bias 按 tap 距离 × 坡度加。
+fn shadow_pcss(ci: u32, px: vec2f, own: f32, no_l: f32) -> f32 {
+    let texel_world = shadow.texel_world[ci];
+    let inv_span = shadow.inv_span[ci];
+    let tan_t = sqrt(max(1.0 - no_l * no_l, 0.0)) / max(no_l, 0.25);
+    let bias_m = texel_world * (1.0 + tan_t) + 0.01;
+    let slope_m = texel_world * tan_t;
+    let center = vec2<i32>(px);
+    // —— blocker search（3×3，步长 2 texel）
     var blocker_sum = 0.0;
     var blocker_count = 0.0;
     for (var dy = -1i; dy <= 1i; dy = dy + 1i) {
         for (var dx = -1i; dx <= 1i; dx = dx + 1i) {
-            let d = shadow_map_load(ci, base + vec2<i32>(dx, dy));
-            if (d > own_cmp) {
+            let o = vec2<i32>(dx, dy) * 2i;
+            let d = shadow_map_load(ci, center + o);
+            let tap_bias = (bias_m + slope_m * length(vec2f(o))) * inv_span;
+            if (d > own + tap_bias) {
                 blocker_sum = blocker_sum + d;
                 blocker_count = blocker_count + 1.0;
             }
@@ -353,24 +327,55 @@ fn shadow_visibility(world_pos: vec3f, n: vec3f) -> f32 {
     if (blocker_count == 0.0) {
         return 1.0;
     }
-    let blocker_avg = blocker_sum / blocker_count;
-    // —— 半影半径：深度差相对比值放大（立案钉明的简化估计，texel 域）
-    let ratio = saturate((blocker_avg - own) / max(own, 1e-4));
-    let radius = clamp(ratio * 32.0, 1.0, 8.0);
-    // —— PCF（3×3 × 半径步进）：逆风采样，lit = 采到的深度不比 own 近
+    // —— 半影半径：遮挡体到接收面的米距离 × 光源尺度 → texel
+    let blocker_m = (blocker_sum / blocker_count - own) / inv_span;
+    let radius = clamp(blocker_m * SHADOW_PENUMBRA_SCALE / texel_world, 1.0, SHADOW_MAX_RADIUS);
+    // —— PCF 5×5，覆盖 ±radius texel
     var lit = 0.0;
-    var taps = 0.0;
     for (var dy = -2i; dy <= 2i; dy = dy + 1i) {
         for (var dx = -2i; dx <= 2i; dx = dx + 1i) {
-            let offset = vec2<i32>(vec2f(f32(dx), f32(dy)) * radius * texel * size);
-            let d = shadow_map_load(ci, base + offset);
-            lit = lit + select(1.0, 0.0, d > own_cmp);
-            taps = taps + 1.0;
+            let off = vec2f(f32(dx), f32(dy)) * (radius * 0.5);
+            let d = shadow_map_load(ci, vec2<i32>(px + off));
+            let tap_bias = (bias_m + slope_m * length(off)) * inv_span;
+            lit = lit + select(1.0, 0.0, d > own + tap_bias);
         }
     }
-    return lit / taps;
+    return lit / 25.0;
 }
 
+fn shadow_visibility(world_pos: vec3f, n: vec3f) -> f32 {
+    if (shadow.map_size.y < 0.5) {
+        return 1.0;
+    }
+    let view_depth = dot(world_pos - shadow.camera_pos.xyz, shadow.camera_forward.xyz);
+    var start = 4u;
+    for (var c = 0u; c < 4u; c = c + 1u) {
+        if (view_depth <= shadow.splits[c]) {
+            start = c;
+            break;
+        }
+    }
+    let l_raw = frame.dir_to_light.xyz;
+    let l = select(vec3f(0.0, 1.0, 0.0), normalize(l_raw), dot(l_raw, l_raw) > 1e-8);
+    let no_l = saturate(dot(n, l));
+    let size = shadow.map_size.x;
+    let margin = SHADOW_MAX_RADIUS + 3.0;
+    for (var c = start; c < 4u; c = c + 1u) {
+        // 法线抬升（防自遮蔽）：1~3 texel，掠射面抬得多
+        let lifted = world_pos + n * (shadow.texel_world[c] * (1.0 + 2.0 * (1.0 - no_l)));
+        let cs = shadow.cascade_view_proj[c] * vec4f(lifted, 1.0);
+        let ndc = cs.xyz / cs.w;
+        let px = vec2f(ndc.x * 0.5 + 0.5, 0.5 - 0.5 * ndc.y) * size;
+        let inside = all(px >= vec2f(margin)) && all(px <= vec2f(size - margin))
+            && ndc.z >= 0.0 && ndc.z <= 1.0;
+        if (inside) {
+            return shadow_pcss(c, px, ndc.z, no_l);
+        }
+    }
+    return 1.0;
+}
+
+// 深度反投影：uv → shader-NDC（uv.y = 0.5 - 0.5·ndc.y 的逆变换）→ clip → world
 fn world_from_depth(uv: vec2f, depth: f32) -> vec3f {
     let ndc = vec3f(uv.x * 2.0 - 1.0, 1.0 - 2.0 * uv.y, depth);
     let clip = vec4f(ndc, 1.0);
