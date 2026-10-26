@@ -45,6 +45,7 @@ pub mod ring_census;
 pub mod bloom;
 pub mod smaa;
 pub mod shapes;
+pub mod sun;
 pub mod shadow;
 
 use bevy::{
@@ -73,6 +74,7 @@ use self::{
     perf::{perf_samples, perf_stats, workload},
     bloom::bloom_set,
     smaa::smaa_set,
+    sun::{sun_get, sun_set},
     shapes::{spawn_lod, spawn_shape},
     shadow::{shadow_set, shadow_stats},
 };
@@ -121,6 +123,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/light_update", light_update)
                 .with_method_main("ash_renderer/light_remove", light_remove)
                 .with_method_main("ash_renderer/light_stats", light_stats)
+                .with_method_main("ash_renderer/sun_get", sun_get)
+                .with_method_main("ash_renderer/sun_set", sun_set)
                 .with_method_main("ash_renderer/cluster_census", cluster_census)
                 .with_method_main("ash_renderer/transparent_sort_check", transparent_sort_check)
                 .with_method_main("ash_renderer/hiz_census", hiz_census)

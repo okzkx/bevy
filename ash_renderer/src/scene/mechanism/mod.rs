@@ -57,7 +57,7 @@ pub use camera_aspect::AshCameraAspectPlugin;
 pub use camera_guard::AshCameraGuardPlugin;
 pub use camera_control::{AshCameraControlPlugin, CameraOrbit};
 pub(crate) use camera_control::{apply_camera_command, CameraCommandError, CameraOrbitCommand};
-pub use light_control::{AshLightControlPlugin, SunOrbit};
+pub use light_control::{apply_sun_rotation, clamp_elevation, AshLightControlPlugin, SunOrbit};
 pub use ledger::{
     AshLedgerPlugin, IncrementStats, InstanceLedger, InstanceRow,
 };
