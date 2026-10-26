@@ -45,8 +45,9 @@
 
 ## 5. 机制（一次性注册，勿动）
 
-- main.rs：`App::set_error_handler(tier_handler)` + `add_systems(Update, fatal_gate)`（gate 为 Update 首个注册系统=早位；语义上任意位置都正确，早位只省致命帧的废活）；
-- 实现住 `ash_renderer/src/common/error.rs`（`tier_handler` + `FATAL: AtomicBool` + `fatal_gate` + `request_graceful_exit`）；
+- main.rs：`App::set_error_handler(tier_handler)` + `add_systems(First, fatal_gate)`（gate 挂 First 集首注册=早位；语义上任意位置都正确，早位只省致命帧的废活）；
+- 实现住 `ash_renderer/src/common/error.rs`（`tier_handler` + `FATAL: AtomicBool` + `fatal_gate`）；
 - 全局静态是进程级：多 App 并存会串扰——本项目单进程单 App，前提钉死；
 - 置位到退出有半帧延迟：FATAL 置位后本帧剩余 system 照跑，runner 帧末查 AppExit 才停（与壳模式等价）；
+- 必须先收尾再冒泡的现场（如 present 失败后帧槽 advance 照常推进）：错误先暂存，收尾完成后 `return Err(fatal(..))`——不绕道看门；
 - 参数校验失败的分流（0.20-dev 实钉）：可跳过校验缺席 = `RunSystemError::Skipped`，静默跳过不进通道；**必选参数（如 `Res<T>`）缺席 = `Failed` 进通道**——按 Tier② 处理是正确语义（资源缺席=状态不可信），正常路径由 `run_if(resource_exists)` 守卫兜住。
