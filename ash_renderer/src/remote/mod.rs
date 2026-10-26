@@ -37,15 +37,16 @@ pub mod lod;
 pub mod monitor;
 pub mod mouse;
 pub mod objects;
+mod params;
 pub mod perf;
+mod readback;
 pub mod residency;
 pub mod ring_census;
 pub mod bloom;
 pub mod smaa;
 pub mod shapes;
+pub mod sun;
 pub mod shadow;
-
-use std::collections::HashMap;
 
 use bevy::{
     prelude::*,
@@ -73,13 +74,14 @@ use self::{
     perf::{perf_samples, perf_stats, workload},
     bloom::bloom_set,
     smaa::smaa_set,
+    sun::{sun_get, sun_set},
     shapes::{spawn_lod, spawn_shape},
     shadow::{shadow_set, shadow_stats},
 };
 
-use crate::{
-    overlay::{transform_edit::{apply_transform_edit, TransformEdit, TransformEditError}, EntityRow, is_relevant, node_label},
-    scene::mechanism::{apply_camera_command, CameraCommandError, CameraOrbitCommand},
+use crate::scene::mechanism::{
+    apply_camera_command, apply_transform_edit, CameraCommandError, CameraOrbitCommand, EntityRow,
+    SceneTreeIndex, TransformEdit, TransformEditError, TREE_MAX_DEPTH,
 };
 
 use ash_macros::system;
@@ -121,6 +123,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/light_update", light_update)
                 .with_method_main("ash_renderer/light_remove", light_remove)
                 .with_method_main("ash_renderer/light_stats", light_stats)
+                .with_method_main("ash_renderer/sun_get", sun_get)
+                .with_method_main("ash_renderer/sun_set", sun_set)
                 .with_method_main("ash_renderer/cluster_census", cluster_census)
                 .with_method_main("ash_renderer/transparent_sort_check", transparent_sort_check)
                 .with_method_main("ash_renderer/hiz_census", hiz_census)
@@ -210,60 +214,29 @@ pub(crate) fn invalid_params(message: impl Into<String>) -> BrpError {
     }
 }
 
-/// `ash_renderer/scene_tree`：场景层级树（只读）。行数据、相关性过滤与节点
-/// 命名复用 egui 层级树窗口的同款（[`EntityRow`]/`is_relevant`/`node_label`）
-/// ——CLI 树与面板树看到同一棵树、同一套"相关"语义。根 = 相关且无父的实体，
-/// 经 `Children` 递归；不相关子树整枝跳过（同面板）。DefaultPlugins 注册的
-/// 数百个内部实体被过滤，`relevant`/`total` 如实报出过滤量。
+/// `ash_renderer/scene_tree`：场景层级树（只读）。索引与 egui 层级树页共用
+/// [`SceneTreeIndex`]——CLI 树与面板树看到同一棵树、同一套"相关"语义。根 =
+/// 相关且无父的实体，经 `Children` 递归；不相关子树整枝跳过（同面板）。
+/// DefaultPlugins 注册的数百个内部实体被过滤，`relevant`/`total` 如实报出过滤量。
 #[system]
 fn scene_tree(In(_params): In<Option<Value>>, rows: Query<EntityRow>) -> BrpResult {
-    let mut total = 0usize;
-    // 相关实体表：entity → (节点文本, 子实体清单, 是否有父)
-    let mut relevant: HashMap<Entity, (String, Vec<Entity>, bool)> = HashMap::new();
-    for (entity, name, children, has_parent, cam, light, mesh, mat, root, local, global) in &rows {
-        total += 1;
-        if is_relevant(name, children, has_parent, cam, light, mesh, mat, root, local, global) {
-            let label = node_label(entity, name, cam, light, mesh.is_some(), mat.is_some(), root);
-            relevant.insert(
-                entity,
-                (
-                    label,
-                    children.map(|c| c.iter().collect()).unwrap_or_default(),
-                    has_parent,
-                ),
-            );
-        }
-    }
-    let mut roots: Vec<Entity> = relevant
+    let index = SceneTreeIndex::build(&rows);
+    let tree: Vec<Value> = index
+        .roots
         .iter()
-        .filter(|(_, (_, _, has_parent))| !*has_parent)
-        .map(|(entity, _)| *entity)
-        .collect();
-    roots.sort_by_key(|e| e.index());
-    let relevant_count = relevant.len();
-    let tree: Vec<Value> = roots
-        .iter()
-        .map(|r| tree_node_json(*r, &relevant, 0))
+        .map(|r| tree_node_json(*r, &index, 0))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(json!({
-        "relevant": relevant_count,
-        "total": total,
+        "relevant": index.nodes.len(),
+        "total": index.total,
         "roots": tree,
     }))
 }
 
-/// 递归深度上限：病态深树在栈溢出前显式拒绝——栈溢出走 abort 是
-/// "禁 panic"规则下唯一不可兜底路径，深度越限回协议错误。上限 1024 远超真实
-/// 场景层级，同时远低于典型线程栈的溢出深度。
-const TREE_MAX_DEPTH: usize = 1024;
-
 /// 递归序列化一个相关子树：子实体里不相关的整枝跳过（与 egui 树同语义）。
-/// 调用方保证 `entity` 在表内；`depth` 越过 [`TREE_MAX_DEPTH`] 回协议错误。
-fn tree_node_json(
-    entity: Entity,
-    relevant: &HashMap<Entity, (String, Vec<Entity>, bool)>,
-    depth: usize,
-) -> BrpResult {
+/// 调用方保证 `entity` 在表内；`depth` 越过 [`TREE_MAX_DEPTH`] 回协议错误
+///（栈溢出走 abort 是"禁 panic"规则下唯一不可兜底路径）。
+fn tree_node_json(entity: Entity, index: &SceneTreeIndex, depth: usize) -> BrpResult {
     if depth > TREE_MAX_DEPTH {
         return Err(BrpError {
             code: error_codes::INTERNAL_ERROR,
@@ -271,15 +244,16 @@ fn tree_node_json(
             data: None,
         });
     }
-    let (label, children, _) = &relevant[&entity];
-    let children: Vec<Value> = children
+    let node = &index.nodes[&entity];
+    let children: Vec<Value> = node
+        .children
         .iter()
-        .filter(|c| relevant.contains_key(*c))
-        .map(|c| tree_node_json(*c, relevant, depth + 1))
+        .filter(|c| index.nodes.contains_key(*c))
+        .map(|c| tree_node_json(*c, index, depth + 1))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(json!({
         "entity": entity.to_string(),
-        "label": label,
+        "label": node.label,
         "children": children,
     }))
 }

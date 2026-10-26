@@ -53,7 +53,7 @@ pub(crate) struct EguiInput {
     buttons_down: [bool; egui::NUM_POINTER_BUTTONS],
     /// 上一帧的修饰键快照：变化时补发 `ModifiersChanged`。
     last_modifiers: egui::Modifiers,
-    /// 面板 pass 跳过帧积压的事件（7.8）：桥侧每帧照常排水（簿记无条件
+    /// 面板 pass 跳过帧积压的事件：桥侧每帧照常排水（簿记无条件
     /// 更新，读取器每帧排空——bevy Messages 双缓冲纪律），面板 pass 不跑时
     /// 事件攒在这里，下次 pass 合并喂入（旧事件在前）。
     pending: Vec<egui::Event>,
@@ -75,9 +75,9 @@ impl EguiInput {
     pub(crate) fn stash_events(&mut self, events: Vec<egui::Event>) {
         for ev in events {
             if matches!(ev, egui::Event::PointerMoved(_))
-                && matches!(self.pending.last(), Some(egui::Event::PointerMoved(_)))
+                && let Some(last @ egui::Event::PointerMoved(_)) = self.pending.last_mut()
             {
-                *self.pending.last_mut().expect("last 已判 Some") = ev;
+                *last = ev;
             } else {
                 self.pending.push(ev);
             }

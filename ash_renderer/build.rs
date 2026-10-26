@@ -1,19 +1,22 @@
-//! 着色器编译管线（3.3.3 落地，兑现 2026-09-28 "runtime+capability 补丁器"定案，
-//! 见 3.3 前置闸门施工记录 §4）：
+//! 着色器编译管线：`shaders/*.wgsl`（入口模块；`read_dir` 不递归，`shaders/common/`
+//! 下的公共片段不单独编译）→ 展开 `// #import <name>` → naga 30.0.1（wgsl-in →
+//! spv-out）→ spirv-val 闸门 →（被 VUID-04680 拒的 runtime 模块）capability 补丁 →
+//! 复跑 spirv-val 兜底 → `OUT_DIR/<stem>.spv`（小端词流），由
+//! `include_bytes!(concat!(env!("OUT_DIR"), "/<stem>.spv"))` 消费。
 //!
-//! `shaders/*.wgsl` → naga 30.0.1（wgsl-in → spv-out）→ spirv-val 闸门 →
-//! （被 VUID-04680 拒的 runtime 模块）capability 补丁 → 复跑 spirv-val 兜底 →
-//! `OUT_DIR/<stem>.spv`（小端词流）。探针经
-//! `include_bytes!(concat!(env!("OUT_DIR"), "/<stem>.spv"))` 消费，与 3.4 正式
-//! 管线同一编译路径。
+//! 公共片段：独占一行的 `// #import <name>` 展开为 `shaders/common/<name>.wgsl` 全文，
+//! 递归展开；同一入口内每个片段只展开一次（菱形依赖去重），循环引用 = 构建错误。
+//! 片段只放 struct / 常量 / 函数，`@group/@binding` 声明留在各入口（组号随管线
+//! 布局走，同一资源在不同入口里组号/绑定号可能不同）；片段函数若引用全局绑定，
+//! 由导入方声明，片段头注写明所需名字。展开结果落 `OUT_DIR/<stem>.expanded.wgsl`，
+//! naga 报错的行列号以该文件为准。
 //!
 //! spirv-val 定位：`VULKAN_SDK` 环境变量优先，回退本机 1.4.357.0 默认安装路径。
 //! - **有 spirv-val**：先验原生输出，仅被拒模块打补丁（补丁幂等，已声明的
-//!   capability 不重复注）——与闸门组 B 完全同流程，"原生即合法"的证据保留。
-//! - **无 spirv-val**：构建降级——全部模块无条件打补丁 + 响亮警告。补丁是纯
-//!   声明性插词（capability 只收紧设备要求不放松合法性），合法性最终由运行期
-//!   验证层在 `vkCreateShaderModule` 内嵌执法（VUID-04680/08740）兜底；但"缺
-//!   官方工具的静默不冒充证据"红线不变——此分支下构建日志会明示证据链降级。
+//!   capability 不重复注）。
+//! - **无 spirv-val**：全部模块无条件打补丁 + `cargo:warning`。补丁是纯声明性插词
+//!   （capability 只收紧设备要求不放松合法性），合法性由运行期验证层在
+//!   `vkCreateShaderModule` 内执法（VUID-04680/08740）兜底；构建日志明示证据链降级。
 //!
 //! 输出纪律：`cargo:warning` 只承载真正异常（缺 spirv-val 降级）；验证轨迹
 //! （原生通过/预期被拒/补丁后通过）走 stderr——cargo 捕获下平时静默，仅在脚本
@@ -24,24 +27,32 @@ use std::path::{Path, PathBuf};
 use naga::back::spv;
 use naga::valid::{Capabilities, Validator, ValidationFlags};
 
-// SPIR-V 语法常量（与前置闸门探针 bindless_probe.rs 同表：值由规范钉死）。
+// SPIR-V 语法常量（与 examples/bindless_probe.rs 同表：值由规范钉死）。
 const OP_CAPABILITY: u16 = 17;
 const OP_EXTENSION: u16 = 10;
 const CAP_RUNTIME_DESCRIPTOR_ARRAY: u32 = 5302;
 const CAP_SAMPLED_IMAGE_ARRAY_NON_UNIFORM: u32 = 5307;
 const EXT_DESCRIPTOR_INDEXING: &str = "SPV_EXT_descriptor_indexing";
 
+/// 公共片段导入指令（独占一行，前导空白允许）。
+const IMPORT_DIRECTIVE: &str = "// #import ";
+
+/// 不产 spv 的入口：`examples/bindless_probe.rs` 以 `include_str!` 读入源码后自行
+/// 编译、扫描与 spirv-val，构建脚本的产物无人消费。
+const STANDALONE_SOURCES: &[&str] = &["bindless_probe_fixed", "bindless_probe_runtime"];
+
 fn main() {
     let shaders_dir = Path::new("shaders");
+    let common_dir = shaders_dir.join("common");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo 提供 OUT_DIR"));
-    // 目录级 rerun-if-changed：逐文件声明只盯已知文件，新落一个 .wgsl 不会触发
-    // 重编译（cargo 对"新增文件"无感知）——3.4 首个正式 shader 落地时实撞此坑。
-    // 目录声明覆盖增删，逐文件声明保留（内容变更仍逐文件精确触发）。
+    // 目录级 rerun-if-changed：逐文件声明对"新增文件"无感知，新落的 .wgsl 不会
+    // 触发重编译。目录声明覆盖增删（cargo 递归扫描，含 common/），逐文件声明
+    // 保留（内容变更逐文件精确触发）。
     println!("cargo:rerun-if-changed={}", shaders_dir.display());
+    println!("cargo:rerun-if-env-changed=VULKAN_SDK");
     let mut wgsl_paths: Vec<PathBuf> = std::fs::read_dir(shaders_dir)
         .unwrap_or_else(|e| panic!("读 {shaders_dir:?} 失败: {e}"))
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
+        .map(|e| e.unwrap_or_else(|e| panic!("枚举 {shaders_dir:?} 条目失败: {e}")).path())
         .filter(|p| p.extension().is_some_and(|ext| ext == "wgsl"))
         .collect();
     wgsl_paths.sort();
@@ -56,42 +67,99 @@ fn main() {
     for path in &wgsl_paths {
         let stem = path.file_stem().expect("有扩展名的路径必有文件名").to_string_lossy().into_owned();
         println!("cargo:rerun-if-changed={}", path.display());
-        let words = compile(path, &stem);
+        if STANDALONE_SOURCES.contains(&stem.as_str()) {
+            continue;
+        }
+        let source = expand_imports(path, &common_dir);
+        let expanded = out_dir.join(format!("{stem}.expanded.wgsl"));
+        std::fs::write(&expanded, &source).unwrap_or_else(|e| panic!("写 {expanded:?} 失败: {e}"));
+        let words = compile(&source, &expanded, &stem);
         let words = gate_and_patch(words, &stem, val_exe.as_deref());
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         let out = out_dir.join(format!("{stem}.spv"));
         std::fs::write(&out, &bytes).unwrap_or_else(|e| panic!("写 {out:?} 失败: {e}"));
     }
-    // 8.5 起主线程栈余量临界：init 主链（Context::new 的 ash 枚举 + 24 元组 InitChain）
-    // + 后处理段帧增量在 MSVC 默认 1MB 主线程栈上稳定溢出（8.4 基线 0/2、
-    // 8.5 构建 2/2 复现，文件探针定位 Context::new surface 到 physical device
-    // 段）。主线程栈保留提到 16MB（Rust 子线程 2MB 默认不受影响）；init 链
-    // 深度治理（拆段）另立账，不阻塞本段。
-    println!("cargo:rustc-link-arg=/STACK:16777216");
+    // MSVC 默认主线程栈 1MB 不够 init 链（Context::new 的 ash 枚举 + InitChain 元组）
+    // 的栈深，会稳定栈溢出；主线程栈保留提到 16MB（Rust 子线程 2MB 默认不受影响）。
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg=/STACK:16777216");
+    }
 }
 
-/// WGSL → SPIR-V 词流。编译失败 = 构建错误（panic 带完整错误链，不静默）。
-fn compile(path: &Path, stem: &str) -> Vec<u32> {
-    let source = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("读 {:?} 失败: {e}", path));
-    let module = match naga::front::wgsl::parse_str(&source) {
-        Ok(m) => m,
-        Err(e) => {
-            // 带源码定位的文本诊断（文件:行:列 + 上下文摘录），比裸 message 可用
-            panic!("[{stem}] WGSL 解析失败:\n{}", e.emit_to_string(&source));
+/// 展开入口模块的 `// #import <name>`（见模块注释）。
+fn expand_imports(entry: &Path, common_dir: &Path) -> String {
+    let mut out = String::new();
+    let mut done: Vec<String> = Vec::new();
+    let mut stack: Vec<String> = Vec::new();
+    expand_into(entry, common_dir, &mut out, &mut done, &mut stack);
+    out
+}
+
+fn expand_into(
+    path: &Path,
+    common_dir: &Path,
+    out: &mut String,
+    done: &mut Vec<String>,
+    stack: &mut Vec<String>,
+) {
+    let source = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("读 {path:?} 失败: {e}"));
+    for line in source.lines() {
+        let Some(name) = line.trim_start().strip_prefix(IMPORT_DIRECTIVE) else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        let name = name.trim();
+        assert!(
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "{path:?}: 非法片段名 `{name}`（只允许 [A-Za-z0-9_]，对应 shaders/common/<name>.wgsl）"
+        );
+        if stack.iter().any(|n| n == name) {
+            panic!("{path:?}: 公共片段循环引用 {} -> {name}", stack.join(" -> "));
         }
+        if done.iter().any(|n| n == name) {
+            continue;
+        }
+        let fragment = common_dir.join(format!("{name}.wgsl"));
+        assert!(fragment.is_file(), "{path:?}: 导入的片段 {fragment:?} 不存在");
+        println!("cargo:rerun-if-changed={}", fragment.display());
+        stack.push(name.to_owned());
+        out.push_str(&format!("// ---- #import {name} begin\n"));
+        expand_into(&fragment, common_dir, out, done, stack);
+        out.push_str(&format!("// ---- #import {name} end\n"));
+        stack.pop();
+        done.push(name.to_owned());
+    }
+}
+
+/// 展开后的 WGSL → SPIR-V 词流。编译失败 = 构建错误（panic 带完整错误链，不静默）。
+fn compile(source: &str, expanded: &Path, stem: &str) -> Vec<u32> {
+    let expanded_name = expanded.display().to_string();
+    let module = match naga::front::wgsl::parse_str(source) {
+        Ok(m) => m,
+        Err(e) => panic!(
+            "[{stem}] WGSL 解析失败（行列号对应展开文件 {expanded_name}）:\n{}",
+            e.emit_to_string_with_path(source, &expanded_name)
+        ),
     };
     assert_host_layout(&module, stem);
-    // 能力面与闸门探针同款显式声明：binding 数组、非一致索引、var<immediate>。
+    // 能力面与 bindless 探针同款显式声明：binding 数组、非一致索引、var<immediate>。
     let caps = Capabilities::IMMEDIATES
         | Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY
         | Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING;
     let mut validator = Validator::new(ValidationFlags::all(), caps);
     let info = match validator.validate(&module) {
         Ok(i) => i,
-        Err(e) => panic!("[{stem}] naga IR 校验失败: {e:#?}"),
+        Err(e) => panic!(
+            "[{stem}] naga IR 校验失败（行列号对应展开文件 {expanded_name}）:\n{}",
+            e.emit_to_string_with_path(source, &expanded_name)
+        ),
     };
-    match spv::write_vec(&module, &info, &spv::Options::default(), None) {
+    let mut options = spv::Options::default();
+    // 坑点：全部管线的正高度 viewport 朝向依赖 naga 对 @builtin(position) 注入的
+    // Y 翻转；默认值已含此位，显式写出防默认值变动后画面整体上下颠倒。
+    options.flags.insert(spv::WriterFlags::ADJUST_COORDINATE_SPACE);
+    match spv::write_vec(&module, &info, &options, None) {
         Ok(w) => w,
         Err(e) => panic!("[{stem}] SPIR-V 生成失败: {e}"),
     }
@@ -100,9 +168,10 @@ fn compile(path: &Path, stem: &str) -> Vec<u32> {
 /// 跨端布局互证闸门：与宿主打包逐字节同源的记录结构体，naga 算出的
 /// 结构体 span（字节数）必须与宿主常量相等——WGSL 侧结构体的成员对齐
 ///（如 `vec3<u32>` 对齐 16）会把步长撑得比宿主打包大，材质/对象槽 ≥1
-/// 全体错位（8.2.6 实抓：MaterialRecord 步长 80 ≠ 宿主 64，缺陷①②同根）。
-/// 宿主常量正本 = `render/assets/instance_table.rs`（ MATERIAL_RECORD_SIZE
-/// / OBJECT_RECORD_SIZE 等）与 lights 侧记录尺寸；新增记录结构时在此登记。
+/// 全体错位（实例：MaterialRecord 尾垫用 vec3<u32> 时步长 80 ≠ 宿主 64）。
+/// 宿主常量正本 = `src/render/assets/instance_table.rs`（MATERIAL_RECORD_SIZE
+/// / OBJECT_RECORD_SIZE 等）与 `src/render/shading/light_table.rs`
+/// （LIGHT_RECORD_SIZE）；新增记录结构时在此登记。
 /// 注：span = 结构体字节数；storage 数组步长 = span 向上取整到对齐，span
 /// 相等且对齐不超宿主步长即步长相等。
 const HOST_LAYOUT_GATE: &[(&str, u32)] = &[
@@ -131,7 +200,7 @@ fn assert_host_layout(module: &naga::Module, stem: &str) {
     }
 }
 
-/// spirv-val 闸门 + 按需补丁（定案流程：原生被 VUID-04680 拒 → 补丁 → 复跑兜底）。
+/// spirv-val 闸门 + 按需补丁（原生被 VUID-04680 拒 → 补丁 → 复跑兜底）。
 /// 无 spirv-val 时降级为无条件补丁（见模块注释）。
 fn gate_and_patch(words: Vec<u32>, stem: &str, val_exe: Option<&Path>) -> Vec<u32> {
     match val_exe {
@@ -148,7 +217,7 @@ fn gate_and_patch(words: Vec<u32>, stem: &str, val_exe: Option<&Path>) -> Vec<u3
                         "[{stem}] 补丁后仍被 spirv-val 拒——模块无合法形态\n-- 原生错误 --\n{native_error}\n-- 补丁后错误 --\n{patch_error}"
                     );
                 }
-                eprintln!("[{stem}] 补丁后通过 spirv-val（runtime+补丁器定案流程）");
+                eprintln!("[{stem}] 补丁后通过 spirv-val");
                 patched
             }
         },
@@ -175,8 +244,8 @@ fn locate_spirv_val() -> Option<PathBuf> {
 /// 跑一次 spirv-val：词流写临时 .spv，--target-env vulkan1.3。被拒返回 Err 文本。
 fn run_spirv_val(val_exe: &Path, words: &[u32]) -> Result<(), String> {
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-    // 4.5 小账:临时文件名混 pid——并发 cargo 调用（多 target/多工作区共享构建脚本
-    // 路径）不再互踩同一 .spv
+    // 临时文件名混 pid：并发 cargo 调用（多 target/多工作区共享构建脚本路径）
+    // 不互踩同一 .spv
     let spv_path = std::env::temp_dir().join(format!(
         "ash_renderer_build_val_{}.spv",
         std::process::id()
@@ -201,7 +270,7 @@ fn run_spirv_val(val_exe: &Path, words: &[u32]) -> Result<(), String> {
     }
 }
 
-/// 最小确定性补丁（与闸门组 B 同款）：capability 段注入缺失的
+/// 最小确定性补丁（与 examples/bindless_probe.rs 组 B 同款）：capability 段注入缺失的
 /// RuntimeDescriptorArray / SampledImageArrayNonUniformIndexing + 扩展段注入
 /// SPV_EXT_descriptor_indexing。capability 必须插在 extension 区段之前
 ///（SPIR-V 逻辑布局顺序），分两个插入点拼接。
@@ -277,5 +346,3 @@ fn decode_spv_string(ws: &[u32]) -> String {
     }
     String::from_utf8_lossy(&bytes).into_owned()
 }
-
-

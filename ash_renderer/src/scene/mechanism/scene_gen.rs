@@ -1,17 +1,14 @@
-//! 常驻大场景生成器（5.4.1/5.4.2）：程序化铺大量实例——共享既有资产的柄、
-//! 规模参数化、随机种子固定可复现，走 4.1 账本链路（批量 spawn 后
-//! Changed 通道自动入行，驻留资产零重传）；chunk 身份（空间网格，待决 2）
-//! 与整块增删（5.4.2）。
+//! 常驻大场景生成器：程序化铺大量实例——共享既有资产的柄、规模参数化、
+//! 随机种子固定可复现，走账本链路（批量 spawn 后 Changed 通道自动入行，
+//! 驻留资产零重传）；chunk 身份（空间网格）与整块增删。
 //!
-//! 定位：5.1～5.3 的 FlightHelmet 小场景靠 BRP 手工逐个 spawn；5.4 起场景
-//! 由本生成器铺。形态钉明（待决 1）：运行期 spawn——不生成 glTF 走加载链，
-//! spawn 克隆与 [`crate::scene::mechanism::spawn_primitive_clone`] 同语义
-//!（柄复制 = 共享资产），账本/上传/GPU 表零新通道；BRP 薄壳在
-//! [`crate::remote::generate`]，egui 面板将来共用本层。
+//! 形态：运行期 spawn——不生成 glTF 走加载链，spawn 克隆与
+//! [`crate::scene::mechanism::spawn_primitive_clone`] 同语义（柄复制 = 共享
+//! 资产），账本/上传/GPU 表零新通道；BRP 薄壳在 remote 的 generate 方法族。
 //!
 //! 复现纪律：位置抖动是纯函数——`f(seed, index)`（splitmix64 终态散列），
 //! 不持顺序状态，同参数重跑逐实例同位。生成器本身规模无关：count/spacing
-//! 只是参数，10 万档（5.5）与 4096 验证档（5.4 默认，待决 7）同一代码路径。
+//! 只是参数，10 万档压测与 4096 验证档同一代码路径。
 
 use super::ObjectOpError;
 use bevy::pbr::StandardMaterial;
@@ -50,7 +47,7 @@ pub struct SceneGenReadback {
 
 /// 批量克隆铺实例：网格 + 种子抖动定位，Name 编号便于树内辨认。
 /// 柄复制 = 共享资产（驻留缓存按 AssetId 去重 → 存量资产零上传），
-/// 无父独立成树（chunk 组织是 5.4.2 的层，本函数不管）。
+/// 无父独立成树（chunk 组织见 [`generate_chunks`]，本函数不管）。
 ///
 /// # Errors
 /// 源实体缺席/非 primitive/缺 Transform；参数为 0（count/columns）或
@@ -144,13 +141,13 @@ fn hash01(seed: u64, index: u32, channel: u64) -> f32 {
     (z >> 40) as f32 / (1u64 << 24) as f32
 }
 
-// ===== 5.4.2 chunk 身份与整块增删 =====
+// ===== chunk 身份与整块增删 =====
 
 /// chunk 身份组件：生成期空间归属，挂在 chunk 根实体上、实例为其子实体。
 ///
-/// 两个钉明（5.4 计划待决 3/8）：
+/// 两个设计约束：
 /// - **身份落在实体组件**：Bevy 侧可查（census/despawn 按 id 寻址）、整块
-///   despawn 复用 despawn 树递归语义（4.1 整树清账的批量形态）；
+///   despawn 复用 despawn 树递归语义（整树清账的批量形态）；
 /// - **chunk 不进 GPU 侧**：GPU 不知道 chunk（不进对象表/标记环/命令环），
 ///   本段剔除仍逐槽；chunk 是 CPU 侧组织与增删粒度。
 ///
@@ -194,8 +191,8 @@ pub struct ChunkGenReadback {
     pub material: AssetId<StandardMaterial>,
 }
 
-/// chunk 化批量生成：空间网格分块（块边界即空间边界，判定线 1 的
-/// "块边界可观察"），块内小网格铺实例，整块 = 一个根实体 + 子树。
+/// chunk 化批量生成：空间网格分块（块边界即空间边界，可观察），块内
+/// 小网格铺实例，整块 = 一个根实体 + 子树。
 /// 抖动散列用跨块平坦 index——同参数重跑逐实例同位。
 ///
 /// # Errors
@@ -230,8 +227,17 @@ pub fn generate_chunks(
     // 块内实例网格：列数 = ceil(sqrt(ipc))，块边长 = 列数 × spacing
     let cols = (p.instances_per_chunk as f32).sqrt().ceil() as u32;
     let extent = cols as f32 * p.spacing;
-    let total_chunks = p.chunk_grid * p.chunk_grid;
-    let total_instances = total_chunks * p.instances_per_chunk;
+    // 总量溢出 u32 = 参数非法（spawn 前拒绝，不产出半批实体）
+    let Some((total_chunks, total_instances)) = p
+        .chunk_grid
+        .checked_mul(p.chunk_grid)
+        .and_then(|chunks| Some((chunks, chunks.checked_mul(p.instances_per_chunk)?)))
+    else {
+        return Err(ObjectOpError::InvalidParams(format!(
+            "chunk_grid²×instances_per_chunk 溢出 u32（chunk_grid {}，instances_per_chunk {}）",
+            p.chunk_grid, p.instances_per_chunk
+        )));
+    };
     let mut flat = 0u32; // 跨块平坦计数（抖动散列的 index）
     let mut first_root = None;
     let mut last_root = None;
@@ -276,17 +282,21 @@ pub fn generate_chunks(
             }
         }
     }
+    // chunk_grid > 0 已校验，至少铺一块——缺席即不变式破坏，按协议错误报出
+    let (Some(first_root), Some(last_root)) = (first_root, last_root) else {
+        return Err(ObjectOpError::InvalidParams("chunk 生成未产出任何块".into()));
+    };
     Ok(ChunkGenReadback {
         chunks: total_chunks,
         instances: total_instances,
-        first_root: first_root.expect("chunk_grid>0 保证至少一块"),
-        last_root: last_root.expect("同上"),
+        first_root,
+        last_root,
         mesh: mesh.0.id(),
         material: material.0.id(),
     })
 }
 
-/// chunk 盘点行：census 的逐块读数（判定线 1 的块边界读数口）。
+/// chunk 盘点行：census 的逐块读数（块边界读数口）。
 #[derive(Debug)]
 pub struct ChunkCensusRow {
     pub id: u32,
@@ -319,8 +329,8 @@ pub fn chunk_census(world: &mut World) -> Vec<ChunkCensusRow> {
 }
 
 /// 整块删除：按 id 找根 → 根连子树递归 despawn（官方递归语义）。每个
-/// primitive 子实体的组件移除各自发 Removed 事件，账本逐行清账——4.1
-/// 整树清账的批量形态，增量链路天然覆盖（判定线 2 的走账前提）。
+/// primitive 子实体的组件移除各自发 Removed 事件，账本逐行清账——
+/// 整树清账的批量形态，增量链路天然覆盖。
 ///
 /// # Errors
 /// chunk id 不在场（`ChunkMissing`）。

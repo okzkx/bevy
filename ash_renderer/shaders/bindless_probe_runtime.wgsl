@@ -1,6 +1,6 @@
-// 3.3 前置闸门小样例（runtime 版）：两张纹理 + 索引，naga 30.0.1 wgsl-in/spv-out。
+// bindless 探针小样例（runtime 版，examples/bindless_probe.rs 以 include_str! 自行编译）：两张纹理 + 索引，naga 30.0.1 wgsl-in/spv-out。
 //
-// 形状即冻结草案（3.3 README 前置闸门③）：
+// 形状即主管线 set/binding 表的草案：
 // - set0 b0/b1：纹理数组 + sampler 数组（WGSL texture/sampler 分离，非 combined）。
 //   本版不带长度 = runtime array（SPIR-V OpTypeRuntimeArray，须 runtimeDescriptorArray）。
 // - set1 b0：每帧 UBO。

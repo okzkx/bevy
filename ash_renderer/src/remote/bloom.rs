@@ -1,4 +1,4 @@
-//! 8.4 BRP Bloom 方法族：开关与参数（bloom_set）。薄壳——参数直写
+//! BRP Bloom 方法族：开关与参数（bloom_set）。薄壳——参数直写
 //! [`BloomSettings`] 资源，帧侧参数 UBO 由 draw_frame 每帧照资源重写。
 
 use bevy::prelude::*;
@@ -8,18 +8,15 @@ use ash_macros::system;
 
 use crate::render::{BloomSettings, TonemapCurve};
 
-use super::{invalid_params, BrpResult};
+use super::{invalid_params, params::parse_params, BrpResult};
 
 /// `ash_renderer/bloom_set`：Bloom/tonemap 开关、曲线与增益。
 /// 请求 `{"enabled": bool, "strength": f32?, "tonemap": bool?,
 /// "curve": "narkowicz"|"filament"?, "gain": f32?}`——缺省字段不动。
 #[system]
 pub(crate) fn bloom_set(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| {
-        invalid_params("params 缺失：需要 enabled/strength/tonemap/curve/gain 之一")
-    })?;
     let p: serde_json::Map<String, Value> =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+        parse_params(params, "params 缺失：需要 enabled/strength/tonemap/curve/gain 之一")?;
     let mut settings = world.resource_mut::<BloomSettings>();
     let mut echo = json!({});
     if let Some(v) = p.get("enabled") {

@@ -1,21 +1,22 @@
-//! 资产加载指示弹窗（7.12）：右下角纯显示小弹窗——进场加载期间显示旋转菊花
+//! 资产加载指示弹窗：右下角纯显示小弹窗——进场加载期间显示旋转菊花
 //!（egui `Spinner`）+ 一行固定文本，完成冷却后自动隐藏。
 //!
-//! 判据（7.12.1 施工钉明，latch 制）：[`LoadActivity`] 启动即置位（覆盖 glb
-//! 解析窗口——资产请求尚未发起、pending=0 的时段，账本差值判据会漏亮）；
-//! 完成判据 = **所有进场根已展开**（`WorldAssetRoot` 占位先到、实体树展开后
-//! 才有 `Children`——runtime `load_world` 的解析窗口由此覆盖：旧场景的
-//! primitive 仍在场、pending=0 时段不误判完成，实抓 3.3s 误收账后补此腿）
-//! ∧ pending 清零 ∧ 上传票据在飞清零。展开失败的根（伪造资产路径）永无
-//! `Children` = 菊花如实长转不消失（计划测试方案的失败例口径），失败详情走
-//! BRP readiness 既有读数。
+//! 判据（latch 制）：[`LoadActivity`] 启动即置位；完成判据 = **所有进场根已
+//! 展开**（`WorldAssetRoot` 占位先到、实体树展开后才有 `Children`）∧ pending
+//! 清零 ∧ 上传票据在飞清零，且稳态持续 [`SETTLE_FRAMES`] 帧。
+//!
+//! 坑点（为什么要 latch + 展开腿）：glb 解析窗口内资产请求尚未发起、
+//! pending=0——只看账本差值会漏亮；runtime `load_world` 时旧场景 primitive
+//! 仍在场、pending=0，不看"根已展开"会在解析期误判完成（误收账可达数秒）。
+//! 展开失败的根（伪造资产路径）永无 `Children` = 菊花如实长转不消失，失败
+//! 详情走 BRP readiness 既有读数。
 //!
 //! 运行期重挂：新进场根（BRP load_world）/流送重请求（pending 回升）如实
 //! 重新亮起——资产确实在加载。
 //!
-//! 节拍集成：菊花动画 `request_repaint` 走 7.8 门控的 `force_next` 消费位
+//! 节拍集成：菊花动画 `request_repaint` 走 pass 门控的 `force_next` 消费位
 //!（repaint_delay == ZERO）——加载期面板 pass 每帧直跑（相位推进），弹窗隐藏
-//! 后触发自然消失回落 7.8 节拍。零交互：弹窗画在 `Order::Background` 层，
+//! 后触发自然消失回落常规节拍。零交互：弹窗画在 `Order::Background` 层，
 //! `layer_id_at` 仲裁只认非 Background——不拦相机控制，不进指针仲裁面。
 
 use bevy::prelude::*;
@@ -28,7 +29,7 @@ use crate::render::Uploader;
 /// 逐行到货的抖动不闪窗。
 const SETTLE_FRAMES: u32 = 30;
 
-/// 加载活跃 latch（7.12.1）：Startup 置位（覆盖解析窗口），完成判据冷却后
+/// 加载活跃 latch：Startup 置位（覆盖解析窗口），完成判据冷却后
 /// 清零；overlay 弹窗与节拍触发源的读数口。
 #[derive(Resource)]
 pub struct LoadActivity {
@@ -64,9 +65,8 @@ pub(crate) fn load_activity_tick(
     };
     // 展开中判定（解析窗口腿）：任一进场根尚无 `Children` = glb 还在解析/
     // 展开（WorldAssetRoot 占位组件先到、实体树后到）。运行期 load_world 的
-    // 解析窗口由此覆盖：旧场景 primitive 仍在场、pending=0 时段不误判完成
-    //（runtime 重载 3.3s 误收账实抓后的补腿）；展开失败的根永无 Children =
-    // 菊花如实长转。
+    // 解析窗口由此覆盖：旧场景 primitive 仍在场、pending=0 时段不误判完成；
+    // 展开失败的根永无 Children = 菊花如实长转。
     let expanding = roots.iter().any(|(_, children)| children.is_none());
     if activity.active {
         if !expanding && pending == 0 && tickets_idle {
@@ -89,9 +89,9 @@ pub(crate) fn load_activity_tick(
     Ok(())
 }
 
-/// 加载弹窗面板（7.12.2）：右下角 Background 层——不进指针仲裁面（layer_id_at
+/// 加载弹窗面板：右下角 Background 层——不进指针仲裁面（layer_id_at
 /// 仲裁只认非 Background），相机控制与面板交互不受弹窗遮挡影响；纯显示零
-/// 交互。菊花动画经 `request_repaint` 走 7.8 门控 force_next 位，加载期面板
+/// 交互。菊花动画经 `request_repaint` 走 pass 门控 force_next 位，加载期面板
 /// pass 每帧直跑（相位推进），隐藏后自然回落节拍。
 pub struct AssetLoadPopup<'a> {
     pub ctx: &'a egui::Context,

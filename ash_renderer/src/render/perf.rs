@@ -1,28 +1,30 @@
-//! GPU timestamp 计时与帧样本账（5.5.2，8.1 多 pass 形状起七位）：统一口径
-//! §3"GPU 用对应工作区间计时"的落点——每帧槽一只 TIMESTAMP query pool
-//!（7 个查询位），帧内写 7 个 timestamp，下一轮该槽 fence 等完（= 上轮提交
-//! 执行完毕）后取回结果。
+//! GPU timestamp 计时与帧样本账：GPU 按对应工作区间计时——每帧槽一只 TIMESTAMP query pool（[`QUERIES_PER_FRAME`] = 8
+//! 个查询位），帧内写 8 个 timestamp，下一轮该槽 fence 等完（= 上轮提交执行
+//! 完毕）后取回结果。
 //!
-//! 时区划分（记录序 = 提交序，全按 TOP_OF_PIPE 采样——上一段的完成被段间
-//! 屏障与命令序强制先于下一段的 timestamp）：
+//! 采样阶段：T0 用 TOP_OF_PIPE（原点）；T1..T7 段界用 BOTTOM_OF_PIPE——
+//! timestamp 在记录序之前的全部命令走完管线后才写入，段末时间戳才真正等到
+//! 本段工作完成。**坑**：段界若用 TOP_OF_PIPE，timestamp 不等前面的工作，
+//! 段间屏障也不约束它（屏障只排序其两侧同步域内的命令），读数会系统性偏小
+//! 甚至挪到相邻段。
 //!
 //! | 位 | 采样点 | 区间含义 |
 //! |---|---|---|
 //! | T0 | 进场屏障后、cull dispatch 前 | —（原点） |
-//! | T1 | indirect 组装屏障后、G-buffer pass 前 | compute 区间（cull+遮挡+组装+间隙） |
-//! | T2 | G-buffer pass 收口后 | G-buffer 写入区间（8.1） |
-//! | T3 | 合成 pass 收口后 | 延迟合成区间（8.2 起光照累积并入；8.1.3 起透明层并入） |
-//! | T4 | Hi-Z 归约链后 | 金字塔构建区间（深度屏障+逐级归约+间隙） |
-//! | T5 | present blit + UI 收口后 | 终点 blit 区间（8.4 起 tone mapping 并入） |
-//! | T6 | end_command_buffer 前 | 全帧 GPU 区间（T0→T6） |
+//! | T1 | compute dispatch 段（剔除/遮挡/LOD/组装/透明等）后 | compute 区间 |
+//! | T2 | shadow pass 收口后 | shadow depth 区间 |
+//! | T3 | G-buffer pass 收口后 | G-buffer 写入区间 |
+//! | T4 | 合成 pass 收口后 | 延迟合成区间（含光照累积与透明层） |
+//! | T5 | Hi-Z 归约链后 | 金字塔构建区间（深度屏障+逐级归约+间隙） |
+//! | T6 | present blit + UI 收口后 | 终点 blit 区间（含 tone mapping） |
+//! | T7 | end_command_buffer 前 | 尾段（T6→T7，读数不入账）；全帧 GPU 区间取 T0→T7 |
 //!
 //! 支持性前提不硬校验出局：timestamp 是诊断设施非渲染正确性，队列族
 //! `timestamp_valid_bits == 0` 时降级停用（warn 一次），CPU 半边照常工作。
 //!
 //! [`PerfLedger`] 是帧样本账（CPU 各段 + GPU 区间 + 规模读数，环形窗口），
 //! 分位数按需现算（排序副本取最近秩），BRP `perf_stats`/`perf_samples` 与
-//! egui 面板都从这里取数。读数只进计量：任何系统不得拿帧时间决定画什么
-//!（诊断性回读边界照 5.2 拍板）。
+//! egui 面板都从这里取数。读数只进计量：任何系统不得拿帧时间决定画什么。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,40 +36,40 @@ use crate::common::error::Result;
 
 use super::Context;
 
-/// 每帧槽查询位数量（T0..T6，见模块注释时区表；8.1 多 pass 形状起七位）。
-pub const QUERIES_PER_FRAME: u32 = 8;
+/// 每帧槽查询位数量（T0..T7，见模块注释时区表）。
+pub(crate) const QUERIES_PER_FRAME: u32 = 8;
 
-/// 一帧的计量样本：CPU 分段（统一口径 §3 传播之外的四段——wait/acquire/
-/// 组装/双环/录制提交/present）+ GPU 区间 + 规模读数。全部毫秒。
+/// 一帧的计量样本：CPU 分段（wait/acquire/组装/双环/录制提交/present）+ GPU
+/// 区间 + 规模读数。全部毫秒。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameSample {
     /// 相邻两次 draw_frame 起点的墙钟间隔（= Update 调度 + winit + draw_frame
-    /// 全帧）——draw_frame 内部各段之外的"未计时区"读数（F26 方向的仪器）。
+    /// 全帧）——draw_frame 内部各段之外的"未计时区"读数。
     pub frame_wall_ms: f32,
     pub wait_slot_ms: f32,
     pub acquire_ms: f32,
     /// DrawList 槽位枚举组装（`drawlist::assemble`）。
     pub assemble_ms: f32,
-    /// 双环写入（模型环增量 + 材质环全量，O(N) 走访在这里——判定线 3 读数源）。
+    /// 双环写入（模型环增量 + 材质环全量，O(N) 走访在这里）。
     pub rings_ms: f32,
     /// 录制 + 提交（`record_frame` 全程含 queue_submit）。
     pub record_submit_ms: f32,
-    /// present 调用本体（不等同上屏，3.2 计时注意）。
+    /// present 调用本体（不等同上屏）。
     pub present_ms: f32,
     /// 上述 CPU 各段合计。
     pub cpu_total_ms: f32,
     pub gpu_compute_ms: f32,
-    /// shadow depth pass 区间（四级联，8.3——T2 插入后逐段顺移）。
+    /// shadow depth pass 区间（四级联）。
     pub gpu_shadow_ms: f32,
-    /// G-buffer 写入区间（不透明 deferred pass，8.1）。
+    /// G-buffer 写入区间（不透明 deferred pass）。
     pub gpu_gbuffer_ms: f32,
-    /// 延迟合成区间（G-buffer 光照；8.2 起光照累积并入，8.1.3 起透明层并入）。
+    /// 延迟合成区间（G-buffer 光照累积 + 透明层）。
     pub gpu_lighting_ms: f32,
-    /// Hi-Z 金字塔构建区间（深度屏障+逐级归约，6.1.2——A/B 账的构建开销单列）。
+    /// Hi-Z 金字塔构建区间（深度屏障+逐级归约——A/B 账的构建开销单列）。
     pub gpu_hiz_ms: f32,
-    /// present blit + UI 区间（8.4 起 tone mapping 并入）。
+    /// present blit + UI 区间（含 tone mapping）。
     pub gpu_present_ms: f32,
-    /// T0→T6 全帧 GPU 区间。
+    /// T0→T7 全帧 GPU 区间。
     pub gpu_total_ms: f32,
     /// 规模读数：在场行数（= GPU 命令条数）与剔除后可见数。
     pub instance_rows: u32,
@@ -78,7 +80,7 @@ pub struct FrameSample {
 ///
 /// `Default` 必须等于 [`Self::new`]（宿主 `init_resource` 走 Default 装配）：
 /// capacity 归 0 时 `push` 的裁剪条件永不成立，环形账退化无界增长，调试窗
-/// 的逐帧分位数排序随窗口线性变慢（7.5 FPS 恶化根因，实抓实修）。
+/// 的逐帧分位数排序随窗口线性变慢（踩过的 FPS 恶化根因）。
 #[derive(bevy::prelude::Resource)]
 pub struct PerfLedger {
     samples: VecDeque<FrameSample>,
@@ -143,14 +145,14 @@ impl PerfLedger {
         if values.is_empty() {
             return None;
         }
-        values.sort_by(|a, b| a.partial_cmp(b).expect("毫秒计时无 NaN"));
+        values.sort_by(f32::total_cmp);
         let rank = ((p * values.len() as f32).ceil() as usize).clamp(1, values.len());
         Some(values[rank - 1])
     }
 
     /// 同一字段多分位数一次读：一遍 clone + 一趟排序取全部秩（调试窗每帧
-    /// 三分位数 × 三字段的重复排序口——每帧九次全量 sort 是 7.5 恶化修复后
-    /// 的残余热点，收敛为每字段一次）。
+    /// 三分位数 × 三字段，逐个 [`Self::percentile`] 是九次全量 sort 的热点，
+    /// 收敛为每字段一次）。
     pub fn percentiles(
         &self,
         ps: &[f32],
@@ -160,7 +162,7 @@ impl PerfLedger {
         if values.is_empty() {
             return vec![None; ps.len()];
         }
-        values.sort_by(|a, b| a.partial_cmp(b).expect("毫秒计时无 NaN"));
+        values.sort_by(f32::total_cmp);
         ps.iter()
             .map(|&p| {
                 let rank =
@@ -171,7 +173,7 @@ impl PerfLedger {
     }
 }
 
-/// GPU timestamp 计时器：每帧槽一只 query pool，槽内 4 位轮转写入。
+/// GPU timestamp 计时器：每帧槽一只 query pool，槽内 [`QUERIES_PER_FRAME`] 位逐帧重写。
 #[derive(bevy::prelude::Resource)]
 pub struct GpuTimer {
     device: Device,
@@ -182,7 +184,7 @@ pub struct GpuTimer {
     /// reset 过但从未执行的查询取结果回 VK_NOT_READY，不进取数路径）。
     /// AtomicBool：Resource 须 Sync（bevy Resource 约束），原子布尔置位
     /// 足够（单线程录制，无竞争面）。
-    recorded: [AtomicBool; 2],
+    recorded: [AtomicBool; super::MAX_FRAMES_IN_FLIGHT],
     /// 支持性闸门结果（false = 队列族无 timestamp，全机 GPU 半边停用）。
     pub enabled: bool,
 }
@@ -210,7 +212,7 @@ impl GpuTimer {
         }
         // 新建查询的初始状态是"未初始化"（VUID-09401 不许直接取结果）——
         // 不做创建期 host reset（那要 hostQueryReset feature 位，VUID-02665
-        // 首跑实抓），而是靠 recorded 闸门：每槽首次取结果必在其首次
+        // 实抓），而是靠 recorded 闸门：每槽首次取结果必在其首次
         // record（cmd_reset_query_pool 起周期）之后，未初始化态不可达。
         let pools = if enabled {
             (0..super::MAX_FRAMES_IN_FLIGHT)
@@ -231,13 +233,13 @@ impl GpuTimer {
         };
         bevy::log::info!(
             "GPU 计时就绪：每帧槽 {QUERIES_PER_FRAME} 位 timestamp（{valid_bits} 有效位，period {period_ns} ns）——\
-             compute/G-buffer/合成/Hi-Z/blit/全帧六区间随 fence 取回"
+             compute/shadow/G-buffer/合成/Hi-Z/blit/尾段七区间 + 全帧随 fence 取回"
         );
         Ok(Self {
             device: ctx.device.clone(),
             pools,
             period_ns,
-            recorded: [AtomicBool::new(false), AtomicBool::new(false)],
+            recorded: std::array::from_fn(|_| AtomicBool::new(false)),
             enabled,
         })
     }
@@ -264,7 +266,8 @@ impl GpuTimer {
         }
     }
 
-    /// 段界采样（T1 compute 后 / T2 shadow 后（8.3）/ T3 rendering 后 / T4 提交前……）。
+    /// 段界采样（T1..T7，见模块注释时区表）。BOTTOM_OF_PIPE：等记录序之前
+    /// 的工作全部完成再写（TOP_OF_PIPE 的坑见模块注释）。
     pub fn mark(&self, command_buffer: vk::CommandBuffer, slot: usize, index: u32) {
         if !self.enabled {
             return;
@@ -272,15 +275,15 @@ impl GpuTimer {
         unsafe {
             self.device.cmd_write_timestamp(
                 command_buffer,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                 self.pools[slot],
                 index,
             );
         }
     }
 
-    /// 取本槽位上轮提交的时间戳并换算六区间（毫秒）。前提 = 本槽 fence
-    /// 已等完（`wait_for_slot` 之后调用）——fence 只证提交完成。停用、该槽
+    /// 取本槽位上轮提交的时间戳并换算七段区间 + 全帧（毫秒，共 8 项）。前提 =
+    /// 本槽 fence 已等完（`wait_for_slot` 之后调用）——fence 只证提交完成。停用、该槽
     /// 从未录制过（首帧空槽）或查询无可读结果（NOT_READY）返回 None。
     ///
     /// # Errors
@@ -289,9 +292,9 @@ impl GpuTimer {
         if !self.enabled || !self.recorded[slot].load(Ordering::Relaxed) {
             return Ok(None);
         }
-        // 可用性由 fence 保证（本槽 fence 已等完 = 上轮 7 个 timestamp 都已
+        // 可用性由 fence 保证（本槽 fence 已等完 = 上轮 8 个 timestamp 都已
         // 写入），不挂 QUERY_RESULT_WAIT——WAIT 对"reset 过但未执行"的查询
-        // 会永久阻塞（首跑实抓的挂死根因）。NOT_READY = 空槽漏网，按无读数
+        // 会永久阻塞（踩过的挂死根因）。NOT_READY = 空槽漏网，按无读数
         // 处理而非失败。
         let mut raw = [0u64; QUERIES_PER_FRAME as usize];
         unsafe {

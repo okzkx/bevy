@@ -1,14 +1,13 @@
-// 3.7.3 overlay 绘制着色器（vertex + fragment 双入口）：egui 镶嵌顶点直出调试 UI。
+// overlay 绘制着色器（vertex + fragment 双入口）：egui 镶嵌顶点直出调试 UI。
 //
-// 接口 = 3.3 冻结的 set0 表 + overlay 专用 16B push（无 set1——UI 无 UBO）：
+// 接口 = 主管线 set0 表 + overlay 专用 16B push（无 set1——UI 无 UBO）：
 // - set0 b0/b1：纹理数组 + sampler 数组，runtime array（build.rs 补丁器补
-//   capability），与 debug_draw.wgsl 同一契约；overlay 管线 layout 只声明 set0
-//   （"表跨管线共享"的兑现位，布局=未来管线公共 ABI）。
+//   capability），与 gbuffer_write.wgsl 同一契约；overlay 管线 layout 只声明 set0。
 // - push constant：整帧 UI 一次的 16B，偏移 0/8/12——与 Rust 镜像
-//   `vulkan/overlay_pipeline.rs::UiPushLayout`（offset_of! 静态互证）和 pipeline
-//   layout 的 push constant range 三方一致。
+//   `src/render/pipeline/overlay_pipeline.rs::UiPushLayout`（offset_of! 静态互证）
+//   和 pipeline layout 的 push constant range 三方一致。
 //
-// 色彩约定（判据 = egui 官方 wgpu 后端 0.36.2 源码，施工计划 §2.2 钉死）：
+// 色彩约定（判据 = egui 官方 wgpu 后端 0.36.2 源码）：
 // - 顶点色与图集采样值都在 gamma 域且已预乘，相乘不拆预乘（官方同款非理想
 //   数学；保真目标 = 与官方 egui 视觉一致，不是理论最优线性预乘）。
 // - rgb 做 gamma→linear（sRGB 解码曲线），alpha 原样带过 → ROP（SRGB view）
@@ -17,14 +16,14 @@
 //   采进来。
 // - 官方 shader 的 dithering 与可预测滤波分支不搬（项目全管线无 dithering，
 //   显式边界）。
-// - mip 钉 level 0（图集静态 mip0，与采样器 max_lod=0 双保险，debug_draw 同款）。
+// - mip 钉 level 0（图集静态 mip0，与采样器 max_lod=0 双保险）。
 //
 // NDC：pos 是 points（左上原点、y 向下；tessellate 不按 ppp 缩放顶点——ppp 只
 // 进字形栅格化/像素取整/圆半径，points 换算成像素是渲染目标的职责），照
 // egui-wgpu 的 webgpu 约定（Y-up）写 pos→clip，screen_size 同为 points 域
 //（官方 0.36.2 uniform 字段即 screen_size_in_points = size_in_pixels / ppp）；
-// naga ADJUST_COORDINATE_SPACE 注入的 gl_Position.y 翻转照旧
-// 生效（与 debug_draw 同一编译路径，翻转恰好一次）。
+// naga ADJUST_COORDINATE_SPACE 注入的 gl_Position.y 翻转照旧生效（与场景管线
+// 同一编译路径，翻转恰好一次）。
 enable wgpu_binding_array;
 
 struct PushParams {
@@ -73,7 +72,7 @@ fn srgb_to_linear(rgb: vec3f) -> vec3f {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
-    // 两侧都在 gamma 域且已预乘：乘法不拆预乘（官方保真，计划 §2.2）
+    // 两侧都在 gamma 域且已预乘：乘法不拆预乘（官方保真）
     let rgba = in.color * textureSampleLevel(
         textures[push.tex_index],
         samplers[push.sampler_index],

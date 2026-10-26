@@ -3,53 +3,48 @@
 //! 本 crate 是学习项目的渲染器落位：bin 目标（`src/main.rs`）为宿主壳入口，只做统筹
 //! （组装插件后交出调度，零 Vulkan 调用）；Vulkan 编排与资源全在本 lib。
 //!
-//! 依赖方向单向无环：
+//! 分层（上层可依赖下层，反向不允许；整体单向无环）：
 //!
 //! ```text
-//! main ──► driver（渲染驱动）──┬─► scene（ECS 取数：账本 + 变更发现，增量维护）
-//!                              ├─► overlay（egui 调试 UI，ECS 侧）
-//!                              └─► vulkan（Vulkan 资源）──► common（工具层）
-//!     ──► remote（BRP 远程通道）──► scene / overlay（语义复用）
+//! main（装配：引用各层插件）
+//!   driver（帧编排）──► overlay（egui 调试 UI）──┐
+//!     │                 remote（BRP 远程通道）───┤
+//!     └──────────────────────────────────────────┴─► scene（ECS 侧场景机制）
+//!                                                     ──► render（Vulkan 资源与录制）
+//!                                                           ──► common（工具层）
 //! ```
 //!
-//! 模块按职责分层：
-//! - [`common`]:工具层(横切,零业务依赖)——[`common::error`](类型化错误:OUT_OF_DATE
-//!   是控制流不是失败)、[`common::syntax`](错误处理语法糖,frenderer syntax crate
-//!   移植,warn + 早退哲学);
-//! - [`vulkan`]:Vulkan 资源层——按生命周期分子模块:`context`(进程级:
-//!   Entry/Instance/Surface/Device/Queue)、`swapchain`(resize 级:随窗口尺寸重建)、
-//!   `frames`(帧级:命令缓冲与同步对象,跨重建轮转复用)、`resources`(资产级:
-//!   内存契约:memory type/usage/绑定/对齐)、`pool`(资产级:DEVICE_LOCAL
-//!   大池 + bump + 驻留缓存)、`uploader`(批次级:staging 环 + timeline
-//!   票据)、`mesh_convert`(纯函数:32B 交错转换)、`images`(资产级:贴图
-//!   链路)、`descriptors`(资产级:常驻描述符表 + 槽位发布)、
-//!   `pipeline`(接口件:图形管线);
-//! - [`scene`]:ECS 侧取数（分机制/业务两半；取数形态为"稳定槽账本 +
-//!   变更发现"，非每帧全量快照）——机制半边
-//!   `mechanism`(材质缝接线/账本与变更发现/宽高比补位,换场景内容不变)+ 业务半边
-//!   `content`(FlightHelmet 进场/取景/灯光参数/进场核验),零 Vulkan 代码;
-//! - [`overlay`]:egui 调试 UI(裸接 ash——禁渲染宿主挂不上 bevy_egui/
-//!   egui-wgpu),框架/业务两半:`input`(bevy 事件→egui RawInput 输入桥)、`ui`
-//!   (框架半边:Update 的 egui pass,产 EguiFrame)、`tool_window`(业务半边:
-//!   单一工具窗口,左侧分组导航 + 右侧页面——着色模式/剔除与 LOD/管线控制/
-//!   帧统计/持续监控/实体层级树)、`axis_gizmo`(右上角坐标轴,永远显示)、`paint`(draw_frame 内的绘制半边:
-//!   图集 CPU 镜像/整传新槽/顶点环,paint_overlay→UiPaint);
-//!   overlay 管线与 UI 录制契约住 `render::pipeline::overlay_pipeline`(`OverlayPipeline`
-//!   共享 set0、`UiPaint`/`UiDrawCall` 供 `frames` 接画);
-//! - [`remote`]:BRP 远程直控通道(HTTP JSON-RPC @ 127.0.0.1:15702)——AI
-//!   免开 UI 查询/改值/推拉相机。框架半边在 mod 根:[`remote::AshRemotePlugin`]
-//!   是协议面注册单点(装 [`bevy::remote::RemotePlugin`]+HTTP 传输+全方法族),
-//!   外加 scene_tree/set_transform/set_camera 三个场景语义方法;方法族按域分子
-//!   模块:[`remote::mouse`](虚拟鼠标:窗口无关输入源,注入
-//!   `Messages<WindowEvent>` 与 bevy_winit 同层)、[`remote::objects`](对象
-//!   生命周期方法族)、[`remote::assets`](资产内容变更 + 动态加载);
-//!   读侧官方 inspection 方法族随 RemotePlugin 默认注册,写侧复用 overlay 的
-//!   Transform 编辑封装与 scene 机制层的相机给值/操作封装,不养两份逻辑;
-//! - [`driver`]:渲染驱动——bevy 调度侧编排,横跨 scene 与 vulkan:
-//!   `host`(宿主桥插件:禁渲染补位 + 系统进调度)、`init`(Vulkan 初始化链与反序拆除)、
-//!   `frame`(帧循环 draw_frame)、`upload`(上传编排:flush_uploads,Last 里 before
-//!   draw_frame);
-//! - main.rs:纯组装(装配级配置 + 插件清单;冻结边界只许增删 add_plugins)。
+//! 允许的顶层依赖：driver → overlay/scene/render/common；overlay、remote →
+//! scene/render/common（两者互不依赖，也不依赖 driver）；scene → render/common；
+//! render → common；common 不依赖任何顶层模块。下层需要被上层"排在之后/之前"
+//! 时暴露 `SystemSet`（如 `scene::ResidencySet`、`scene::PointerCaptureSet`），由
+//! 上层声明排序；跨层共享的设置/读数类型下沉到被双方依赖的那层（如
+//! `render::RenderMode`、`render::FrameSyncSettings`、`scene::DrawListVerify`）。
+//!
+//! 各层职责：
+//! - [`common`]：工具层（横切、零业务依赖）——类型化错误与统一错误通道
+//!   （[`common::error`]）、错误处理语法糖（[`common::syntax`]）；
+//! - [`render`]：Vulkan 资源与录制——按生命周期分子目录：`context`（进程级）、
+//!   `swapchain`（resize 级）、`pipeline/*`（帧编排录制、各管线与附件、UI 顶点环与
+//!   图集 GPU 账面）、`assets/*`（池/上传/贴图/描述符表/GPU 常驻绘制数据）、
+//!   `gpu/*`（剔除/遮挡/LOD/indirect/Hi-Z 的 compute 半边）、`shading/*`（光源表、
+//!   CSM、着色模式）；另含各 GPU 特性的开关与诊断账面、帧样本账与监控读数契约；
+//! - [`scene`]：ECS 侧场景机制（零 Vulkan 调用）——机制半边 `mechanism`（材质缝、
+//!   稳定槽账本与变更发现、驻留管理、相机/日光控制与输入仲裁窄接口、对象/资产/
+//!   Transform 写操作封装、层级树索引）+ 业务半边 `content`（进场/取景/灯光参数/
+//!   进场核验）；
+//! - [`overlay`]：egui 调试 UI（裸接 ash）——框架半边 `framework`（Context/字体、
+//!   Update 的 egui pass、输入桥、发布 `PointerCapture`、绘制半边 `paint_overlay`）+
+//!   业务半边 `tool_window`/`widgets`（工具窗口各页、坐标轴指示器、加载弹窗）；
+//! - [`remote`]：BRP 远程直控通道（HTTP JSON-RPC @ 127.0.0.1:15702）——
+//!   [`remote::AshRemotePlugin`] 是协议面注册单点，方法族按域分子模块；写侧复用
+//!   scene 机制层的 Transform 编辑、相机给值与对象/资产操作封装，读侧直读 scene/
+//!   render 的账面，与 overlay 同源而不经过 overlay；
+//! - [`driver`]：帧编排——`host`（宿主桥插件：禁渲染补位 + 设置资源插入 + 系统进
+//!   调度；子模块 `init` 初始化链与反序拆除、`frame` 帧循环 `draw_frame`、
+//!   `drawlist` DrawList 组装、`frame_sync` 帧率同步应用）、`upload`（上传编排
+//!   `flush_uploads`：Last 里排在驻留 tick 之后、draw_frame 之前）；
+//! - main.rs：纯组装（装配级配置 + 插件清单；冻结边界只许增删 add_plugins）。
 
 pub mod common;
 pub mod driver;

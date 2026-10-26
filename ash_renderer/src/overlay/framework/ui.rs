@@ -3,10 +3,10 @@
 //!
 //! overlay 按内容分两半：本文件是框架半边——"怎么跑"（Context/字体、pass、
 //! 纹理增量折叠、帧产出）；窗口内容"画什么"是业务，住
-//! [`crate::overlay::tool_window`]（本文件的 pass
-//! 只负责在 begin/end 之间建工具窗口并按当前页分发内容）。
+//! [`crate::overlay::tool_window`]（本文件的 pass 只负责在 begin/end 之间调
+//! 工具窗口参数束的 `show`）。
 //!
-//! 节拍化（7.8）：pass 分两层——面板层（工具窗口）由输入事件、
+//! 节拍化：pass 分两层——面板层（工具窗口）由输入事件、
 //! 0.5s 快照、切页/折叠等触发；gizmo 层（坐标轴指示器）由相机旋转驱动。其余
 //! 帧不跑 pass，`EguiFrame` 两层代数保持，绘制半边按代数命中镶嵌缓存
 //! （官方集成 eframe 的"空闲不重绘"在本宿主的等价物——本宿主每帧 present，
@@ -38,45 +38,34 @@ use bevy::{
 };
 
 use super::input::{egui_raw_input, EguiInput};
-use super::paint::{AtlasGpu, AtlasMirror};
-use crate::driver::host::FrameSyncSettings;
-use crate::overlay::transform_edit::{TransformEditQueue, apply_transform_edits};
+use super::paint::AtlasMirror;
+use crate::render::{AtlasGpu, EguiPassTiming};
+use crate::scene::mechanism::{
+    apply_transform_edits, PointerCapture, PointerCaptureSet, TransformEditQueue,
+};
 use crate::overlay::widgets::axis_gizmo::AxisGizmo;
 use crate::overlay::widgets::load_popup::{load_activity_tick, AssetLoadPopup, LoadActivity};
-use crate::overlay::tool_window::culling::CullingPage;
 use crate::overlay::tool_window::entity_tree::{
-    EntityTreePage, EntityTreeState, SelectedDetails, SelectedEntity, TransformDragCache,
-    collect_selected_details, maintain_entity_tree, mark_tree_dirty_despawn,
-    mark_tree_dirty_insert, mark_tree_dirty_remove,
+    add_tree_dirty_observers, collect_selected_details, maintain_entity_tree,
 };
-use crate::overlay::tool_window::frame_stats::{
-    ChunkRows, FpsMeter, FrameStatsPage, PerfPanelCache, RendererStats,
-};
-use crate::overlay::tool_window::monitor::{MonitorHistory, MonitorPage};
-use crate::overlay::tool_window::pipeline::PipelinePage;
-use crate::overlay::tool_window::shading::{RenderMode, ShadingPage};
-use crate::overlay::tool_window::{ToolPage, ToolWindow, ToolWindowState};
-use crate::scene::mechanism::WorkloadSettings;
-use crate::render::{
-    BloomSettings, CullDiagnostics, CullSettings, Context, ImageCache, IndirectStats, MeshPool, LodDiagnostics, LodSettings, OcclusionDiagnostics,
-    OcclusionSettings, PerfLedger, ShadowSettings, SmaaSettings,
-};
+use crate::overlay::tool_window::{insert_tool_window_resources, ToolWindowParams};
 
 use ash_macros::system;
 
-/// 调试 UI 插件：Startup 建状态，Update 跑 egui pass。绘制半边（图集/顶点/管线）
-/// 在 `driver`/`vulkan` 侧，消费本插件产的 [`EguiFrame`]。
+/// 调试 UI 插件：Startup 建状态，Update 跑 egui pass 并发布输入仲裁。绘制半边
+///（图集/顶点/管线）在 `driver`/`render` 侧，消费本插件产的 [`EguiFrame`]。
 pub struct OverlayPlugin;
 
 impl Plugin for OverlayPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, init_egui)
             .init_resource::<EguiInput>()
-            // 树拍平脏信号（7.7）：任一组件 Insert/Remove/Despawn 都可能改树
-            // 形态——观测器只置脏，重建归维护系统统一做（稳态零成本）
-            .add_observer(mark_tree_dirty_insert)
-            .add_observer(mark_tree_dirty_remove)
-            .add_observer(mark_tree_dirty_despawn)
+            // 输入仲裁：每帧（不受 pass 节拍门控）发布，相机/日光控制排在其后读
+            .init_resource::<PointerCapture>()
+            .add_systems(Update, publish_pointer_capture.in_set(PointerCaptureSet));
+        // 树拍平脏信号：任一组件 Insert/Remove/Despawn 都可能改树形态——观测器
+        // 只置脏，重建归维护系统统一做（稳态零成本）
+        add_tree_dirty_observers(app)
             // 属性链：树拍平维护（脏才重建）→ 采集（产快照）→ egui pass
             //（显示 + 组编辑）→ 编辑清账，链式定序；清账完 PostUpdate 传播
             // 才读 Transform，同帧 relay 保画面跟随
@@ -113,7 +102,7 @@ pub struct EguiFrame {
     pub screen_points: Vec2,
 }
 
-/// 一层 egui 产出（7.8 节拍化）：shapes 仅在**本层 pass 运行帧**填充（下一个
+/// 一层 egui 产出（节拍化）：shapes 仅在**本层 pass 运行帧**填充（下一个
 /// 绘制帧被 paint_overlay 取走镶嵌），generation 只在本层 pass 重跑时 +1——
 /// 跳过帧绘制半边按代数命中镶嵌缓存（零重求值零重镶嵌，画面静止即正确）。
 /// 官方集成（eframe）靠"空闲不重绘、窗口保留上一帧"拿到同样效果；本宿主
@@ -126,12 +115,34 @@ pub struct EguiLayer {
     pub generation: u64,
 }
 
-/// egui pass 自计时（7.5）：最近一次 pass 的墙钟耗时——Update 侧在
-/// draw_frame 计量之外，FPS 恶化取证的 Update 半边仪器。
-#[derive(Resource, Default)]
-pub struct EguiPassTiming {
-    /// 最近一次 run_egui_pass 的墙钟毫秒（两层 pass 合计；跳过帧为 0）。
-    pub last_ms: f32,
+/// 指针是否悬在 UI 浮动层上：查该点最顶层，非 Background 层 = 调试面板。
+///
+/// 坑：不用 `is_pointer_over_egui()`——它依赖 `run_ui` 闭包 API 写入的
+/// `root_ui_available_rect`，本集成的 `begin_pass`/`end_pass` 形状下该字段恒
+/// None，指针在背景上时恒返回 true（实测门永远关死）。`layer_id_at` 读最近
+/// 一次 pass 的层序，最多滞后一帧——点击瞬间指针不会瞬移，调试 UI 可接受。
+fn pointer_over_ui(ctx: &egui::Context, pos: egui::Pos2) -> bool {
+    ctx.layer_id_at(pos)
+        .is_some_and(|layer| layer.order != egui::Order::Background)
+}
+
+/// Update（[`PointerCaptureSet`]）：按本帧光标发布输入仲裁——光标 points 域
+/// 与 egui 同域直比；光标离窗/主窗缺席/egui 未就绪 = 不让。每帧整体覆写，
+/// 不受 pass 节拍门控。
+#[system]
+fn publish_pointer_capture(
+    state: Option<Res<EguiState>>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    mut capture: ResMut<PointerCapture>,
+) {
+    let cursor = window.single().ok().and_then(Window::cursor_position);
+    *capture = match state {
+        Some(state) => PointerCapture {
+            over_ui: cursor.is_some_and(|pos| pointer_over_ui(&state.ctx, egui::pos2(pos.x, pos.y))),
+            wants_keyboard: state.ctx.egui_wants_keyboard_input(),
+        },
+        None => PointerCapture::default(),
+    };
 }
 
 /// Startup：建 egui Context + 装字体 + 插状态资源。
@@ -149,28 +160,13 @@ fn init_egui(mut commands: Commands) {
     state.ctx.set_style_of(egui::Theme::Dark, style);
     commands.insert_resource(state);
     commands.insert_resource(EguiFrame::default());
-    commands.insert_resource(RenderMode::from_env());
-    // 工具窗口导航状态：当前页 + 分组折叠
-    commands.insert_resource(ToolWindowState::default());
-    // 层级树点选：属性面板的编辑目标来源
-    commands.insert_resource(SelectedEntity::default());
-    // 树拍平缓存（7.7）：脏信号观测器 + 维护系统重建，默认脏 = 首帧立树
-    commands.insert_resource(EntityTreeState::default());
-    // 属性快照：采集系统每帧重写，Startup 先落空壳
-    commands.insert_resource(SelectedDetails::default());
-    // 旋转拖拽缓存：拖拽期内冻结欧拉表示分支（防跨分支混写闪烁）
-    commands.insert_resource(TransformDragCache::default());
+    // 工具窗口各页状态（导航/点选/树缓存/帧率与监控账等）
+    insert_tool_window_resources(&mut commands);
     // Transform 编辑队列：pass 产、清账系统消费
     commands.insert_resource(TransformEditQueue::default());
-    // 帧率显示平滑：0.5s 出一次平均快照
-    commands.insert_resource(FpsMeter::default());
-    // 持续监控历史（7.5）：随 fps 快照节奏采样，窗口显隐不影响记账
-    commands.insert_resource(MonitorHistory::default());
-    // egui pass 自计时（7.5）：Update 侧墙钟读数
+    // egui pass 自计时：Update 侧墙钟读数
     commands.insert_resource(EguiPassTiming::default());
-    // 分位数面板缓存（7.5）：0.5s 重算，调试窗只读
-    commands.insert_resource(PerfPanelCache::default());
-    // 资产加载活跃 latch（7.12）：默认 active（覆盖 Startup 解析窗口）
+    // 资产加载活跃 latch：默认 active（覆盖 Startup 解析窗口）
     commands.insert_resource(LoadActivity::default());
     // 图集镜像（Update 折入）与 GPU 代（Last 整传；空建——首帧有整图增量才落图）。
     // AtlasGpu 的拆除在 teardown_vulkan（graveyard 与表同寿的拆除序）
@@ -208,68 +204,21 @@ fn load_fonts() -> egui::FontDefinitions {
     fonts
 }
 
-/// 工具窗口各页的一次性参数束（ui.rs 接线层）：统计、着色模式、导航状态、
-/// 点选与层级树查询合成一个 SystemParam——系统参数上限 16（FrameInput 同款式
-/// 的束打法），新增面板件全走这里，不撑大 pass 签名。
+/// pass 的业务参数束：工具窗口参数束 + 框架侧消费的少量读源（自计时、
+/// 相机旋转、加载 latch）——系统参数上限 16，束打法同 FrameInput。
 #[derive(SystemParam)]
 struct DebugUiParams<'w, 's> {
-    stats: RendererStats<'w>,
-    mode: ResMut<'w, RenderMode>,
-    tool_state: ResMut<'w, ToolWindowState>,
-    selected: ResMut<'w, SelectedEntity>,
-    fps: ResMut<'w, FpsMeter>,
-    /// egui pass 自计时（7.5）
+    /// 工具窗口各页读写的资源（页面分发见 [`ToolWindowParams::show`]）
+    tools: ToolWindowParams<'w, 's>,
+    /// egui pass 自计时
     timing: ResMut<'w, EguiPassTiming>,
-    /// 分位数面板缓存（7.5）：0.5s 重算
-    pct_cache: ResMut<'w, PerfPanelCache>,
-    /// 持续监控历史（7.5）：fps 快照刷新时采样入账
-    history: ResMut<'w, MonitorHistory>,
-    /// Vulkan 上下文（7.5 显存堆级读数；init 前空帧缺席）
-    vulkan: Option<Res<'w, Context>>,
-    /// 树拍平缓存（7.7）：维护系统产，pass 只读；展开/收起写回
-    tree_state: ResMut<'w, EntityTreeState>,
-    /// 属性快照（采集系统产，只读消费）
-    details: Res<'w, SelectedDetails>,
-    /// 旋转拖拽缓存（拖拽期内冻结欧拉表示分支）
-    drag_cache: ResMut<'w, TransformDragCache>,
     /// 主相机姿态（坐标轴指示器读旋转；本工程单相机，取任一）
     cameras: Query<'w, 's, &'static GlobalTransform, With<Camera>>,
-    /// Transform 编辑排队（pass 产，清账系统消费）
-    edit_queue: ResMut<'w, TransformEditQueue>,
-    /// 剔除开关（5.2：checkbox 写，draw_frame 读）
-    cull_settings: ResMut<'w, CullSettings>,
-    /// 剔除诊断读数（draw_frame 每帧刷新，只读展示）
-    cull_diag: Res<'w, CullDiagnostics>,
-    /// 遮挡开关（6.1：checkbox 写，draw_frame 读）
-    occlusion_settings: ResMut<'w, OcclusionSettings>,
-    /// 遮挡诊断读数（6.1：draw_frame 每帧刷新，只读展示）
-    occlusion_diag: Res<'w, OcclusionDiagnostics>,
-    /// LOD 开关（6.2：checkbox 写，draw_frame 读）
-    lod_settings: ResMut<'w, LodSettings>,
-    /// LOD 诊断读数（6.2：draw_frame 每帧刷新，只读展示）
-    lod_diag: Res<'w, LodDiagnostics>,
-    /// indirect 闭环读数（5.3：draw_frame 每帧刷新，只读展示）
-    indirect_stats: Res<'w, IndirectStats>,
-    /// chunk 盘点（5.4：块数与成员总数计量行）
-    chunks: ChunkRows<'w, 's>,
-    /// 帧样本账（5.5：分位数/显存/注入读数）
-    perf: Res<'w, PerfLedger>,
-    /// 帧率同步开关与刷新率读数（7.6：checkbox 写，apply_frame_sync 读）
-    frame_sync: ResMut<'w, FrameSyncSettings>,
-    image_cache: Res<'w, ImageCache>,
-    mesh_pool: Res<'w, MeshPool>,
-    workload: Res<'w, WorkloadSettings>,
-    /// 资产加载活跃 latch（7.12：菊花弹窗显示与面板直跑触发源）
+    /// 资产加载活跃 latch（加载弹窗显示与面板直跑触发源）
     load_activity: Res<'w, LoadActivity>,
-    /// 阴影开关（8.x 管线控制：checkbox 写，draw_frame 读；BRP shadow_set 同源）
-    shadow_settings: ResMut<'w, ShadowSettings>,
-    /// Bloom/tonemap 开关与参数（8.4：checkbox/滑杆写；BRP bloom_set 同源）
-    bloom_settings: ResMut<'w, BloomSettings>,
-    /// SMAA 开关（8.5：checkbox 写；BRP smaa_set 同源）
-    smaa_settings: ResMut<'w, SmaaSettings>,
 }
 
-/// 节拍化的跨帧门控账（7.8）：pass 触发判定的全部 Local 状态收拢成束——
+/// 节拍化的跨帧门控账：pass 触发判定的全部 Local 状态收拢成束——
 /// 系统参数上限 16（DebugUiParams 同款束打法）。
 #[derive(SystemParam)]
 struct PassGate<'w, 's> {
@@ -328,16 +277,8 @@ fn run_egui_pass(
     let Some(window) = window.iter().next() else {
         return; // 主窗未建（Startup 前的空帧）：egui 无屏幕域，整帧让路
     };
-    // —— 节拍底座（每帧，不隶属 pass）：fps 快照 + 监控采样 + 分位缓存。
-    // pass 节拍化后不能躺在 pass 里——跳过帧也要推进采样账（监控历史随
-    // 快照节奏入账、窗口显隐不影响记账的原语义保持）。
-    let snapshot_ticked = ui.fps.tick(time.delta_secs());
-    if snapshot_ticked {
-        ui.history
-            .sample(ui.fps.snapshot.fps, ui.fps.snapshot.ms, ui.vulkan.as_deref());
-        // 分位数面板缓存同节奏重算（调试窗逐帧只读，不再逐帧全量 sort）
-        ui.pct_cache.refresh(&ui.perf);
-    }
+    // —— 节拍底座（每帧，不隶属 pass）：跳过帧也要推进采样账
+    let snapshot_ticked = ui.tools.tick_snapshot(time.delta_secs());
     let pass_clock = std::time::Instant::now();
     let ppp = window.scale_factor();
     let screen_points = Vec2::new(window.width(), window.height());
@@ -358,13 +299,8 @@ fn run_egui_pass(
     let cam_rot_changed = *gate.last_cam_rot != Some(cam_rot);
     *gate.last_cam_rot = Some(cam_rot);
     // 指针在面板层上（浮动窗口层；gizmo 层纯显示无悬停态，不计入——悬停
-    // gizmo 不值得重跑面板）。与 camera_control 的仲裁同式（layer_id_at）。
-    let over_ui = |pos: egui::Pos2| {
-        state
-            .ctx
-            .layer_id_at(pos)
-            .is_some_and(|layer| layer.order != egui::Order::Background)
-    };
+    // gizmo 不值得重跑面板）。与输入仲裁同一判定（pointer_over_ui）。
+    let over_ui = |pos: egui::Pos2| pointer_over_ui(&state.ctx, pos);
     let mut panel_events = false;
     for ev in &raw.events {
         match ev {
@@ -391,19 +327,17 @@ fn run_egui_pass(
         || snapshot_ticked
         || size_changed
         || *gate.force_next
-        // 加载期直跑（7.12）：菊花相位逐帧推进（0.5s 快照节拍会看着卡顿）；
+        // 加载期直跑：菊花相位逐帧推进（0.5s 快照节拍会看着卡顿）；
         // 加载完成弹窗隐藏后触发自然消失回落节拍
         || ui.load_activity.active
-        || ui.tool_state.is_changed()
-        || ui.selected.is_changed()
-        || ui.tree_state.is_changed()
+        || ui.tools.changed()
         || panel_events;
     let gizmo_due = !*gate.pass_ever_ran || size_changed || cam_rot_changed;
     *gate.force_next = false;
 
     if panel_due {
         // 积压合并（旧事件在前）+ 门控翻转帧补发一次当前位置：进面板建
-        // 悬停、出面板清悬停，缺了悬停高亮冻结在旧形状里（7.8 计划钉子）
+        // 悬停、出面板清悬停，缺了悬停高亮冻结在旧形状里
         let mut events = input.drain_pending();
         events.append(&mut raw.events);
         if *gate.skipped_since_pass
@@ -416,59 +350,8 @@ fn run_egui_pass(
         state.ctx.set_pixels_per_point(ppp);
         state.ctx.begin_pass(raw);
         let plugin_host = plugin_hooks_begin(&state);
-        let mut edit = None;
-        ToolWindow { ctx: &state.ctx, state: &mut ui.tool_state }.show(|body, page| match page {
-            ToolPage::Shading => ShadingPage { mode: &mut ui.mode }.show(body),
-            ToolPage::Culling => CullingPage {
-                cull_settings: &mut ui.cull_settings,
-                cull_diag: &ui.cull_diag,
-                occlusion_settings: &mut ui.occlusion_settings,
-                occlusion_diag: &ui.occlusion_diag,
-                lod_settings: &mut ui.lod_settings,
-                lod_diag: &ui.lod_diag,
-                indirect_stats: &ui.indirect_stats,
-            }
-            .show(body),
-            ToolPage::Pipeline => PipelinePage {
-                shadow: &mut ui.shadow_settings,
-                bloom: &mut ui.bloom_settings,
-                smaa: &mut ui.smaa_settings,
-            }
-            .show(body),
-            ToolPage::FrameStats => FrameStatsPage {
-                fps: ui.fps.snapshot,
-                window,
-                ppp,
-                stats: &ui.stats,
-                pct: &ui.pct_cache,
-                workload: &ui.workload,
-                image_cache: &ui.image_cache,
-                mesh_pool: &ui.mesh_pool,
-                chunks: &ui.chunks,
-            }
-            .show(body),
-            ToolPage::Monitor => MonitorPage {
-                history: &ui.history,
-                fps: ui.fps.snapshot,
-                mesh_pool: &ui.mesh_pool,
-                image_cache: &ui.image_cache,
-                frame_sync: &mut ui.frame_sync,
-            }
-            .show(body),
-            ToolPage::EntityTree => {
-                edit = EntityTreePage {
-                    selected: &mut ui.selected,
-                    state: &mut ui.tree_state,
-                    details: &ui.details,
-                    drag: &mut ui.drag_cache,
-                }
-                .show(body);
-            }
-        });
-        if let Some(edit) = edit {
-            ui.edit_queue.0.push(edit);
-        }
-        // 加载指示弹窗（7.12）：最后画（右下角浮在窗区之上）；Background 层
+        ui.tools.show(&state.ctx, window, ppp);
+        // 加载指示弹窗：最后画（右下角浮在窗区之上）；Background 层
         // 纯显示零交互，不进 panel_layers 之外的仲裁面
         if ui.load_activity.active {
             AssetLoadPopup { ctx: &state.ctx }.show();
@@ -509,7 +392,7 @@ fn run_egui_pass(
             focused: raw_focused,
             ..Default::default()
         });
-        // 面板层可见性补记（7.8 面板消失修复）：egui 按"上一个 pass 画过谁"
+        // 面板层可见性补记：egui 按"上一个 pass 画过谁"
         // 记账窗口可见性（Areas::end_pass 换道 visible_areas_last_frame）——
         // 本子 pass 不画任何窗口，若不补记，面板层会从账面蒸发，下个面板
         // pass 被 egui 视为"窗口刚重新出现"而重触发淡入动画（Area::content_ui
@@ -541,7 +424,7 @@ fn run_egui_pass(
     *gate.last_size = size;
     frame.pixels_per_point = ppp;
     frame.screen_points = screen_points;
-    // pass 自计时落账（7.5）：两层合计；跳过帧为 0（监控读数如实反映节拍）
+    // pass 自计时落账：两层合计；跳过帧为 0（监控读数如实反映节拍）
     ui.timing.last_ms = if *gate.pass_ever_ran && (panel_due || gizmo_due) {
         pass_clock.elapsed().as_secs_f32() * 1000.0
     } else {
@@ -569,7 +452,7 @@ fn run_egui_pass(
 /// 形状）；run_ui 的 root_ui_available_rect 副产物不补（layer_id_at 已够用）。
 /// 其余默认插件不补：CallbackPlugin 零注册即 no-op（且类型不可名）、
 /// DragAndDrop/DebugTextPlugin 钩子在本宿主零负载（无 DnD payload/无 debug
-/// text），将来用到时照此各加一段。7.8 节拍化：面板 pass 与 gizmo 子 pass
+/// text），用到时照此各加一段。节拍化下面板 pass 与 gizmo 子 pass
 /// 各自完整配对（跳过帧整个 pass 不存在，无钩子可配）。
 fn plugin_hooks_begin(state: &EguiState) -> egui::Ui {
     let mut plugin_host = egui::Ui::new(

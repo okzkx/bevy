@@ -3,8 +3,8 @@
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 
-use crate::overlay::framework::paint::AtlasGpu;
-use crate::render::{BindlessTables, ImageCache, MeshPool, PerfLedger, Uploader};
+use super::mib;
+use crate::render::{AtlasGpu, BindlessTables, ImageCache, MeshPool, PerfLedger, Uploader};
 use crate::scene::mechanism::scene_gen::SceneChunk;
 use crate::scene::mechanism::WorkloadSettings;
 
@@ -45,7 +45,7 @@ impl FpsMeter {
     const UPDATE_INTERVAL: f32 = 0.5;
 
     /// pass 每帧喂一次本帧 delta；累计满一个 interval 出一次新快照。
-    /// 返回本次是否刚刷新了快照（7.5 监控采样复用同一节奏：新快照才入历史）。
+    /// 返回本次是否刚刷新了快照（监控采样复用同一节奏：新快照才入历史）。
     pub(in crate::overlay) fn tick(&mut self, delta_secs: f32) -> bool {
         self.acc_secs += delta_secs;
         self.acc_frames += 1;
@@ -61,7 +61,7 @@ impl FpsMeter {
     }
 }
 
-/// 分位数面板缓存（7.5）：跟 fps 快照同节奏（0.5s）重算三分位数 × 三字段，
+/// 分位数面板缓存：跟 fps 快照同节奏（0.5s）重算三分位数 × 三字段，
 /// 每帧只读展示——逐帧九次全量 sort 已随 [`PerfLedger::percentiles`] 收敛为
 /// 每字段一趟，且文本 0.5s 才变一次（egui galley 缓存可命中，不再逐帧重塑）。
 #[derive(Resource, Default)]
@@ -92,7 +92,7 @@ impl PerfPanelCache {
     }
 }
 
-/// chunk 盘点查询（5.4 计量行数据源）：根实体带 SceneChunk，成员数 =
+/// chunk 盘点查询（计量行数据源）：根实体带 SceneChunk，成员数 =
 /// 直接子实体数。生成期归属原样报出（不按当前位置重算）。
 pub(in crate::overlay) type ChunkRows<'w, 's> =
     Query<'w, 's, (&'static SceneChunk, Option<&'static Children>)>;
@@ -147,18 +147,17 @@ impl FrameStatsPage<'_> {
         ui.separator();
         ui.strong("资源");
         let ((v_used, v_cap), (i_used, i_cap)) = mesh_pool.usage();
-        const MB: f64 = 1024.0 * 1024.0;
         ui.monospace(format!(
             "网格池 顶点 {:.1}/{:.1}MB · 索引 {:.1}/{:.1}MB",
-            v_used as f64 / MB,
-            v_cap as f64 / MB,
-            i_used as f64 / MB,
-            i_cap as f64 / MB,
+            mib(v_used),
+            mib(v_cap),
+            mib(i_used),
+            mib(i_cap),
         ));
         ui.monospace(format!(
             "贴图 {} 张 {:.1}MB（停尸房 {}）",
             image_cache.resident_count(),
-            image_cache.resident_bytes() as f64 / MB,
+            mib(image_cache.resident_bytes()),
             image_cache.graveyard_len(),
         ));
         let (chunk_count, chunk_members) = chunks

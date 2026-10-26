@@ -1,68 +1,36 @@
-//! 语法糖（移植自用户在 frenderer 的 `modules/common/syntax` crate，错误处理哲学的载体）。
+//! 错误处理语法糖：统一错误通道的一行糖 + 控制流宏族。
 //!
-//! frenderer 实践的设计哲学：**错误就地消化——日志 + 安全降级，不上浮、不 panic**。
-//! 全库 anyhow 单类型 + 零裸 unwrap；本 crate 借用其控制流族，`log` 换 `bevy::log`。
-//!
-//! 搬入清单与取舍：
-//! - ✅ 控制流宏 9 件（8 件 frenderer 原件 + `unwrap_or_panic!` 为 ash_renderer 新增，
-//!   补初始化路径的家族位）+ `LogDebug`/`WarnOrDefault`——bevy 系统返回 `()`，`?` 不可用，
-//!   "warn + 早退"正是 `()` 系统里的传播形式；逐实体遍历类系统（Query → 绘制列表）
-//!   是其预期主场（frenderer render_params.rs:35 同形状）；
-//! - ✅（ash_renderer 新增）`ResultTierExt`（or_warn/or_fatal）+ `fatal` 构造——
-//!   统一错误通道的糖：错误点一行"挂 context 负载 + 标 Severity"，`?` 把
-//!   `BevyError` 冒泡给执行器进官方通道（[`crate::common::error::tier_handler`]
-//!   按 Severity 分流，退出收尾在看门 system）——日志在 handler 统一打，错误点
-//!   不再 log。主场 = 签名 `Result<(), BevyError>` 的系统（现役首例 `draw_frame`），
-//!   `()` 系统本体仍走宏族；
-//! - ❌ `singleton` 系列：bevy `Resource` 就是全局状态的正解，搬进来反而诱导反模式；
-//! - ❌ `lock_mutex!`：bevy 调度器管并发，系统内不持手动锁；首个后台线程出现时再议；
-//! - ❌ `Option::some()`：anyhow `?` 链专用，这里 Option 早退已由 `unwrap_or_*` 覆盖。
+//! 判定线（`.agents/rules/System错误处理规范.md`）：本次失败要求提前 return 就冒泡，
+//! 不要求就就地 log 继续。
+//! - 冒泡：签名 `Result<(), BevyError>` 的系统，错误点一行"挂 context 负载 + 标
+//!   Severity"后 `?` 上交——[`ResultTierExt`]（`or_warn`/`or_fatal`）、
+//!   [`OptionTierExt`]（`ok_or_fatal`）、[`fatal`]（match 分支就地构造）。日志由
+//!   [`crate::common::error::tier_handler`] 统一打，错误点不 log。
+//! - 就地 log 继续：循环内逐项降级（log 后 `continue`）与无失败路径的 `()` 系统，
+//!   走控制流宏族；一次性收账日志走 [`OnceLog`]。
 //!
 //! 宏命名规律：**前缀定输入，后缀定出口**。
 //! 前缀：`unwrap_`=Option、`warn_unwrap_`=Result（先打 warn 日志）、`or_`=bool、
 //! `matches_`=任意模式 let-else。
 //! 后缀：`_return` 结尾 = `return 值`（单参版返回 `Default::default()`）；
-//! 无后缀 = 执行给定的发散语句（循环里几乎全是 `continue`）；
-//! `_panic` = 家族的 panic 位（**工程原则"非必要不 panic"——现无现役调用点**，
-//! 仅供真正必要的断言场景：不可恢复的内部不变量且需要 backtrace 取证；经
-//! `UnwrapPanic` trait 同时吃 Option 与 Result）。
-//! 用法：`use ash_renderer::common::syntax::宏名;`——宏内部用 `$crate::` 全限定调 trait 方法，
-//! 调用方无需导 trait。宏家族当前无现役调用点，作为 `()` 系统的控制流
-//! 标准件备用（签名 `Result<(), BevyError>` 的系统走 [`ResultTierExt`]），故本模块
-//! 关闭 `unused_macros`。
+//! 无后缀 = 执行给定的发散语句（循环里几乎全是 `continue`）。
+//! 用法：`use crate::common::syntax::宏名;`——宏内部用 `$crate::` 全限定调 trait
+//! 方法，调用方无需导 trait。
 
-#![allow(unused_macros)]
+use std::convert::Infallible;
 
 use bevy::ecs::error::{BevyError, ContextExt, ResultSeverityExt, Severity};
-use bevy::log::{info, warn};
+use bevy::log::warn;
 
-/// Result 旁路日志：错误打日志后**原样穿透**（可继续 `?` 传播或交给宏早退）。
+/// Result 旁路日志：错误打 warn 日志后**原样穿透**（交给 `warn_unwrap_*` 宏早退）。
 pub trait LogDebug<T> {
-    /// 只打 Debug 首行，info 级
-    fn info(self) -> Self;
     /// 打完整 Debug，warn 级
     fn warn(self) -> Self;
-    /// warn 后降级为 Option
-    fn warn_ok(self) -> Option<T>;
 }
 
 impl<T, D: std::fmt::Debug> LogDebug<T> for std::result::Result<T, D> {
-    fn info(self) -> Self {
-        self.map_err(|d| {
-            format!("{d:?}").lines().next().inspect(|l| info!("{l}"));
-            d
-        })
-    }
-
     fn warn(self) -> Self {
-        self.map_err(|e| {
-            warn!("{e:?}");
-            e
-        })
-    }
-
-    fn warn_ok(self) -> Option<T> {
-        self.warn().ok()
+        self.inspect_err(|e| warn!("{e:?}"))
     }
 }
 
@@ -70,8 +38,8 @@ impl<T, D: std::fmt::Debug> LogDebug<T> for std::result::Result<T, D> {
 /// `BevyError` 冒泡给执行器进统一错误通道——日志在 [`crate::common::error::tier_handler`]
 /// 统一打（单点零重复），退出收尾在看门 system。
 ///
-/// 与 [`LogDebug`] 的分工：`warn()` 是旁路日志（Err 原样穿透、就地消化、不进
-/// 通道），本 trait 产出的是要冒泡的错误。主场 = 签名 `Result<(), BevyError>` 的
+/// 与 [`LogDebug`] 的分工：`warn()` 是旁路日志（Err 原样穿透、不进通道），本
+/// trait 产出的是要冒泡的错误。主场 = 签名 `Result<(), BevyError>` 的
 /// 系统（现役：`draw_frame`/`flush_uploads`/`init_vulkan`）。
 pub trait ResultTierExt<T, E>: Sized {
     /// Tier①：挂 `msg` context（可 `format!`）+ 标 [`Severity::Warning`]——`?` 后
@@ -119,10 +87,8 @@ pub fn fatal(
     msg: impl Into<std::borrow::Cow<'static, str>>,
     err: impl Into<BevyError>,
 ) -> BevyError {
-    Err::<(), _>(err.into())
-        .context(msg)
-        .unwrap_err()
-        .with_severity(Severity::Error)
+    let Err(err) = Err::<Infallible, _>(err.into()).context(msg);
+    err.with_severity(Severity::Error)
 }
 
 /// 一次性收账日志标准件：首次 [`OnceLog::log`] 执行并置位，此后静默。
@@ -137,39 +103,6 @@ impl OnceLog {
             self.0 = true;
             f();
         }
-    }
-}
-
-/// warn 后以 `Default` 兜底：线程入口/后台任务的"失败不炸"语义。
-pub trait WarnOrDefault<T> {
-    fn warn_unwrap_or_default(self) -> T;
-}
-
-impl<T: Default, D: std::fmt::Debug> WarnOrDefault<T> for std::result::Result<T, D> {
-    fn warn_unwrap_or_default(self) -> T {
-        self.or_else(|e| {
-            warn!("{e:?}");
-            Ok::<T, D>(Default::default())
-        })
-        .unwrap_or_default()
-    }
-}
-
-/// Option 与 Result 的统一解包底座（`unwrap_or_panic!` 用）：错误统一成 `String`（Display）。
-/// 两个 blanket impl 实现"Option 与 Result 同一套语法"——frenderer 哲学的延伸件。
-pub trait UnwrapPanic<T> {
-    fn into_result(self) -> std::result::Result<T, String>;
-}
-
-impl<T, E: std::fmt::Display> UnwrapPanic<T> for std::result::Result<T, E> {
-    fn into_result(self) -> std::result::Result<T, String> {
-        self.map_err(|e| e.to_string())
-    }
-}
-
-impl<T> UnwrapPanic<T> for Option<T> {
-    fn into_result(self) -> std::result::Result<T, String> {
-        self.ok_or_else(|| "None".to_string())
     }
 }
 
@@ -231,30 +164,9 @@ macro_rules! unwrap_or {
     }};
 }
 
-/// 失败 → panic（初始化路径专用，ash_renderer 新增件；frenderer 无此宏）。
-/// 同时吃 Result（错误走 Display）与 Option（报 "None"）——一次性装配代码
-/// 没有"安全降级"可言，fail fast：根因必须钉在启动现场，而不是延后失真。
-/// 双参版 `panic!("{上下文}: {错误}")`，单参版直接 panic 错误。
-#[macro_export]
-macro_rules! unwrap_or_panic {
-    ($res_value:expr, $panic_message:expr) => {
-        match $crate::common::syntax::UnwrapPanic::into_result($res_value) {
-            Ok(t) => t,
-            Err(msg) => panic!("{}: {msg}", $panic_message),
-        }
-    };
-
-    ($res_value:expr) => {
-        match $crate::common::syntax::UnwrapPanic::into_result($res_value) {
-            Ok(t) => t,
-            Err(msg) => panic!("{msg}"),
-        }
-    };
-}
-
 /// 布尔卫语句：false → `return Default::default()`。
-/// 注意与 let-else 族不同，这里 `$e2` 不经编译器强制发散（沿用 frenderer 原样），
-/// 传非发散表达式会静默继续——只传 `return`/`continue`。
+/// 坑：与 let-else 族不同，`or!` 的 `$e2` 不经编译器强制发散，传非发散表达式会
+/// 静默继续——只传 `return`/`continue`。
 #[macro_export]
 macro_rules! or_return {
     ($e:expr) => {{
@@ -300,6 +212,6 @@ macro_rules! matches_or {
 }
 
 pub use {
-    matches_or, matches_or_return, or, or_return, unwrap_or, unwrap_or_panic,
-    unwrap_or_return, warn_unwrap_or, warn_unwrap_or_return,
+    matches_or, matches_or_return, or, or_return, unwrap_or, unwrap_or_return,
+    warn_unwrap_or, warn_unwrap_or_return,
 };

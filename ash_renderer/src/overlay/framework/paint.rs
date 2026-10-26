@@ -1,5 +1,6 @@
-//! overlay 绘制半边：图集 CPU 镜像 → 整图重传新槽、UI 顶点环、
-//! `paint_overlay` 把 [`EguiFrame`] 变成 [`UiPaint`]。
+//! overlay 绘制半边：图集 CPU 镜像 → 整图重传新槽、镶嵌写 UI 顶点环，
+//! `paint_overlay` 把 [`EguiFrame`] 变成 [`UiPaint`]。GPU 侧账面
+//!（[`AtlasGpu`]/[`UiVertexRing`]）住 render 层，本模块只做 egui 侧产出。
 //!
 //! 图集路线：epaint 图集增量是 dirty-rect 局部补丁，而 uploader
 //! 图像段只支持整图 (0,0) 拷贝；扩局部区要引入 graphics→transfer 的新同步方向
@@ -7,11 +8,6 @@
 //! → 旧代入 graveyard（与表同寿）**"。镜像折入在 Update 的 pass 出口（`AtlasMirror::fold`），
 //! 不随 EguiFrame 跨系统存放——`TexturesDelta` 的 Drop 审查要求增量被消费，且
 //! 最小化帧 Update 照跑而 draw_frame 整帧让路，跨系统携带会被下帧覆写丢失。
-//!
-//! 顶点环：UI 顶点/索引每帧整换、宿主直写 HOST_VISIBLE
-//! （`BufferRole::DynamicDraw`），不走 MeshPool（池是 DEVICE_LOCAL 资产级 bump，
-//! 写入走 staging+transfer——每帧整换的 UI 数据直写更诚实）。复用安全与帧 UBO
-//! 同一条 fence 纪律：写入发生在 `wait_for_slot` 之后 = 本槽上一轮提交完成之后。
 //!
 //! 时序：`paint_overlay` 在 draw_frame 内、FrameDraw 组装（`wait_ticket` 快照）
 //! **之前**调用——图集批的票据必须落进本帧图形提交的等待值。
@@ -22,33 +18,12 @@ use bevy::{ecs::system::SystemParam, image::ImageSamplerDescriptor, prelude::*};
 use crate::{
     common::error::{Result, VulkanError},
     render::{
-        sampler_key, BindlessTables, BufferRole, Context, GpuBuffer, GpuImage, ImageSpec,
-        SlotBinding, StagingImageCopy, Ticket, UiDrawCall, UiPaint, UploadBatch, Uploader,
-        MAX_FRAMES_IN_FLIGHT, UI_VERTEX_STRIDE,
+        sampler_key, AtlasGpu, BindlessTables, Context, GpuImage, ImageSpec, StagingImageCopy,
+        UiDrawCall, UiPaint, UiVertex, UiVertexRing, UploadBatch, Uploader,
     },
 };
 
 use super::ui::{EguiFrame, EguiLayer, EguiState};
-
-/// 单槽 UI 顶点容量（个数；×20B = 1.25MB/槽）。调试 UI 单帧数百万顶点不可能，
-/// 超容 = Tier① 丢当帧 UI（可交互性损失不拦帧循环）。
-const UI_VERTEX_CAPACITY: usize = 64 * 1024;
-/// 单槽 UI 索引容量（个数；×4B = 384KB/槽）。
-const UI_INDEX_CAPACITY: usize = 96 * 1024;
-
-/// epaint 顶点的 Rust 镜像：与 overlay_draw.wgsl 的顶点输入同一契约
-/// （pos vec2f + uv vec2f + color 4×u8 打包，20B 步长）。epaint 默认布局同款
-/// 字段序（非 unity feature）；镜像类型切断对 epaint 字段序的依赖。
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(crate) struct UiVertex {
-    pos: [f32; 2],
-    uv: [f32; 2],
-    /// sRGBA 预乘（gamma 域）——Color32 字节原样直通 GPU。
-    color: [u8; 4],
-}
-
-const _: () = assert!(std::mem::size_of::<UiVertex>() == UI_VERTEX_STRIDE as usize);
 
 /// 字体图集的 CPU 镜像（Update 侧由 [`super::ui`] 折入，绘制半边按代数差整传）。
 #[derive(Resource, Default)]
@@ -133,144 +108,6 @@ fn blit(
     }
 }
 
-/// 图集 GPU 侧：当前代资源 + 退役代 graveyard（接统一排空点）。
-#[derive(Resource, Default)]
-pub struct AtlasGpu {
-    /// 当前在用的图集代（最近一次整传）。
-    current: Option<AtlasSlot>,
-    /// 退役代：整传换下的旧 GpuImage（上传票据随行）——由 flush_uploads 的
-    /// 统一排空点在"图形最后使用 + 上传完成"双条件后销毁（否则随 dirty-rect
-    /// 代数增长，停尸房与纹理槽无界积聚）。
-    graveyard: Vec<(GpuImage, Ticket)>,
-    /// 已整传的镜像代数。
-    uploaded_generation: u64,
-}
-
-/// 一代图集的 GPU 资源与 bindless 槽位。
-struct AtlasSlot {
-    image: GpuImage,
-    /// 本代整传票据（排空双条件之一）。
-    ticket: Ticket,
-    slots: SlotBinding,
-}
-
-impl AtlasGpu {
-    /// 已整传的镜像代数（调试窗口统计行）。
-    pub(crate) fn generation(&self) -> u64 {
-        self.uploaded_generation
-    }
-
-    /// graveyard 累计张数（调试窗口统计行）。
-    pub(crate) fn graveyard_len(&self) -> usize {
-        self.graveyard.len()
-    }
-
-    /// 排空旧代停尸房：与 ImageCache/MeshPool 同款双条件——
-    /// `wait_draws` 等"图形最后使用"（帧槽 fence），`uploader` 等"上传完成"
-    ///（旧代整传票据）。空房直接返回不等待（稳态零成本）。
-    ///
-    /// # Errors
-    /// 帧侧等待或票据等待失败（排空未发生，停尸房保留，下帧重试）。
-    pub(crate) fn drain_graveyard(
-        &mut self,
-        uploader: &Uploader,
-        wait_draws: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<()> {
-        if self.graveyard.is_empty() {
-            return Ok(());
-        }
-        wait_draws()?;
-        let max_ticket = self
-            .graveyard
-            .iter()
-            .map(|(_, ticket)| *ticket)
-            .fold(0u64, u64::max);
-        uploader.wait_until(max_ticket)?;
-        let count = self.graveyard.len();
-        self.graveyard.clear(); // Drop 序：view 先于 image，memory 最后
-        info!("图集停尸房排空:销毁 {count} 张旧代（双条件齐备后）");
-        Ok(())
-    }
-}
-
-/// UI 顶点环：每帧槽一对固定容量顶点/索引 buffer（`MAX_FRAMES_IN_FLIGHT` 组），
-/// 宿主按帧直写。写入安全契约 = 调用方（draw_frame）先过 `wait_for_slot`。
-#[derive(Resource)]
-pub struct UiVertexRing {
-    slots: Vec<UiRingSlot>,
-}
-
-struct UiRingSlot {
-    vertex: GpuBuffer,
-    index: GpuBuffer,
-}
-
-impl UiVertexRing {
-    /// 建环：每帧槽一对 buffer（创建失败全有或全无，`GpuBuffer::create` 自回收）。
-    ///
-    /// # Errors
-    /// 任一 buffer 创建/分配/绑定/映射失败（Tier②，初始化链冒泡）。
-    pub fn new(ctx: &Context) -> Result<Self> {
-        let mut slots = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            slots.push(UiRingSlot {
-                vertex: GpuBuffer::create(
-                    &ctx.device,
-                    ctx.memory_contract(),
-                    (UI_VERTEX_CAPACITY * std::mem::size_of::<UiVertex>()) as u64,
-                    BufferRole::DynamicDraw,
-                )?,
-                index: GpuBuffer::create(
-                    &ctx.device,
-                    ctx.memory_contract(),
-                    (UI_INDEX_CAPACITY * std::mem::size_of::<u32>()) as u64,
-                    BufferRole::DynamicDraw,
-                )?,
-            });
-        }
-        Ok(Self { slots })
-    }
-
-    /// 本帧槽顶点/索引 buffer 句柄（录制段绑定用）。
-    pub(crate) fn buffers(&self, slot: usize) -> (vk::Buffer, vk::Buffer) {
-        let s = &self.slots[slot];
-        (s.vertex.buffer(), s.index.buffer())
-    }
-
-    /// 写本帧槽：整帧 UI 顶点/索引从头直写（offset 0）。容量在调用方先判。
-    ///
-    /// # Errors
-    /// 底层写/flush 失败（Tier② 冒泡）。
-    pub(crate) fn write(
-        &mut self,
-        slot: usize,
-        vertices: &[UiVertex],
-        indices: &[u32],
-    ) -> Result<()> {
-        // # Safety:UiVertex/u32 均 repr 紧排、无填充（上方 const 断言 20B），
-        // 字节视图只在 write 调用内存活
-        let vbytes = unsafe {
-            std::slice::from_raw_parts(vertices.as_ptr().cast(), std::mem::size_of_val(vertices))
-        };
-        let ibytes = unsafe {
-            std::slice::from_raw_parts(indices.as_ptr().cast(), std::mem::size_of_val(indices))
-        };
-        let s = &mut self.slots[slot];
-        s.vertex.write(0, vbytes)?;
-        s.index.write(0, ibytes)
-    }
-
-    /// 单槽顶点容量（个数）。
-    pub(crate) fn vertex_capacity(&self) -> usize {
-        UI_VERTEX_CAPACITY
-    }
-
-    /// 单槽索引容量（个数）。
-    pub(crate) fn index_capacity(&self) -> usize {
-        UI_INDEX_CAPACITY
-    }
-}
-
 /// paint_overlay 的资源束（SystemParam，与 UploadData 同款式样）。
 #[derive(SystemParam)]
 pub(crate) struct UiDrawData<'w> {
@@ -288,7 +125,7 @@ pub(crate) struct OverlayLogState {
     pub warned_callback: bool,
     pub warned_no_atlas: bool,
     pub painted_logged: bool,
-    /// 两层镶嵌缓存（7.8 节拍化）：(shapes 代数, 镶嵌产物)——代数未变的帧
+    /// 两层镶嵌缓存（节拍化）：(shapes 代数, 镶嵌产物)——代数未变的帧
     /// 直接复用，跳过帧零重镶嵌。egui 官方评估过"shapes 相等即复用"但没做
     ///（逐形状比较占 tessellate 一半成本，context.rs tessellate 注释）；本缓
     /// 存按 pass 代数判等，零比较成本。
@@ -320,7 +157,7 @@ pub(crate) fn paint_overlay(
 ) -> Result<Option<UiPaint>> {
     // —— 1) 图集整传：镜像代数领先已传代数 → 全新 GpuImage + 独立批 + publish 新槽 ——
     let (mirror_image, mirror_generation) = mirror.snapshot();
-    if gpu.uploaded_generation < mirror_generation {
+    if gpu.generation() < mirror_generation {
         let Some(image) = mirror_image else {
             // 折入只增代数不建镜像的路径不存在（整图增量才落位）；防御性按内部
             // 矛盾处理，不 panic
@@ -374,18 +211,7 @@ pub(crate) fn paint_overlay(
                 // 槽位发布在提交成功后（失败不留指向未上传数据的槽，与 flush_uploads
                 // 同纪律）；只写新槽（不覆盖在飞消费的旧槽）
                 let slots = tables.publish(gpu_image.view(), &sampler_key(&spec.sampler))?;
-                if let Some(old) = gpu.current.replace(AtlasSlot {
-                    image: gpu_image,
-                    ticket,
-                    slots,
-                }) {
-                    // 旧代退场：本体进停尸房（票据随行，排空点销毁）、纹理槽进
-                    // 待回收账（采样器槽不退——图集用 LINEAR 键与真实贴图共享，
-                    // 本体归表后槽内句柄不随旧代消失）
-                    tables.retire_texture(old.slots.texture);
-                    gpu.graveyard.push((old.image, old.ticket));
-                }
-                gpu.uploaded_generation = mirror_generation;
+                gpu.install(tables, gpu_image, ticket, slots, mirror_generation);
                 info!(
                     "图集整传 #{ticket}：{}×{}（第 {mirror_generation} 代），纹理槽 {}/{}；\
                      旧代入 graveyard（当前 {} 张待排空）",
@@ -393,7 +219,7 @@ pub(crate) fn paint_overlay(
                     spec.height,
                     slots.texture,
                     tables.capacity(),
-                    gpu.graveyard.len(),
+                    gpu.graveyard_len(),
                 );
             }
             // staging 非空的批次必有提交（uploader 契约）；此处为内部矛盾
@@ -405,7 +231,7 @@ pub(crate) fn paint_overlay(
         }
     }
     // —— 2) 镶嵌：两层 shapes（未镶嵌）→ ClippedPrimitive。代数未变的帧
-    // 直接复用缓存产物（7.8 跳过帧零重镶嵌；pass 帧取走当帧 shapes 重镶嵌）——
+    // 直接复用缓存产物（跳过帧零重镶嵌；pass 帧取走当帧 shapes 重镶嵌）——
     tessellate_layer(
         &egui.ctx,
         &mut frame.panel,
@@ -448,7 +274,7 @@ pub(crate) fn paint_overlay(
         return Ok(None);
     }
     // 图集 GPU 代必须在场（shapes 非空 → 文本已栅格化 → 首帧已整传；防御分支）
-    let Some(atlas) = &gpu.current else {
+    let Some(atlas) = gpu.current_slots() else {
         if !log.warned_no_atlas {
             log.warned_no_atlas = true;
             warn!("图集 GPU 代缺席（镜像从未折入整图增量），当帧 UI 丢弃");
@@ -478,15 +304,15 @@ pub(crate) fn paint_overlay(
             draws.len(),
             vertices.len(),
             indices.len(),
-            atlas.slots.texture,
-            atlas.slots.sampler,
+            atlas.texture,
+            atlas.sampler,
             frame.screen_points.x,
             frame.screen_points.y,
         );
     }
     Ok(Some(UiPaint {
-        atlas_texture: atlas.slots.texture,
-        atlas_sampler: atlas.slots.sampler,
+        atlas_texture: atlas.texture,
+        atlas_sampler: atlas.sampler,
         // push 的 screen_size 与顶点 pos 同域 = points：tessellate 不按 ppp 缩放
         // 顶点（ppp 只进字形栅格化/像素取整/圆半径），换算成像素是渲染目标的
         // 职责——egui-wgpu 0.36.2 同款：uniform 字段即 screen_size_in_points

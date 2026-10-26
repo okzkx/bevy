@@ -30,6 +30,8 @@ use crate::common::error::Result;
 
 use crate::render::Context;
 
+use super::pipeline_handle::PipelineHandle;
+
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与探针同一编译路径）。
 /// 8.1 起场景管线 = G-buffer 写入（albedo+normal 双 color + 深度）；
 /// debug_draw.wgsl（forward 直出）退役为 A/B 对照参照，不再进主管线。
@@ -38,9 +40,7 @@ const GBUFFER_WRITE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gbuff
 /// 图形管线 + pipeline layout（dynamic rendering 形态，无 RenderPass）。
 #[derive(bevy::prelude::Resource)]
 pub struct GraphicsPipeline {
-    device: Device,
-    layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
+    handle: PipelineHandle,
 }
 
 impl GraphicsPipeline {
@@ -235,9 +235,7 @@ impl GraphicsPipeline {
                  viewport 正高度直出，剔除关，push 退役（5.3：firstInstance 携带槽号），set0/set1/set2 同源绑定"
             );
             Ok(Self {
-                device: device.clone(),
-                layout,
-                pipeline,
+                handle: PipelineHandle::new(device, layout, pipeline),
             })
         }
     }
@@ -245,28 +243,12 @@ impl GraphicsPipeline {
     /// 管线句柄（帧录制绑定用）。
     #[must_use]
     pub fn pipeline(&self) -> vk::Pipeline {
-        self.pipeline
+        self.handle.pipeline()
     }
 
     /// pipeline layout 句柄（push/描述符绑定与管线同源）。
     #[must_use]
     pub fn layout(&self) -> vk::PipelineLayout {
-        self.layout
-    }
-}
-
-// # Safety:句柄本质是整数,创建/销毁只在持有方线程;方法只读句柄(与 FramePool 同款约定)
-unsafe impl Send for GraphicsPipeline {}
-unsafe impl Sync for GraphicsPipeline {}
-
-impl Drop for GraphicsPipeline {
-    fn drop(&mut self) {
-        // 契约边界:不等 GPU,退出排空由 teardown 的 device_wait_idle 先行;
-        // pipeline 先于 layout(引用方向),layout 先于它借用的 set layouts(在
-        // BindlessTables 里,拆除序由 host 的 remove_resource 顺序保证)
-        unsafe {
-            self.device.destroy_pipeline(self.pipeline, None);
-            self.device.destroy_pipeline_layout(self.layout, None);
-        }
+        self.handle.layout()
     }
 }

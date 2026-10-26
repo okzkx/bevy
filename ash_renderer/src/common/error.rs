@@ -1,10 +1,11 @@
 //! 类型化错误与统一错误通道。
 //!
 //! 帧循环的核心分支逻辑就是区分 `ERROR_OUT_OF_DATE_KHR`（必须重建后重试，不算错误）
-//! 与真失败——`String` 承载不了这个语义，所以引入 enum。初始化失败仍带调用上下文，
-//! 走 `Init(String)`。
+//! 与真失败——`String` 承载不了这个语义，所以引入 enum。初始化失败带调用上下文走
+//! `Init(String)`；固定容量耗尽与访问越界走 `Capacity(String)`；运行期编排契约被
+//! 打破（状态矛盾、误用）走 `Upload(String)`。
 //!
-//! 统一错误通道（正本见《代码结构优化：统一错误通道定案》篇）：system 签名
+//! 统一错误通道（正本见《代码结构优化：统一错误通道定案》）：system 签名
 //! `Result<(), BevyError>`，`?` 冒泡的 Err 由执行器交给 [`tier_handler`]，按错误值的
 //! `Severity` 元数据两 Tier 分流——`Warning` 就地 warn 丢弃（Tier①），其余 error
 //! 留档 + 置位 [`FATAL`]，由 [`fatal_gate`] 看门写 `AppExit` 优雅退出（Tier②）。
@@ -29,11 +30,15 @@ pub enum VulkanError {
     Vk(#[from] vk::Result),
     #[error("上传/资源编排契约被打破: {0}")]
     Upload(String),
+    /// 固定容量耗尽或访问范围越界：显式拒绝，不静默截断、不越界读写
+    #[error("容量/范围越界: {0}")]
+    Capacity(String),
     #[error("{0}")]
     Init(String),
 }
 
-/// 进程级优雅退出请求位：Tier② 裁决的统一落点，[`fatal_gate`] 唯一消费者。
+/// 进程级优雅退出请求位：唯一写者 [`tier_handler`]（Tier② 分支置位），唯一消费者
+/// [`fatal_gate`]。
 ///
 /// 进程级全局静态，多 App 并存会串扰——本项目单进程单 App，前提钉死。
 static FATAL: AtomicBool = AtomicBool::new(false);
@@ -56,7 +61,7 @@ pub fn tier_handler(mut err: BevyError, ctx: ErrorContext) {
     }
     match err.severity() {
         Severity::Warning => warn!("{ctx}: {err}"),
-        // 低档（Ignore/Trace/Debug/Info）= 携带方明示可忽略,按告警记录不升级,
+        // 低档（Ignore/Trace/Debug/Info）= 携带方明示可忽略,按 info 记录不升级,
         // 不伪造致命退出
         Severity::Ignore | Severity::Trace | Severity::Debug | Severity::Info => {
             info!("{ctx}: {err}");
@@ -68,18 +73,11 @@ pub fn tier_handler(mut err: BevyError, ctx: ErrorContext) {
     }
 }
 
-/// Tier② 裁决但不能提前 return 的现场就地置位（现役唯一：present 失败后必须照常
-/// advance 保持帧槽账本一致）；退出由下一帧的 [`fatal_gate`] 生效。
-pub(crate) fn request_graceful_exit() {
-    FATAL.store(true, Ordering::Release);
-}
-
 /// 看门 system（锚定 `First` 集——多线程执行器下无序系统插入序不保证，早位收益
 /// 须显式锚定）：`FATAL` 置位 → 写 `AppExit` 优雅退出。
 ///
 /// swap 清位：连续多个 Tier② 只退一次。置位到生效有半帧延迟——本帧剩余 system
-/// 照跑、runner 帧末查 `AppExit` 才停，与壳模式等价（壳 return 也只跳过本 system），
-/// 且本帧正常收尾更平滑。
+/// 照跑、runner 帧末查 `AppExit` 才停，本帧正常收尾。
 #[system]
 pub fn fatal_gate(mut exit: MessageWriter<AppExit>) {
     if FATAL.swap(false, Ordering::AcqRel) {

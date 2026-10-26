@@ -1,4 +1,4 @@
-// 8.1.4 透明 GPU bitonic 排序（compute 单入口）：把 collect 产的 (深度键, 行)
+// 透明 GPU bitonic 排序（compute 单入口）：把 collect 产的 (深度键, 行)
 // 对按键升序全排——键 = 包围盒中心视图深度（clip.w），padding = -inf（宿主
 // 每帧 fill）。gather 端从升序数组**尾部反向**取（最远先画 = back-to-front，
 // 近似排序精度与 CPU 同档，物体级）。

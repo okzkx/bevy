@@ -1,18 +1,17 @@
-//! LOD 组登记处（6.2.2）：逻辑 mesh → 各档变体柄的 CPU 侧映射账——flush
+//! LOD 组登记处：逻辑 mesh → 各档变体柄的 CPU 侧映射账——flush
 //! 上传链按它把档位资产一并盘点上传，draw_frame 的 LOD 表写入按它取各档
 //! 引脚，BRP `lod_census` 按它报组信息。纯 CPU 侧账本，零 Vulkan 代码
-//!（引脚现查 [`MeshPool`]，与 4.1"GPU 足迹不进账本"同纪律）。
+//!（引脚现查 [`MeshPool`]，与"GPU 足迹不进账本"同纪律）。
 //!
-//! 形状口径（6.2.1 钉明）：LOD 阶梯仅支持 sphere（ico 细分参数面
+//! 形状口径：LOD 阶梯仅支持 sphere（ico 细分参数面
 //! 4/3/2/1 四档）——其余四形状无细分参数，扩形状 = 加 builder 参数映射，
 //! 无结构代价。基准档（level 0）复用 [`TestShapeAssets`] 的形状缓存柄
 //!（同参零新资产），level 1.. 按形状缓存进本资源——重复 spawn 阶梯共享
-//! 柄零重传（4.1 资产经济同款）。
+//! 柄零重传（资产经济）。
 //!
-//! 异步边界（6.2 范围钉明）：阶梯档位是程序化网格、随实体首次盘点同步
-//! 进容器即时上传；异步到货档位（load_mesh 注册组）的重试通道不归本段
-//! ——6.3 驻留管理器接管"请求 → 上传"后由其账面驱动（本登记处届时只
-//! 供查表）。
+//! 异步边界：阶梯档位是程序化网格、随实体首次盘点同步进容器即时上传；
+//! "请求 → 上传"由驻留管理器（[`super::residency`]）账面驱动，本登记处只
+//! 供查表。
 
 use std::collections::HashMap;
 
@@ -25,7 +24,7 @@ use crate::render::MAX_LOD_LEVELS;
 /// level → base 反查（档位资产到货时重挂引用行 LOD 脏标用）与变体网格
 /// 缓存（形状 × 档位 → 柄，同参共享零新资产）。
 ///
-/// 换代号（7.9）：每次 `register` 递增——DrawList 组装的锚解析以
+/// 换代号：每次 `register` 递增——DrawList 组装的锚解析以
 /// `levels_of` 为输入，换组 = 锚解析变，组装缓存凭换代号触发全量重建
 ///（消费端 [`crate::scene::InstanceLedger`] 比对上次组装的换代号）。
 #[derive(Resource, Default)]
@@ -87,7 +86,7 @@ impl LodGroups {
     }
 }
 
-/// 档位细分阶梯（6.2 钉明）：sphere = ico 细分 4/3/2/1（三角形数约
+/// 档位细分阶梯：sphere = ico 细分 4/3/2/1（三角形数约
 /// 1280/320/80/20，四档覆盖"近清远粗"的可观测跨度）。level 0 与
 /// [`TestShapeAssets`] 的形状缓存同参数（ico 4）——基准柄复用零重复资产。
 fn build_lod_mesh(shape: TestShape, level: u32) -> Result<Mesh, ObjectOpError> {
@@ -154,7 +153,7 @@ pub fn spawn_lod_ladder(
     for level in 1..MAX_LOD_LEVELS {
         // 借用逐段独占：查缓存（只读）→ 构造 + 入容器（Assets 独占）→
         // 登记缓存（LodGroups 独占）——World 双可变借用不并存
-        // unique：变体同样绕缓存直造（每阶梯独立四档资产，6.3 压测前提）
+        // unique：变体同样绕缓存直造（每阶梯独立四档资产，流送压测前提）
         let handle = match world.resource::<LodGroups>().cached_variant(shape, level) {
             Some(handle) if !unique => handle,
             _ => {

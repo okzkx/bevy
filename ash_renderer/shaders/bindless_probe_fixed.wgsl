@@ -1,4 +1,4 @@
-// 3.3 前置闸门小样例（定长版）：与 runtime 版同形状，唯一差异是数组带定长 4。
+// bindless 探针小样例（定长版，examples/bindless_probe.rs 以 include_str! 自行编译）：与 runtime 版同形状，唯一差异是数组带定长 4。
 //
 // 定长 binding_array → SPIR-V OpTypeArray（非 OpTypeRuntimeArray），不需要
 // runtimeDescriptorArray 特性——它是 naga 原生 runtime 输出若被 spirv-val 拒绝时

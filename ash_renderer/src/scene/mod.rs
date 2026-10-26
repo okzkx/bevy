@@ -17,10 +17,11 @@ pub use mechanism::{
     AshLedgerPlugin,
     AshLightControlPlugin, AshMaterialHookPlugin, AshReadinessPlugin, AshResidencyPlugin,
     AshVisibilityExemptPlugin,
-    AshWorkloadPlugin, AssetInvalidations, AssetReadiness, AssetRetirements, IncrementStats,
+    AshWorkloadPlugin, AssetInvalidations, AssetReadiness, AssetRetirements, DrawListVerify,
+    IncrementStats,
     InstanceLedger,
     InstanceRow, LodDemand, LodGroups, LodLadderReadback, ReadinessStats, RecycleStats,
-    ResidencySettings, ResidencyStats, SunOrbit, WorkloadSettings, GapMode, GapSnapshot,
+    ResidencySet, ResidencySettings, ResidencyStats, SunOrbit, WorkloadSettings, GapMode, GapSnapshot,
     anchor_level,
     gap_asset_ids, spawn_lod_ladder,
 };

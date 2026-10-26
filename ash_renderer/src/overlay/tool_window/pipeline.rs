@@ -5,9 +5,9 @@
 //! 面板与脚本天然同源（不养两份逻辑）。
 //!
 //! 开关语义：
-//! - 阴影关 = shadow 剔除标记/命令/绘制/采样全链旁路，画面与 8.2 基线一致；
-//! - Bloom/tonemap 关 = composite 直出 HDR 线性值（8.4 前基线形态）；
-//! - SMAA 关 = composite 直出无边缘平滑（8.5 前基线形态）。
+//! - 阴影关 = shadow 剔除标记/命令/绘制/采样全链旁路（无阴影基线画面）；
+//! - Bloom/tonemap 关 = composite 直出 HDR 线性值；
+//! - SMAA 关 = composite 直出无边缘平滑。
 
 use crate::render::{BloomSettings, ShadowSettings, SmaaSettings, TonemapCurve};
 

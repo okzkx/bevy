@@ -1,10 +1,9 @@
-//! BRDF 着色与光源数据（8.2/8.3 主体，步骤级施工计划 §5 提案形状）。
+//! BRDF 着色与光源数据：光源常驻表、CSM 宿主半边、着色模式。
 
 pub mod light_table;
+pub mod render_mode;
 pub mod shadow;
 
-pub use light_table::{
-    LightRecord, LightTable, LIGHT_FLAG_SHADOW, LIGHT_RECORD_SIZE, LIGHT_TABLE_CAPACITY,
-    LIGHT_TYPE_POINT,
-};
-// LIGHT_TYPE_SPOT 暂不出口：spot 本体归后续段（记录形状预留），出口即 dead_code
+pub use light_table::{LightRecord, LightTable, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT};
+pub use render_mode::RenderMode;
+// LIGHT_TYPE_SPOT 不出口：spot 本体未实现（记录形状预留），出口即 dead_code

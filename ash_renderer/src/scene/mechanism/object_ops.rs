@@ -1,8 +1,8 @@
 //! 对象写操作封装：spawn 克隆/换柄两类实体级变更的可复用实现——
-//! BRP 方法族（[`crate::remote::objects`]）与将来的 egui 面板共用这一层，
+//! BRP 方法族（remote 的 objects 薄壳）与其他写入方共用这一层，
 //! 不养两份逻辑（apply_transform_edit 同款惯例）。despawn/摘组件
 //! 不在此层：官方 BRP 内置 `world.despawn_entity`/`world.remove_components`
-//! 已覆盖该通道，且当前无 egui 消费者——不为"将来可能"预写零调用代码。
+//! 已覆盖该通道，无其他消费者——不预写零调用代码。
 //!
 //! 边界：本模块只做 ECS 写路径，**不碰账本**——变更进账走
 //! [`crate::scene::mechanism::update_ledger`] 的 Changed/Removed 通道，任何
@@ -27,7 +27,7 @@ pub enum ObjectOpError {
     InvalidAssetPath(String),
     /// 请求参数形状非法（数值域越界等；与"缺参数"的 NothingToDo 分列）。
     InvalidParams(String),
-    /// chunk id 不在场（5.4 整块操作按生成期编号寻址）。
+    /// chunk id 不在场（整块操作按生成期编号寻址）。
     ChunkMissing(u32),
 }
 

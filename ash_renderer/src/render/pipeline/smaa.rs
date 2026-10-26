@@ -34,7 +34,7 @@ pub const SMAA_BINDING_SAMPLER: u32 = 2;
 pub const SMAA_BINDING_TEX1: u32 = 3;
 pub const SMAA_BINDING_TEX2: u32 = 4;
 
-pub const SMAA_INFO_SIZE: u32 = 32;
+pub(crate) const SMAA_INFO_SIZE: u32 = 32;
 
 /// SMAA 开关（BRP `smaa_set` 写，draw_frame 读）。
 #[derive(Resource)]
@@ -46,14 +46,6 @@ impl Default for SmaaSettings {
     fn default() -> Self {
         Self { enabled: true }
     }
-}
-
-/// LUT 图像本体（GpuImage + view；随本资源 Drop）。
-struct LutImage {
-    /// 本体保活（view 引用它；析构随 GpuImage Drop）。
-    #[allow(dead_code)]
-    image: GpuImage,
-    view: vk::ImageView,
 }
 
 /// SMAA 资源族。
@@ -71,8 +63,9 @@ pub struct SmaaTargets {
     ldrs: Vec<ColorTarget>,
     edges: Vec<ColorTarget>,
     blends: Vec<ColorTarget>,
-    area_lut: LutImage,
-    search_lut: LutImage,
+    /// LUT 本体（描述符直接引用 GpuImage 自带 view；析构随 GpuImage Drop）。
+    area_lut: GpuImage,
+    search_lut: GpuImage,
     infos: Vec<GpuBuffer>,
     sampler: vk::Sampler,
     extent: vk::Extent2D,
@@ -96,36 +89,54 @@ fn decode_lut_png(bytes: &[u8], role: &str) -> Result<(Vec<u8>, u32, u32)> {
     Ok((data, w, h))
 }
 
+/// LUT 解码 + 建图 + 直传（`role` 只用于报错文案）。
+fn upload_lut(
+    ctx: &Context,
+    uploader: &mut crate::render::Uploader,
+    bytes: &[u8],
+    role: &str,
+) -> Result<GpuImage> {
+    let sharing = super::concurrent_families(ctx);
+    let (data, w, h) = decode_lut_png(bytes, role)?;
+    let spec = crate::render::assets::images::ImageSpec {
+        width: w,
+        height: h,
+        format: vk::Format::R8G8B8A8_UNORM,
+        mip_levels: 1,
+        sampler: bevy::image::ImageSamplerDescriptor::linear(),
+    };
+    let gpu = GpuImage::create(
+        &ctx.device,
+        &ctx.instance,
+        ctx.physical_device,
+        ctx.memory_contract(),
+        &spec,
+        &sharing,
+    )?;
+    let _ticket = uploader.submit_batch(crate::render::assets::uploader::UploadBatch {
+        staging: data,
+        image_uploads: vec![crate::render::assets::uploader::StagingImageCopy {
+            image: gpu.image(),
+            src_offset: 0,
+            width: w,
+            height: h,
+            mip_levels: 1,
+        }],
+        ..Default::default()
+    })?;
+    Ok(gpu)
+}
+
 impl SmaaTargets {
-    /// 建资源链：三目标 → LUT 直传 → UBO → 布局 → pool + 描述符。
+    /// 建资源链：LUT 直传 → 布局 + 采样器 + pool（尺寸无关，只建一次）→
+    /// 三目标 → UBO → 描述符集。
     ///
     /// # Errors
     /// 附件/LUT/描述符创建失败。
     pub fn new(ctx: &Context, uploader: &mut crate::render::Uploader, extent: vk::Extent2D) -> Result<Self> {
-        if std::env::var("SMAA_SKIP").is_ok() {
-            // 诊断短路：跳过 LUT/描述符建链
-            let mut this = Self {
-                device: ctx.device.clone(),
-                set_layout_a: vk::DescriptorSetLayout::null(),
-                set_layout_b: vk::DescriptorSetLayout::null(),
-                pool: vk::DescriptorPool::null(),
-                sets_edge: Vec::new(),
-                sets_blend: Vec::new(),
-                sets_nb: Vec::new(),
-                ldrs: Vec::new(),
-                edges: Vec::new(),
-                blends: Vec::new(),
-                area_lut: LutImage { image: Self::lut_placeholder(ctx)?, view: vk::ImageView::null() },
-                search_lut: LutImage { image: Self::lut_placeholder(ctx)?, view: vk::ImageView::null() },
-                infos: Vec::new(),
-                sampler: vk::Sampler::null(),
-                extent,
-            };
-            for _ in 0..MAX_FRAMES_IN_FLIGHT {
-                this.infos.push(this.mk_buffer(ctx, BufferRole::FrameUniform, 32)?);
-            }
-            return Ok(this);
-        }
+        // LUT 先于 this 建：半途失败时已建 GpuImage 随自身 Drop 回收
+        let area_lut = upload_lut(ctx, uploader, SMAA_AREA_LUT_PNG, "area")?;
+        let search_lut = upload_lut(ctx, uploader, SMAA_SEARCH_LUT_PNG, "search")?;
         let mut this = Self {
             device: ctx.device.clone(),
             set_layout_a: vk::DescriptorSetLayout::null(),
@@ -137,82 +148,19 @@ impl SmaaTargets {
             ldrs: Vec::new(),
             edges: Vec::new(),
             blends: Vec::new(),
-            area_lut: LutImage { image: Self::lut_placeholder(ctx)?, view: vk::ImageView::null() },
-            search_lut: LutImage { image: Self::lut_placeholder(ctx)?, view: vk::ImageView::null() },
+            area_lut,
+            search_lut,
             infos: Vec::new(),
             sampler: vk::Sampler::null(),
             extent,
         };
-        let built = (|| -> Result<()> {
-            for _ in 0..MAX_FRAMES_IN_FLIGHT {
-                this.ldrs.push(ColorTarget::new(ctx, extent, vk::Format::R8G8B8A8_UNORM, false, "smaa ldr")?);
-                this.edges.push(ColorTarget::new(ctx, extent, vk::Format::R8G8B8A8_UNORM, false, "smaa edges")?);
-                this.blends.push(ColorTarget::new(ctx, extent, vk::Format::R8G8B8A8_UNORM, false, "smaa blend")?);
-            }
-            let sharing: Vec<u32> = if ctx.transfer_queue_family_index != ctx.queue_family_index {
-                vec![ctx.transfer_queue_family_index, ctx.queue_family_index]
-            } else {
-                Vec::new()
-            };
-            for role_bytes in [SMAA_AREA_LUT_PNG, SMAA_SEARCH_LUT_PNG] {
-                let role = if role_bytes.len() > 10000 { "area" } else { "search" };
-                let (data, w, h) = decode_lut_png(role_bytes, role)?;
-                let spec = crate::render::assets::images::ImageSpec {
-                    width: w,
-                    height: h,
-                    format: vk::Format::R8G8B8A8_UNORM,
-                    mip_levels: 1,
-                    sampler: bevy::image::ImageSamplerDescriptor::linear(),
-                };
-                let gpu = crate::render::assets::images::GpuImage::create(
-                    &ctx.device,
-                    &ctx.instance,
-                    ctx.physical_device,
-                    ctx.memory_contract(),
-                    &spec,
-                    &sharing,
-                )?;
-                let _ticket = uploader.submit_batch(crate::render::assets::uploader::UploadBatch {
-                    staging: data,
-                    image_uploads: vec![crate::render::assets::uploader::StagingImageCopy {
-                        image: gpu.image(),
-                        src_offset: 0,
-                        width: w,
-                        height: h,
-                        mip_levels: 1,
-                    }],
-                    ..Default::default()
-                })?;
-                let view = unsafe {
-                    ctx.device
-                        .create_image_view(
-                            &vk::ImageViewCreateInfo::default()
-                                .image(gpu.image())
-                                .view_type(vk::ImageViewType::TYPE_2D)
-                                .format(vk::Format::R8G8B8A8_UNORM)
-                                .subresource_range(
-                                    vk::ImageSubresourceRange::default()
-                                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                        .level_count(1)
-                                        .layer_count(1),
-                                ),
-                            None,
-                        )
-                        .map_err(VulkanError::from)?
-                };
-                if role == "area" {
-                    this.area_lut = LutImage { image: gpu, view };
-                } else {
-                    this.search_lut = LutImage { image: gpu, view };
-                }
-            }
-            for _ in 0..MAX_FRAMES_IN_FLIGHT {
-                this.infos.push(this.mk_buffer(ctx, BufferRole::FrameUniform, 32)?);
-            }
-            unsafe { this.build_descriptors() }?;
-            Ok(())
-        })();
-        built?;
+        // 失败路径：已建对象都已落字段，由 Drop 回收
+        unsafe { this.build_static() }?;
+        this.build_targets(ctx, extent)?;
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            this.infos.push(this.mk_buffer(ctx, BufferRole::FrameUniform, u64::from(SMAA_INFO_SIZE))?);
+        }
+        unsafe { this.build_descriptors() }?;
         info!(
             "SMAA 资源就绪: LDR/edges/blend 三目标 + area 160×560 / search 64×16 LUT 直传 \
              × {} 帧槽 SmaaInfo",
@@ -221,39 +169,31 @@ impl SmaaTargets {
         Ok(this)
     }
 
-    fn lut_placeholder(ctx: &Context) -> Result<GpuImage> {
-        // 占位（真实 LUT 在建链随后直传覆盖引用）——1×1 白图保描述符合法
-        let spec = crate::render::assets::images::ImageSpec {
-            width: 1,
-            height: 1,
-            format: vk::Format::R8G8B8A8_UNORM,
-            mip_levels: 1,
-            sampler: bevy::image::ImageSamplerDescriptor::linear(),
-        };
-        crate::render::assets::images::GpuImage::create(
-            &ctx.device,
-            &ctx.instance,
-            ctx.physical_device,
-            ctx.memory_contract(),
-            &spec,
-            &[],
-        )
+    /// 尺寸相关目标：LDR/edges/blend ×帧槽（旧目标先清）。
+    fn build_targets(&mut self, ctx: &Context, extent: vk::Extent2D) -> Result<()> {
+        self.ldrs.clear();
+        self.edges.clear();
+        self.blends.clear();
+        self.extent = extent;
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            self.ldrs.push(ColorTarget::new(ctx, extent, vk::Format::R8G8B8A8_UNORM, false, "smaa ldr")?);
+            self.edges.push(ColorTarget::new(ctx, extent, vk::Format::R8G8B8A8_UNORM, false, "smaa edges")?);
+            self.blends.push(ColorTarget::new(ctx, extent, vk::Format::R8G8B8A8_UNORM, false, "smaa blend")?);
+        }
+        Ok(())
     }
 
     fn mk_buffer(&self, ctx: &Context, role: BufferRole, size: u64) -> Result<GpuBuffer> {
-        let sharing: Vec<u32> = if ctx.transfer_queue_family_index != ctx.queue_family_index {
-            vec![ctx.transfer_queue_family_index, ctx.queue_family_index]
-        } else {
-            Vec::new()
-        };
+        let sharing = super::concurrent_families(ctx);
         GpuBuffer::create_with_families(&self.device, ctx.memory_contract(), size, role, &sharing)
     }
 
+    /// 尺寸无关对象：两套布局 + 采样器 + pool（容量只随帧槽定）。
+    ///
     /// # Safety
-    /// 布局已建；失败路径由调用方回收。
-    unsafe fn build_descriptors(&mut self) -> Result<()>  {
+    /// 只在 new 调一次；每个对象建成即落字段，失败路径由 Drop 回收。
+    unsafe fn build_static(&mut self) -> Result<()> {
         unsafe {
-
         let device = &self.device;
         let stages = vk::ShaderStageFlags::FRAGMENT;
         let tex = |b: u32| {
@@ -302,22 +242,37 @@ impl SmaaTargets {
             &bevy::image::ImageSamplerDescriptor::linear(),
         )
         .create_sampler(device)?;
+        // 池容量按布局消耗计（分配即按 layout 全 binding 扣，与是否写入无关）：
+        // 每槽 edge/blend 两张 L_a（3 image + 1 UBO + 1 sampler）+ nb 一张 L_b
+        //（2 image + 1 UBO + 2 sampler）= 8 image + 3 UBO + 4 sampler
         self.pool = device.create_descriptor_pool(
             &vk::DescriptorPoolCreateInfo::default()
                 .max_sets((3 * slots) as u32)
                 .pool_sizes(&[
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                        .descriptor_count((7 * slots) as u32),
+                        .descriptor_count((8 * slots) as u32),
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::SAMPLER)
-                        .descriptor_count((5 * slots) as u32),
+                        .descriptor_count((4 * slots) as u32),
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                        .descriptor_count(slots as u32),
+                        .descriptor_count((3 * slots) as u32),
                 ]),
             None,
         )?;
+        Ok(())
+        }
+    }
+
+    /// 从 pool 分配三组描述符集并逐槽写入（pool 须为空：新建或刚 reset）。
+    ///
+    /// # Safety
+    /// 静态对象、目标与 UBO 已建成功；失败路径由调用方回收。
+    unsafe fn build_descriptors(&mut self) -> Result<()> {
+        unsafe {
+        let device = &self.device;
+        let slots = MAX_FRAMES_IN_FLIGHT;
         self.sets_edge = device.allocate_descriptor_sets(
             &vk::DescriptorSetAllocateInfo::default()
                 .descriptor_pool(self.pool)
@@ -369,8 +324,8 @@ impl SmaaTargets {
             push_img(&mut image_infos, self.edges[slot].view(), false, &mut plan, si, SMAA_BINDING_TEX0);
             self.push_buf(&mut buf_infos, &mut plan, si, SMAA_BINDING_INFO);
             push_img(&mut image_infos, vk::ImageView::null(), true, &mut plan, si, SMAA_BINDING_SAMPLER);
-            push_img(&mut image_infos, self.search_lut.view, false, &mut plan, si, SMAA_BINDING_TEX1);
-            push_img(&mut image_infos, self.area_lut.view, false, &mut plan, si, SMAA_BINDING_TEX2);
+            push_img(&mut image_infos, self.search_lut.view(), false, &mut plan, si, SMAA_BINDING_TEX1);
+            push_img(&mut image_infos, self.area_lut.view(), false, &mut plan, si, SMAA_BINDING_TEX2);
             // nb set：b0 ldr + b3 blend + b4 blend 采样器
             let ni = 2 * slots + slot;
             push_img(&mut image_infos, self.ldrs[slot].view(), false, &mut plan, ni, SMAA_BINDING_TEX0);
@@ -425,7 +380,8 @@ impl SmaaTargets {
         plan.push((set_i, binding, vk::DescriptorType::UNIFORM_BUFFER, buf_infos.len() - 1, true));
     }
 
-    /// 随 swapchain 重建（闸门③，幂等）：三目标销毁重建 + 描述符重写。
+    /// 随 swapchain 重建（闸门③，幂等）：三目标销毁重建 + pool reset 后重分配
+    /// 描述符集。layout/采样器/pool/LUT 本体不动（与尺寸无关）。
     ///
     /// # Errors
     /// 附件/描述符重建失败。
@@ -433,16 +389,15 @@ impl SmaaTargets {
         if self.ldr_extent() == extent {
             return Ok(());
         }
-        self.extent = extent;
         unsafe { ctx.device.device_wait_idle() }?;
-        self.ldrs.clear();
-        self.edges.clear();
-        self.blends.clear();
-        for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            self.ldrs.push(ColorTarget::new(ctx, extent, vk::Format::R8G8B8A8_UNORM, false, "smaa ldr")?);
-            self.edges.push(ColorTarget::new(ctx, extent, vk::Format::R8G8B8A8_UNORM, false, "smaa edges")?);
-            self.blends.push(ColorTarget::new(ctx, extent, vk::Format::R8G8B8A8_UNORM, false, "smaa blend")?);
-        }
+        unsafe {
+            self.device
+                .reset_descriptor_pool(self.pool, vk::DescriptorPoolResetFlags::empty())
+        }?;
+        self.sets_edge.clear();
+        self.sets_blend.clear();
+        self.sets_nb.clear();
+        self.build_targets(ctx, extent)?;
         unsafe { self.build_descriptors() }?;
         info!("SMAA 三目标随 swapchain 重建: {extent:?}");
         Ok(())
@@ -530,10 +485,6 @@ impl Drop for SmaaTargets {
         }
     }
 }
-
-// # Safety:句柄本质是整数,创建/销毁只在持有方线程;方法只读句柄
-unsafe impl Send for SmaaTargets {}
-unsafe impl Sync for SmaaTargets {}
 
 
 /// SMAA 三全屏管线（edge/blend/neighborhood；复用 FullscreenPipeline 脚手架，

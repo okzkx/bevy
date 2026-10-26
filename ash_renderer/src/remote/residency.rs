@@ -1,7 +1,6 @@
-//! 驻留管理器读数与设置方法族（6.3.5）：BRP 侧的验证通道——
-//! `residency_stats` 做预算/实占/请求/淘汰的聚合读数（判定线 1 的证据形态）
-//! 加逐资产清单（驻留态/距离/引用行数），`residency_set` 写开关/预算/请求
-//! 半径（数据层 A/B 的远程驱动）。
+//! 驻留管理器读数与设置方法族：BRP 侧的验证通道——`residency_stats` 做
+//! 预算/实占/请求/淘汰的聚合读数加逐资产清单（驻留态/距离/引用行数），
+//! `residency_set` 写开关/预算/请求半径（数据层 A/B 的远程驱动）。
 //!
 //! 红线边界（照 cull/lod 族同款）：两个方法都只读驻留账/只写设置，**不提供
 //! 任何"按驻留账改场景"的通道**——诊断读数永远不回灌绘制决策。
@@ -19,7 +18,11 @@ use crate::{
     render::MeshPool,
 };
 
-use super::{error_codes, invalid_params, BrpError, BrpResult};
+use super::{
+    invalid_params,
+    params::{no_camera, parse_params},
+    BrpResult,
+};
 
 /// `ash_renderer/residency_stats`：驻留读数（只读）。聚合段 = 预算/实占/
 /// 请求/冷却/淘汰累计；资产段 = 逐 mesh 身份的驻留态与最近引用距离。
@@ -28,19 +31,11 @@ use super::{error_codes, invalid_params, BrpError, BrpResult};
 /// 驻留资源缺席（禁渲染宿主）。
 #[system]
 pub(crate) fn residency_stats(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let cam_pos = {
-        let mut cameras = world.query_filtered::<&GlobalTransform, With<Camera>>();
-        match cameras.single(world) {
-            Ok(g) => g.translation(),
-            Err(_) => {
-                return Err(BrpError {
-                    code: error_codes::COMPONENT_ERROR,
-                    message: "World 里没有相机——距离读数无法计算".to_owned(),
-                    data: None,
-                });
-            }
-        }
-    };
+    let cam_pos = world
+        .query_filtered::<&GlobalTransform, With<Camera>>()
+        .single(world)
+        .map_err(|_| no_camera("距离读数无法计算"))?
+        .translation();
     let stats = world.resource::<ResidencyStats>().clone();
     let settings = world.resource::<ResidencySettings>();
     let pool = world.resource::<MeshPool>();
@@ -121,8 +116,8 @@ struct ResidencySetParams {
     budget_image_bytes: Option<u64>,
     #[serde(default)]
     fine_grained: Option<bool>,
-    /// 低保真保底锚（6.5）：true = 组行可绘锚迁到最粗变体档（保底常驻、
-    /// 基准按需）；false = 6.4 现状（基准锚）。
+    /// 低保真保底锚：true = 组行可绘锚迁到最粗变体档（保底常驻、基准按需）；
+    /// false = 基准锚。
     #[serde(default)]
     floor_anchor: Option<bool>,
 }
@@ -134,8 +129,7 @@ struct ResidencySetParams {
 /// 参数缺失/类型错/数值非法（预算字节超 u32 位宽的显存口径不截断、半径负值）。
 #[system]
 pub(crate) fn residency_set(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let p: ResidencySetParams = serde_json::from_value(params.unwrap_or(Value::Null))
-        .map_err(|e| invalid_params(format!("params: {e}")))?;
+    let p: ResidencySetParams = parse_params(params, "params 缺失：需要对象（各项可选）")?;
     let mut settings = world.resource_mut::<ResidencySettings>();
     if let Some(enabled) = p.enabled {
         settings.enabled = enabled;

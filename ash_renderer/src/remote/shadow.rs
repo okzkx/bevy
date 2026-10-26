@@ -11,19 +11,18 @@ use crate::{
     },
     scene::InstanceLedger,
 };
-use super::{error_codes, invalid_params, BrpError, BrpResult};
+use super::{
+    invalid_params,
+    params::parse_params,
+    readback::{f32_at, u32_at},
+    BrpError, BrpResult,
+};
 
-fn component_error(message: String) -> BrpError {
-    BrpError { code: error_codes::COMPONENT_ERROR, message, data: None }
-}
-
-/// `ash_renderer/shadow_set`：阴影开关（A/B 判定线的驱动面）。
+/// `ash_renderer/shadow_set`：阴影开关（A/B 对照的驱动面）。
 /// 请求 `{"enabled": bool}`；关 = shadow 剔除/命令/绘制/采样全链旁路。
 #[system]
 pub(crate) fn shadow_set(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 enabled"))?;
-    let p: serde_json::Map<String, Value> =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let p: serde_json::Map<String, Value> = parse_params(params, "params 缺失：需要 enabled")?;
     let enabled = p
         .get("enabled")
         .and_then(|v| v.as_bool())
@@ -33,8 +32,8 @@ pub(crate) fn shadow_set(In(params): In<Option<Value>>, world: &mut World) -> Br
     Ok(json!({ "enabled": enabled, "previous": old }))
 }
 
-/// `ash_renderer/shadow_stats`：逐 cascade GPU 标记 vs CPU 参照对照（判定线 3
-/// 的读数面）。读数 = 本帧槽两帧前 compute 输出（marks_frame 标注陈旧度）。
+/// `ash_renderer/shadow_stats`：逐 cascade GPU 标记 vs CPU 参照对照读数面。
+/// 读数 = 本帧槽两帧前 compute 输出（marks_frame 标注陈旧度）。
 #[system]
 pub(crate) fn shadow_stats(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
     // 读数快照先行取值（避免与下方标记环可变借用交叠）
@@ -50,17 +49,16 @@ pub(crate) fn shadow_stats(In(_params): In<Option<Value>>, world: &mut World) ->
         .resource_mut::<ShadowTargets>()
         .ubo(marks_frame)
         .read(0, &mut ubo_bytes)
-        .map_err(|e: VulkanError| component_error(format!("shadow UBO 读失败: {e}")))?;
-    let f32_at = |o: usize| f32::from_le_bytes(ubo_bytes[o..o + 4].try_into().expect("4B"));
+        .map_err(|e: VulkanError| BrpError::internal(format!("shadow UBO 读失败: {e}")))?;
     let mut planes_per_cascade = [[bevy::math::Vec4::ZERO; 6]; SHADOW_CASCADES];
     for (c, cascade) in planes_per_cascade.iter_mut().enumerate() {
         for (p, plane) in cascade.iter_mut().enumerate() {
             let base = 256 + (c * 6 + p) * 16;
             *plane = bevy::math::Vec4::new(
-                f32_at(base),
-                f32_at(base + 4),
-                f32_at(base + 8),
-                f32_at(base + 12),
+                f32_at(&ubo_bytes, base)?,
+                f32_at(&ubo_bytes, base + 4)?,
+                f32_at(&ubo_bytes, base + 8)?,
+                f32_at(&ubo_bytes, base + 12)?,
             );
         }
     }
@@ -94,45 +92,43 @@ pub(crate) fn shadow_stats(In(_params): In<Option<Value>>, world: &mut World) ->
         .resource_mut::<ShadowTargets>()
         .mark_mut(marks_frame)
         .read(0, &mut gpu)
-        .map_err(|e: VulkanError| component_error(format!("shadow 标记环读失败: {e}")))?;
-    let smark_at = |slot: u32, c: usize| {
-        let o = slot as usize * 16 + c * 4;
-        u32::from_le_bytes(gpu[o..o + 4].try_into().expect("4B"))
-    };
+        .map_err(|e: VulkanError| BrpError::internal(format!("shadow 标记环读失败: {e}")))?;
 
     let mut mismatches = [0u32; SHADOW_CASCADES];
     let mut gpu_visible = [0u32; SHADOW_CASCADES];
     let mut cpu_visible = [0u32; SHADOW_CASCADES];
     for (slot, cpu) in reference {
         for (c, &cpu_vis) in cpu.iter().enumerate() {
-            let gpu_vis = smark_at(slot, c) == 1;
+            let gpu_vis = u32_at(&gpu, slot as usize * 16 + c * 4)? == 1;
             gpu_visible[c] += u32::from(gpu_vis);
             cpu_visible[c] += u32::from(cpu_vis);
             mismatches[c] += u32::from(gpu_vis != cpu_vis);
         }
     }
     let diag = world.resource::<ShadowDiagnostics>();
-    let splits: Vec<f32> = (0..SHADOW_CASCADES).map(|k| f32_at(640 + k * 4)).collect();
+    let splits = (0..SHADOW_CASCADES)
+        .map(|k| f32_at(&ubo_bytes, 640 + k * 4))
+        .collect::<Result<Vec<f32>, _>>()?;
     let mat_at = |c: usize, row: usize, col: usize| {
         // to_cols_array 列主序：flat = col*4 + row
-        f32_at(c * 64 + (col * 4 + row) * 4)
+        f32_at(&ubo_bytes, c * 64 + (col * 4 + row) * 4)
     };
-    let cascades_detail: Vec<serde_json::Value> = (0..SHADOW_CASCADES)
+    let cascades_detail = (0..SHADOW_CASCADES)
         .map(|c| {
-            json!({
+            let view_proj = (0..4)
+                .map(|r| (0..4).map(|k| mat_at(c, r, k)).collect::<Result<Vec<_>, _>>())
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(json!({
                 "gpu_visible": gpu_visible[c],
                 "cpu_visible": cpu_visible[c],
                 "mismatches": mismatches[c],
-                "cascade_view_proj": (0..4).map(|r| (0..4).map(|k| mat_at(c, r, k)).collect::<Vec<_>>()).collect::<Vec<_>>(),
-                "texel_world": f32_at(704 + c * 4),
-                "inv_span": f32_at(720 + c * 4),
-                "planes": (0..6).map(|p| {
-                    let base = 256 + (c * 6 + p) * 16;
-                    (0..4).map(|k| f32_at(base + k * 4)).collect::<Vec<_>>()
-                }).collect::<Vec<_>>(),
-            })
+                "cascade_view_proj": view_proj,
+                "texel_world": f32_at(&ubo_bytes, 704 + c * 4)?,
+                "inv_span": f32_at(&ubo_bytes, 720 + c * 4)?,
+                "planes": planes_per_cascade[c].iter().map(|p| p.to_array()).collect::<Vec<_>>(),
+            }))
         })
-        .collect();
+        .collect::<Result<Vec<Value>, BrpError>>()?;
     Ok(json!({
         "enabled": diag_enabled,
         "bound": diag.bound,

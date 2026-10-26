@@ -17,8 +17,9 @@
 //! set）；遮挡消费走第二个独立小布局（b0 = 全链采样视图）。不进 set2——
 //! 金字塔随 swapchain 重建会整体换 image/视图，set2"描述符 init 一次写入
 //! 永不更新"的冻结纪律不为它开口，重建 churn 隔离在本模块内（resize 时
-//! `rebuild` 重建 image/视图/pool 并重写描述符，温暖路径与深度附件同纪律：
-//! 自带 device_wait_idle）。
+//! `rebuild` 重建 image/视图、reset pool 并重写描述符——管线与 pool 不随
+//! extent 变，pool 按设备最大级数预留；温暖路径与深度附件同纪律：自带
+//! device_wait_idle）。
 //!
 //! warmup（6.1.4 边界）：重建后两个帧槽的金字塔内容都是未定义（首建/
 //! resize 后），前 2 帧遮挡测试整段跳过（fallback 判据之一，`ready()`）。
@@ -30,6 +31,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::common::error::{Result, VulkanError};
 
 use crate::render::assets::images::full_mip_chain;
+use crate::render::gpu::compute::ComputePipeline;
+use crate::render::readback::OneShotReadback;
 use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物；spirv-val 已过，naga textureLoad/
@@ -39,7 +42,7 @@ const HIZ_DOWNSAMPLE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hiz_
 /// 金字塔格式（R32_SFLOAT 单通道浮点——深度值域 [0,1] 直存，无语义压缩）。
 /// 支持查询在 [`HizPyramid::new`]，STORAGE_IMAGE + SAMPLED_IMAGE + TRANSFER_SRC
 /// 能力实测留痕（§2 核实项 2：能力不足即 Init 出局，不静默换格式）。
-pub const HIZ_FORMAT: vk::Format = vk::Format::R32_SFLOAT;
+pub(crate) const HIZ_FORMAT: vk::Format = vk::Format::R32_SFLOAT;
 
 // ===== 纯函数三件（判定线 3 的 CPU 参照与单测本体；occlusion.wgsl 注释同源）=====
 
@@ -96,13 +99,16 @@ struct HizViews {
 }
 
 /// 归约 compute 管线 + 描述符：单布局（b0 源采样 / b1 目标 storage），
-/// 每 (帧槽, 级) 一套 set——描述符内容在 init/rebuild 写定后不再变。
+/// 每 (帧槽, 级) 一套 set。管线/布局/pool 不依赖 extent，`new` 建一次跨重建
+/// 复用；set 内容随 init/rebuild 重写，两次重写之间不变。句柄 null / None =
+/// 未建成（Drop 照拆：destroy null 句柄是规范允许的 no-op）。
 struct ReductionPass {
-    device: Device,
     set_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
-    pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
+    pipeline: Option<ComputePipeline>,
+    /// pool 预留的级数上限（设备 maxImageDimension2D 的完整 mip 链）——
+    /// 按首建级数定死会在窗口放大、级数变多时 OUT_OF_POOL_MEMORY。
+    pool_levels: u32,
     /// set 下标 = slot × levels + level。
     sets: Vec<vk::DescriptorSet>,
 }
@@ -148,7 +154,7 @@ pub struct HizCensus {
 impl HizPyramid {
     /// 读回指定级全量（原始 f32 行主序）——判定线 3 的 CPU 参照通道本体。
     /// 布局收口：GENERAL（恒定）→ TRANSFER_SRC_OPTIMAL（拷贝）→ 回 GENERAL；
-    /// 一次性 command pool + staging + fence 随调用生命周期。
+    /// 一次性资源随调用生命周期（[`OneShotReadback`]，成败路径同一回收出口）。
     ///
     /// # Errors
     /// staging/命令池/fence 创建、录制、提交或映射失败。
@@ -161,98 +167,44 @@ impl HizPyramid {
         let (w, h) = self.level_dims(level);
         let slot = slot % self.slots.len();
         let byte_size = u64::from(w) * u64::from(h) * 4;
+        // 录制：布局切 TRANSFER_SRC → 拷贝 → 切回 GENERAL（金字塔恒 GENERAL
+        // 是运行时形状，读回借用后归还）。进场屏障 src 取 ALL_COMMANDS/
+        // MEMORY_WRITE 宽口径：写者是前序提交里的归约 compute，提交序把它们
+        // 纳入第一同步域
+        let to_transfer = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::GENERAL)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(self.slots[slot].image)
+            .subresource_range(single_level_range(level))
+            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+        let to_general = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(self.slots[slot].image)
+            .subresource_range(single_level_range(level))
+            .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(level)
+                    .layer_count(1),
+            )
+            .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
+        let mut bytes = vec![0u8; byte_size as usize];
         unsafe {
             let device = &ctx.device;
-            // —— 一次性诊断资源：staging（HOST_VISIBLE|HOST_COHERENT）+ 命令池
-            // + fence，全部随本调用生命周期
-            let staging = device.create_buffer(
-                &vk::BufferCreateInfo::default()
-                    .size(byte_size)
-                    .usage(vk::BufferUsageFlags::TRANSFER_DST),
-                None,
-            )?;
-            let staging_result = (|| {
-                let reqs = device.get_buffer_memory_requirements(staging);
-                let memory_type = ctx.memory_contract().find_type(
-                    reqs.memory_type_bits,
-                    vk::MemoryPropertyFlags::HOST_VISIBLE,
-                    vk::MemoryPropertyFlags::HOST_COHERENT,
-                )?;
-                let memory = device.allocate_memory(
-                    &vk::MemoryAllocateInfo::default()
-                        .allocation_size(reqs.size)
-                        .memory_type_index(memory_type),
-                    None,
-                )?;
-                device.bind_buffer_memory(staging, memory, 0)?;
-                let pool = device.create_command_pool(
-                    &vk::CommandPoolCreateInfo::default()
-                        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-                        .queue_family_index(ctx.queue_family_index),
-                    None,
-                )?;
-                let cb = device
-                    .allocate_command_buffers(
-                        &vk::CommandBufferAllocateInfo::default()
-                            .command_pool(pool)
-                            .level(vk::CommandBufferLevel::PRIMARY)
-                            .command_buffer_count(1),
-                    )
-                    .map_err(VulkanError::from)?[0];
-                let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
-                Ok((memory, pool, cb, fence))
-            })();
-            let (memory, pool, cb, fence) = match staging_result {
-                Ok(t) => t,
-                Err(e) => {
-                    device.destroy_buffer(staging, None);
-                    return Err(e);
-                }
-            };
-            // 录制：布局切 TRANSFER_SRC → 拷贝 → 切回 GENERAL（金字塔恒
-            // GENERAL 是运行时形状，读回借用后归还）
-            let to_transfer = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::GENERAL)
-                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(self.slots[slot].image)
-                .subresource_range(single_level_range(level))
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
-            let to_general = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .new_layout(vk::ImageLayout::GENERAL)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(self.slots[slot].image)
-                .subresource_range(single_level_range(level))
-                .src_access_mask(vk::AccessFlags::TRANSFER_READ)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
-            let region = vk::BufferImageCopy::default()
-                .buffer_offset(0)
-                .image_subresource(
-                    vk::ImageSubresourceLayers::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .mip_level(level)
-                        .layer_count(1),
-                )
-                .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
-            let record = device.begin_command_buffer(
-                cb,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            );
-            if let Err(e) = record {
-                device.destroy_fence(fence, None);
-                device.destroy_command_pool(pool, None);
-                device.destroy_buffer(staging, None);
-                device.free_memory(memory, None);
-                return Err(e.into());
-            }
+            let readback = OneShotReadback::begin(ctx, byte_size)?;
             device.cmd_pipeline_barrier(
-                cb,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
+                readback.cb,
+                vk::PipelineStageFlags::ALL_COMMANDS,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(),
                 &[],
@@ -260,14 +212,14 @@ impl HizPyramid {
                 &[to_transfer],
             );
             device.cmd_copy_image_to_buffer(
-                cb,
+                readback.cb,
                 self.slots[slot].image,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                staging,
+                readback.staging,
                 &[region],
             );
             device.cmd_pipeline_barrier(
-                cb,
+                readback.cb,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::DependencyFlags::empty(),
@@ -275,22 +227,10 @@ impl HizPyramid {
                 &[],
                 &[to_general],
             );
-            device.end_command_buffer(cb)?;
-            device.queue_submit(ctx.queue, &[vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cb))], fence)?;
-            device.wait_for_fences(std::slice::from_ref(&fence), true, u64::MAX)?;
-            // 映射读回（ash 0.38 形状：map 返回 NonNull 指针），拷出后即释放
-            let ptr = device
-                .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
-                .map_err(VulkanError::from)?;
-            let floats =
-                std::slice::from_raw_parts(ptr.cast::<f32>(), (byte_size / 4) as usize).to_vec();
-            device.unmap_memory(memory);
-            device.destroy_fence(fence, None);
-            device.destroy_command_pool(pool, None);
-            device.destroy_buffer(staging, None);
-            device.free_memory(memory, None);
-            Ok((w, h, floats))
+            readback.finish_and_read(ctx, &mut bytes)?;
         }
+        let floats = bytes.as_chunks::<4>().0.iter().map(|c| f32::from_ne_bytes(*c)).collect();
+        Ok((w, h, floats))
     }
 
     /// 读回指定级并出统计（判定线 3 读数口；语义见 [`HizCensus`]）。
@@ -358,11 +298,10 @@ impl HizPyramid {
             levels,
             extent,
             reduction: ReductionPass {
-                device: ctx.device.clone(),
                 set_layout: vk::DescriptorSetLayout::null(),
                 pool: vk::DescriptorPool::null(),
-                pipeline: vk::Pipeline::null(),
-                pipeline_layout: vk::PipelineLayout::null(),
+                pipeline: None,
+                pool_levels: 0,
                 sets: Vec::new(),
             },
             occlusion_layout: vk::DescriptorSetLayout::null(),
@@ -370,7 +309,8 @@ impl HizPyramid {
             occlusion_sets: Vec::new(),
         };
         this.build_images_and_views(ctx, depth_images)?;
-        this.build_reduction(ctx)?;
+        this.build_reduction_pipeline(ctx)?;
+        this.write_reduction_sets(ctx)?;
         this.build_occlusion_sets(ctx, depth_images)?;
         info!(
             "Hi-Z 金字塔就绪: {HIZ_FORMAT:?} {}x{} ×{levels} 级 ×{MAX} 帧槽（每帧渲染后逐级归约重写；\
@@ -428,7 +368,7 @@ impl HizPyramid {
         self.initialized = (0..self.slots_capacity()).map(|_| AtomicBool::new(false)).collect();
         self.warmup = crate::render::MAX_FRAMES_IN_FLIGHT as u32;
         self.build_images_and_views(ctx, depth_images)?;
-        self.build_reduction(ctx)?;
+        self.write_reduction_sets(ctx)?;
         self.build_occlusion_sets(ctx, depth_images)?;
         info!(
             "Hi-Z 金字塔随 swapchain 重建: {}x{} ×{} 级（{} 帧槽，warmup 重置，遮挡测试随后就绪）",
@@ -448,6 +388,10 @@ impl HizPyramid {
     /// dispatch；级间内存屏障（本级写 → 下级读）。调用方保证已做深度屏障
     ///（depth 附件 → DEPTH_READ_ONLY）与本槽进场屏障（本函数开头插）。
     pub(crate) fn record_reduction(&self, device: &Device, cb: vk::CommandBuffer, slot: usize) {
+        // new 成功即 Some；None 只出现在 new 半建失败后的 Drop 路径，录制不可达
+        let Some(reduction) = self.reduction.pipeline.as_ref().map(ComputePipeline::handles) else {
+            return;
+        };
         let slot = slot % self.slots.len();
         unsafe {
             // 进场：首用 UNDEFINED→GENERAL；之后恒 GENERAL，只收口
@@ -491,11 +435,7 @@ impl HizPyramid {
                     std::slice::from_ref(&barrier),
                 );
             }
-            device.cmd_bind_pipeline(
-                cb,
-                vk::PipelineBindPoint::COMPUTE,
-                self.reduction.pipeline,
-            );
+            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, reduction.pipeline);
             // **级序取舍钉明（6.1.2 施工订正）**：从 level 1 起派发（level 1 =
             // 深度 2×2 MIN），**level 0 不派发**——原形状把 2×2 MIN 写进全尺寸
             // level 0，只有左上 1/4 被写、其余未定义，整条链读垃圾（运行实抓：
@@ -507,7 +447,7 @@ impl HizPyramid {
                 device.cmd_bind_descriptor_sets(
                     cb,
                     vk::PipelineBindPoint::COMPUTE,
-                    self.reduction.pipeline_layout,
+                    reduction.layout,
                     0,
                     std::slice::from_ref(&set),
                     &[],
@@ -643,125 +583,72 @@ impl HizPyramid {
         Ok(())
     }
 
-    /// 归约管线 + 描述符：单布局（b0 SAMPLED_IMAGE / b1 STORAGE_IMAGE）+
-    /// 每 (帧槽,级) 一套 set。pool 先 reset 再重写（重建路径复用同一 pool）。
-    fn build_reduction(&mut self, ctx: &Context) -> Result<()> {
+    /// 归约管线 + set layout + 描述符 pool（`new` 建一次，跨重建复用——都不
+    /// 依赖 extent）。每建成一个句柄即落进 `self.reduction`，中途失败由 Drop
+    /// 回收已建部分。pool 按设备 maxImageDimension2D 的完整 mip 链预留，任意
+    /// 合法 extent 的级数都装得下，rebuild 只 reset 不重建。
+    fn build_reduction_pipeline(&mut self, ctx: &Context) -> Result<()> {
         let device = &ctx.device;
-        // —— 管线（首建或重建都重建；shader module 事后即拆）
-        let words: Vec<u32> = HIZ_DOWNSAMPLE_SPV
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| u32::from_le_bytes(*c))
-            .collect();
-        let module = unsafe {
-            device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
-        }?;
-        // 旧的 pipeline/layout 先拆（重建路径；首建为 null 空手 no-op 不可行——
-        // destroy null 句柄是 UB，须用 Option 语义：null 检查）
-        unsafe { self.reduction.destroy_pipeline_if_built() };
-        let result = unsafe {
-            let bindings = [
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(0)
-                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::COMPUTE),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(1)
-                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            ];
-            let set_layout = device
-                .create_descriptor_set_layout(
-                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
-                    None,
-                )
-                .map_err(VulkanError::from);
-            let set_layout = match set_layout {
-                Ok(l) => l,
-                Err(e) => {
-                    device.destroy_shader_module(module, None);
-                    return Err(e);
-                }
-            };
-            let layout = device
-                .create_pipeline_layout(
-                    &vk::PipelineLayoutCreateInfo::default()
-                        .set_layouts(std::slice::from_ref(&set_layout)),
-                    None,
-                )
-                .map_err(VulkanError::from);
-            let layout = match layout {
-                Ok(l) => l,
-                Err(e) => {
-                    device.destroy_descriptor_set_layout(set_layout, None);
-                    device.destroy_shader_module(module, None);
-                    return Err(e);
-                }
-            };
-            let stage = vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::COMPUTE)
-                .module(module)
-                .name(c"cs_main");
-            match device.create_compute_pipelines(
-                vk::PipelineCache::null(),
-                &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout)],
+        let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ];
+        self.reduction.set_layout = unsafe {
+            device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
                 None,
-            ) {
-                Ok(mut pipelines) => {
-                    let pipeline = pipelines.pop().expect("单 info 必返单管线");
-                    Ok((pipeline, layout, set_layout))
-                }
-                Err((pipelines, e)) => {
-                    for p in pipelines {
-                        device.destroy_pipeline(p, None);
-                    }
-                    device.destroy_pipeline_layout(layout, None);
-                    device.destroy_descriptor_set_layout(set_layout, None);
-                    Err(e.into())
-                }
-            }
-        };
-        let (pipeline, pipeline_layout, set_layout) = match result {
-            Ok(t) => t,
-            Err(e) => {
-                unsafe { device.destroy_shader_module(module, None) };
-                return Err(e);
-            }
-        };
-        unsafe { device.destroy_shader_module(module, None) };
-        self.reduction.pipeline = pipeline;
-        self.reduction.pipeline_layout = pipeline_layout;
-        // set layout 重建：旧的拆
-        if self.reduction.set_layout != vk::DescriptorSetLayout::null() {
-            unsafe { device.destroy_descriptor_set_layout(self.reduction.set_layout, None) };
+            )
+        }?;
+        self.reduction.pipeline = Some(ComputePipeline::new(
+            device,
+            HIZ_DOWNSAMPLE_SPV,
+            std::slice::from_ref(&self.reduction.set_layout),
+            0,
+            c"cs_main",
+        )?);
+        let max_dim = ctx.limits().max_image_dimension2_d;
+        self.reduction.pool_levels = full_mip_chain(max_dim, max_dim);
+        let max_sets = crate::render::MAX_FRAMES_IN_FLIGHT as u32 * self.reduction.pool_levels;
+        self.reduction.pool = unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(max_sets)
+                    .pool_sizes(&[
+                        vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                            .descriptor_count(max_sets),
+                        vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::STORAGE_IMAGE)
+                            .descriptor_count(max_sets),
+                    ]),
+                None,
+            )
+        }?;
+        Ok(())
+    }
+
+    /// 归约描述符：reset pool → 每 (帧槽,级) 分配一套 set → 写入当前视图
+    ///（首建与 rebuild 共用；调用前视图已就位）。
+    fn write_reduction_sets(&mut self, ctx: &Context) -> Result<()> {
+        let device = &ctx.device;
+        if self.levels > self.reduction.pool_levels {
+            return Err(VulkanError::Init(format!(
+                "Hi-Z {} 级超出描述符 pool 预留的 {} 级（extent 超过设备 maxImageDimension2D）",
+                self.levels, self.reduction.pool_levels
+            )));
         }
-        self.reduction.set_layout = set_layout;
-        // —— pool + sets + 写入（重建路径先 reset 旧 pool 复用）
         let sets_total = crate::render::MAX_FRAMES_IN_FLIGHT * self.levels as usize;
-        if self.reduction.pool != vk::DescriptorPool::null() {
-            unsafe { device.reset_descriptor_pool(self.reduction.pool, vk::DescriptorPoolResetFlags::empty()) }
-                .map_err(VulkanError::from)?;
-        } else {
-            self.reduction.pool = unsafe {
-                device.create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo::default()
-                        .max_sets(sets_total as u32)
-                        .pool_sizes(&[
-                            vk::DescriptorPoolSize::default()
-                                .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                                .descriptor_count(sets_total as u32),
-                            vk::DescriptorPoolSize::default()
-                                .ty(vk::DescriptorType::STORAGE_IMAGE)
-                                .descriptor_count(sets_total as u32),
-                        ]),
-                    None,
-                )
-            }
+        self.reduction.sets.clear();
+        unsafe { device.reset_descriptor_pool(self.reduction.pool, vk::DescriptorPoolResetFlags::empty()) }
             .map_err(VulkanError::from)?;
-        }
         let sets_layouts = std::iter::repeat_n(self.reduction.set_layout, sets_total).collect::<Vec<_>>();
         let sets = unsafe {
             device.allocate_descriptor_sets(
@@ -905,8 +792,9 @@ impl HizPyramid {
         for slot in self.slots.drain(..) {
             drop(slot);
         }
-        // 注意：reduction pipeline/pool/layout 与 occlusion pool/layout 跨重建
-        // 复用（只随 Self Drop 终拆）——image/视图才是每重建 churn 的部分
+        // reduction pipeline/layout/pool 与 occlusion pool/layout 跨重建复用
+        //（pool 只 reset、set 重写，随 Self Drop 终拆）——image/视图才是每重建
+        // churn 的部分
     }
 }
 
@@ -925,8 +813,9 @@ impl Drop for HizPyramid {
     fn drop(&mut self) {
         self.drop_resources();
         let device = &self.device;
-        // 归约管线链（重建中可能已部分为 null——null 句柄不可 destroy）
-        unsafe { self.reduction.destroy_pipeline_if_built() };
+        // 句柄逐个落位（null = 未建成——new 中途失败时 Drop 照常走这里）；
+        // destroy null 句柄是规范允许的 no-op，null 检查只为读起来显式
+        self.reduction.pipeline = None;
         if self.reduction.set_layout != vk::DescriptorSetLayout::null() {
             unsafe { device.destroy_descriptor_set_layout(self.reduction.set_layout, None) };
         }
@@ -938,21 +827,6 @@ impl Drop for HizPyramid {
         }
         if self.occlusion_layout != vk::DescriptorSetLayout::null() {
             unsafe { device.destroy_descriptor_set_layout(self.occlusion_layout, None) };
-        }
-    }
-}
-
-impl ReductionPass {
-    /// 拆管线 + pipeline layout（null 检查——首建前/重建窗口期为 null）。
-    ///
-    /// # Safety
-    /// 句柄须为已建成管线（非 null）且 GPU 不再使用。
-    unsafe fn destroy_pipeline_if_built(&self) {
-        if self.pipeline != vk::Pipeline::null() {
-            unsafe {
-                self.device.destroy_pipeline(self.pipeline, None);
-                self.device.destroy_pipeline_layout(self.pipeline_layout, None);
-            }
         }
     }
 }
@@ -1049,89 +923,6 @@ unsafe fn create_bound_memory(ctx: &Context, image: vk::Image) -> Result<vk::Dev
         Ok(memory)
     }
 }
-
-/// 诊断回读助手：把一段 buffer 拷进一次性 staging 并回读（8.1.3 透明族判定线
-/// ③的索引列表读数面复用 hiz census 的一次性命令池 + staging 形状；低频 BRP
-/// 调用，不在帧循环内）。
-///
-/// # Errors
-/// staging 创建/提交/等待失败（设备丢失等）。
-pub(crate) fn readback_buffer(ctx: &Context, src: vk::Buffer, out: &mut [u8]) -> Result<()> {
-    unsafe {
-        let device = &ctx.device;
-        let byte_size = out.len() as u64;
-        let staging = device.create_buffer(
-            &vk::BufferCreateInfo::default()
-                .size(byte_size)
-                .usage(vk::BufferUsageFlags::TRANSFER_DST),
-            None,
-        )?;
-        let (memory, pool, cb, fence) = (|| -> Result<(vk::DeviceMemory, vk::CommandPool, vk::CommandBuffer, vk::Fence)> {
-            let reqs = device.get_buffer_memory_requirements(staging);
-            let memory_type = ctx.memory_contract().find_type(
-                reqs.memory_type_bits,
-                vk::MemoryPropertyFlags::HOST_VISIBLE,
-                vk::MemoryPropertyFlags::HOST_COHERENT,
-            )?;
-            let memory = device.allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(reqs.size)
-                    .memory_type_index(memory_type),
-                None,
-            )?;
-            device.bind_buffer_memory(staging, memory, 0)?;
-            let pool = device.create_command_pool(
-                &vk::CommandPoolCreateInfo::default()
-                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-                    .queue_family_index(ctx.queue_family_index),
-                None,
-            )?;
-            let cb = device
-                .allocate_command_buffers(
-                    &vk::CommandBufferAllocateInfo::default()
-                        .command_pool(pool)
-                        .level(vk::CommandBufferLevel::PRIMARY)
-                        .command_buffer_count(1),
-                )?[0];
-            let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
-            Ok((memory, pool, cb, fence))
-        })()?;
-        let record = (|| {
-            device.begin_command_buffer(
-                cb,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
-            let region = vk::BufferCopy::default().size(byte_size);
-            device.cmd_copy_buffer(cb, src, staging, std::slice::from_ref(&region));
-            device.end_command_buffer(cb)
-        })();
-        if let Err(e) = record {
-            device.destroy_fence(fence, None);
-            device.destroy_command_pool(pool, None);
-            device.destroy_buffer(staging, None);
-            device.free_memory(memory, None);
-            return Err(e.into());
-        }
-        device.queue_submit(
-            ctx.queue,
-            &[vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cb))],
-            fence,
-        )?;
-        device.wait_for_fences(std::slice::from_ref(&fence), true, u64::MAX)?;
-        let ptr = device
-            .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
-            .map_err(VulkanError::from)?;
-        out.copy_from_slice(std::slice::from_raw_parts(ptr.cast::<u8>(), out.len()));
-        device.unmap_memory(memory);
-        device.destroy_fence(fence, None);
-        device.destroy_command_pool(pool, None);
-        device.destroy_buffer(staging, None);
-        device.free_memory(memory, None);
-        Ok(())
-    }
-}
-
 
 #[cfg(test)]
 mod tests {

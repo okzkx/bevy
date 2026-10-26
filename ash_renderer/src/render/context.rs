@@ -4,18 +4,20 @@
 //!
 //! 生命周期四层（详见 .agents/docs/2-宿主壳/材料/VulkanContext字段释义：从Entry到Swapchain.md §12）：
 //! - 本结构 = 进程级（随进程活）+ Surface（窗口级，单窗宿主壳中并入）；
-//! - resize 级的 Swapchain 与帧级的命令缓冲/fence/信号量在同层 `swapchain` / `frames` 子模块。
+//! - resize 级的 Swapchain 与帧级的命令缓冲/fence/信号量在 `swapchain` 模块与
+//!   `pipeline::frames`。
 //!
-//! 其余约束来源：
+//! 其余约束：
 //! - 句柄取自 `RawHandleWrapper::get_window_handle()`（bevy 的安全方法），Win32 路径
 //!   手写 `vkCreateWin32SurfaceKHR`；hinstance 可能为 None，`GetModuleHandleW(None)` 兜底；
-//! - ash 0.38.0 对 Instance/Device/loader 均无 Drop 实现（extensions_generated.rs 零
-//!   `impl Drop`）——销毁全部手动、按 Device ← Surface ← Messenger ← Instance 反序
-//!   （Drop 实序 Surface 先于 Messenger，两者无依赖均合法，与 teardown
-//!   的手动反序不逐字一致但同满足依赖约束）；
+//! - ash 0.38.0 对 Instance/Device/loader 均无 Drop 实现——销毁全部手动，Drop 序
+//!   Surface → Messenger → Device → Instance（Surface/Messenger 是 instance 级对象、
+//!   与 Device 无依赖，先拆合法；Instance 必须最后）；
 //! - `Entry` 内持 libloading 句柄，提前丢它会卸载 vulkan-1.dll，必须与 Instance 同寿命；
-//! - bevy 退出时 runner `exiting` 回调会清场（清场序对 Resource 是任意的），正常退出
-//!   走 `driver::host` 的 `teardown_vulkan`（OnAppExitSystems）反序拆除，本 Drop 只是兜底。
+//! - 正常退出走 `driver::host` 的 `teardown_vulkan`（OnAppExitSystems）：先
+//!   `device_wait_idle`，再按声明序移除资源，本结构最后移除触发 Drop。runner
+//!   `exiting` 清场序对 Resource 是任意的，Drop 内的 `device_wait_idle` 兜这类无人
+//!   排空的路径。
 
 use std::ffi::{c_char, c_void};
 use std::num::NonZeroIsize;
@@ -192,7 +194,7 @@ impl Context {
             None
         };
 
-        // ---- Surface（手写 Win32 路径，方案见搭建记录 §3）----
+        // ---- Surface（手写 Win32 路径）----
         let surface_fns = surface::Instance::new(&entry, &instance);
         let win32_fns = win32_surface::Instance::new(&entry, &instance);
         let surface = unsafe {
@@ -230,10 +232,10 @@ impl Context {
                 .iter()
                 .enumerate()
                 .find(|(i, f)| {
-                    // COMPUTE 是 5.2 起的选族硬条件（视锥剔除 dispatch 跑图形族，
+                    // COMPUTE 是选族硬条件（剔除等 compute dispatch 跑图形族，
                     // 同队列最简——无跨队列信号量）：compute 是 1.0 core 无 feature
-                    // 位，但"支持"必须在此钉成硬条件而非口头确认（1.3 基线同纪律：
-                    // 不达标的设备出局并记日志，比创建后 dispatch 炸了便宜）
+                    // 位，但"支持"必须在此钉成硬条件（1.3 基线同纪律：不达标的
+                    // 设备出局，比创建后 dispatch 炸了便宜）
                     f.queue_flags.contains(vk::QueueFlags::GRAPHICS)
                         && f.queue_flags.contains(vk::QueueFlags::COMPUTE)
                         && unsafe {
@@ -327,7 +329,7 @@ impl Context {
                 "物理设备 descriptor indexing 特性不足：{name} 不支持（bindless 路线无传统回退，该设备出局）"
             )));
         }
-        // 硬校验：indirect 绘制能力（5.3 闸门①）。multi_draw_indirect 挂在
+        // 硬校验：indirect 绘制能力。multi_draw_indirect 挂在
         // 1.0 起的 base feature 位（VkPhysicalDeviceFeatures）——"1.1/1.2 core
         // 晋升"只收编命令不取消启用位（timeline 同理），"查询为 true ≠ 已启用"
         // 纪律照旧：未启用时调 cmd_draw_indexed_indirect(drawCount>1) 直接违
@@ -337,8 +339,8 @@ impl Context {
                 "物理设备 feature 不足：multi_draw_indirect 不支持（5.3 indirect 闭环无逐 draw 回退路径，该设备出局）".into(),
             ));
         }
-        // 惯例：20 个分位的支持值全量落日志——"不启用≠不查"，后续段要用
-        // 哪位（SSBO 表/variable count…）的证据都在这行里，不重新侦察
+        // 20 个分位的支持值全量落日志——"不启用≠不查"，要用哪位
+        //（SSBO 表/variable count…）的证据都在这行里
         let di_all: [(&str, u32); 20] = [
             ("inAttArrDynIdx", vk12_query.shader_input_attachment_array_dynamic_indexing),
             ("uniTexelArrDynIdx", vk12_query.shader_uniform_texel_buffer_array_dynamic_indexing),
@@ -374,8 +376,8 @@ impl Context {
             .descriptor_binding_sampled_image_update_after_bind(true)
             .descriptor_binding_partially_bound(true);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
-        // base features 启用位（DeviceCreateInfo 的 features 字段——此前未传，
-        // 全 0）：multi_draw_indirect 是 indirect 闭环（5.3）的闸门①启用位
+        // base features 启用位（DeviceCreateInfo 的 features 字段）：
+        // multi_draw_indirect 是 indirect 闭环的启用位
         let base_features = vk::PhysicalDeviceFeatures::default().multi_draw_indirect(true);
         let queue_priority = [1.0f32];
         let mut queue_infos = vec![vk::DeviceQueueCreateInfo::default()
@@ -388,7 +390,7 @@ impl Context {
                     .queue_priorities(&queue_priority),
             );
         }
-        // 输出编码定案（纹理格式与Gamma篇 §6 待决翻面）：swapchain 保持
+        // 输出编码定案：swapchain 保持
         // B8G8R8A8_UNORM 底板（DWM 母语），渲染附件用同图 B8G8R8A8_SRGB view 别名
         // （wgpu/bevy_render 同构：非 SRGB surface 套 sRGB view）。view 换格式需要
         // image 带 MUTABLE_FORMAT——swapchain image 上它由本扩展 + 格式清单兑现
@@ -405,7 +407,7 @@ impl Context {
             ));
         }
 
-        // 显存预算读数（7.5）：设备扩展按支持情况加挂，缺席降级为隐藏读数
+        // 显存预算读数：设备扩展按支持情况加挂，缺席降级为隐藏读数
         //（监控面板显存行不可用，不报错不阻塞帧循环）。
         let budget_enabled = unsafe { instance.enumerate_device_extension_properties(physical_device) }
             .unwrap_or_default()
@@ -490,7 +492,7 @@ impl Context {
         &self.memory_contract
     }
 
-    /// 各内存堆的 budget/usage 一次读（VK_EXT_memory_budget；7.5 持续监控数据源）。
+    /// 各内存堆的 budget/usage 一次读（VK_EXT_memory_budget；监控面板数据源）。
     /// 扩展未加挂时返回 `None`。每次调用现查（properties2 纯查询，0.5s 采样节奏
     /// 下开销可忽略）；`heap_usage` 是堆的系统级用量（含其他进程），不是本进程
     /// 显存——进程自身占用看渲染器内部账（MeshPool/ImageCache）并列呈现。
@@ -522,12 +524,24 @@ impl Context {
         // # Safety:physical_device 来自成功枚举、instance 未销毁(同 memory_contract)
         unsafe { self.instance.get_physical_device_properties(self.physical_device) }.limits
     }
+
+    /// transfer 写 + graphics 读的资源(池 buffer/贴图)共享族集合:有专用 transfer 族
+    /// (≠ graphics)时返回两族(资源按 CONCURRENT 创建,免所有权乒乓),同族设备返回
+    /// 空(EXCLUSIVE)。
+    #[must_use]
+    pub fn sharing_families(&self) -> Vec<u32> {
+        if self.transfer_queue_family_index != self.queue_family_index {
+            vec![self.transfer_queue_family_index, self.queue_family_index]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 impl Drop for Context {
     fn drop(&mut self) {
-        // 手动反序拆除（ash 0.38 无自动 Drop）。device_wait_idle 在正常退出里只是
-        // 兜底——teardown_vulkan 已在销毁任何 GPU 资源前排空过队列（等待必须
+        // 手动反序拆除（ash 0.38 无自动 Drop）。坑：device_wait_idle 在正常退出里
+        // 只是兜底——teardown_vulkan 已在销毁任何 GPU 资源前排空过队列（等待必须
         // 先于销毁，本 Drop 的等待保护不了早已拆掉的兄弟资源）；它真正服务的是
         // panic 清场这类拆毁顺序不定、无人排空的路径。swapchain/image view 在
         // Swapchain 的 Drop 里，不归本结构管。

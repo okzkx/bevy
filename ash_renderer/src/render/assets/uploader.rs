@@ -16,7 +16,7 @@
 //! 从结构上成立(staging 槽位游标在等待/复用判定
 //! 时已先行推进,失败帧的槽位占用是复用纪律内部消化的事,与票据无关)。
 //!
-//! **timeline 提交接口定案**(面板口径):保留旧式 SubmitInfo,timeline 信号量
+//! **timeline 提交接口定案**:保留旧式 SubmitInfo,timeline 信号量
 //! 进提交时按 VUID-VkSubmitInfo-pNext-03239 挂 `TimelineSemaphoreSubmitInfo`;
 //! 不启用 synchronization2(设备创建也从未开它),两套同步接口不混用。
 //!
@@ -140,7 +140,7 @@ pub struct Uploader {
     queue_family: u32,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
-    /// mip 生成续批（5.4.3）：blit 须 graphics 命令池（VUID-vkCmdBlitImage-
+    /// mip 生成续批：blit 须 graphics 命令池（VUID-vkCmdBlitImage-
     /// commandBuffer-cmdpool——transfer-only 池录 blit 违规且设备丢失，运行
     /// 实抓）。链生成段挂 graphics 队列、等 transfer 票据后执行、signal
     /// 同一票据信号量 +1（发布票据 = 续批票据，消费方等待语义不变）。
@@ -321,7 +321,7 @@ impl Uploader {
     }
 
     /// CPU 等到"截至 `ticket` 的全部上传批次"完成。合法调用点只有三处:
-    /// 槽位复用、池维护、探针/验证——逐批路径没有它(判定线 6)。
+    /// 槽位复用、池维护、探针/验证——逐批路径没有它。
     ///
     /// # Errors
     /// 等待超时(5s,合法合批远快于此;超时按设备异常冒泡)或调用失败。
@@ -426,8 +426,8 @@ impl Uploader {
                 );
             }
             if !batch.image_uploads.is_empty() {
-                // 图像段:布局迁移与 buffer 读写次序是两类问题(显存机制篇
-                // 判定线 3),独立录制,不套 buffer barrier 模板。
+                // 图像段:布局迁移与 buffer 读写次序是两类问题,独立录制,
+                // 不套 buffer barrier 模板。
                 //
                 // 前置:UNDEFINED → TRANSFER_DST。首用自持——src/dst 族号用 IGNORED:
                 // 生产图像是 CONCURRENT 双族(显式族号会被 VUID 拒,必须
@@ -642,7 +642,7 @@ impl Uploader {
         // 虚假完成票据不存在
         slot.in_flight = Some(ticket);
         self.next_ticket += 1;
-        // —— mip 生成续批（5.4.3）：多级图的链生成在 graphics 队列续批——
+        // —— mip 生成续批：多级图的链生成在 graphics 队列续批——
         // 等本批 transfer 票据（信号量 wait @ ticket）→ blit 逐级缩 + 逐级
         // barrier → 全链迁 SHADER_READ_ONLY → signal 最终票据（ticket + 1）。
         // 发布给消费方的票据 = 续批票据（"链可用"的完成点），等待语义不变。

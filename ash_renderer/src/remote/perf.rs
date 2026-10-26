@@ -1,9 +1,9 @@
-//! 性能读数与变更形态方法族（5.5）：`perf_stats`（分位数 + 分段均值 + 显存/
+//! 性能读数与变更形态方法族：`perf_stats`（分位数 + 分段均值 + 显存/
 //! 规模读数）、`perf_samples`（原始样本导出，离线汇总用）、`workload`（变更
 //! 形态开关写方法）——压测矩阵的采集与注入通道。
 //!
 //! 红线边界：三个方法只读账面/只写工作负载开关，**读数永远不回灌绘制决策**
-//!（诊断性回读边界照 5.2 拍板）。perf 读数 = PerfLedger 环形窗口快照（Last
+//!（诊断性回读边界同 cull 族）。perf 读数 = PerfLedger 环形窗口快照（Last
 //! 帧循环逐帧 push，BRP handler 在 RemoteLast 读——窗口内含至本帧上帧的样本）。
 
 use bevy::prelude::*;
@@ -16,7 +16,11 @@ use crate::{
     render::{GpuTimer, ImageCache, MeshPool, PerfLedger},
 };
 
-use super::{invalid_params, BrpResult};
+use super::{
+    invalid_params,
+    params::{parse_params, parse_params_or_default},
+    BrpResult,
+};
 
 /// 分位数三元组（p50/p95/p99）+ 均值，从 PerfLedger 现算。
 fn percentile_block(ledger: &PerfLedger, field: impl Fn(&crate::render::FrameSample) -> f32) -> Value {
@@ -107,21 +111,16 @@ pub(crate) fn perf_stats(
 /// 参数不合法（last 非法值）。
 #[system]
 pub(crate) fn perf_samples(In(params): In<Option<Value>>, perf: Res<PerfLedger>) -> BrpResult {
-    let last = match params {
-        Some(v) => {
-            let p: LastParams = serde_json::from_value(v)
-                .map_err(|e| invalid_params(format!("params 不合法：{e}")))?;
-            p.last.unwrap_or(256)
-        }
-        None => 256,
-    };
+    let p: LastParams = parse_params_or_default(params)?;
+    let last = p.last.unwrap_or(256);
     if last > 2048 {
         return Err(invalid_params("last 上限 2048（窗口容量）"));
     }
     let all = perf.snapshot();
     let start = all.len().saturating_sub(last);
-    let rows: Vec<Value> = all[start..]
+    let rows: Vec<Value> = all
         .iter()
+        .skip(start)
         .map(|s| {
             json!({
                 "frame_wall_ms": s.frame_wall_ms,
@@ -152,15 +151,13 @@ pub(crate) fn perf_samples(In(params): In<Option<Value>>, perf: Res<PerfLedger>)
 /// 参数缺失/不合法。
 #[system]
 pub(crate) fn workload(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 enabled 与可选 rows"))?;
     #[derive(serde::Deserialize)]
     struct WorkloadParams {
         enabled: bool,
         #[serde(default)]
         rows: Option<usize>,
     }
-    let p: WorkloadParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let p: WorkloadParams = parse_params(params, "params 缺失：需要 enabled 与可选 rows")?;
     let mut settings = world.resource_mut::<WorkloadSettings>();
     settings.enabled = p.enabled;
     if let Some(rows) = p.rows {
@@ -179,7 +176,7 @@ fn mean_of(ledger: &PerfLedger, field: impl Fn(&crate::render::FrameSample) -> f
     ((values.iter().sum::<f32>() / values.len() as f32) * 1000.0).round() as f64 / 1000.0
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default)]
 struct LastParams {
     #[serde(default)]
     last: Option<usize>,

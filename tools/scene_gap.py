@@ -36,10 +36,12 @@ except AttributeError:
     pass
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXE = os.path.join(REPO, "target", "debug", "ash_renderer.exe")
+# 环境变量旁路：worktree 双实例并行时指向错开的 exe 与端口（缺省主仓同名）
+HOST_NAME = os.environ.get("ASH_HOST_EXE_NAME", "ash_renderer.exe")
+EXE = os.environ.get("ASH_HOST_EXE", os.path.join(REPO, "target", "debug", HOST_NAME))
 HOST_LOG = os.path.join(REPO, ".temp", "scene_gap_host.log")
 SHOT_DIR = os.path.join(REPO, ".temp", "6.6")
-BRP_PORT = 15702
+BRP_PORT = int(os.environ.get("ASH_BRP_PORT", "15702"))
 
 _results = []
 
@@ -126,12 +128,12 @@ def iter_processes():
     import csv
     import io
     out = subprocess.run(
-        ["tasklist", "/FI", "IMAGENAME eq ash_renderer.exe", "/FO", "CSV", "/NH"],
+        ["tasklist", "/FI", f"IMAGENAME eq {HOST_NAME}", "/FO", "CSV", "/NH"],
         capture_output=True,
     ).stdout.decode("gbk", errors="replace")
     rows = []
     for row in csv.reader(io.StringIO(out)):
-        if len(row) >= 2 and row[0] == "ash_renderer.exe":
+        if len(row) >= 2 and row[0] == HOST_NAME:
             rows.append((int(row[1]), row[0]))
     return rows
 

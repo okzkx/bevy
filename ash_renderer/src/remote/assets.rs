@@ -5,7 +5,7 @@
 //! ——反射 mutate 走 `world.mutate_component` 是组件值反射，够不着
 //! `Assets<T>` 容器里的资产本体，本方法族自研；操作本体在
 //! [`crate::scene::mechanism::mutate_asset`] 与 [`object_ops`] 的加载封装
-//! （与将来 egui 面板共用的可复用实现），本模块只是协议薄壳。
+//! （可供 egui 面板复用的实现），本模块只是协议薄壳。
 //!
 //! 动态加载语义：`load_mesh`/`load_image` 受理即返回加载中柄——
 //! 路径失败经 [`AssetLoadFailedEvent`] 读侧收账（失败可见、行出队），到货经
@@ -16,7 +16,7 @@
 //! 双缓冲**下一帧**被读侧（asset_events）看见，再同帧完成失效与重传，画面
 //! 次帧生效。安全边界：默认只绑 loopback、无鉴权，仅限本机。
 
-use bevy::{prelude::*, remote::{error_codes, BrpError, BrpResult}};
+use bevy::{prelude::*, remote::{BrpError, BrpResult}};
 use serde_json::{json, Value};
 
 use crate::scene::mechanism::{
@@ -24,8 +24,7 @@ use crate::scene::mechanism::{
     MutateAsset,
 };
 
-use super::invalid_params;
-use super::objects::object_op_error;
+use super::{invalid_params, objects::object_op_error, params::parse_params};
 
 use ash_macros::system;
 
@@ -37,10 +36,10 @@ struct MutateAssetParams {
     /// 改材质 base_color（线性域 RGBA）。
     #[serde(default)]
     base_color: Option<[f32; 4]>,
-    /// 改材质 metallic（[0,1]，8.2 PBR 面）。
+    /// 改材质 metallic（[0,1]，PBR 面）。
     #[serde(default)]
     metallic: Option<f32>,
-    /// 改材质 perceptual_roughness（[0,1]，8.2 PBR 面）。
+    /// 改材质 perceptual_roughness（[0,1]，PBR 面）。
     #[serde(default)]
     perceptual_roughness: Option<f32>,
     /// 换材质 base_color 贴图槽：拷源实体材质的槽柄（含清槽语义）。
@@ -58,14 +57,11 @@ struct MutateAssetParams {
 /// `AssetEvent::Modified`）。返回动过的资产身份读回（写后读对账用）。
 #[system]
 pub(crate) fn mutate_asset_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| {
-        invalid_params(
-            "params 缺失：需要 entity 与至少一项（base_color / slot_base_color_from / \
-             mesh_vertex_scale / image_tint）",
-        )
-    })?;
-    let p: MutateAssetParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let p: MutateAssetParams = parse_params(
+        params,
+        "params 缺失：需要 entity 与至少一项（base_color / slot_base_color_from / \
+         mesh_vertex_scale / image_tint）",
+    )?;
     let req = MutateAsset {
         base_color: p.base_color,
         metallic: p.metallic,
@@ -107,23 +103,17 @@ struct LoadMeshParams {
 /// readiness 段与失败日志对账（加载是异步链，本方法不等到货）。
 #[system]
 pub(crate) fn load_mesh_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params
-        .ok_or_else(|| invalid_params("params 缺失：需要 path 与 entity|source 二选一"))?;
-    let p: LoadMeshParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
-    if p.entity.is_some() == p.source.is_some() {
-        return Err(invalid_params("entity 与 source 恰好给一个"));
-    }
-    let readback = if let Some(entity) = p.entity {
-        load_mesh_rebind(world, entity, &p.path)
-    } else {
-        spawn_with_loaded_mesh(
+    let p: LoadMeshParams = parse_params(params, "params 缺失：需要 path 与 entity|source 二选一")?;
+    let readback = match (p.entity, p.source) {
+        (Some(entity), None) => load_mesh_rebind(world, entity, &p.path),
+        (None, Some(source)) => spawn_with_loaded_mesh(
             world,
-            p.source.unwrap_or(Entity::PLACEHOLDER),
+            source,
             &p.path,
             p.offset.map(Vec3::from_array).unwrap_or(Vec3::ZERO),
             p.name_suffix.as_deref().unwrap_or("（异步）"),
-        )
+        ),
+        _ => return Err(invalid_params("entity 与 source 恰好给一个")),
     }
     .map_err(object_op_error)?;
     let material = world
@@ -151,9 +141,7 @@ struct LoadImageParams {
 /// （贴图腿驱动）。共享材质语义：目标材质被原位改写，全部引用者同变。
 #[system]
 pub(crate) fn load_image_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 path 与 entity"))?;
-    let p: LoadImageParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let p: LoadImageParams = parse_params(params, "params 缺失：需要 path 与 entity")?;
     let image = load_image_slot(world, p.entity, &p.path).map_err(object_op_error)?;
     Ok(json!({
         "entity": p.entity.to_string(),
@@ -176,9 +164,7 @@ struct ReloadAssetParams {
 /// 本方法不等到货。
 #[system]
 pub(crate) fn reload_asset_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 path"))?;
-    let p: ReloadAssetParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let p: ReloadAssetParams = parse_params(params, "params 缺失：需要 path")?;
     // reload 收 `impl Into<AssetPath>`，String → AssetPath 的 From 走 panic
     // 解析器——统一 try_parse 预校验，非法路径回协议错误
     let path = bevy::asset::AssetPath::try_parse(&p.path)
@@ -196,34 +182,25 @@ pub(crate) fn reload_asset_cmd(In(params): In<Option<Value>>, world: &mut World)
 fn asset_op_error(err: AssetOpError) -> BrpError {
     match err {
         AssetOpError::EntityMissing(e) => BrpError::entity_not_found(e),
-        AssetOpError::TargetNotPrimitive(e) => BrpError {
-            code: error_codes::COMPONENT_ERROR,
-            message: format!("目标实体 {e:?} 不是可渲染 primitive（缺 Mesh3d/MeshMaterial3d）"),
-            data: None,
-        },
-        AssetOpError::SourceNotPrimitive(e) => BrpError {
-            code: error_codes::COMPONENT_ERROR,
-            message: format!("槽拷贝源实体 {e:?} 不是可渲染 primitive"),
-            data: None,
-        },
-        AssetOpError::AssetMissing(what) => BrpError {
-            code: error_codes::COMPONENT_ERROR,
-            message: format!("资产容器查无：{what}"),
-            data: None,
-        },
-        AssetOpError::MeshPositionsUnsupported => BrpError {
-            code: error_codes::COMPONENT_ERROR,
-            message: "mesh 缺 POSITION 属性或非 F32 三元布局，顶点缩放拒绝".to_owned(),
-            data: None,
-        },
-        AssetOpError::ImageFormatUnsupported(format) => BrpError {
-            code: error_codes::COMPONENT_ERROR,
-            message: format!("贴图格式 {format:?} 非 4 字节 RGBA 族,像素 tint 拒绝"),
-            data: None,
-        },
+        AssetOpError::TargetNotPrimitive(e) => BrpError::component_error(format!(
+            "目标实体 {e:?} 不是可渲染 primitive（缺 Mesh3d/MeshMaterial3d）"
+        )),
+        AssetOpError::SourceNotPrimitive(e) => {
+            BrpError::component_error(format!("槽拷贝源实体 {e:?} 不是可渲染 primitive"))
+        }
+        AssetOpError::AssetMissing(what) => {
+            BrpError::component_error(format!("资产容器查无：{what}"))
+        }
+        AssetOpError::MeshPositionsUnsupported => {
+            BrpError::component_error("mesh 缺 POSITION 属性或非 F32 三元布局，顶点缩放拒绝")
+        }
+        AssetOpError::ImageFormatUnsupported(format) => BrpError::component_error(format!(
+            "贴图格式 {format:?} 非 4 字节 RGBA 族,像素 tint 拒绝"
+        )),
         AssetOpError::InvalidParams(what) => invalid_params(what),
         AssetOpError::NothingToDo => invalid_params(
-            "至少一项变更（base_color / metallic / perceptual_roughness / slot_base_color_from /              mesh_vertex_scale / image_tint）",
+            "至少一项变更（base_color / metallic / perceptual_roughness / slot_base_color_from / \
+             mesh_vertex_scale / image_tint）",
         ),
     }
 }
@@ -239,14 +216,13 @@ struct LoadWorldParams {
 /// [`WorldAssetRoot`]，与 Startup 进场组（scene/content/world_asset）同链：
 /// 到货后由 bevy_world_serialization 的 `world_instance_spawner` 反射展开成
 /// primitive 实体树。多场景共存口：Startup 默认场景（Sponza）不动，其余
-/// 场景经此进（7.2 zero_day / 7.3 Poly Haven / 7.4 复验全走这里）。
+/// 场景经此进。
 ///
 /// 异步语义与 load_mesh 同款：受理即返回加载中，本方法族不等到货——
 /// 到货/失败看进场到货报告与 AssetLoadFailedEvent 读侧。
+#[system]
 pub(crate) fn load_world_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 path"))?;
-    let p: LoadWorldParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
+    let p: LoadWorldParams = parse_params(params, "params 缺失：需要 path")?;
     let handle = world
         .resource::<AssetServer>()
         // load 收 AssetPath<'static>（柄内保存），&str 须转 owned（load_mesh_rebind 同款钉）

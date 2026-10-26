@@ -1,21 +1,20 @@
 //! 描述符对象与槽位发布。
 //!
 //! 职责三件：
-//! 1. **限额对账**：UAB 轨五项限额与候选容量 1024 的显式对账。UAB 轨与
-//!    普通轨分开记账（特性族篇 §4），普通轨素材（maxPerStageDescriptorSampledImages
-//!    = 1048576）不作数；容量不够 = `Init` 冒泡出局，不静默截断、不写越界。
+//! 1. **限额对账**：UAB 轨五项限额与候选容量 [`TABLE_CAPACITY`] 的显式对账。UAB 轨与
+//!    普通轨分开记账，普通轨素材（maxPerStageDescriptorSampledImages）不作数；
+//!    容量不够 = `Init` 冒泡出局，不静默截断、不写越界。
 //! 2. **描述符对象**：set0 常驻双表（b0 SAMPLED_IMAGE×容量 / b1
-//!    SAMPLER×容量，UAB+PARTIALLY_BOUND）+ set1 每帧 UBO。三层配套（特性族篇 §3）
+//!    SAMPLER×容量，UAB+PARTIALLY_BOUND）+ set1 每帧 UBO。UAB 三层配套
 //!    在此收齐后两层：binding 旗标 + layout 创建旗标（`UPDATE_AFTER_BIND_POOL`，
 //!    VUID-03000）+ pool 旗标（`UPDATE_AFTER_BIND`）；feature 位第一层在
 //!    [`crate::render::context`]。
 //! 3. **槽位分配与发布**：free list 分槽、采样器按 [`sampler_key`]
 //!    功能参数去重、fallback 槽 0（白 1×1 + 线性采样器）、发布接上传票据。
 //!
-//! set/binding 表（前置闸门冻结，本模块是 CPU 侧真身）：set0 b0 = `texture_2d`
-//! 数组（runtime，无长度）、b1 = sampler 数组；set1 b0 = 每帧 UBO 128B（灯光版
-//! 扩容，见 [`FRAME_UBO_SIZE`] 冻结表）。push 96B 偏移 0/64/68/80 与 pipeline
-//! layout 在 [`super::pipeline`]。
+//! set/binding 表（本模块是 CPU 侧真身）：set0 b0 = `texture_2d` 数组（runtime，
+//! 无长度）、b1 = sampler 数组；set1 b0 = 每帧 UBO（[`FRAME_UBO_SIZE`]）；set2 归
+//! [`super::instance_table`]。场景 pipeline layout 无 push range。
 //!
 //! stage flags 取 `COMPUTE|VERTEX|FRAGMENT` 超集：探针走 compute、主渲染走
 //! graphics，超集声明只影响驱动的描述符优化面，不改变合法性。
@@ -33,6 +32,7 @@ use ash::{vk, Device, Instance};
 use bevy::image::ImageSamplerDescriptor;
 use bevy::log::info;
 
+use crate::common::bytes::{put_mat4, put_u32, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
 use super::images::{sampler_key, GpuImage, ImageSpec};
@@ -40,28 +40,26 @@ use crate::render::resources::{BufferRole, GpuBuffer, MemoryContract};
 use super::uploader::{StagingImageCopy, Ticket, UploadBatch, Uploader};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
-/// 常驻表容量（候选定案值）。`BindlessTables::new` 按设备 UAB 轨五项限额
-/// 核对，不够即报错——不静默降容量。纹理表与采样器表同容量（闸门冻结的双数组
-/// 布局事实上排除了各自异容的必要；异容需求出现时拆两个常量再改）。
+/// 常驻表容量。`BindlessTables::new` 按设备 UAB 轨五项限额核对，不够即报错——
+/// 不静默降容量。纹理表与采样器表同容量（双数组布局下无各自异容的必要；异容
+/// 需求出现时拆两个常量）。
 pub const TABLE_CAPACITY: u32 = 1024;
 
-/// 每帧 UBO 字节数（set1 b0）。208B（mat4 view_proj + 灯光参数 + mat4
-/// inv_view_proj + vec4 camera_pos——8.2.3 光照累积的 V 向量需要相机世界
-/// 位置，192B 冻结边界第三次解冻，照 5.1.1 解冻清单先例逐项落日志）；binding
-/// 形状（b0 UNIFORM_BUFFER）与 pipeline layout 不变，range 在写入时的
-/// `DescriptorBufferInfo`，扩容不动 ABI。
+/// 每帧 UBO 字节数（set1 b0）。208B（mat4 view_proj + 灯光参数 + mode + mat4
+/// inv_view_proj + vec4 camera_pos，偏移见 `FrameUniformsLayout` 静态断言表）；
+/// binding 形状（b0 UNIFORM_BUFFER）与 pipeline layout 不随尺寸变，range 在写入
+/// 时的 `DescriptorBufferInfo`，扩容不动 ABI。
 pub const FRAME_UBO_SIZE: u64 = 208;
 
-/// 帧数据打包模式（UBO `mode` 字段；0..=2 与退役 A/B 参照 `debug_draw.wgsl`
-/// 同值，4 起为合成 pass 专属的 G-buffer 通道仪器；语义见
-/// `gbuffer_composite.wgsl` 与 host 侧材质模式说明）。
+/// 帧数据打包模式（UBO `mode` 字段；4 起为合成 pass 专属的 G-buffer 通道仪器；
+/// 语义见 `gbuffer_composite.wgsl` 与 host 侧材质模式说明）。
 pub const FRAME_MODE_LAMBERT: u32 = 0;
 pub const FRAME_MODE_UNLIT: u32 = 1;
 pub const FRAME_MODE_NORMAL: u32 = 2;
-/// 世界位置可视化（8.1.2）：G-buffer 深度反投影重建的世界坐标编码直出——
-/// 深度重建机制的验收仪器（仅合成 pass 消费，forward 时代无此模式）。
+/// 世界位置可视化：G-buffer 深度反投影重建的世界坐标编码直出——
+/// 深度重建机制的验收仪器（仅合成 pass 消费）。
 pub const FRAME_MODE_POSITION: u32 = 3;
-/// G-buffer 调试仪器（8.2.5）：matparam 单通道灰度直出——mutate 材质热改
+/// G-buffer 调试仪器：matparam 单通道灰度直出——mutate 材质热改
 ///（metallic/roughness）的写后读验收口。
 pub const FRAME_MODE_METALLIC: u32 = 4;
 pub const FRAME_MODE_ROUGHNESS: u32 = 5;
@@ -74,7 +72,7 @@ pub const FRAME_MODE_DEPTH: u32 = 8;
 pub struct FrameUniformsData {
     /// view × projection（列主序展平约定同 push 的 model）。
     pub view_proj: bevy::math::Mat4,
-    /// inv(view_proj)（8.1.2）：clip→world 反投影——G-buffer 深度重建世界
+    /// inv(view_proj)：clip→world 反投影——G-buffer 深度重建世界
     /// 位置的常量面；相机缺席帧 identity 兜底（与 view_proj 同源同帧）。
     pub inv_view_proj: bevy::math::Mat4,
     /// 表面到光方向（xyz 单位向量，w=0 占位）。**bevy GPU 同款语义**：
@@ -87,17 +85,15 @@ pub struct FrameUniformsData {
     pub light_color: [f32; 4],
     /// 材质模式（`FRAME_MODE_*`）。
     pub mode: u32,
-    /// 相机世界位置（xyz，8.2.3：光照累积的 V = normalize(camera_pos − world)
+    /// 相机世界位置（xyz：光照累积的 V = normalize(camera_pos − world)
     /// 取数面；w 未用）。相机缺席帧 zeros 兜底（与 view_proj 同源同帧）。
     pub camera_pos: [f32; 4],
 }
 
 /// [`FrameUniformsData`] 的 WGSL 布局镜像（uniform address space）：本类型不参与
-/// 运行时（字节由 [`pack_frame_uniforms`] 按偏移手工排布），存在的意义与
-/// `pipeline.rs::PushLayout` 同款——`offset_of!` 静态断言把 WGSL/描述符 range/CPU
-/// 三方钉在一起。uniform 对齐 16：mode 后垫到 128。
+/// 运行时（字节由 [`pack_frame_uniforms`] 按偏移手工排布），`offset_of!` 静态断言
+/// 把 WGSL/描述符 range/CPU 三方钉在一起。uniform 对齐 16：mode 后垫到 128。
 #[repr(C)]
-#[allow(dead_code)]
 struct FrameUniformsLayout {
     view_proj: [f32; 16],
     dir_to_light: [f32; 4],
@@ -121,31 +117,19 @@ const _: () = {
     assert!(FRAME_UBO_SIZE == 208);
 };
 
-/// [`FrameUniformsData`] → 208B uniform 字节（偏移按 [`FrameUniformsLayout`] 的
-/// 静态断言表手工排布，与 `pipeline.rs::pack_push` 同一纪律）。
+/// [`FrameUniformsData`] → 208B uniform 字节（偏移按 `FrameUniformsLayout` 的
+/// 静态断言表手工排布）。
 #[must_use]
 pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usize] {
     let mut out = [0u8; FRAME_UBO_SIZE as usize];
-    let mut put = |offset: usize, bytes: &[u8]| {
-        out[offset..offset + bytes.len()].copy_from_slice(bytes);
-    };
-    for (i, v) in d.view_proj.to_cols_array().iter().enumerate() {
-        put(i * 4, &v.to_le_bytes());
-    }
-    for (base, field) in [(64usize, &d.dir_to_light), (80, &d.ambient_color), (96, &d.light_color)] {
-        for (i, v) in field.iter().enumerate() {
-            put(base + i * 4, &v.to_le_bytes());
-        }
-    }
-    put(112, &d.mode.to_le_bytes());
-    // 116..128 对齐垫保持 0；inv_view_proj @ 128（8.1.2 深度重建常量面）
-    for (i, v) in d.inv_view_proj.to_cols_array().iter().enumerate() {
-        put(128 + i * 4, &v.to_le_bytes());
-    }
-    // camera_pos @ 192（8.2.3 光照累积 V 向量常量面）
-    for (i, v) in d.camera_pos.iter().enumerate() {
-        put(192 + i * 4, &v.to_le_bytes());
-    }
+    put_mat4(&mut out, 0, &d.view_proj);
+    put_vec4(&mut out, 64, &d.dir_to_light);
+    put_vec4(&mut out, 80, &d.ambient_color);
+    put_vec4(&mut out, 96, &d.light_color);
+    put_u32(&mut out, 112, d.mode);
+    // 116..128 对齐垫保持 0
+    put_mat4(&mut out, 128, &d.inv_view_proj);
+    put_vec4(&mut out, 192, &d.camera_pos);
     out
 }
 
@@ -185,7 +169,7 @@ impl SlotAllocator {
             self.used += 1;
             Ok(slot)
         } else {
-            Err(VulkanError::Upload(format!(
+            Err(VulkanError::Capacity(format!(
                 "描述符表容量耗尽：已用 {used}/{capacity}（容量由 TABLE_CAPACITY 与设备限额对账定，\
                  静态资产超容走显式受控扩容，不写越界不截断）",
                 used = self.used,
@@ -257,7 +241,8 @@ impl BindlessTables {
         uploader: &mut Uploader,
         graphics_family: u32,
         capacity: u32,
-    ) -> Result<Self> {        // ---- 1) 限额对账：UAB 轨五项,逐项落日志留证据。注意这组限额
+    ) -> Result<Self> {
+        // ---- 1) 限额对账：UAB 轨五项,逐项落日志留证据。注意这组限额
         //不在普通 Limits 里——它们是 descriptorIndexing 的 properties2 扩展
         //（PhysicalDeviceDescriptorIndexingProperties,经 Properties2 push_next 查询,
         //与 Features2 查支持同一形状）----
@@ -274,7 +259,7 @@ impl BindlessTables {
             "UAB 轨限额对账(候选容量 {capacity}): 每阶段 sampledImages {per_stage_smp} / 每 set {per_set_smp} \
              | 每阶段 samplers {per_stage_sam} / 每 set {per_set_sam} | 全池总额 {all_pools}",
         );
-        // 每阶段与每 set 是两道独立闸(特性族篇 §4);全池总额按双表满载 + 每帧 UBO 计
+        // 每阶段与每 set 是两道独立闸;全池总额按双表满载 + 每帧 UBO 计
         let pool_total = u64::from(capacity) * 2 + MAX_FRAMES_IN_FLIGHT as u64;
         let checks = [
             ("每阶段 sampledImages", u64::from(per_stage_smp), u64::from(capacity)),
@@ -294,7 +279,7 @@ impl BindlessTables {
         );
 
         // ---- 2) 双 layout:binding 旗标经 BindingFlagsCreateInfo 扩展结构挂入
-        //（ash 0.38 的 DescriptorSetLayoutBinding 无旗标字段,闸门组 C 同款配方）,
+        //（ash 0.38 的 DescriptorSetLayoutBinding 无旗标字段）,
         // layout 自身带 UPDATE_AFTER_BIND_POOL(VUID-03000 三层配套的第二层) ----
         let stages = vk::ShaderStageFlags::COMPUTE
             | vk::ShaderStageFlags::VERTEX
@@ -359,7 +344,11 @@ impl BindlessTables {
         result
     }
 
-    /// 建表链后半段(layout 已建):失败路径回收 pool/sets/UBO/fallback。
+    /// 建表链后半段(layout 已建);UBO/fallback 半成品随局部变量 Drop。
+    ///
+    /// 坑:失败路径回收不全——只有 set 分配失败回收 pool;UBO/fallback 段失败
+    /// pool 不回收;fallback 发布失败时 `tables` 的 Drop 已拆两个 layout,外层
+    /// [`Self::new`] 会再拆一次。均只在 init 失败(随即 Tier② 退出)时触发。
     ///
     /// # Safety
     /// 两个 layout 须刚创建成功且未销毁;`uploader` 须可用(fallback 上传走它)。
@@ -473,26 +462,20 @@ impl BindlessTables {
             &fallback_spec,
             &fallback_sharing,
         )?;
-        let fallback_ticket = match uploader.submit_batch(UploadBatch {
-            staging: vec![255, 255, 255, 255],
-            image_uploads: vec![StagingImageCopy {
-                image: fallback.image(),
-                src_offset: 0,
-                width: 1,
-                height: 1,
-                mip_levels: 1,
-            }],
-            // 图像 CONCURRENT 双族共享,不随批次 release
-            ..Default::default()
-        }) {
-            Ok(Some(ticket)) => ticket,
-            Ok(None) => {
-                return Err(VulkanError::Upload(
-                    "内部矛盾:fallback 批次非空却未产生提交".into(),
-                ))
-            }
-            Err(e) => return Err(e),
-        };
+        let fallback_ticket = uploader
+            .submit_batch(UploadBatch {
+                staging: vec![255, 255, 255, 255],
+                image_uploads: vec![StagingImageCopy {
+                    image: fallback.image(),
+                    src_offset: 0,
+                    width: 1,
+                    height: 1,
+                    mip_levels: 1,
+                }],
+                // 图像 CONCURRENT 双族共享,不随批次 release
+                ..Default::default()
+            })?
+            .ok_or_else(|| VulkanError::Upload("内部矛盾:fallback 批次非空却未产生提交".into()))?;
         let mut tables = Self {
             device: device.clone(),
             set0_layout,
@@ -713,13 +696,6 @@ impl BindlessTables {
         self.retired_textures.len() + self.retired_samplers.len()
     }
 }
-
-/// # Safety
-/// 持有的 ash 句柄本质是整数;frame_ubos(GpuBuffer)与 fallback(GpuImage)已实现
-/// Send/Sync,槽位账本是纯 Rust 数据;多线程共享由外部纪律保证(与 Uploader 同款:
-/// 资源创建/销毁/发布只在持有方线程,方法只读句柄或经 &mut 独占)。
-unsafe impl Send for BindlessTables {}
-unsafe impl Sync for BindlessTables {}
 
 impl Drop for BindlessTables {
     fn drop(&mut self) {

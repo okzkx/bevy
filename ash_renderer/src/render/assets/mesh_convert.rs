@@ -57,7 +57,7 @@ pub struct ConvertedMesh {
     pub vertex_count: u32,
     pub index_count: u32,
     /// 局部包围盒(POSITION 逐点 min/max,与顶点同源一次扫出)——对象表记录的
-    /// 包围体素材(5.1:随驻留入库;世界空间保守推导与消费归 5.2)。
+    /// 包围体素材(随驻留入库,compute 侧推导世界空间保守包围盒)。
     pub local_aabb: ([f32; 3], [f32; 3]),
 }
 
