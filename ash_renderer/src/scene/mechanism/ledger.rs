@@ -47,7 +47,7 @@ pub(crate) use super::assembly_cache::{AssemblyCache, AssemblyView};
 /// 账本一行：一个可渲染 primitive 的跨帧实例数据。柄去资产容器取内容，
 /// `model` 直进模型环（帧循环增量重写）；`instance_slot` 是 GPU 对象表下标
 /// （flush_uploads 分配，`None` = 尚未驻留成表——对象记录/模型环内容的
-/// hazard 纪律见 `render::assets::instance_table` 模块文档）。
+/// hazard 纪律见 `render::resident::instance_table` 模块文档）。
 #[derive(Clone)]
 pub struct InstanceRow {
     pub mesh: Handle<Mesh>,

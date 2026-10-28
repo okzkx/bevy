@@ -4,7 +4,7 @@
 //! 资源操作全部走 [`crate::render`] 的 pool/uploader/images 出口。
 //!
 //! 时序:PostUpdate 账本对账 → **Last:准备+上传提交** →
-//! 同帧图形提交(图形侧等票据=draw 挂 ticket 信号量等待,见 frames.rs)。
+//! 同帧图形提交(图形侧等票据=draw 挂 ticket 信号量等待,见 render/frame/frame_draw.rs)。
 //! 本系统住 `Last`,由 [`crate::driver::host`] 的 `draw_frame` 链成序(先上传
 //! 后画)。失败按统一错误通道分流(判定线=冒泡与否只看是否提前 return):
 //! 资产未到货/转换拒绝 = 循环内逐项降级,就地 warn 重试不进通道;提前 return
@@ -649,7 +649,7 @@ pub(crate) fn flush_uploads(
     }
     // 跨族内存可见性不靠 release/acquire 成对:图像与池一样走 CONCURRENT 双族
     // 共享——上传批次的图像收尾是纯布局转换(IGNORED 族),
-    // 跨队列内存可见性由图形提交等票据信号量收口(见 frames.rs 提交段注释)。
+    // 跨队列内存可见性由图形提交等票据信号量收口(见 render/frame/frame_draw.rs 提交段注释)。
     // —— 5) 一次合批 = 一个 staging 范围 + 一次 transfer 提交。
     // staging 非空的批次必有提交、空批已在入口 return——查无提交是内部契约矛盾。
     // 提交失败不发布票据,池内 bump 游标随下次容量保证自然前移

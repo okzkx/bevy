@@ -1460,7 +1460,7 @@ fn count_marked(marks: &[u32], live: &[u32]) -> u32 {
 }
 
 /// 清屏色：固定深蓝纯色。线性域值——SRGB view 在 ROP 写出时才做编码
-///（frames.rs），调色时按线性直觉给值，不要拿 sRGB 十六进制直接换算。
+///（render/frame/frame_draw.rs），调色时按线性直觉给值，不要拿 sRGB 十六进制直接换算。
 const CLEAR_COLOR: [f32; 4] = [0.02, 0.06, 0.14, 1.0];
 
 /// [f32; 4] 的收账日志格式（灯光 UBO 的 rgb 分量可读性）。

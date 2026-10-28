@@ -1,7 +1,7 @@
 //! 交换链：窗口尺寸一变就整体重建，images、views、格式、尺寸全换。
 //!
 //! 帧槽对象（fence、image_available、命令缓冲）跨重建复用，不归这里管；
-//! render_finished 信号量按 image 分配，挂在本结构下随重建一起换（原因见 `pipeline/frames.rs` 模块注释）。
+//! render_finished 信号量按 image 分配，挂在本结构下随重建一起换（原因见 `frame/frame_pool.rs` 模块注释）。
 
 use ash::{khr::swapchain, vk, Device};
 use bevy::log::info;

@@ -6,7 +6,7 @@
 //!（槽位枚举 + 材质环写侧走访是账本在账信息，不是可见集回读）。行的 GPU 内容
 //! 由对象表（写一次）+ 模型环/材质环（每帧重写）承载。
 //! hazard 纪律：环写入只发生在 `draw_frame` 的 `wait_for_slot` 之后
-//!（与本帧 UBO 同一条 fence 证据），详见 `render::assets::instance_table` 模块文档。
+//!（与本帧 UBO 同一条 fence 证据），详见 `render::resident::instance_table` 模块文档。
 //!
 //! 行级可绘判定：实例槽缺（未驻留成表）/锚 mesh 未驻留/材质容器缺席 = 该行暂缓
 //!（Tier①，自愈后消失）；缺贴图 = fallback 白图照画。暂缓行不进在场环 = 自动

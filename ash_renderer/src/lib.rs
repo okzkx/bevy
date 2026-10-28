@@ -24,11 +24,10 @@
 //! 各层职责：
 //! - [`common`]：工具层（横切、零业务依赖）——类型化错误与统一错误通道
 //!   （[`common::error`]）、错误处理语法糖（[`common::syntax`]）；
-//! - [`render`]：Vulkan 资源与录制——按生命周期分子目录：`context`（进程级）、
-//!   `swapchain`（resize 级）、`pipeline/*`（帧编排录制、各管线与附件、UI 顶点环与
-//!   图集 GPU 账面）、`assets/*`（池/上传/贴图/描述符表/GPU 常驻绘制数据）、
-//!   `gpu/*`（剔除/遮挡/LOD/indirect/Hi-Z 的 compute 半边）、`shading/*`（光源表、
-//!   CSM、着色模式）；另含各 GPU 特性的开关与诊断账面、帧样本账与监控读数契约；
+//! - [`render`]：Vulkan 资源与录制——`core`（Vulkan 地基 + 管线标准件）、
+//!   `resident`（常驻 GPU 数据：池/上传/贴图/描述符表/实例表/光源表）、`passes`
+//!   （按功能：可见性链、G-buffer、阴影、光照、透明、后处理、UI）、`frame`（帧槽与
+//!   整帧录制）、`stats`（计时与监控读数）；各 GPU 特性的开关与诊断账面随所属功能；
 //! - [`scene`]：ECS 侧场景机制（零 Vulkan 调用）——机制半边 `mechanism`（材质缝、
 //!   稳定槽账本与变更发现、驻留管理、相机/日光控制与输入仲裁窄接口、对象/资产/
 //!   Transform 写操作封装、层级树索引）+ 业务半边 `content`（进场/取景/灯光参数/

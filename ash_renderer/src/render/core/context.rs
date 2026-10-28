@@ -2,7 +2,7 @@
 //! Device → 图形队列 + transfer 队列。
 //!
 //! 只管进程级对象和窗口 Surface；Swapchain 在 `swapchain` 模块，帧级命令缓冲、fence、
-//! 信号量在 `pipeline::frames`。各字段释义与生命周期分层见
+//! 信号量在 `frame::frame_pool`。各字段释义与生命周期分层见
 //! `.agents/docs/2-宿主壳/材料/VulkanContext字段释义：从Entry到Swapchain.md` §12。
 
 use std::ffi::{c_char, c_void};
@@ -92,6 +92,10 @@ impl Drop for ContextInitGuard {
         }
     }
 }
+
+/// CPU 领先 GPU 的最大帧数：第 N 帧要等第 N-2 帧的资源空出来才能重录。所有按帧槽
+/// 轮转的资源（命令缓冲、UBO、各种环）都按它分配份数。
+pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 /// 进程级 Vulkan 上下文。ash 的 Instance/Device 没有自动 Drop，由本类型的 `Drop` 手动销毁。
 #[derive(bevy::prelude::Resource)]
