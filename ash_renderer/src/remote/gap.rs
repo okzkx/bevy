@@ -9,12 +9,14 @@
 //! compute 输出），BRP handler 在 RemoteLast——读数 = 最近一次帧起采样的
 //! 快照（不在提交后直读环，避免与在飞 compute 写竞争）。
 
+use std::collections::HashSet;
+
 use bevy::prelude::*;
 use serde_json::{json, Value};
 
 use ash_macros::system;
 
-use crate::scene::{GapMode, GapSnapshot, ResidencySettings, ResidencyStats};
+use crate::scene::{GapMode, GapSnapshot, InstanceLedger, ResidencySettings, ResidencyStats};
 use crate::render::MAX_LOD_LEVELS;
 
 use super::{invalid_params, params::parse_params, BrpResult};
@@ -42,13 +44,19 @@ pub(crate) fn gap_stats(In(_params): In<Option<Value>>, world: &mut World) -> Br
 }
 
 /// `ash_renderer/gap_census`：逐槽缺口位图清单（只读）——非零槽列表
-/// `[{slot, bits, levels:[...]}]`，levels = 置位档位号（GPU 缺口 vs CPU
-/// 参照对账的原始证据）。
+/// `[{slot, bits, levels:[...], row}]`，levels = 置位档位号（GPU 缺口 vs CPU
+/// 参照对账的原始证据），row = 该槽当前是否对应账本行（false = 陈旧缺口，
+/// 合并时按 gap_stale 丢弃）。
 ///
 /// # Errors
 /// 资源缺席（禁渲染宿主）。
 #[system]
 pub(crate) fn gap_census(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let row_slots: HashSet<u32> = world
+        .resource::<InstanceLedger>()
+        .rows()
+        .filter_map(|(_, row)| row.instance_slot)
+        .collect();
     let snapshot = world.resource::<GapSnapshot>();
     let slots: Vec<Value> = snapshot
         .bits
@@ -59,7 +67,8 @@ pub(crate) fn gap_census(In(_params): In<Option<Value>>, world: &mut World) -> B
             let levels: Vec<u32> = (0..MAX_LOD_LEVELS)
                 .filter(|level| bits >> level & 1 == 1)
                 .collect();
-            json!({ "slot": slot, "bits": bits, "levels": levels })
+            let row = row_slots.contains(&(slot as u32));
+            json!({ "slot": slot, "bits": bits, "levels": levels, "row": row })
         })
         .collect();
     Ok(json!({
