@@ -25,6 +25,7 @@ mod stats;
 pub use self::core::device::context::{Context, MAX_FRAMES_IN_FLIGHT};
 pub use self::core::target::color::HDR_FORMAT;
 pub use self::core::binding::set_layout::{SetLayout, SetLayouts};
+pub(crate) use self::core::binding::layout_registry::{ALL_PIPELINES, ALL_SETS};
 pub use passes::visibility::cull::{
     aabb_visible, frustum_planes, CullDiagnostics, CullDraw, CullPass, CullSettings,
 };

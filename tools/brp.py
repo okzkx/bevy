@@ -278,6 +278,10 @@ def cmd_mutate(args):
     out(rpc(args.host, args.port, "ash_renderer/mutate_asset", params))
 
 
+def cmd_layout_contract(_args):
+    out(rpc(args.host, args.port, "ash_renderer/layout_contract"))
+
+
 def cmd_stats(args):
     out(rpc(args.host, args.port, "ash_renderer/increment_stats"))
 
@@ -679,6 +683,7 @@ def main():
     p.set_defaults(func=cmd_mutate)
 
     sub.add_parser("stats", help="增量计量读数（ash_renderer/increment_stats）").set_defaults(func=cmd_stats)
+    sub.add_parser("layout-contract", help="布局契约报表（ash_renderer/layout_contract，只读）").set_defaults(func=cmd_layout_contract)
 
     sub.add_parser("cull-stats", help="剔除读数对照：GPU 标记 vs CPU 参照逐实体 + 不一致清单（ash_renderer/cull_stats；读数陈旧 ≤2 帧，对照前等 ≥3 帧）").set_defaults(func=cmd_cull_stats)
 

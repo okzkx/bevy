@@ -3,6 +3,7 @@
 
 pub(in crate::render) mod pipeline_layout;
 pub(in crate::render) mod descriptor_writer;
+pub(in crate::render) mod layout_registry;
 pub(in crate::render) mod set_layout;
 pub(in crate::render) mod shader_abi;
 pub(in crate::render) mod storage_sets;

@@ -28,6 +28,7 @@
 //! 安全边界：默认只绑 loopback、完全无鉴权，仅限本机调试使用，不改绑对外地址。
 
 pub mod assets;
+pub mod layout_contract;
 pub mod cluster;
 pub mod cull;
 pub mod draw;
@@ -151,7 +152,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/shadow_set", shadow_set)
                 .with_method_main("ash_renderer/bloom_set", bloom_set)
                 .with_method_main("ash_renderer/smaa_set", smaa_set)
-                .with_method_main("ash_renderer/shadow_stats", shadow_stats),
+                .with_method_main("ash_renderer/shadow_stats", shadow_stats)
+                .with_method_main("ash_renderer/layout_contract", layout_contract::layout_contract),
             RemoteHttpPlugin::default().with_port(port),
         ));
         // render subapp 的 BRP 端口跟随主端口（HostPort 字段公开；build 时机早于

@@ -5,79 +5,21 @@
 use ash::vk::{self, Handle};
 
 use super::pipeline_layout::{PipelineDesc, PushRange};
+use super::shader_abi;
 use super::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
-use super::shader_abi::{self, Shader};
+use super::layout_registry::{ALL_PIPELINES, ALL_SETS, PROBE_ONLY};
 use crate::render::passes::gbuffer::gbuffer_pipeline::GBUFFER_WRITE_PIPELINE;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET;
-use crate::render::passes::lighting::cluster::{CLUSTER_BUILD_PIPELINE, LIGHT_CLUSTER_SET};
+use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET;
 use crate::render::passes::lighting::composite_pipeline::GBUFFER_COMPOSITE_PIPELINE;
 use crate::render::passes::overlay::overlay_pipeline::OVERLAY_PIPELINE;
-use crate::render::passes::post::bloom::{
-    BLOOM_DOWN_PIPELINE, BLOOM_PREFILTER_PIPELINE, BLOOM_TEX_SET, BLOOM_UP_PIPELINE, BLOOM_UP_SET,
-};
+use crate::render::passes::post::bloom::BLOOM_UP_SET;
 use crate::render::passes::post::present_tonemap_pipeline::PRESENT_TONEMAP_PIPELINE;
-use crate::render::passes::post::smaa::{
-    SMAA_A_SET, SMAA_BLEND_PIPELINE, SMAA_B_SET, SMAA_EDGE_PIPELINE, SMAA_NEIGHBORHOOD_PIPELINE,
-};
-use crate::render::passes::shadow::shadow_build::SHADOW_BUILD_PIPELINE;
 use crate::render::passes::shadow::shadow_map::{SHADOW_SET, SHADOW_WRITE_PIPELINE, SHADOW_BINDING_UNIFORM};
-use crate::render::passes::transparent::{
-    TRANSPARENT_COLLECT_PIPELINE, TRANSPARENT_FORWARD_PIPELINE, TRANSPARENT_GATHER_PIPELINE, TRANSPARENT_SET,
-    TRANSPARENT_SORT_PIPELINE,
-};
+use crate::render::passes::transparent::TRANSPARENT_SET;
 use crate::render::passes::visibility::cull::CULL_PIPELINE;
-use crate::render::passes::visibility::hiz::{HIZ_DOWNSAMPLE_PIPELINE, HIZ_OCCLUSION_SET, HIZ_REDUCE_SET};
-use crate::render::passes::visibility::indirect::BUILD_INDIRECT_PIPELINE;
-use crate::render::passes::visibility::lod::LOD_SELECT_PIPELINE;
-use crate::render::passes::visibility::occlusion::OCCLUSION_PIPELINE;
 use crate::render::resident::descriptors::{BINDLESS_SET, FRAME_SET, TABLE_CAPACITY};
 use crate::render::resident::instance_table::INSTANCE_SET;
-
-/// 宿主建的全部管线。新增管线要登记在这里，否则 `every_shader_entry_has_a_pipeline` 会报。
-const ALL_PIPELINES: &[&PipelineDesc] = &[
-    &GBUFFER_WRITE_PIPELINE,
-    &SHADOW_WRITE_PIPELINE,
-    &TRANSPARENT_FORWARD_PIPELINE,
-    &OVERLAY_PIPELINE,
-    &GBUFFER_COMPOSITE_PIPELINE,
-    &BLOOM_PREFILTER_PIPELINE,
-    &BLOOM_DOWN_PIPELINE,
-    &BLOOM_UP_PIPELINE,
-    &SMAA_EDGE_PIPELINE,
-    &SMAA_BLEND_PIPELINE,
-    &SMAA_NEIGHBORHOOD_PIPELINE,
-    &PRESENT_TONEMAP_PIPELINE,
-    &CULL_PIPELINE,
-    &BUILD_INDIRECT_PIPELINE,
-    &SHADOW_BUILD_PIPELINE,
-    &OCCLUSION_PIPELINE,
-    &LOD_SELECT_PIPELINE,
-    &CLUSTER_BUILD_PIPELINE,
-    &TRANSPARENT_COLLECT_PIPELINE,
-    &TRANSPARENT_SORT_PIPELINE,
-    &TRANSPARENT_GATHER_PIPELINE,
-    &HIZ_DOWNSAMPLE_PIPELINE,
-];
-
-const ALL_SETS: &[&SetLayoutDesc] = &[
-    &BINDLESS_SET,
-    &FRAME_SET,
-    &INSTANCE_SET,
-    &GBUFFER_SAMPLED_SET,
-    &LIGHT_CLUSTER_SET,
-    &TRANSPARENT_SET,
-    &SHADOW_SET,
-    &BLOOM_TEX_SET,
-    &BLOOM_UP_SET,
-    &SMAA_A_SET,
-    &SMAA_B_SET,
-    &HIZ_REDUCE_SET,
-    &HIZ_OCCLUSION_SET,
-];
-
-/// 只给 examples 用、不归宿主管线的 shader。
-const PROBE_ONLY: &[&Shader] = &[&shader_abi::DESCRIPTOR_PROBE];
-
 const ALL_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::ALL;
 
 /// 静态的 set 列表（数组字面量里取 static 的地址不会被提升成 'static）。
