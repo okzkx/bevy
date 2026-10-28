@@ -161,8 +161,12 @@ pub fn spawn_test_shape(
     }
     if let Some(r) = rotation_euler_deg {
         // 欧拉角 YXZ 度数，与 set_transform/属性面板同口径
-        transform.rotation =
-            Quat::from_euler(EulerRot::YXZ, r.y.to_radians(), r.x.to_radians(), r.z.to_radians());
+        transform.rotation = Quat::from_euler(
+            EulerRot::YXZ,
+            r.x.to_radians(),
+            r.y.to_radians(),
+            r.z.to_radians(),
+        );
     }
     if let Some(s) = scale {
         transform.scale = s;
@@ -201,5 +205,47 @@ fn build_shape_mesh(shape: TestShape) -> Result<Mesh, ObjectOpError> {
         TestShape::Capsule => Ok(Capsule3d::new(0.5, 1.0).mesh().build()),
         TestShape::Cone => Ok(Cone::new(0.5, 1.0).mesh().build()),
         TestShape::Cuboid => Ok(Cuboid::new(1.0, 1.0, 1.0).mesh().build()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{spawn_test_shape, TestShape};
+    use crate::scene::mechanism::transform_edit::{apply_transform_edit, TransformEdit};
+    use bevy::{math::{EulerRot, Quat, Vec3}, prelude::*};
+
+    #[test]
+    fn spawn_shape_rotation_tuple_matches_transform_edit_order() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let euler = Vec3::new(23.0, 41.0, -17.0);
+        let readback = spawn_test_shape(
+            &mut world,
+            TestShape::Cuboid,
+            [0.8, 0.8, 0.8],
+            None,
+            None,
+            None,
+            Some(euler),
+            None,
+            None,
+            false,
+        )
+        .expect("测试 cuboid 构建应成功");
+        apply_transform_edit(
+            &mut world,
+            readback.entity,
+            TransformEdit { rotation_euler_deg: Some(euler), ..Default::default() },
+        )
+        .expect("新实体应包含 Transform");
+        let from_spawn = world.get::<Transform>(readback.entity).unwrap().rotation;
+        let from_edit = Quat::from_euler(
+            EulerRot::YXZ,
+            euler.x.to_radians(),
+            euler.y.to_radians(),
+            euler.z.to_radians(),
+        );
+        assert!(from_spawn.abs_diff_eq(from_edit, 1e-6));
     }
 }

@@ -46,9 +46,41 @@ pub(crate) const HIZ_FORMAT: vk::Format = vk::Format::R32_SFLOAT;
 
 // ===== 纯函数三件（判定线 3 的 CPU 参照与单测本体；occlusion.wgsl 注释同源）=====
 
-/// reverse-Z 2×2 tile 归约：取 MIN。**方向钉死**：本仓深度 reverse-Z
-///（近=1、远=0），值越小 = 越远；tile 的保守遮挡上界 = tile 内最远的已缓冲
-/// 表面 = 值最小者。正向 Z 的同类归约取 MAX——方向相反，取错 = 系统性错杀。
+/// 一个 mip 目标像素覆盖的源像素范围。奇数源尺寸向下减半时，最后的目标
+/// 像素吸收末尾多出的一行/列，范围右端不包含。
+#[cfg(test)]
+fn reduction_source_range(dst: u32, src_size: u32, dst_size: u32) -> std::ops::Range<u32> {
+    let start = dst * 2;
+    let end = if dst + 1 == dst_size {
+        src_size
+    } else {
+        (start + 2).min(src_size)
+    };
+    start..end
+}
+
+#[cfg(test)]
+fn reduce_mip_level(source: &[f32], src_dims: [u32; 2], dst_dims: [u32; 2]) -> Vec<f32> {
+    let mut output = vec![1.0; (dst_dims[0] * dst_dims[1]) as usize];
+    for y in 0..dst_dims[1] {
+        for x in 0..dst_dims[0] {
+            let xr = reduction_source_range(x, src_dims[0], dst_dims[0]);
+            let yr = reduction_source_range(y, src_dims[1], dst_dims[1]);
+            let mut minimum = 1.0_f32;
+            for sy in yr {
+                for sx in xr.clone() {
+                    minimum = minimum.min(source[(sy * src_dims[0] + sx) as usize]);
+                }
+            }
+            output[(y * dst_dims[0] + x) as usize] = minimum;
+        }
+    }
+    output
+}
+
+/// reverse-Z tile 归约：覆盖对应源区间并取 MIN。**方向钉死**：本仓深度
+/// reverse-Z（近=1、远=0），值越小 = 越远；tile 的保守遮挡上界 = tile 内
+/// 最远的已缓冲表面 = 值最小者。正向 Z 的同类归约取 MAX，方向相反。
 #[must_use]
 pub fn reduce_tile_reverse_z(a: f32, b: f32, c: f32, d: f32) -> f32 {
     a.min(b).min(c).min(d)
@@ -90,12 +122,34 @@ struct HizImage {
 /// 按层取）；归约逐级两视图（源/目标）——源 level 0 = 深度附件采样视图
 ///（指向该帧槽自己的深度 image），level L≥1 = 上一级金字塔的采样视图。
 struct HizViews {
+    device: Device,
     /// 遮挡测试的全链采样视图（SHADER_READ，GENERAL 布局，全 mip 层）。
     occlusion: vk::ImageView,
     /// 归约目标 storage 视图（每级一张）。
     storage: Vec<vk::ImageView>,
     /// 归约源采样视图（每级一张；[0] = 深度附件视图，[L] = 金字塔 L-1 级）。
     src: Vec<vk::ImageView>,
+}
+
+impl Drop for HizViews {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_image_view(self.occlusion, None);
+            for view in self.storage.drain(..).chain(self.src.drain(..)) {
+                self.device.destroy_image_view(view, None);
+            }
+        }
+    }
+}
+
+struct HizViewsBuildGuard {
+    views: Vec<HizViews>,
+}
+
+impl Drop for HizViewsBuildGuard {
+    fn drop(&mut self) {
+        self.views.clear();
+    }
 }
 
 /// 归约 compute 管线 + 描述符：单布局（b0 源采样 / b1 目标 storage），
@@ -528,7 +582,9 @@ impl HizPyramid {
             }
         }
         self.slots = slots;
-        let mut views = Vec::new();
+        let mut guard = HizViewsBuildGuard {
+            views: Vec::with_capacity(self.slots.len()),
+        };
         for (slot, hiz_image) in self.slots.iter().enumerate() {
             let occlusion = unsafe {
                 device.create_image_view(
@@ -541,17 +597,14 @@ impl HizPyramid {
                 )
             }
             .map_err(VulkanError::from)?;
-            let mut storage = Vec::with_capacity(self.levels as usize);
-            let mut src = Vec::with_capacity(self.levels as usize);
-            let mut fail = None;
+            let mut current = HizViews {
+                device: device.clone(),
+                occlusion,
+                storage: Vec::with_capacity(self.levels as usize),
+                src: Vec::with_capacity(self.levels as usize),
+            };
             for level in 0..self.levels {
-                match unsafe { create_level_view(device, hiz_image.image, level) } {
-                    Ok(v) => storage.push(v),
-                    Err(e) => {
-                        fail = Some(e);
-                        break;
-                    }
-                }
+                current.storage.push(unsafe { create_level_view(device, hiz_image.image, level) }?);
                 // 源视图：dispatch 从 level 1 起——level 0/1 的源 = 深度附件
                 //（D32，DEPTH aspect；[0] 槽位不派发，占位同深度），L≥2 = 上一级
                 let source = if level <= 1 {
@@ -559,27 +612,11 @@ impl HizPyramid {
                 } else {
                     unsafe { create_level_view(device, hiz_image.image, level - 1) }
                 };
-                match source {
-                    Ok(v) => src.push(v),
-                    Err(e) => {
-                        fail = Some(e);
-                        break;
-                    }
-                }
+                current.src.push(source?);
             }
-            if let Some(e) = fail {
-                unsafe { device.destroy_image_view(occlusion, None) };
-                for v in storage {
-                    unsafe { device.destroy_image_view(v, None) };
-                }
-                for v in src {
-                    unsafe { device.destroy_image_view(v, None) };
-                }
-                return Err(e);
-            }
-            views.push(HizViews { occlusion, storage, src });
+            guard.views.push(current);
         }
-        self.views = views;
+        self.views = std::mem::take(&mut guard.views);
         Ok(())
     }
 
@@ -776,18 +813,6 @@ impl HizPyramid {
     }
 
     fn drop_resources(&mut self) {
-        let device = &self.device;
-        for view_group in &self.views {
-            unsafe {
-                device.destroy_image_view(view_group.occlusion, None);
-                for v in &view_group.storage {
-                    device.destroy_image_view(*v, None);
-                }
-                for v in &view_group.src {
-                    device.destroy_image_view(*v, None);
-                }
-            }
-        }
         self.views.clear();
         for slot in self.slots.drain(..) {
             drop(slot);
@@ -926,7 +951,10 @@ unsafe fn create_bound_memory(ctx: &Context, image: vk::Image) -> Result<vk::Dev
 
 #[cfg(test)]
 mod tests {
-    use super::{occluded_reverse_z, occlusion_mip_level, reduce_tile_reverse_z};
+    use super::{
+        occluded_reverse_z, occlusion_mip_level, reduce_mip_level, reduce_tile_reverse_z,
+        reduction_source_range,
+    };
 
     /// **reverse-Z 归约极值方向（判定线 3，最危险单点）**：tile 内 2×2 深度
     /// 值 {0.2, 0.9, 0.5, 0.3} 的保守遮挡上界 = MIN = 0.2（值小 = 远——
@@ -938,6 +966,34 @@ mod tests {
         assert_eq!(tile, 0.2, "tile 保守遮挡上界 = 最远表面 = 值最小者");
         // 全背景 tile（clear 0 = 远平面）→ 上界 0
         assert_eq!(reduce_tile_reverse_z(0.0, 0.0, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn odd_mip_reduction_covers_every_source_texel() {
+        for src_dims in [[225, 225], [400, 225], [25, 14], [3, 1], [1, 1], [2, 1]] {
+            let dst_dims = [(src_dims[0] / 2).max(1), (src_dims[1] / 2).max(1)];
+            let source: Vec<f32> = (0..src_dims[0] * src_dims[1])
+                .map(|i| (i % 251) as f32 / 251.0)
+                .collect();
+            let actual = reduce_mip_level(&source, src_dims, dst_dims);
+            let mut covered = vec![false; source.len()];
+            for y in 0..dst_dims[1] {
+                for x in 0..dst_dims[0] {
+                    let xr = reduction_source_range(x, src_dims[0], dst_dims[0]);
+                    let yr = reduction_source_range(y, src_dims[1], dst_dims[1]);
+                    let mut expected = 1.0_f32;
+                    for sy in yr {
+                        for sx in xr.clone() {
+                            let index = (sy * src_dims[0] + sx) as usize;
+                            covered[index] = true;
+                            expected = expected.min(source[index]);
+                        }
+                    }
+                    assert_eq!(actual[(y * dst_dims[0] + x) as usize], expected);
+                }
+            }
+            assert!(covered.into_iter().all(|covered| covered), "{src_dims:?}");
+        }
     }
 
     /// **遮挡判定保守性（判定线 3）**：物体最近角点深度值 vs tile 上界的

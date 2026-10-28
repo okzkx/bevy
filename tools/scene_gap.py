@@ -201,7 +201,8 @@ def main():
     print("\n== 场景重建（unique 阶梯 + floor_anchor + 预算 1/4 + 半径 10）==")
     build_scene()
     full = read_stats()
-    budget = max(full["used_mesh_bytes"] // 4, 200_000)
+    full_used = full["used_mesh_bytes"]
+    budget = max(full_used // 4, 200_000)
     rpc("ash_renderer/residency_set", {
         "enabled": True, "budget_mesh_bytes": budget,
         "request_radius": 10.0, "eject_cooldown_frames": 30,
@@ -211,48 +212,52 @@ def main():
     rpc("ash_renderer/gap_set", {"mode": "off"})
     rpc("ash_renderer/set_camera", {"target": [0, 0.5, 0], "yaw_deg": 0, "pitch_deg": 25, "radius": 18})
     wait_settle(5.0)
+    p_off = rpc("ash_renderer/perf_stats")["cpu_total_ms"]["p95"]
 
     if args.build_only:
         print(f"\n场景已重建（--build-only，预算 {budget}B 未采证）。")
         sys.exit(0)
 
     print(f"\n== ① 请求稀疏且有界（GpuOnly：CPU 期望档预测让位，缺口独走）==")
-    used_off = read_stats()["used_mesh_bytes"]
+    used_off = full_used
+    g0 = read_gap()
     rpc("ash_renderer/gap_set", {"mode": "gpu_only"})
     wait_settle(6.0)
     g1 = read_gap()
     s1 = read_stats()
     ds1 = rpc("ash_renderer/draw_stats")
-    lod_c = rpc("ash_renderer/lod_census")
-    present_slots = {row["slot"] for row in lod_c.get("rows", [])}
     census = rpc("ash_renderer/gap_census")
     census_slots = [entry["slot"] for entry in census["slots"]]
-    ds1 = rpc("ash_renderer/draw_stats")
+    rowless = [entry["slot"] for entry in census["slots"] if not entry["row"]]
+    gap_rows_window = g1["gap_rows_total"] - g0["gap_rows_total"]
     print(f"  gap: slots={g1['gap_slots_last']} assets={g1['gap_assets_last']} "
-          f"rows_total={g1['gap_rows_total']} 快照非零={g1['snapshot_slots_nonzero']}/{g1['snapshot_bound']} "
+          f"本窗触发行={gap_rows_window} 快照非零={g1['snapshot_slots_nonzero']}/{g1['snapshot_bound']} "
           f"used={s1['used_mesh_bytes']}")
     check("①a 缺口有界（槽数 ≤ bump bound，位图硬上限）",
           g1["gap_slots_last"] <= g1["snapshot_bound"],
           f"缺口槽 {g1['gap_slots_last']} ≤ bound {g1['snapshot_bound']}")
+    # 单帧 assets 可为 0：稳态下缺口身份多处于淘汰冷却窗或两帧快照延迟内已到货
     check("①b 同身份去重（资产数 ≤ 缺口槽数）",
-          g1["gap_assets_last"] <= max(g1["gap_slots_last"], 1) and g1["gap_rows_total"] > 0,
-          f"assets {g1['gap_assets_last']} ≤ slots {g1['gap_slots_last']}，触发行累计 {g1['gap_rows_total']}")
-    check("①c 缺口只来自在场行（缺口槽数 ≤ 命令条数=在场行数；build_indirect 只在查引脚处置位、cull 清零不在场槽）",
-          len(census_slots) <= ds1.get("command_count", 0),
-          f"缺口槽 {census_slots[:6]} 共 {len(census_slots)} ≤ 在场命令 {ds1.get('command_count')}")
-    check("①d GpuOnly 下缺口驱动升级真实发生（缺口回到/used 变动）",
-          g1["gap_rows_total"] > 0 or s1["used_mesh_bytes"] > 0,
-          f"gap_rows_total={g1['gap_rows_total']} used={used_off}→{s1['used_mesh_bytes']}")
+          g1["gap_assets_last"] <= max(g1["gap_slots_last"], 1),
+          f"assets {g1['gap_assets_last']} ≤ slots {g1['gap_slots_last']}")
+    check("①c 缺口只来自在场行（逐槽对应账本行，数量受命令数约束）",
+          not rowless and len(census_slots) <= ds1.get("command_count", 0),
+          f"无行槽={rowless[:6]} gap={len(census_slots)} commands={ds1.get('command_count')}")
+    check("①d GpuOnly 下缺口请求链真实运行（本窗口内产生缺口行请求）",
+          gap_rows_window > 0,
+          f"窗前累计={g0['gap_rows_total']} 本窗={gap_rows_window} used_off={used_off} "
+          f"used={s1['used_mesh_bytes']} requested={s1['requested']}")
     if host_pid is not None:
         shoot(host_pid, "gap_gpu_only_缺口驱动.png")
 
-    print("\n== ② 无当帧等待：GpuOnly 活跃期间帧时间无停顿（快照两帧采样结构）==")
+    print("\n== ② 无当帧等待：GpuOnly 活跃期间帧时间相对 Off 基线无明显回退 ==")
     p_on = rpc("ash_renderer/perf_stats")
     p95_on = p_on["cpu_total_ms"]["p95"]
-    print(f"  GpuOnly 活跃：CPU 帧 p95={p95_on:.2f}ms（off 基线前值见 ⑤ 对照段）")
-    check("② 活跃期间帧循环无阻塞（读数面正常 + 结构保证见施工记录）",
-          p95_on < 100.0,
-          f"p95={p95_on:.2f}ms（快照两帧采样 + fence 纪律，无 busy wait）")
+    max_p95 = max(1.0, p_off * 1.5)
+    print(f"  Off={p_off:.2f}ms GpuOnly={p95_on:.2f}ms 上限={max_p95:.2f}ms")
+    check("② 活跃期间帧循环无明显阻塞/相对回退",
+          p95_on < 100.0 and p95_on <= max_p95,
+          f"Off={p_off:.2f}ms GpuOnly={p95_on:.2f}ms")
 
     print("\n== ③ 丢失自愈：merged → off（哑火）→ merged ==")
     rpc("ash_renderer/gap_set", {"mode": "merged"})

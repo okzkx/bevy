@@ -467,8 +467,7 @@ pub(crate) fn draw_frame(
     let scene_aabb = scene_world_aabb(ledger, &scene.pool);
     write_shadow_ubo(shadow, slot, &view, &light, scene_aabb)?;
     write_post_ubos(post, slot)?;
-    let prev_transparent_rows =
-        write_transparent_slot(transparent, slot, &view, core.swapchain.extent)?;
+    write_transparent_slot(transparent, slot, &view, core.swapchain.extent)?;
     // 双环写入：模型环增量 + 材质环全量 + 在场环 + LOD 表增量（hazard 纪律表见
     // instance_table 模块文档）。
     let rings_clock = Instant::now();
@@ -563,7 +562,7 @@ pub(crate) fn draw_frame(
     let target_view = core.swapchain.views[index as usize];
     let instances = &scene.instance_tables;
     let transparent_frame =
-        transparent_draw(transparent, instances, slot, indirect_count, prev_transparent_rows)?;
+        transparent_draw(transparent, instances, slot, indirect_count)?;
     let shadow_write = shadow_write_draw(shadow, instances, &scene.pool, slot, indirect_count)?;
     let (smaa_edge_blend, smaa_nb) = smaa_draws(post, slot);
     let frame_draw = FrameDraw {
@@ -1002,13 +1001,13 @@ fn write_post_ubos(post: &mut PostInput, slot: usize) -> Result<(), BevyError> {
 }
 
 /// 透明层帧侧宿主写（fence 纪律内）：cluster 均匀数据（view_proj/inv_view_proj/
-/// 网格标量）、光源常驻表脏行、透明行计数先读后清。返回上一轮本槽的透明行数。
+/// 网格标量）、光源常驻表脏行、透明行计数清零。
 fn write_transparent_slot(
     transparent: &mut TransparentInput,
     slot: usize,
     view: &FrameView,
     extent: vk::Extent2D,
-) -> Result<u32, BevyError> {
+) -> Result<(), BevyError> {
     let cluster_uniform = pack_cluster_uniforms(
         &view.view_proj,
         &view.inv_view_proj,
@@ -1027,22 +1026,13 @@ fn write_transparent_slot(
         .lights
         .write_dirty(slot)
         .or_fatal("光源常驻表脏行写失败，渲染链无法继续")?;
-    // prev 透明计数先读后清（本帧槽两帧前输出，fence 纪律）——bitonic 排序的
-    // 空排让路判据（prev = 0 的帧数组未排，gather 尾部反向读取仍覆盖全部真实
-    // 行，只丢一帧排序；读数不决定画什么，只决定是否跑空排序）。清零 = collect
-    // 的 atomicAdd 基线。
-    let mut prev_bytes = [0u8; 4];
-    transparent
-        .clusters
-        .t_count(slot)
-        .read(0, &mut prev_bytes)
-        .or_fatal("透明行计数读失败，渲染链无法继续")?;
+    // 清零 = collect 的 atomicAdd 基线。
     transparent
         .clusters
         .t_count(slot)
         .write(0, &0u32.to_le_bytes())
         .or_fatal("透明行计数清零失败，渲染链无法继续")?;
-    Ok(u32::from_le_bytes(prev_bytes))
+    Ok(())
 }
 
 /// 本帧 compute 段的共享输入。
@@ -1327,14 +1317,13 @@ fn indirect_half(
     Ok(dispatch)
 }
 
-/// 透明层录制输入：在场行 > 0 才录三 dispatch 与透明绘制；collect 可失败
-///（透明行容量上界，显式报错）。上一轮透明行数为 0 时跳过 bitonic 空排。
+/// 透明层录制输入：在场行 > 0 才录 cluster/collect/gather 与透明绘制；collect 可失败
+///（透明行容量上界，显式报错）。排序每个非空帧都执行以覆盖计数从 0 增长的过渡。
 fn transparent_draw(
     transparent: &TransparentInput,
     instances: &InstanceTables,
     slot: usize,
     count: u32,
-    prev_rows: u32,
 ) -> Result<Option<TransparentFrame>, BevyError> {
     if count == 0 {
         return Ok(None);
@@ -1349,7 +1338,7 @@ fn transparent_draw(
                 .or_fatal("透明行收集 dispatch 输入组装失败，渲染链无法继续")?,
         ),
         gather: Some(passes.gather(count)),
-        sort: (prev_rows > 0).then(|| passes.sort_plan()),
+        sort: passes.sort_plan(),
         set2: instances.frame_set2(slot),
         pipeline: transparent.pipeline.pipeline(),
         layout: transparent.pipeline.layout(),

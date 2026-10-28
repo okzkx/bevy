@@ -17,16 +17,11 @@ use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
 use crate::render::resources::{BufferRole, GpuBuffer};
-use crate::render::shading::shadow::{SHADOW_CASCADES, SHADOW_MAP_SIZE};
+use crate::render::shading::shadow::{SHADOW_CASCADES, SHADOW_MAP_SIZE, SHADOW_UBO_SIZE};
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
 use super::depth::DepthTarget;
-use super::pipeline_handle::PipelineHandle;
-
-/// shadow UBO 总长（`shading/shadow.rs::ShadowUniformsLayout` 静态互证）：
-/// cascade 矩阵 4×64B + 平面 24×16B + splits/forward/pos/map_size 各 16B
-/// + texel_world/inv_span 各 16B。
-pub const SHADOW_UBO_SIZE: u32 = 736;
+use super::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
 
 pub const SHADOW_BINDING_UNIFORM: u32 = 0;
 pub const SHADOW_BINDING_MAP0: u32 = 1;
@@ -487,11 +482,7 @@ impl ShadowPipeline {
                 .dynamic_state(&dynamic_info)
                 .layout(layout)
                 .push_next(&mut rendering_info);
-            let pipeline = device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
-                .map_err(|(_, e)| e)?
-                .pop()
-                .ok_or_else(|| VulkanError::Init("shadow 管线：单 info 未返回管线".into()))?;
+            let pipeline = create_graphics_pipeline(device, &info)?;
             device.destroy_shader_module(module, None);
             info!(
                 "shadow 管线就绪: depth-only dynamic rendering（D32 reverse-Z GREATER），\

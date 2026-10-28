@@ -299,16 +299,20 @@ fn camera_control(
         && mouse.pressed(MouseButton::Left)
         && let Some(pos) = cursor
     {
-        if let Some(last) = session.last_cursor {
-            let delta = pos - last;
-            let turn = FULL_TURN_PER_HEIGHT / window.height();
-            for (_, mut orbit) in &mut cameras {
-                orbit.yaw -= delta.x * turn;
-                orbit.pitch = (orbit.pitch + delta.y * turn).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        if ui_wants {
+            session.last_cursor = Some(pos);
+        } else {
+            if let Some(last) = session.last_cursor {
+                let delta = pos - last;
+                let turn = FULL_TURN_PER_HEIGHT / window.height();
+                for (_, mut orbit) in &mut cameras {
+                    orbit.yaw -= delta.x * turn;
+                    orbit.pitch = (orbit.pitch + delta.y * turn).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+                }
+                dirty |= delta != Vec2::ZERO;
             }
-            dirty |= delta != Vec2::ZERO;
+            session.last_cursor = Some(pos);
         }
-        session.last_cursor = Some(pos);
     }
     // 右键拖拽环视：位置钉住、yaw/pitch 旋转、pivot 搬到新视线正前方
     //（[`look_rotate`]，Unity Scene 同款）；egui 门与左键同款。

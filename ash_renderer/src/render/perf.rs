@@ -36,6 +36,10 @@ use crate::common::error::Result;
 
 use super::Context;
 
+fn wrapping_timestamp_delta(start: u64, end: u64, mask: u64) -> u64 {
+    end.wrapping_sub(start) & mask
+}
+
 /// 每帧槽查询位数量（T0..T7，见模块注释时区表）。
 pub(crate) const QUERIES_PER_FRAME: u32 = 8;
 
@@ -173,6 +177,19 @@ impl PerfLedger {
     }
 }
 
+struct QueryPoolsBuildGuard<'a> {
+    device: &'a Device,
+    pools: Vec<vk::QueryPool>,
+}
+
+impl Drop for QueryPoolsBuildGuard<'_> {
+    fn drop(&mut self) {
+        for pool in self.pools.drain(..) {
+            unsafe { self.device.destroy_query_pool(pool, None) };
+        }
+    }
+}
+
 /// GPU timestamp 计时器：每帧槽一只 query pool，槽内 [`QUERIES_PER_FRAME`] 位逐帧重写。
 #[derive(bevy::prelude::Resource)]
 pub struct GpuTimer {
@@ -180,6 +197,8 @@ pub struct GpuTimer {
     pools: Vec<vk::QueryPool>,
     /// 设备 `timestampPeriod`（ns/刻度），换算毫秒的系数。
     period_ns: f32,
+    /// 硬件计数器有效位掩码（计数器回绕可能早于 u64 回绕）。
+    timestamp_mask: u64,
     /// 各槽位是否已经历过一轮 record（首帧前的空槽 fetch 直接 None——
     /// reset 过但从未执行的查询取结果回 VK_NOT_READY，不进取数路径）。
     /// AtomicBool：Resource 须 Sync（bevy Resource 约束），原子布尔置位
@@ -204,6 +223,11 @@ impl GpuTimer {
         };
         let period_ns = ctx.limits().timestamp_period;
         let enabled = valid_bits > 0;
+        let timestamp_mask = match valid_bits {
+            0 => 0,
+            64.. => u64::MAX,
+            bits => (1u64 << bits) - 1,
+        };
         if !enabled {
             warn!(
                 "图形队列族 {valid_bits} 个 timestamp 有效位：GPU 帧计时降级停用（CPU 分段照常），\
@@ -215,19 +239,21 @@ impl GpuTimer {
         // 实抓），而是靠 recorded 闸门：每槽首次取结果必在其首次
         // record（cmd_reset_query_pool 起周期）之后，未初始化态不可达。
         let pools = if enabled {
-            (0..super::MAX_FRAMES_IN_FLIGHT)
-                .map(|_| {
-                    unsafe {
-                        ctx.device.create_query_pool(
-                            &vk::QueryPoolCreateInfo::default()
-                                .query_type(vk::QueryType::TIMESTAMP)
-                                .query_count(QUERIES_PER_FRAME),
-                            None,
-                        )
-                    }
-                    .map_err(crate::common::error::VulkanError::from)
-                })
-                .collect::<Result<Vec<_>>>()?
+            let mut guard = QueryPoolsBuildGuard {
+                device: &ctx.device,
+                pools: Vec::with_capacity(super::MAX_FRAMES_IN_FLIGHT),
+            };
+            for _ in 0..super::MAX_FRAMES_IN_FLIGHT {
+                guard.pools.push(unsafe {
+                    ctx.device.create_query_pool(
+                        &vk::QueryPoolCreateInfo::default()
+                            .query_type(vk::QueryType::TIMESTAMP)
+                            .query_count(QUERIES_PER_FRAME),
+                        None,
+                    )
+                }?);
+            }
+            std::mem::take(&mut guard.pools)
         } else {
             Vec::new()
         };
@@ -239,6 +265,7 @@ impl GpuTimer {
             device: ctx.device.clone(),
             pools,
             period_ns,
+            timestamp_mask,
             recorded: std::array::from_fn(|_| AtomicBool::new(false)),
             enabled,
         })
@@ -314,7 +341,9 @@ impl GpuTimer {
         if raw.iter().all(|&t| t == 0) {
             return Ok(None);
         }
-        let ticks_to_ms = |a: u64, b: u64| (b.wrapping_sub(a)) as f32 * self.period_ns / 1.0e6;
+        let ticks_to_ms = |a: u64, b: u64| {
+            wrapping_timestamp_delta(a, b, self.timestamp_mask) as f32 * self.period_ns / 1.0e6
+        };
         Ok(Some([
             ticks_to_ms(raw[0], raw[1]),
             ticks_to_ms(raw[1], raw[2]),
@@ -335,5 +364,17 @@ impl Drop for GpuTimer {
         for pool in &self.pools {
             unsafe { self.device.destroy_query_pool(*pool, None) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrapping_timestamp_delta;
+
+    #[test]
+    fn timestamp_delta_wraps_at_device_valid_width() {
+        let mask = (1u64 << 36) - 1;
+        assert_eq!(wrapping_timestamp_delta(mask - 2, 3, mask), 6);
+        assert_eq!(wrapping_timestamp_delta(u64::MAX - 2, 3, u64::MAX), 6);
     }
 }

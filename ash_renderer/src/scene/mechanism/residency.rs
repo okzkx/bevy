@@ -305,7 +305,7 @@ pub(crate) struct TickGateKey {
     request_radius_bits: u32,
     fine_grained: bool,
     floor_anchor: bool,
-    gap_mode_off: bool,
+    gap_mode: GapMode,
 }
 
 /// 管理器内部状态（冷却表：mesh/贴图身份 → 剩余冷却帧——两张表，键型
@@ -436,7 +436,7 @@ pub(crate) fn residency_tick(
         request_radius_bits: settings.request_radius.to_bits(),
         fine_grained: settings.fine_grained,
         floor_anchor: settings.floor_anchor,
-        gap_mode_off: matches!(settings.gap_mode, GapMode::Off),
+        gap_mode: settings.gap_mode,
     });
     let gap_quiet =
         settings.gap_mode == GapMode::Off || snapshot.bits.iter().all(|&b| b == 0);
@@ -949,7 +949,7 @@ impl Plugin for AshResidencyPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{anchor_level, gap_asset_ids, GapMode, MAX_LOD_LEVELS};
+    use super::{anchor_level, gap_asset_ids, GapMode, TickGateKey, MAX_LOD_LEVELS};
     use bevy::prelude::*;
 
     /// 可绘锚档位（三处共用纯函数）：关闭 = 基准；开启 = 保底档（最粗变体）；
@@ -989,6 +989,24 @@ mod tests {
         // 越界位忽略（bit 4.. 不在 MAX 内）
         let only_inrange = gap_asset_ids(u32::MAX, &levels, base);
         assert_eq!(only_inrange.len(), MAX_LOD_LEVELS as usize);
+    }
+
+    #[test]
+    fn gap_modes_have_distinct_gate_keys() {
+        let key = |gap_mode| TickGateKey {
+            view_proj: bevy::math::Mat4::IDENTITY,
+            extent: [1280, 720],
+            threshold_bits: 64.0_f32.to_bits(),
+            hysteresis_bits: 0.25_f32.to_bits(),
+            budget_mesh_bytes: 1_000_000,
+            budget_image_bytes: 0,
+            request_radius_bits: 40.0_f32.to_bits(),
+            fine_grained: true,
+            floor_anchor: false,
+            gap_mode,
+        };
+        assert!(key(GapMode::GpuOnly) != key(GapMode::Merged));
+        assert!(key(GapMode::Off) != key(GapMode::GpuOnly));
     }
 
     /// GapMode 字符串往返与默认（BRP 通道的解析纪律：未知形态报错不猜）。

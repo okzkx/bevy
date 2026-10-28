@@ -30,7 +30,7 @@ use crate::common::error::Result;
 
 use crate::render::Context;
 
-use super::pipeline_handle::PipelineHandle;
+use super::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与探针同一编译路径）。
 /// 8.1 起场景管线 = G-buffer 写入（albedo+normal 双 color + 深度）；
@@ -220,10 +220,7 @@ impl GraphicsPipeline {
                 .dynamic_state(&dynamic_info)
                 .layout(layout)
                 .push_next(&mut rendering_info);
-            let pipeline = device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
-                .map_err(|(_, e)| e)?
-                .remove(0);
+            let pipeline = create_graphics_pipeline(device, &info)?;
             // module 用毕即拆：管线创建完成即编译收口，规范允许此刻销毁 shader
             // module（vkDestroyShaderModule 与管线无生命周期耦合）。句柄是纯整数，
             // 不拆即每次启动泄漏 1 个 VkShaderModule（验证层

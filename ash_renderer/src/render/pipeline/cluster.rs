@@ -37,6 +37,7 @@ use crate::render::gpu::compute::{create_shader_module, ComputeHandles, ComputeP
 use crate::render::resources::{BufferRole, GpuBuffer};
 use crate::render::shading::LightRecord;
 use crate::render::Context;
+use super::pipeline_handle::create_graphics_pipeline;
 
 const CLUSTER_BUILD_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cluster_build.spv"));
 const TRANSPARENT_COLLECT_SPV: &[u8] =
@@ -612,9 +613,8 @@ pub struct TransparentFrame {
     /// 透明行收集 + 命令组装 dispatch（count = 在场行数 > 0 才 Some）。
     pub collect: Option<TransparentCollectDraw>,
     pub gather: Option<TransparentGatherDraw>,
-    /// bitonic 排序计划（prev 透明计数 = 0 的让路帧 None——数组未排，
-    /// gather 尾部反向读取仍覆盖全部真实行，只丢一帧排序）。
-    pub sort: Option<TransparentSortPlan>,
+    /// bitonic 排序计划（每个非空场景帧都排序；透明行从 0 增长时也不能读未排序数组）。
+    pub sort: TransparentSortPlan,
     /// set2（常驻表，gather 读；透明绘制也绑）。
     pub set2: vk::DescriptorSet,
     /// 透明前向绘制管线（layout 四集）。
@@ -1009,11 +1009,7 @@ impl TransparentPipeline {
                 .dynamic_state(&dynamic_info)
                 .layout(layout)
                 .push_next(&mut rendering_info);
-            let pipeline = device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
-                .map_err(|(_, e)| e)?
-                .pop()
-                .ok_or_else(|| VulkanError::Init("透明前向管线：单 info 未返回管线".into()))?;
+            let pipeline = create_graphics_pipeline(device, &info)?;
             device.destroy_shader_module(module, None);
             info!(
                 "透明前向管线就绪: HDR {color_format:?}（SRC_ALPHA 混合）+ 深度 {depth_format:?}（重绑只测不写），常驻三集 + cluster 小集"
@@ -1057,6 +1053,62 @@ impl Drop for TransparentPipeline {
 #[cfg(test)]
 mod tests {
     use super::slice_ndc_z;
+
+    fn bitonic_sort(entries: &mut [(f32, u32)]) {
+        let n = entries.len() as u32;
+        let mut k = 2;
+        while k <= n {
+            let mut j = k / 2;
+            while j > 0 {
+                for gid in 0..n / 2 {
+                    let i = (gid / j) * (2 * j) + (gid % j);
+                    let partner = i + j;
+                    let ascending = (i & k) == 0 || k == n;
+                    if (ascending && entries[i as usize].0 > entries[partner as usize].0)
+                        || (!ascending && entries[i as usize].0 < entries[partner as usize].0)
+                    {
+                        entries.swap(i as usize, partner as usize);
+                    }
+                }
+                j /= 2;
+            }
+            k *= 2;
+        }
+    }
+
+    #[test]
+    fn bitonic_half_dispatch_sorts_entire_network_and_keeps_indices_paired() {
+        let mut entries = vec![
+            (3.0_f32, 3),
+            (0.0, 0),
+            (2.0, 2),
+            (1.0, 1),
+            (7.0, 7),
+            (4.0, 4),
+            (6.0, 6),
+            (5.0, 5),
+        ];
+        bitonic_sort(&mut entries);
+        assert!(entries.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        assert_eq!(entries.iter().map(|entry| entry.1).collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn bitonic_padding_moves_before_live_entries() {
+        let mut entries = vec![
+            (f32::NEG_INFINITY, 0),
+            (f32::NEG_INFINITY, 1),
+            (f32::NEG_INFINITY, 2),
+            (f32::NEG_INFINITY, 3),
+            (f32::NEG_INFINITY, 4),
+            (f32::NEG_INFINITY, 5),
+            (9.0, 90),
+            (2.0, 20),
+        ];
+        bitonic_sort(&mut entries);
+        assert_eq!(entries[6..].iter().map(|entry| entry.1).collect::<Vec<_>>(), [20, 90]);
+        assert_eq!(entries[6..].iter().map(|entry| entry.0).collect::<Vec<_>>(), [2.0, 9.0]);
+    }
     use bevy::math::{Mat4, Vec3};
 
     /// 相机不在原点时，深度片的 NDC z 必须等于"视深为 z 的真实点"的 NDC z

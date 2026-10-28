@@ -30,7 +30,7 @@ use crate::common::error::Result;
 
 use crate::render::Context;
 
-use super::pipeline_handle::PipelineHandle;
+use super::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与场景管线同一编译路径）。
 const OVERLAY_DRAW_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/overlay_draw.spv"));
@@ -263,10 +263,7 @@ impl OverlayPipeline {
                 .dynamic_state(&dynamic_info)
                 .layout(layout)
                 .push_next(&mut rendering_info);
-            let pipeline = device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
-                .map_err(|(_, e)| e)?
-                .remove(0);
+            let pipeline = create_graphics_pipeline(device, &info)?;
             // module 用毕即拆（与场景管线同纪律：创建收口即销毁，拆 Device 零泄漏）
             device.destroy_shader_module(module, None);
             info!(

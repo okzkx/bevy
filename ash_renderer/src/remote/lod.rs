@@ -185,21 +185,25 @@ struct SetParams {
 pub(crate) fn lod_set_params(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: SetParams =
         parse_params(params, "params 缺失：需要对象（threshold_px/hysteresis 可选）")?;
+    if let Some(threshold) = p.threshold_px
+        && (!threshold.is_finite() || threshold <= 0.0)
+    {
+        return Err(invalid_params(format!(
+            "threshold_px {threshold} 非法（须为有限正数）"
+        )));
+    }
+    if let Some(hysteresis) = p.hysteresis
+        && (!hysteresis.is_finite() || !(0.0..1.0).contains(&hysteresis))
+    {
+        return Err(invalid_params(format!(
+            "hysteresis {hysteresis} 非法（须为有限值且 ∈ [0,1)）"
+        )));
+    }
     let mut settings = world.resource_mut::<LodSettings>();
     if let Some(threshold) = p.threshold_px {
-        if threshold <= 0.0 || threshold.is_nan() {
-            return Err(invalid_params(format!(
-                "threshold_px {threshold} 非法（须 > 0）"
-            )));
-        }
         settings.threshold_px = threshold;
     }
     if let Some(hysteresis) = p.hysteresis {
-        if !(0.0..1.0).contains(&hysteresis) {
-            return Err(invalid_params(format!(
-                "hysteresis {hysteresis} 非法（须 ∈ [0,1)）"
-            )));
-        }
         settings.hysteresis = hysteresis;
     }
     Ok(json!({

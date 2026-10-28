@@ -180,11 +180,16 @@ fn main() {
     let vu = VU_LOG
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if vu.is_empty() {
+    if !validation_installed {
+        println!("  [SKIP] validation layer 未安装：上传功能性观察完成，但无 Vulkan 执法证据");
+    } else if vu.is_empty() {
         println!("  (零条——上传全链在验证层 + 同步验证下清净)");
     } else {
         for m in vu.iter() {
             println!("  {m}");
+        }
+        if validation_installed {
+            panic!("正向上传路径收到验证层消息 {} 条", vu.len());
         }
     }
     println!("\n结论口径:组 A=转换逐字节;组 B=上传闭环 + 票据 + 去重;组 C=维护迁移内容保持;");

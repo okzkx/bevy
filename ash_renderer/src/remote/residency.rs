@@ -130,6 +130,11 @@ struct ResidencySetParams {
 #[system]
 pub(crate) fn residency_set(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: ResidencySetParams = parse_params(params, "params 缺失：需要对象（各项可选）")?;
+    if let Some(radius) = p.request_radius
+        && (!radius.is_finite() || radius <= 0.0)
+    {
+        return Err(invalid_params(format!("request_radius {radius} 非法（须为有限正数）")));
+    }
     let mut settings = world.resource_mut::<ResidencySettings>();
     if let Some(enabled) = p.enabled {
         settings.enabled = enabled;
@@ -138,9 +143,6 @@ pub(crate) fn residency_set(In(params): In<Option<Value>>, world: &mut World) ->
         settings.budget_mesh_bytes = budget;
     }
     if let Some(radius) = p.request_radius {
-        if radius <= 0.0 || radius.is_nan() {
-            return Err(invalid_params(format!("request_radius {radius} 非法（须 > 0）")));
-        }
         settings.request_radius = radius;
     }
     if let Some(cooldown) = p.eject_cooldown_frames {

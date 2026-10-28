@@ -33,7 +33,30 @@ pub enum PresentOutcome {
     Suboptimal,
 }
 
-/// swapchain + 每张 image 的 view。重建 = wait_idle 后整体换新（`rebuild`）。
+struct SwapchainBuildGuard {
+    fns: swapchain::Device,
+    device: Device,
+    swapchain: vk::SwapchainKHR,
+    views: Vec<vk::ImageView>,
+    semaphores: Vec<vk::Semaphore>,
+}
+
+impl Drop for SwapchainBuildGuard {
+    fn drop(&mut self) {
+        unsafe {
+            for semaphore in self.semaphores.drain(..) {
+                self.device.destroy_semaphore(semaphore, None);
+            }
+            for view in self.views.drain(..) {
+                self.device.destroy_image_view(view, None);
+            }
+            if self.swapchain != vk::SwapchainKHR::null() {
+                self.fns.destroy_swapchain(self.swapchain, None);
+            }
+        }
+    }
+}
+
 #[derive(bevy::prelude::Resource)]
 pub struct Swapchain {
     fns: swapchain::Device,
@@ -174,70 +197,40 @@ impl Swapchain {
                 None,
             )
         }?;
-        // 建好之后取 images 若失败，swapchain 必须就地销毁——否则它一直占着 hwnd，
-        // 下一次重建必报 ERROR_NATIVE_WINDOW_IN_USE_KHR
-        let images = match unsafe { fns.get_swapchain_images(swapchain) } {
-            Ok(images) => images,
-            Err(e) => {
-                unsafe { fns.destroy_swapchain(swapchain, None) };
-                return Err(e.into());
-            }
+        let mut guard = SwapchainBuildGuard {
+            fns: fns.clone(),
+            device: ctx.device.clone(),
+            swapchain,
+            views: Vec::new(),
+            semaphores: Vec::new(),
         };
+        let images = unsafe { fns.get_swapchain_images(swapchain) }?;
+        guard.views.reserve(images.len());
+        for &image in &images {
+            guard.views.push(unsafe {
+                ctx.device.create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(view_format)
+                        .subresource_range(
+                            vk::ImageSubresourceRange::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .level_count(1)
+                                .layer_count(1),
+                        ),
+                    None,
+                )
+            }?);
+        }
 
-        // view：渲染（含清屏）吃 view 不吃裸 image；格式用 SRGB 别名（输出编码，
-        // 见上方定案注释）——生命周期与 swapchain 绑定。
-        // 半建失败全有或全无——views/semaphores 任一环失败,已建句柄
-        // 与 swapchain 本体就地回收,否则泄漏者占着 hwnd,重建恒报
-        // ERROR_NATIVE_WINDOW_IN_USE,渲染永久失效(对照 images 段同款纪律)
-        let views = match images
-            .iter()
-            .map(|&image| {
-                unsafe {
-                    ctx.device.create_image_view(
-                        &vk::ImageViewCreateInfo::default()
-                            .image(image)
-                            .view_type(vk::ImageViewType::TYPE_2D)
-                            .format(view_format)
-                            .subresource_range(
-                                vk::ImageSubresourceRange::default()
-                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                    .level_count(1)
-                                    .layer_count(1),
-                            ),
-                        None,
-                    )
-                }
-                .map_err(VulkanError::from)
-            })
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(views) => views,
-            Err(e) => {
-                unsafe { fns.destroy_swapchain(swapchain, None) };
-                return Err(e);
-            }
-        };
-
-        // 每张 image 一个 present-wait 信号量，数量与 image 集合一一对应，
-        // 不与帧槽数挂钩——两帧在飞对三张 image 的错峰复用由"同 image 重 acquire"
-        // 背书，不靠帧 fence 越权担保 present engine 的消费进度。
-        let render_finished = match images
-            .iter()
-            .map(|_| {
-                unsafe { ctx.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }
-                    .map_err(VulkanError::from)
-            })
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(sems) => sems,
-            Err(e) => {
-                for view in views {
-                    unsafe { ctx.device.destroy_image_view(view, None) };
-                }
-                unsafe { fns.destroy_swapchain(swapchain, None) };
-                return Err(e);
-            }
-        };
+        // Present-wait semaphore 按 image 分配，生命周期与 swapchain 一致。
+        guard.semaphores.reserve(images.len());
+        for _ in &images {
+            guard.semaphores.push(unsafe {
+                ctx.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+            }?);
+        }
 
         info!(
             "swapchain 就绪: {}x{}，{} images，底板 {:?} / 渲染 view {:?}，present={:?}，render_finished 按 image 配 {} 个",
@@ -247,9 +240,12 @@ impl Swapchain {
             surface_format.format,
             view_format,
             present_mode,
-            render_finished.len(),
+            guard.semaphores.len(),
         );
 
+        let views = std::mem::take(&mut guard.views);
+        let render_finished = std::mem::take(&mut guard.semaphores);
+        let swapchain = std::mem::replace(&mut guard.swapchain, vk::SwapchainKHR::null());
         Ok(Self {
             fns,
             device: ctx.device.clone(),

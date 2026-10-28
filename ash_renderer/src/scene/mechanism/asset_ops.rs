@@ -140,29 +140,38 @@ pub fn mutate_asset(
             Some(source_material.base_color_texture.clone())
         }
     };
-    let tint_target: Option<Handle<Image>> = match p.image_tint {
-        None => None,
-        Some(_) => {
-            let texture_handle = {
+    let tint_target: Option<Handle<Image>> = if p.image_tint.is_some() {
+        let texture_handle = match new_slot.as_ref() {
+            Some(Some(handle)) => handle.clone(),
+            Some(None) => {
+                return Err(AssetOpError::AssetMissing(
+                    "换槽请求清除了 base_color_texture,无处 tint",
+                ));
+            }
+            None => {
                 let assets = world
                     .get_resource::<Assets<StandardMaterial>>()
                     .ok_or(AssetOpError::AssetMissing("Assets<StandardMaterial> 容器缺席"))?;
-                let material = assets
+                assets
                     .get(&material_handle)
-                    .ok_or(AssetOpError::AssetMissing("StandardMaterial"))?;
-                material.base_color_texture.clone().ok_or(AssetOpError::AssetMissing(
-                    "该实体材质没有 base_color_texture,无处 tint",
-                ))?
-            };
-            let assets = world
-                .get_resource::<Assets<Image>>()
-                .ok_or(AssetOpError::AssetMissing("Assets<Image> 容器缺席"))?;
-            let image = assets
-                .get(&texture_handle)
-                .ok_or(AssetOpError::AssetMissing("Image"))?;
-            check_tint_rgba8(image)?;
-            Some(texture_handle)
-        }
+                    .ok_or(AssetOpError::AssetMissing("StandardMaterial"))?
+                    .base_color_texture
+                    .clone()
+                    .ok_or(AssetOpError::AssetMissing(
+                        "该实体材质没有 base_color_texture,无处 tint",
+                    ))?
+            }
+        };
+        let assets = world
+            .get_resource::<Assets<Image>>()
+            .ok_or(AssetOpError::AssetMissing("Assets<Image> 容器缺席"))?;
+        let image = assets
+            .get(&texture_handle)
+            .ok_or(AssetOpError::AssetMissing("Image"))?;
+        check_tint_rgba8(image)?;
+        Some(texture_handle)
+    } else {
+        None
     };
     if p.mesh_vertex_scale.is_some() {
         let assets =
@@ -294,8 +303,6 @@ fn tint_format_supported(format: TextureFormat) -> bool {
             | TextureFormat::Rgba8Snorm
             | TextureFormat::Rgba8Uint
             | TextureFormat::Rgba8Sint
-            | TextureFormat::Bgra8Unorm
-            | TextureFormat::Bgra8UnormSrgb
     )
 }
 
@@ -319,4 +326,18 @@ fn tint_rgba8(image: &mut Image, tint: [f32; 3]) -> Result<(), AssetOpError> {
         px[2] = (f32::from(px[2]) * tint[2]).clamp(0.0, 255.0) as u8;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tint_format_supported;
+    use wgpu_types::TextureFormat;
+
+    #[test]
+    fn tint_support_matches_rgba_byte_order() {
+        assert!(tint_format_supported(TextureFormat::Rgba8Unorm));
+        assert!(tint_format_supported(TextureFormat::Rgba8UnormSrgb));
+        assert!(!tint_format_supported(TextureFormat::Bgra8Unorm));
+        assert!(!tint_format_supported(TextureFormat::Bgra8UnormSrgb));
+    }
 }

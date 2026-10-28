@@ -79,6 +79,21 @@ def wait_settle(seconds=3.0):
     time.sleep(seconds)
 
 
+def wait_residency_state(predicate, seconds=90.0):
+    deadline = time.time() + seconds
+    last = None
+    while time.time() < deadline:
+        try:
+            last = read_stats()
+            inc = rpc("ash_renderer/increment_stats")
+            if predicate(last, inc):
+                return last, inc
+        except (KeyError, RuntimeError):
+            pass
+        time.sleep(1.0)
+    return last, rpc("ash_renderer/increment_stats")
+
+
 def launch_host():
     if not os.path.isfile(EXE):
         print(f"宿主二进制不存在：{EXE}\n先 cargo build 再跑本脚本。")
@@ -117,7 +132,7 @@ def iter_processes():
     import csv
     import io
     out = subprocess.run(
-        ["tasklist", "/FI", "IMAGENAME eq ash_renderer.exe", "/FO", "CSV", "/NH"],
+        ["tasklist", "/FI", f"IMAGENAME eq {HOST_NAME}", "/FO", "CSV", "/NH"],
         capture_output=True,
     ).stdout.decode("gbk", errors="replace")
     rows = []
@@ -140,8 +155,9 @@ SPACING = 14.0
 
 
 def build_scene():
-    """铺 4×4 独立资产阶梯网格，返回 (实体清单, 全量驻留需求估计的读数)。"""
+    """铺 4×4 独立资产阶梯网格，返回实体与该脚本创建的 mesh 身份。"""
     entities = []
+    mesh_ids = set()
     for gx in range(GRID):
         for gz in range(GRID):
             x = (gx - (GRID - 1) / 2) * SPACING
@@ -154,11 +170,12 @@ def build_scene():
                 "name": f"流送-阶梯-{gx}-{gz}",
             })
             entities.append(r["entity"])
+            mesh_ids.update(r["levels"])
     wait_settle(6.0)  # 每阶梯 4 资产上传 + 账本入行
     st = rpc("ash_renderer/residency_stats")
     print(f"  铺场 {len(entities)} 阶梯（独立资产），账本 {st['rows']} 行，"
           f"mesh 驻留 {st['used_mesh_bytes']}B（全常驻口径）")
-    return entities
+    return entities, mesh_ids
 
 
 def read_stats():
@@ -186,7 +203,7 @@ def main():
         sys.exit(1)
 
     print("\n== 场景重建（unique 阶梯网格 → 持久化脚本）==")
-    build_scene()
+    _, test_mesh_ids = build_scene()
     # 预算 = 全常驻实占的 1/3（读数现算，自适应规模）；半径覆盖 1.5 格
     full = read_stats()["used_mesh_bytes"]
     budget = max(full // 3, 200_000)
@@ -211,6 +228,7 @@ def main():
 
     print("\n== ② 可持续游历：四站环游 + 回访起点 ==")
     stations = [(-14, -14), (14, -14), (14, 14), (-14, 14), (-14, -14)]  # 末站=起点回访
+    start_meshes = None
     ok_tour = True
     for i, (x, z) in enumerate(stations):
         rpc("ash_renderer/set_camera", {"target": [x, 0.5, z], "radius": 8})
@@ -218,6 +236,12 @@ def main():
         st = read_stats()
         ds = rpc("ash_renderer/draw_stats")
         inc = rpc("ash_renderer/increment_stats")
+        if i == 0:
+            # 预算只够近环：半径边缘资产在淘汰/重请求间持续抖动，只有近环（远者先淘汰）稳定驻留
+            start_meshes = {
+                row["mesh"] for row in st["assets"]
+                if row["mesh"] in test_mesh_ids and row["resident"] and row["min_dist"] <= SPACING * 1.2
+            }
         print(f"  站 {i} @({x},{z}): used={st['used_mesh_bytes']} ejected={st['ejected_total']} "
               f"requested={st['requested']} cooling={st['cooling']} pending_rows={inc['upload']['dirty_rows']}")
         if st["used_mesh_bytes"] > st["budget_mesh_bytes"]:
@@ -225,10 +249,21 @@ def main():
         if ds.get("draw_calls_recorded", 1) > 1:
             ok_tour = False
     check("②a 游历全程 used ≤ budget 且 draw_calls 恒 ≤1", ok_tour)
-    # 回访起点：起点站资产应重新驻留（resident_meshes 不缩水 + 起点网格行可绘）
+    # 回访起点：按资产身份核对，而非全局驻留计数。超预算下驻留持续换入换出，
+    # 单帧快照不稳；回访窗口内每个起点资产至少驻留过一次 = 未被永久丢失。
     s_end = read_stats()
+    restored = set()
+    deadline = time.time() + 15.0
+    while time.time() < deadline and restored != start_meshes:
+        now = read_stats()
+        restored |= {row["mesh"] for row in now["assets"]
+                     if row["mesh"] in (start_meshes or ()) and row["resident"]}
+        time.sleep(0.5)
     check("②b 回访后仍在预算内", s_end["used_mesh_bytes"] <= s_end["budget_mesh_bytes"],
           f"used={s_end['used_mesh_bytes']}")
+    check("②c 回访窗口内起点近环资产全部重新驻留",
+          bool(start_meshes) and restored == start_meshes,
+          f"起点资产={len(start_meshes or ())} 恢复={len(restored)}")
 
     print("\n== ③ 发布语义（未驻留行暂缓 = 无幽灵）==")
     inc = rpc("ash_renderer/increment_stats")
@@ -239,21 +274,31 @@ def main():
           ds.get("command_count", 0) <= inc["rows"])
 
     print("\n== ④ A/B：关 = 全常驻基线 ==")
+    s_before_off = read_stats()
     rpc("ash_renderer/residency_set", {"enabled": False})
-    wait_settle(5.0)
-    s_off = read_stats()
-    print(f"  关：used={s_off['used_mesh_bytes']} ejected={s_off['ejected_total']} "
-          f"resident={s_off['resident_meshes']}")
+    s_off, inc_off = wait_residency_state(
+        lambda stats, inc: not stats["enabled"]
+        and inc["upload"]["dirty_rows"] == 0
+        and stats["used_mesh_bytes"] >= full,
+        seconds=120.0,
+    )
+    print(f"  关：enabled={s_off['enabled']} used={s_off['used_mesh_bytes']} ejected={s_off['ejected_total']} "
+          f"resident={s_off['resident_meshes']} dirty={inc_off['upload']['dirty_rows']}")
     # ejected 容差 = 关生效前的在途请求消化（②末 pending 行完成可能短暂触顶淘汰，
     # BRP 写值次帧生效——容差上限 = 场景资产数口径）
     check("④ 关后全常驻（used 回到全量口径、ejected 增量在在途容差内）",
           s_off["used_mesh_bytes"] >= full
-          and s_off["ejected_total"] - s_end["ejected_total"] < 64)
+          and s_off["ejected_total"] - s_before_off["ejected_total"] < 64,
+          f"used={s_off['used_mesh_bytes']}/{full} ejected 增量={s_off['ejected_total'] - s_before_off['ejected_total']}")
     rpc("ash_renderer/residency_set", {"enabled": True})
-    wait_settle(5.0)
-    s_on = read_stats()
-    check("④b 开 = 收敛回预算", s_on["used_mesh_bytes"] <= s_on["budget_mesh_bytes"],
-          f"used={s_on['used_mesh_bytes']}")
+    s_on, _ = wait_residency_state(
+        lambda stats, inc: stats["enabled"]
+        and stats["used_mesh_bytes"] <= stats["budget_mesh_bytes"]
+        and inc["upload"]["dirty_rows"] == 0,
+        seconds=120.0,
+    )
+    check("④b 开 = 收敛回预算", s_on["enabled"] and s_on["used_mesh_bytes"] <= s_on["budget_mesh_bytes"],
+          f"enabled={s_on['enabled']} used={s_on['used_mesh_bytes']}")
 
     print("\n== ⑤ 零 VUID（仅脚本自启的宿主有日志可查）==")
     if host_pid is not None:

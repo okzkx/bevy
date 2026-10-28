@@ -16,8 +16,8 @@
 // 对应的 Rust 侧 HizPyramid 内）：b0 = 源采样视图（texture_2d<f32>，textureLoad
 // 不需要采样器），b1 = 目标 storage 视图（r32float，write）。
 //
-// 并发语义：每 invocation 写互不重叠的 dst 像素；边缘越界坐标 clamp 后重复
-// 取样（MIN 下重复值不改变结果，保守无损）。
+// 并发语义：每 invocation 写互不重叠的 dst 像素；奇数尺寸尾行/尾列并入
+// 最后一格归约范围，所有源像素都有归属。
 
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var dst: texture_storage_2d<r32float, write>;
@@ -28,19 +28,18 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= dims.x || gid.y >= dims.y) {
         return;
     }
-    // 源尺寸 = 目标 ×2（奇数源最后一线取 clamp 重复；textureLoad 越界读在
-    // Vulkan 返回 0——reverse-Z 下 0 = 最远，混进来会把 tile 假装成"更远"，
-    // 后果是多画（保守方向），但为读数诚实仍显式 clamp）
-    let src_dims = dims * 2u;
-    let x0 = min(gid.x * 2u + 0u, src_dims.x - 1u);
-    let x1 = min(gid.x * 2u + 1u, src_dims.x - 1u);
-    let y0 = min(gid.y * 2u + 0u, src_dims.y - 1u);
-    let y1 = min(gid.y * 2u + 1u, src_dims.y - 1u);
-    let a = textureLoad(src, vec2<u32>(x0, y0), 0).x;
-    let b = textureLoad(src, vec2<u32>(x1, y0), 0).x;
-    let c = textureLoad(src, vec2<u32>(x0, y1), 0).x;
-    let d = textureLoad(src, vec2<u32>(x1, y1), 0).x;
+    let src_dims = vec2<u32>(textureDimensions(src));
+    let start = gid.xy * 2u;
+    // mip 尺寸向下取整时，奇数源图会留下尾行/尾列；并入最后一个目标
+    // texel，保证所有源深度都参与 MIN 归约。
+    let end_x = select(min(start.x + 2u, src_dims.x), src_dims.x, gid.x + 1u == dims.x);
+    let end_y = select(min(start.y + 2u, src_dims.y), src_dims.y, gid.y + 1u == dims.y);
+    var m = 1.0;
+    for (var y = start.y; y < end_y; y += 1u) {
+        for (var x = start.x; x < end_x; x += 1u) {
+            m = min(m, textureLoad(src, vec2<u32>(x, y), 0).x);
+        }
+    }
     // MIN = reverse-Z 的保守遮挡上界（见模块头注；hiz.rs 单测同源钉方向）
-    let m = min(min(a, b), min(c, d));
     textureStore(dst, gid.xy, vec4<f32>(m, 0.0, 0.0, 0.0));
 }
