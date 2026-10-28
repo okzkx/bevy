@@ -20,11 +20,11 @@ use crate::common::error::Result;
 use crate::render::core::device::memory::{BufferRole, GpuBuffer};
 use crate::render::{Context, HDR_FORMAT, MAX_FRAMES_IN_FLIGHT};
 
-use crate::render::core::kit::fullscreen_pipeline::FullscreenPipeline;
-use crate::render::core::kit::color_target::ColorTarget;
-use crate::render::core::kit::pipeline_layout::PipelineDesc;
-use crate::render::core::kit::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
-use crate::render::core::kit::shader_abi;
+use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
+use crate::render::core::target::color::ColorTarget;
+use crate::render::core::binding::pipeline_layout::PipelineDesc;
+use crate::render::core::binding::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::shader_abi;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET;
 
 /// 降/升采样级数（半分辨率逐级）。

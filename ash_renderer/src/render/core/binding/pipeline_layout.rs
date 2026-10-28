@@ -13,7 +13,6 @@ use ash::{vk, Device};
 
 use crate::common::error::{Result, VulkanError};
 
-use super::compute_pipeline::create_shader_module;
 use super::set_layout::{SetLayoutDesc, SetLayouts};
 use super::shader_abi::{ArrayShape, Shader};
 
@@ -138,7 +137,7 @@ impl PipelineDesc {
         assemble: impl FnOnce(vk::PipelineLayout, &[vk::PipelineShaderStageCreateInfo<'static>]) -> Result<T>,
     ) -> Result<T> {
         let layout = self.create_layout(device, layouts)?;
-        let result = create_shader_module(device, self.shader.spv).and_then(|module| {
+        let result = self.shader.create_module(device).and_then(|module| {
             let stages: Vec<_> = self
                 .entries
                 .iter()

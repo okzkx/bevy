@@ -3,10 +3,10 @@
 use ash::vk;
 
 use crate::common::error::Result;
-use crate::render::core::kit::fullscreen_pipeline::FullscreenPipeline;
-use crate::render::core::kit::pipeline_layout::PipelineDesc;
-use crate::render::core::kit::set_layout::SetLayouts;
-use crate::render::core::kit::shader_abi;
+use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
+use crate::render::core::binding::pipeline_layout::PipelineDesc;
+use crate::render::core::binding::set_layout::SetLayouts;
+use crate::render::core::binding::shader_abi;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET;
 use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET;
 use crate::render::passes::shadow::shadow_map::SHADOW_SET;

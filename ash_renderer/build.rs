@@ -183,7 +183,7 @@ fn compile(source: &str, expanded: &Path, stem: &str) -> (Vec<u32>, String) {
 }
 
 /// 生成一个 `Shader` 静态项的 Rust 源码（落 `OUT_DIR/shader_abi.rs`，由
-/// `src/render/core/kit/shader_abi.rs` include）：spv 字节 + 每个入口实际用到的
+/// `src/render/core/binding/shader_abi.rs` include）：spv 字节 + 每个入口实际用到的
 /// `(set, binding, 描述符种类, 数组形状)` 与 immediate（push）字节数。
 /// 只列入口真正读写/查询过的全局量——声明了没用的 binding 不进表，管线布局
 /// 对它没有义务。

@@ -11,7 +11,7 @@
 //!   present 已被 present engine 消费完——这是帧 fence 给不了的保证（fence 只证提交
 //!   完成，不证 present engine 的消费进度；依据 Khronos Vulkan Guide "Swapchain
 //!   semaphore reuse"；同一队列上提交有序，下一次 signal 排在前一个 present 消费之后）。
-//! - **深度附件按帧槽分配**：数量 = MAX_FRAMES_IN_FLIGHT，本体在 [`crate::render::core::kit::depth_target`]。
+//! - **深度附件按帧槽分配**：数量 = MAX_FRAMES_IN_FLIGHT，本体在 [`crate::render::core::target::depth`]。
 //!   两份同步证据：① 在飞的两帧各用各的槽位深度，并发写
 //!   不可能撞同一张图；② 同槽深度的两次使用之间隔着 `wait_for_slot` 的 fence
 //!   等待（录制前 CPU 已确认上一轮提交完成）——不把"归帧级"当无冲突证明，冲突
@@ -24,7 +24,7 @@ use ash::{vk, Device};
 use bevy::log::info;
 
 use crate::common::error::Result;
-use crate::render::core::kit::depth_target::DepthTarget;
+use crate::render::core::target::depth::DepthTarget;
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
 

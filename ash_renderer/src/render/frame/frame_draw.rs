@@ -19,11 +19,11 @@ use ash::vk;
 
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
-use crate::render::core::kit::barrier::{image_barrier, image_barrier_with_memory, ImageBarrier};
-use crate::render::core::kit::fullscreen_pipeline::{
+use crate::render::core::record::barrier::{image_barrier, image_barrier_with_memory, ImageBarrier};
+use crate::render::core::record::fullscreen::{
     record_fullscreen, record_fullscreen_open, record_fullscreen_sampled, FullscreenPass,
 };
-use crate::render::core::kit::pipeline_handle::{
+use crate::render::core::record::graphics::{
     bind_graphics, bind_vertex_index, full_rect, set_viewport, set_viewport_scissor,
 };
 use crate::render::passes::visibility::cull::CullDraw;

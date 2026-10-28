@@ -5,7 +5,7 @@
 //! 写/shadow draw 读）。
 //!
 //! 深度图 = [`DepthTarget`] ×4（D32_SFLOAT，DEPTH+SAMPLED 用途，reverse-Z
-//! clear 0——与主深度链同向，[`crate::render::core::kit::depth_target`] 模块注释的成套纪律）；固定
+//! clear 0——与主深度链同向，[`crate::render::core::target::depth`] 模块注释的成套纪律）；固定
 //! [`SHADOW_MAP_SIZE`]² 不随 swapchain resize 重建（级联覆盖面与屏幕分辨率
 //! 无关，resize 判定线由此免受影响）。
 //!
@@ -20,11 +20,11 @@ use crate::render::core::device::memory::{BufferRole, GpuBuffer};
 use crate::render::passes::shadow::cascades::{SHADOW_CASCADES, SHADOW_MAP_SIZE, SHADOW_UBO_SIZE};
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
-use crate::render::core::kit::depth_target::DepthTarget;
-use crate::render::core::kit::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
-use crate::render::core::kit::pipeline_layout::{PipelineDesc, PushRange};
-use crate::render::core::kit::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
-use crate::render::core::kit::shader_abi;
+use crate::render::core::target::depth::DepthTarget;
+use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::shader_abi;
 use crate::render::resident::instance_table::INSTANCE_SET;
 
 pub const SHADOW_BINDING_UNIFORM: u32 = 0;
@@ -417,7 +417,7 @@ impl ShadowPipeline {
         // dynamic rendering：无色附件、深度 D32（VUID-08914 声明面 = 实例
         // 附件全集——shadow 实例只有深度）
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-            .depth_attachment_format(crate::render::core::kit::depth_target::DEPTH_FORMAT);
+            .depth_attachment_format(crate::render::core::target::depth::DEPTH_FORMAT);
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)
             .vertex_input_state(&vertex_input)

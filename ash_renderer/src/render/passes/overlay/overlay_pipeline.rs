@@ -30,10 +30,10 @@ use crate::common::error::Result;
 
 use crate::render::Context;
 
-use crate::render::core::kit::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
-use crate::render::core::kit::pipeline_layout::{PipelineDesc, PushRange};
-use crate::render::core::kit::set_layout::{stages, SetLayouts};
-use crate::render::core::kit::shader_abi;
+use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::binding::set_layout::{stages, SetLayouts};
+use crate::render::core::binding::shader_abi;
 use crate::render::resident::descriptors::BINDLESS_SET;
 
 /// push 范围覆盖全 16B、双阶段：screen_size 在 vertex 用，槽位在 fragment 用。

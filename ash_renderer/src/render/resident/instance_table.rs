@@ -48,7 +48,7 @@ use crate::common::bytes::{put_f32s, put_mat4, put_u32, put_u32s, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
 use crate::render::core::device::memory::{align_up, BufferRole, GpuBuffer, MemoryContract};
-use crate::render::core::kit::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc};
+use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
 /// 对象表容量（实例槽数）。覆盖 10 万实例压测档（131072 ≥ 100000）；

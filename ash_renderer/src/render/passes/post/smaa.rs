@@ -22,11 +22,11 @@ use crate::render::core::device::memory::{BufferRole, GpuBuffer};
 use crate::render::resident::images::GpuImage;
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
-use crate::render::core::kit::color_target::ColorTarget;
-use crate::render::core::kit::fullscreen_pipeline::FullscreenPipeline;
-use crate::render::core::kit::pipeline_layout::PipelineDesc;
-use crate::render::core::kit::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
-use crate::render::core::kit::shader_abi;
+use crate::render::core::target::color::ColorTarget;
+use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
+use crate::render::core::binding::pipeline_layout::PipelineDesc;
+use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::shader_abi;
 
 const SMAA_AREA_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_area_lut.png");
 const SMAA_SEARCH_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_search_lut.png");

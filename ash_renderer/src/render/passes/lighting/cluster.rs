@@ -11,14 +11,15 @@ use bevy::prelude::Resource;
 
 use crate::common::bytes::{put_f32, put_mat4, put_u32};
 use crate::common::error::{Result, VulkanError};
-use crate::render::core::kit::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
+use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::device::memory::{BufferRole, GpuBuffer};
 use crate::render::LightRecord;
 use crate::render::Context;
-use crate::render::core::kit::pipeline_layout::PipelineDesc;
-use crate::render::core::kit::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
-use crate::render::core::kit::shader_abi;
-use crate::render::core::kit::storage_sets;
+use crate::render::core::binding::pipeline_layout::PipelineDesc;
+use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::shader_abi;
+use crate::render::core::binding::storage_sets;
 
 const CS_FS: vk::ShaderStageFlags = stages(&[vk::ShaderStageFlags::COMPUTE, vk::ShaderStageFlags::FRAGMENT]);
 

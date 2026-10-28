@@ -11,7 +11,7 @@
 //! | 1 | normal | R16G16B16A16_SFLOAT | 世界空间法线 xyz 直存（w 未用；编码取舍见施工记录） |
 //! | 2 | motion vectors | ——（不分配） | 留位：槽位号保留 |
 //! | 3 | matparam | R8G8B8A8_UNORM | 材质标量（8.2.1）：r=metallic / g=AO / b=perceptualRoughness / a=reflectance（8.2.3 转正）——光照累积的 PBR 入参 |
-//! | — | depth | D32_SFLOAT | reverse-Z 深度（本体按帧槽在 [`crate::render::core::kit::depth_target`]） |
+//! | — | depth | D32_SFLOAT | reverse-Z 深度（本体按帧槽在 [`crate::render::core::target::depth`]） |
 //!
 //! **HDR 中间目标 hdr**（R16G16B16A16_SFLOAT）：合成（G-buffer 光照）与透明
 //! forward 层的落色面——HDR 契约留位一次到位（8.4 正式启用 Bloom/ToneMapping）；
@@ -28,8 +28,8 @@ use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
 use crate::render::Context;
-use crate::render::core::kit::color_target::{ColorTarget, HDR_FORMAT};
-use crate::render::core::kit::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc};
+use crate::render::core::target::color::{ColorTarget, HDR_FORMAT};
+use crate::render::core::binding::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc};
 
 /// albedo 附件格式（线性 8bit——G-buffer 存采样端已解码的线性反照率，
 /// 编码恰好一次判定线不受影响：SRGB 编码仍只在最终 ROP 写出发生一次）。

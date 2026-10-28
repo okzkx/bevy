@@ -7,10 +7,11 @@ use bevy::log::info;
 
 use crate::common::bytes::put_u32;
 use crate::common::error::Result;
-use crate::render::core::kit::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
-use crate::render::core::kit::pipeline_layout::{PipelineDesc, PushRange};
-use crate::render::core::kit::set_layout::SetLayouts;
-use crate::render::core::kit::shader_abi;
+use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::record::compute::{ComputeHandles, Handoff};
+use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::binding::set_layout::SetLayouts;
+use crate::render::core::binding::shader_abi;
 use crate::render::passes::shadow::shadow_map::SHADOW_SET;
 use crate::render::resident::instance_table::INSTANCE_SET;
 use crate::render::Context;

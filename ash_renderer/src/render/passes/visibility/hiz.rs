@@ -31,10 +31,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::common::error::{Result, VulkanError};
 
 use crate::render::resident::images::full_mip_chain;
-use crate::render::core::kit::compute_pipeline::ComputePipeline;
-use crate::render::core::kit::pipeline_layout::PipelineDesc;
-use crate::render::core::kit::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
-use crate::render::core::kit::shader_abi;
+use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::binding::pipeline_layout::PipelineDesc;
+use crate::render::core::binding::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::shader_abi;
 use crate::render::core::device::readback::OneShotReadback;
 use crate::render::Context;
 

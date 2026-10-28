@@ -4,9 +4,10 @@
 //!
 //! 表里只有入口真正用到的全局量：声明了却没被入口读写的 binding 不出现。
 
-use ash::vk;
+use ash::{vk, Device};
 
 use super::set_layout::DescKind;
+use crate::common::error::{Result, VulkanError};
 
 /// shader 侧的数组形状。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +48,17 @@ pub(crate) struct Shader {
 impl Shader {
     pub(crate) fn entry(&self, name: &str) -> Option<&EntryAbi> {
         self.entries.iter().find(|e| e.name == name)
+    }
+
+    /// 建 shader module（调用方负责销毁）。字节按小端 4B 一字重组：`include_bytes!`
+    /// 不保证 u32 对齐，不能直接转型。
+    ///
+    /// # Errors
+    /// `vkCreateShaderModule` 失败。
+    pub(crate) fn create_module(&self, device: &Device) -> Result<vk::ShaderModule> {
+        let words: Vec<u32> = self.spv.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
+        unsafe { device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None) }
+            .map_err(VulkanError::from)
     }
 }
 
