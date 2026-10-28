@@ -531,11 +531,14 @@ impl FramePool {
                         collect,
                     );
                 }
-                // bitonic 排序链（collect 与 gather 之间；prev 透明计数 0 的让路帧
-                // None——未排序尾部反向读取仍覆盖全部真实行）
-                if let Some(sort) = &t.sort {
-                    crate::render::pipeline::cluster::record_transparent_sort(device, cb, t.cluster_set, sort);
-                }
+                // bitonic 排序链（collect 与 gather 之间）：固定容量数组每个非空帧
+                // 都重排，确保本帧新增长的透明行不会从未排序尾部进入 gather。
+                crate::render::pipeline::cluster::record_transparent_sort(
+                    device,
+                    cb,
+                    t.cluster_set,
+                    &t.sort,
+                );
                 if let Some(gather) = &t.gather {
                     crate::render::pipeline::cluster::record_transparent_gather(
                         device,

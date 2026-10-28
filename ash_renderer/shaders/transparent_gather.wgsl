@@ -32,8 +32,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if i >= push.count || i >= count {
         return;
     }
-    // 升序数组尾部反向取（最远先画；未排帧仍覆盖全部真实行）
-    let slot = t_index_list[count - 1u - i];
+    // 固定容量全排序后，-inf padding 位于前缀，真实键在尾部；从数组末端反向
+    // 读取 count 个真实行（最远先画）。
+    let slot = t_index_list[TRANSPARENT_CAPACITY - 1u - i];
     let rec = objects[slot];
     let pins = pick_lod_entry(rec, slot, min(lod_levels[slot], MAX_LOD_LEVELS - 1u));
     let visible = marks[slot];

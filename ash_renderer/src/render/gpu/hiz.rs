@@ -46,9 +46,41 @@ pub(crate) const HIZ_FORMAT: vk::Format = vk::Format::R32_SFLOAT;
 
 // ===== 纯函数三件（判定线 3 的 CPU 参照与单测本体；occlusion.wgsl 注释同源）=====
 
-/// reverse-Z 2×2 tile 归约：取 MIN。**方向钉死**：本仓深度 reverse-Z
-///（近=1、远=0），值越小 = 越远；tile 的保守遮挡上界 = tile 内最远的已缓冲
-/// 表面 = 值最小者。正向 Z 的同类归约取 MAX——方向相反，取错 = 系统性错杀。
+/// 一个 mip 目标像素覆盖的源像素范围。奇数源尺寸向下减半时，最后的目标
+/// 像素吸收末尾多出的一行/列，范围右端不包含。
+#[cfg(test)]
+fn reduction_source_range(dst: u32, src_size: u32, dst_size: u32) -> std::ops::Range<u32> {
+    let start = dst * 2;
+    let end = if dst + 1 == dst_size {
+        src_size
+    } else {
+        (start + 2).min(src_size)
+    };
+    start..end
+}
+
+#[cfg(test)]
+fn reduce_mip_level(source: &[f32], src_dims: [u32; 2], dst_dims: [u32; 2]) -> Vec<f32> {
+    let mut output = vec![1.0; (dst_dims[0] * dst_dims[1]) as usize];
+    for y in 0..dst_dims[1] {
+        for x in 0..dst_dims[0] {
+            let xr = reduction_source_range(x, src_dims[0], dst_dims[0]);
+            let yr = reduction_source_range(y, src_dims[1], dst_dims[1]);
+            let mut minimum = 1.0_f32;
+            for sy in yr {
+                for sx in xr.clone() {
+                    minimum = minimum.min(source[(sy * src_dims[0] + sx) as usize]);
+                }
+            }
+            output[(y * dst_dims[0] + x) as usize] = minimum;
+        }
+    }
+    output
+}
+
+/// reverse-Z tile 归约：覆盖对应源区间并取 MIN。**方向钉死**：本仓深度
+/// reverse-Z（近=1、远=0），值越小 = 越远；tile 的保守遮挡上界 = tile 内
+/// 最远的已缓冲表面 = 值最小者。正向 Z 的同类归约取 MAX，方向相反。
 #[must_use]
 pub fn reduce_tile_reverse_z(a: f32, b: f32, c: f32, d: f32) -> f32 {
     a.min(b).min(c).min(d)
@@ -919,7 +951,10 @@ unsafe fn create_bound_memory(ctx: &Context, image: vk::Image) -> Result<vk::Dev
 
 #[cfg(test)]
 mod tests {
-    use super::{occluded_reverse_z, occlusion_mip_level, reduce_tile_reverse_z};
+    use super::{
+        occluded_reverse_z, occlusion_mip_level, reduce_mip_level, reduce_tile_reverse_z,
+        reduction_source_range,
+    };
 
     /// **reverse-Z 归约极值方向（判定线 3，最危险单点）**：tile 内 2×2 深度
     /// 值 {0.2, 0.9, 0.5, 0.3} 的保守遮挡上界 = MIN = 0.2（值小 = 远——
@@ -931,6 +966,34 @@ mod tests {
         assert_eq!(tile, 0.2, "tile 保守遮挡上界 = 最远表面 = 值最小者");
         // 全背景 tile（clear 0 = 远平面）→ 上界 0
         assert_eq!(reduce_tile_reverse_z(0.0, 0.0, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn odd_mip_reduction_covers_every_source_texel() {
+        for src_dims in [[225, 225], [400, 225], [25, 14], [3, 1], [1, 1], [2, 1]] {
+            let dst_dims = [(src_dims[0] / 2).max(1), (src_dims[1] / 2).max(1)];
+            let source: Vec<f32> = (0..src_dims[0] * src_dims[1])
+                .map(|i| (i % 251) as f32 / 251.0)
+                .collect();
+            let actual = reduce_mip_level(&source, src_dims, dst_dims);
+            let mut covered = vec![false; source.len()];
+            for y in 0..dst_dims[1] {
+                for x in 0..dst_dims[0] {
+                    let xr = reduction_source_range(x, src_dims[0], dst_dims[0]);
+                    let yr = reduction_source_range(y, src_dims[1], dst_dims[1]);
+                    let mut expected = 1.0_f32;
+                    for sy in yr {
+                        for sx in xr.clone() {
+                            let index = (sy * src_dims[0] + sx) as usize;
+                            covered[index] = true;
+                            expected = expected.min(source[index]);
+                        }
+                    }
+                    assert_eq!(actual[(y * dst_dims[0] + x) as usize], expected);
+                }
+            }
+            assert!(covered.into_iter().all(|covered| covered), "{src_dims:?}");
+        }
     }
 
     /// **遮挡判定保守性（判定线 3）**：物体最近角点深度值 vs tile 上界的
