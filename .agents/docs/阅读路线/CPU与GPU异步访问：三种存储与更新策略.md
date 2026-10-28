@@ -79,7 +79,7 @@
 ## 源码与关联阅读
 
 - [第 1 站：入口与初始化链](第1站：入口与初始化链.md#四lighttable-为什么每帧槽一份)：最初提出三种做法的阅读笔记；本文为详细机制正本。
-- `ash_renderer/src/render/assets/instance_table.rs`：对象表单 buffer、每槽描述符与旧槽 graveyard；`ash_renderer/src/driver/upload.rs`：换槽、staging 上传与回收节拍；`ash_renderer/src/render/assets/uploader.rs`：上传票据。
-- `ash_renderer/src/render/shading/light_table.rs`：光源双份环与脏行写次数；`ash_renderer/src/scene/mechanism/ledger.rs`：模型/LOD 各槽脏账；`ash_renderer/src/driver/host/drawlist.rs`：材质环全写。
-- `ash_renderer/src/driver/host/frame.rs` 与 `ash_renderer/src/render/pipeline/frames.rs`：当前帧槽等待、写环与提交；`ash_renderer/src/render/core/resources.rs`：HOST_VISIBLE、coherent 偏好及非 coherent flush/invalidate。
+- `ash_renderer/src/render/resident/instance_table.rs`：对象表单 buffer、每槽描述符与旧槽 graveyard；`ash_renderer/src/driver/upload.rs`：换槽、staging 上传与回收节拍；`ash_renderer/src/render/resident/uploader.rs`：上传票据。
+- `ash_renderer/src/render/resident/light_table.rs`：光源双份环与脏行写次数；`ash_renderer/src/scene/mechanism/ledger.rs`：模型/LOD 各槽脏账；`ash_renderer/src/driver/host/drawlist.rs`：材质环全写。
+- `ash_renderer/src/driver/host/frame.rs`、`ash_renderer/src/render/frame/frame_pool.rs` 与 `ash_renderer/src/render/frame/frame_draw.rs`：当前帧槽等待、写环与提交；`ash_renderer/src/render/core/resources.rs`：HOST_VISIBLE、coherent 偏好及非 coherent flush/invalidate。
 - `ash_renderer/src/render/core/swapchain.rs`：冷路径排空、重建与 WSI 边界。本文只描述代码现状，不以文字代替 Vulkan 验证层及运行测试。
