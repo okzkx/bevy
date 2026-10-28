@@ -143,6 +143,7 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 > │   ├── 错误处理体系：两Tier思想与优雅退出.md   ← 宪法篇
 > │   ├── 错误处理语法糖：frenderer syntax与ash_renderer移植.md  ← 工具篇
 > │   └── 代码结构优化：统一错误通道定案.md  ← 设计定案篇（官方通道统一 Tier② 裁决，壳+body 退役；施工中）
+> ├── 阅读路线/                    ← ash_renderer 代码阅读路线（总览篇 + 分站笔记 + 优化候选计划 + README 面板）
 > ├── 笔记/                        ← 跨步骤专题笔记（方法论/工具层/侦察）
 > │   ├── 写文档纪律：帧流程三轮返工的教训.md     ← 方法论篇
 > │   ├── 开发工具与语法笔记.md        ← 工具层知识
@@ -230,6 +231,7 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 - `笔记/引擎/为什么引擎没有都上 GPU 驱动：CPU 镜像、回读墙与收益边界.md`（**知识篇**（2026-10-15，由"为什么现代引擎不都采用 GDR"之问沉淀，5.2 开工前）：GDR 只买走"逐对象发现—剔除—装配—提交"循环的决策权；留下三件管不了——**权威场景状态必须住 CPU**（GPU 显存形状错位，常驻表=单向投影，4.1 增量底座是比 API 门槛更贵的工程量门槛）、**回读墙**（结论晚 1~2 帧+节拍耦合，"不回读可见集"红线的机制内容，诊断性读数=读数不投票）、**透明排序难题不随 GDR 消失**（per-object 排序粒度两边一样粗、精确解是 OIT，Nanite 只吃不透明还有 vis-buffer 与 blend 语义冲突这一层）；**收益判据=GDR 省"每对象×每帧"、还"一次性建永久在册"的常驻纪律**，对象数不到量级是负优化；行业形态=分层混合非二选一（Unity GPU Resident Drawer 是 opt-in、UE proxy 每帧 upload 没做常驻）；与上游知识库《GPU-Driven Rendering》§8 分工——那边讲门槛、这边讲架构；文末自测四问照第一课体例）
 - `笔记/引擎/渲染管线模式与 VisBuffer：GDR 的着色层搭档.md`（**知识篇**（2026-10-15，由"GPU-driven 用什么管线模式 / vis-buffer 是什么 / 与 G-buffer 什么关系"三轮问答沉淀，上条的姊妹篇——那边讲决策与提交层、这边讲着色层）：**GDR 与 forward/deferred 正交**（决策提交层关心对象数、着色数据组织层关心光源数/材质带宽，组合谱系 deferred（Nanite/Frostbite/Ubisoft）与 forward+（id Tech/COD）都有）；与 GDR 真正绑定的两件=不透明主通道（半透明独立 forward，与 deferred 同构）+ vis-buffer/deferred material；**vis-buffer=G-buffer 同一岗位的另一种格式**（存三角形 ID+重心坐标的"取货单"，~8B/px 对 40+B/px；resolve 回表现场插值=5.1"递索引不递数据"在像素层重放），二选一不并存、"G-buffer 由 vis-buffer 生成"只是 UE5 链式融合特例（纯派 id Tech/Frostbite 没有 G-buffer）；存在前提相反判据（能算属性→G-buffer 终态 / 微三角形或带宽压力→vis-buffer）；本项目落点=单 pass forward，两级升级路径（forward+ / vis-buffer）已登记外置拓展条目 5，信号判据="三角形 ID 表 + 全屏 resolve 消费"出现）
 - [3-静态取数链路/](3-静态取数链路/README.md)（M2：**3.1～3.5 全段收官（2026-09-29）**——3.5 光照与同屏对照落地：每帧 UBO 128B 灯光/相机、材质三模式、官方 bevy_render 独立进程并排对照分项通过，全程零 VUID；步骤 4 解禁）
+- [阅读路线/](阅读路线/README.md)（**ash_renderer 代码阅读路线**（2026-10-27 立）：沿一帧数据九站边看边学边校验——总览篇定顺序与各站对象类别，分站笔记沉淀讲解结论（第 1 站含资源对象五类分类表），另有可追加的优化候选计划（Cluster 职责拆分／管线资源布局声明，未施工）；目录文档登记不等于授权改代码）
 - [已实现缺陷与修复验收](3-静态取数链路/3.2-buffer侧上传/已实现缺陷与修复验收.md)（2026-09-23 代码复核：生产同步缺陷、timeline 探针有效性、证据等级与修复验收；仅文档，不宣称代码已修）
 
 上游知识库（`C:\Users\zengkaixiang\.agents\docs\游戏制作\游戏引擎\渲染\渲染管线\`，绝对路径引用）：

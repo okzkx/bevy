@@ -1,0 +1,39 @@
+# ash_renderer 九站阅读路线：边看边学边校验
+
+本文登记 2026-10-27 定下的 ash_renderer 全库阅读顺序：沿一帧数据的生命周期分九站走，逐站按"讲意图与原理 + 随时提问质疑"的方式完成边看边学边校验。本文只管阅读顺序与各站校验要点，不主张任何代码改动；路上发现的问题按性质回填对应步骤或《待修复清单》，不在本路线内施工。
+
+## 为什么是这个顺序
+
+- **沿一帧数据走**：开机 → 地基 → 节拍 → 标准件 → 资产上场 → GPU 骨架 → 管线装备 → 场景账本 → 帧录制。一帧数据怎么流，阅读顺序就怎么排。
+- **顺依赖方向**：common → render → scene → {overlay∥remote} → driver（步骤 7~8 质量复盘无环化后的分层）。顺着读，每站引用到的"前方内容"都还没读到的困惑最少。
+- **覆盖学习主线三核心**：bindless（第 5 站）、GPU-driven（第 6 站）、大世界流送（第 8 站），正好对应《学习目标实现步骤》的主线。
+
+## 九站表
+
+"对象类别"列用的是第 1 站笔记里的五类划分（①设备根 ②帧级执行件 ③常驻数据表 ④渲染目标 ⑤管线），标出每站主讲哪类 Vulkan 资源对象；逐个对象的归属见《[第1站：入口与初始化链](第1站：入口与初始化链.md)》。
+
+| 站 | 落点 | 规模（行） | 对象类别 | 主题与校验要点 |
+|---|---|---|---|---|
+| 1 | `main.rs` + `driver/host/init.rs` + `driver/host/mod.rs` | ~540 | 五类总览（创建方） | 入口与插件装配。看清渲染器以 Bevy 为宿主的插件拓扑；init 只当目录和依赖图读，不钻构造函数。量小热身。 |
+| 2 | `render/context.rs` | 558 | ① Context | instance/device/queue 创建与 Vulkan 特性开关。全库一切 Vulkan 调用的地基；"支持/启用/使用三件事"纪律的主战场。 |
+| 3 | `render/swapchain.rs` + `render/frame_sync_settings.rs` | ~550 | ① Swapchain + ② | present 模式、帧槽、UNORM+SRGB view 三件套。看懂"一帧占一槽、fence 管执行序"的节拍——后面所有跨帧问题都挂在这个模型上。 |
+| 4 | `render/cmd.rs` | 260 | 不持有资源 | 屏障与全屏 pass 标准件。体量最小杠杆最大：复盘里十几处屏障修复全按这里的约定改写；先吃透，后面读任何 pass 都能顺手校验屏障对不对。 |
+| 5 | `render/assets/`（descriptors、pool、instance_table、mesh_convert、uploader） | ~3870 | ③（+ ② Uploader） | **bindless 的心脏**，学习目标第一核心：GPU 常驻资源、描述符堆、实例表、上传票据。工作量最大，值得拆两次讲。 |
+| 6 | `render/gpu/`（compute + cull、hiz、occlusion、lod、shadow_build） | ~2310 | ⑤ compute（+ ④ HizPyramid） | **GPU-driven 核心**，学习目标第二核心。六处 compute 骨架下沉的 `compute.rs` 是总钥匙，先读它再逐个环节。 |
+| 7 | `render/pipeline/` + `render/shading/` | ~6860 | ④ + ⑤ 图形/全屏 | 图形管线族：graphics_pipeline、shadow、gbuffer、post、smaa、cluster、light_table。"装备库"性质，按想先看的效果挑内部顺序也行。 |
+| 8 | `scene/content/` + `scene/mechanism/`（ledger、residency、collect_report 优先） | ~2800 | CPU 侧账本（驱动 ③ 增删） | Bevy 侧账本：一份资产两份真身（CPU 容器 + GPU 显存）、两层索引账（Ledger 行按实体粒度 / residency 按资产粒度）。大世界流送第三核心。 |
+| 9 | `driver/host/frame.rs`（draw_frame）+ `frame_sync.rs` + `render/pipeline/frames.rs`（record_frame） | ~2700 | 五类全部（消费方） | 终点验收考场：质量复盘把 draw_frame 从 1065 行拆到 350 行、record_frame 从 1958 行拆到 1109 行（提交 bd48cb0a2 口径）。前八站读完后，这里的每一行都能对上前面的某个标准件——读它就是全库复盘。 |
+
+行数为 2026-10-27 实测 `wc -l` 快照，仅供量力安排，不作为长期口径。
+
+## 边界
+
+- **overlay/（egui 屏幕层）与 remote/（BRP 工具链）不进主线**：属于"边用边熟"，中途查证运行时行为时再进入。
+- 本文只登记阅读顺序与校验要点，不主张代码改动；发现的问题回填对应步骤文档或《待修复清单》。
+- 各站讲解中确认的结论沉淀进本文件夹的分站笔记；跨站通用、可独立传播的机制知识仍按入口篇 §九 另立知识点文档。
+
+## 走法约定
+
+- 每站先讲三样：这一站的意图、数据流、在整条链上的位置；再指出值得校验的点（屏障语义、生命周期、与提交说明的对应）。
+- 边讲边问：随时打断提问与质疑，讲解人随时核对源码作答；结论分歧以源码为准。
+- 一站讲完即校验完，再进下一站；中途换站允许（第 7 站装备库尤其适合按需跳读）。
