@@ -4,6 +4,7 @@
 use ash::{vk, Device};
 
 use crate::common::error::{Result, VulkanError};
+use crate::render::Context;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::record::compute::ComputeHandles;
@@ -21,22 +22,22 @@ impl ComputePipeline {
     ///
     /// # Errors
     /// 配方对账不过、入口不是一个，或 layout / module / pipeline 任一创建失败。
-    pub(crate) fn new(device: &Device, desc: &PipelineDesc, layouts: &SetLayouts) -> Result<Self> {
-        desc.build(device, layouts, |layout, stages| {
+    pub(crate) fn new(ctx: &Context, desc: &PipelineDesc, layouts: &SetLayouts) -> Result<Self> {
+        desc.build(ctx, layouts, |layout, stages| {
             let &[stage] = stages else {
                 return Err(VulkanError::Init(format!("compute 管线 {} 须恰好一个入口", desc.label)));
             };
             let info = vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout);
-            match unsafe { device.create_compute_pipelines(vk::PipelineCache::null(), &[info], None) } {
+            match unsafe { ctx.device.create_compute_pipelines(vk::PipelineCache::null(), &[info], None) } {
                 Ok(mut pipelines) => pipelines
                     .pop()
-                    .map(|pipeline| Self { device: device.clone(), handles: ComputeHandles { pipeline, layout, sets: desc.sets } })
+                    .map(|pipeline| Self { device: ctx.device.clone(), handles: ComputeHandles { pipeline, layout, sets: desc.sets } })
                     .ok_or_else(|| {
                         VulkanError::Init(format!("compute 管线 {} 创建成功却未返回句柄", desc.label))
                     }),
                 Err((pipelines, e)) => {
                     for p in pipelines {
-                        unsafe { device.destroy_pipeline(p, None) };
+                        unsafe { ctx.device.destroy_pipeline(p, None) };
                     }
                     Err(e.into())
                 }

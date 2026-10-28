@@ -280,6 +280,13 @@ impl SetLayouts {
         Ok(Self { entries })
     }
 
+    /// 给登记的全部布局挂调试名（验证层报错与 RenderDoc 按名字显示；best-effort）。
+    pub(crate) fn name_all(&self, ctx: &crate::render::Context) {
+        for e in &self.entries {
+            ctx.name_object(e.raw, &format!("set_layout: {}", e.desc.name));
+        }
+    }
+
     /// 按声明取句柄；登记的必须正是这一份声明，不只是同名。
     ///
     /// # Errors

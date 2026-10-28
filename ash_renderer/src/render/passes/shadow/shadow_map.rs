@@ -311,9 +311,8 @@ impl ShadowPipeline {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        let device = &ctx.device;
-        SHADOW_WRITE_PIPELINE.build(device, layouts, |layout, stages| unsafe {
-            Self::create_pipeline(device, layout, stages)
+        SHADOW_WRITE_PIPELINE.build(ctx, layouts, |layout, stages| unsafe {
+            Self::create_pipeline(&ctx.device, layout, stages)
         })
     }
 

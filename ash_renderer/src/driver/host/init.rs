@@ -127,6 +127,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         smaa_targets.layout_b(),
         hiz.occlusion_layout(),
     ])?;
+    layouts.name_all(&ctx);
     // 图形管线（PipelineHandle）
     let gbuffer_pipeline =
         GBufferPipeline::new(&ctx, &layouts, &[ALBEDO_FORMAT, NORMAL_FORMAT, MATPARAM_FORMAT], DEPTH_FORMAT)?;

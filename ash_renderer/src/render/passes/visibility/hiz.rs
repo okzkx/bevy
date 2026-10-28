@@ -645,7 +645,7 @@ impl HizPyramid {
         let device = &ctx.device;
         self.reduction.set_layout = HIZ_REDUCE_SET.create(device)?;
         let layouts = SetLayouts::new([SetLayout::new(&HIZ_REDUCE_SET, self.reduction.set_layout)])?;
-        self.reduction.pipeline = Some(ComputePipeline::new(device, &HIZ_DOWNSAMPLE_PIPELINE, &layouts)?);
+        self.reduction.pipeline = Some(ComputePipeline::new(ctx, &HIZ_DOWNSAMPLE_PIPELINE, &layouts)?);
         let max_dim = ctx.limits().max_image_dimension2_d;
         self.reduction.pool_levels = full_mip_chain(max_dim, max_dim);
         let max_sets = crate::render::MAX_FRAMES_IN_FLIGHT as u32 * self.reduction.pool_levels;

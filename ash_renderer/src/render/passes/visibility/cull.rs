@@ -181,7 +181,7 @@ impl CullPass {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        let pipeline = ComputePipeline::new(&ctx.device, &CULL_PIPELINE, layouts)?;
+        let pipeline = ComputePipeline::new(ctx, &CULL_PIPELINE, layouts)?;
         Ok(Self { pipeline })
     }
 

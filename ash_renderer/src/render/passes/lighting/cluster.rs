@@ -387,7 +387,7 @@ impl ClusterBuildPass {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        let pipeline = ComputePipeline::new(&ctx.device, &CLUSTER_BUILD_PIPELINE, layouts)?;
+        let pipeline = ComputePipeline::new(ctx, &CLUSTER_BUILD_PIPELINE, layouts)?;
         info!("cluster_build compute 就绪（光源分簇单集）");
         Ok(Self { pipeline })
     }

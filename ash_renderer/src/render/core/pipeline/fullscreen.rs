@@ -31,9 +31,8 @@ impl FullscreenPipeline {
         layouts: &SetLayouts,
         color_format: vk::Format,
     ) -> Result<Self> {
-        let device = &ctx.device;
-        desc.build(device, layouts, |layout, stages| unsafe {
-            Self::create_pipeline(device, desc, color_format, layout, stages)
+        desc.build(ctx, layouts, |layout, stages| unsafe {
+            Self::create_pipeline(&ctx.device, desc, color_format, layout, stages)
         })
     }
 

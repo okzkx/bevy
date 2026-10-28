@@ -132,9 +132,8 @@ impl OverlayPipeline {
         color_format: vk::Format,
         depth_format: vk::Format,
     ) -> Result<Self> {
-        let device = &ctx.device;
-        OVERLAY_PIPELINE.build(device, layouts, |layout, stages| unsafe {
-            Self::create_pipeline(device, color_format, depth_format, layout, stages)
+        OVERLAY_PIPELINE.build(ctx, layouts, |layout, stages| unsafe {
+            Self::create_pipeline(&ctx.device, color_format, depth_format, layout, stages)
         })
     }
 

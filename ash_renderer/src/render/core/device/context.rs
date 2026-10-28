@@ -118,8 +118,23 @@ pub struct Context {
     pub transfer_queue: vk::Queue,
     /// 内存类型/堆表与 nonCoherentAtomSize，建设备时查一次；内存选型都从这里取，不各自重查。
     memory_contract: crate::render::MemoryContract,
+    /// VK_EXT_debug_utils 的设备侧 loader（对象命名用；扩展常开）。
+    debug_device: debug_utils::Device,
     /// 是否启用了 VK_EXT_memory_budget（设备支持才启用）。
     budget_enabled: bool,
+}
+
+impl Context {
+    /// 给 Vulkan 对象挂调试名（best-effort：失败只影响报错可读性，不致命）。
+    /// 对象类型从句柄类型推导（ash 的 Handle trait）。
+    pub(crate) fn name_object<H: vk::Handle>(&self, handle: H, name: &str) {
+        let c = match std::ffi::CString::new(name) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let info = vk::DebugUtilsObjectNameInfoEXT::default().object_handle(handle).object_name(c.as_c_str());
+        let _ = unsafe { self.debug_device.set_debug_utils_object_name(&info) };
+    }
 }
 
 impl Context {
@@ -155,11 +170,9 @@ impl Context {
         }
 
         // ---- Instance ----
-        let mut ext_names: Vec<*const c_char> =
-            vec![surface::NAME.as_ptr(), win32_surface::NAME.as_ptr()];
-        if validation {
-            ext_names.push(debug_utils::NAME.as_ptr());
-        }
+        // debug_utils 常开（被动扩展）：对象命名供验证层报错与 RenderDoc 按名字显示
+        let ext_names: Vec<*const c_char> =
+            vec![surface::NAME.as_ptr(), win32_surface::NAME.as_ptr(), debug_utils::NAME.as_ptr()];
         let layer_names: Vec<*const c_char> = if validation {
             vec![VALIDATION_LAYER.as_ptr()]
         } else {
@@ -474,6 +487,7 @@ impl Context {
             if validation { "on" } else { "未找到" },
         );
 
+        let debug_device = debug_utils::Device::new(&instance, &device);
         let context = Self {
             entry,
             instance,
@@ -488,6 +502,7 @@ impl Context {
             transfer_queue,
             memory_contract,
             budget_enabled,
+            debug_device,
         };
         guard.committed = true;
         Ok(context)

@@ -47,7 +47,7 @@ impl ShadowBuildPass {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        let pipeline = ComputePipeline::new(&ctx.device, &SHADOW_BUILD_PIPELINE, layouts)?;
+        let pipeline = ComputePipeline::new(ctx, &SHADOW_BUILD_PIPELINE, layouts)?;
         info!("shadow 命令组装管线就绪: shadow_build compute（[set2, shadow set] + 4B push count）");
         Ok(Self { pipeline })
     }

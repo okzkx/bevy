@@ -96,7 +96,7 @@ impl IndirectPass {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        let pipeline = ComputePipeline::new(&ctx.device, &BUILD_INDIRECT_PIPELINE, layouts)?;
+        let pipeline = ComputePipeline::new(ctx, &BUILD_INDIRECT_PIPELINE, layouts)?;
         let max_draw_indirect_count = ctx.limits().max_draw_indirect_count;
         info!(
             "indirect 组装管线就绪: build_indirect compute（set2 + 4B push count）,\

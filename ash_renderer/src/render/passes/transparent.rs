@@ -270,11 +270,10 @@ impl TransparentPasses {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        let device = &ctx.device;
         let sort_passes = bitonic_sequence(TRANSPARENT_CAPACITY)?;
-        let sort = ComputePipeline::new(device, &TRANSPARENT_SORT_PIPELINE, layouts)?;
-        let collect = ComputePipeline::new(device, &TRANSPARENT_COLLECT_PIPELINE, layouts)?;
-        let gather = ComputePipeline::new(device, &TRANSPARENT_GATHER_PIPELINE, layouts)?;
+        let sort = ComputePipeline::new(ctx, &TRANSPARENT_SORT_PIPELINE, layouts)?;
+        let collect = ComputePipeline::new(ctx, &TRANSPARENT_COLLECT_PIPELINE, layouts)?;
+        let gather = ComputePipeline::new(ctx, &TRANSPARENT_GATHER_PIPELINE, layouts)?;
         info!(
             "透明层 compute 三件就绪: collect（[set2, cluster, transparent]）/ sort（[transparent]）/ gather（[set2, transparent]）"
         );
@@ -422,9 +421,8 @@ impl TransparentPipeline {
         color_format: vk::Format,
         depth_format: vk::Format,
     ) -> Result<Self> {
-        let device = &ctx.device;
-        TRANSPARENT_FORWARD_PIPELINE.build(device, layouts, |layout, stages| unsafe {
-            Self::create_pipeline(device, color_format, depth_format, layout, stages)
+        TRANSPARENT_FORWARD_PIPELINE.build(ctx, layouts, |layout, stages| unsafe {
+            Self::create_pipeline(&ctx.device, color_format, depth_format, layout, stages)
         })
     }
 

@@ -47,9 +47,8 @@ impl GBufferPipeline {
         color_formats: &[vk::Format],
         depth_format: vk::Format,
     ) -> Result<Self> {
-        let device = &ctx.device;
-        GBUFFER_WRITE_PIPELINE.build(device, layouts, |layout, stages| unsafe {
-            Self::create_pipeline(device, color_formats, depth_format, layout, stages)
+        GBUFFER_WRITE_PIPELINE.build(ctx, layouts, |layout, stages| unsafe {
+            Self::create_pipeline(&ctx.device, color_formats, depth_format, layout, stages)
         })
     }
 

@@ -9,9 +9,10 @@
 
 use std::ffi::CStr;
 
-use ash::{vk, Device};
+use ash::vk;
 
 use crate::common::error::{Result, VulkanError};
+use crate::render::Context;
 
 use super::set_layout::{SetLayoutDesc, SetLayouts};
 use super::shader_abi::{ArrayShape, Shader};
@@ -110,8 +111,9 @@ impl PipelineDesc {
     ///
     /// # Errors
     /// 对账不过、有声明没登记，或创建失败。
-    pub(crate) fn create_layout(&self, device: &Device, layouts: &SetLayouts) -> Result<vk::PipelineLayout> {
+    pub(crate) fn create_layout(&self, ctx: &Context, layouts: &SetLayouts) -> Result<vk::PipelineLayout> {
         self.check()?;
+        let device = &ctx.device;
         let set_layouts = self.sets.iter().map(|d| layouts.get(d)).collect::<Result<Vec<_>>>()?;
         let push_ranges: Vec<vk::PushConstantRange> = self
             .push
@@ -121,7 +123,9 @@ impl PipelineDesc {
         let info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&set_layouts)
             .push_constant_ranges(&push_ranges);
-        Ok(unsafe { device.create_pipeline_layout(&info, None) }?)
+        let layout = unsafe { device.create_pipeline_layout(&info, None) }?;
+        ctx.name_object(layout, &format!("pipeline_layout: {}", self.label));
+        Ok(layout)
     }
 
     /// 建管线的公共骨架：对账并组装 layout → shader module → 各入口的阶段信息（阶段
@@ -132,11 +136,12 @@ impl PipelineDesc {
     /// 对账不过、layout / module 创建失败，或 `assemble` 的错误。
     pub(crate) fn build<T>(
         &self,
-        device: &Device,
+        ctx: &Context,
         layouts: &SetLayouts,
         assemble: impl FnOnce(vk::PipelineLayout, &[vk::PipelineShaderStageCreateInfo<'static>]) -> Result<T>,
     ) -> Result<T> {
-        let layout = self.create_layout(device, layouts)?;
+        let layout = self.create_layout(ctx, layouts)?;
+        let device = &ctx.device;
         let result = self.shader.create_module(device).and_then(|module| {
             let stages: Vec<_> = self
                 .entries
