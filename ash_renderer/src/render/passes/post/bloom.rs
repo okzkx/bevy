@@ -22,11 +22,10 @@ use crate::render::{Context, HDR_FORMAT, MAX_FRAMES_IN_FLIGHT};
 
 use crate::render::core::kit::fullscreen_pipeline::FullscreenPipeline;
 use crate::render::core::kit::color_target::ColorTarget;
-
-const BLOOM_PREFILTER_SPV: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/bloom_prefilter.spv"));
-const BLOOM_DOWN_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bloom_down.spv"));
-const BLOOM_UP_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bloom_up.spv"));
+use crate::render::core::kit::pipeline_layout::PipelineDesc;
+use crate::render::core::kit::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::kit::shader_abi;
+use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET;
 
 /// 降/升采样级数（半分辨率逐级）。
 pub const BLOOM_LEVELS: usize = 5;
@@ -35,6 +34,52 @@ pub const BLOOM_BINDING_TEX0: u32 = 0;
 pub const BLOOM_BINDING_TEX1: u32 = 1;
 pub const BLOOM_BINDING_SAMPLER: u32 = 2;
 pub const BLOOM_BINDING_PARAMS: u32 = 3;
+
+const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
+
+/// 降采样集：b0 源纹理 + b2 采样器。
+pub(crate) static BLOOM_TEX_SET: SetLayoutDesc = SetLayoutDesc::new(
+    "bloom_tex",
+    &[
+        BindingDesc::new(BLOOM_BINDING_TEX0, DescKind::SampledImage, FS),
+        BindingDesc::new(BLOOM_BINDING_SAMPLER, DescKind::Sampler, FS),
+    ],
+);
+
+/// 升采样集（也是 tonemap 的 bloom 输入集）：b0/b1 两张纹理 + b2 采样器 + b3 参数 UBO。
+pub(crate) static BLOOM_UP_SET: SetLayoutDesc = SetLayoutDesc::new(
+    "bloom_up",
+    &[
+        BindingDesc::new(BLOOM_BINDING_TEX0, DescKind::SampledImage, FS),
+        BindingDesc::new(BLOOM_BINDING_TEX1, DescKind::SampledImage, FS),
+        BindingDesc::new(BLOOM_BINDING_SAMPLER, DescKind::Sampler, FS),
+        BindingDesc::new(BLOOM_BINDING_PARAMS, DescKind::UniformBuffer, FS),
+    ],
+);
+
+pub(crate) static BLOOM_PREFILTER_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "bloom_prefilter",
+    shader: &shader_abi::BLOOM_PREFILTER,
+    entries: &[c"vs_main", c"fs_main"],
+    sets: &[&GBUFFER_SAMPLED_SET],
+    push: None,
+};
+
+pub(crate) static BLOOM_DOWN_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "bloom_down",
+    shader: &shader_abi::BLOOM_DOWN,
+    entries: &[c"vs_main", c"fs_main"],
+    sets: &[&BLOOM_TEX_SET],
+    push: None,
+};
+
+pub(crate) static BLOOM_UP_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "bloom_up",
+    shader: &shader_abi::BLOOM_UP,
+    entries: &[c"vs_main", c"fs_main"],
+    sets: &[&BLOOM_UP_SET],
+    push: None,
+};
 
 /// 参数 UBO 字节长（5×f32 + 垫，std140 对齐 16）。
 pub const BLOOM_PARAMS_SIZE: u32 = 32;
@@ -241,42 +286,8 @@ impl BloomTargets {
     unsafe fn build_static(&mut self) -> Result<()> {
         unsafe {
         let device = &self.device;
-        let stages = vk::ShaderStageFlags::FRAGMENT;
-        let tex = |binding: u32| {
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(binding)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(1)
-                .stage_flags(stages)
-        };
-        self.set_layout_tex = device.create_descriptor_set_layout(
-            &vk::DescriptorSetLayoutCreateInfo::default().bindings(&[
-                tex(BLOOM_BINDING_TEX0),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(BLOOM_BINDING_SAMPLER)
-                    .descriptor_type(vk::DescriptorType::SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(stages),
-            ]),
-            None,
-        )?;
-        self.set_layout_up = device.create_descriptor_set_layout(
-            &vk::DescriptorSetLayoutCreateInfo::default().bindings(&[
-                tex(BLOOM_BINDING_TEX0),
-                tex(BLOOM_BINDING_TEX1),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(BLOOM_BINDING_SAMPLER)
-                    .descriptor_type(vk::DescriptorType::SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(stages),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(BLOOM_BINDING_PARAMS)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .descriptor_count(1)
-                    .stage_flags(stages),
-            ]),
-            None,
-        )?;
+        self.set_layout_tex = BLOOM_TEX_SET.create(device)?;
+        self.set_layout_up = BLOOM_UP_SET.create(device)?;
         // Bloom 链自有采样器（线性 + CLAMP_TO_EDGE；本体随本资源 Drop 销毁
         // ——不走描述符表去重账，账本采样器槽留给贴图面）
         self.sampler = crate::render::resident::images::sampler_key(
@@ -423,16 +434,16 @@ impl BloomTargets {
             .collect()
     }
 
-    /// set_layout_up 句柄（tonemap 第二集 layout 借用）。
+    /// 升采样集布局（up 管线与 tonemap 的 bloom 输入集共用）。
     #[must_use]
-    pub fn set_layout_up(&self) -> vk::DescriptorSetLayout {
-        self.set_layout_up
+    pub fn up_layout(&self) -> SetLayout {
+        SetLayout::new(&BLOOM_UP_SET, self.set_layout_up)
     }
 
-    /// set_layout_tex 句柄（down 管线 layout 借用）。
+    /// 降采样集布局（down 管线用）。
     #[must_use]
-    pub fn set_layout_tex(&self) -> vk::DescriptorSetLayout {
-        self.set_layout_tex
+    pub fn tex_layout(&self) -> SetLayout {
+        SetLayout::new(&BLOOM_TEX_SET, self.set_layout_tex)
     }
 
     /// 本帧槽 tonemap 参数集（up0 + 采样器 + 参数 UBO）。
@@ -550,22 +561,12 @@ impl BloomPipelines {
     /// 建三全屏管线（shader module/layout/pipeline 由 FullscreenPipeline 承包）。
     ///
     /// # Errors
-    /// shader 编译/管线创建失败。
-    pub fn new(
-        ctx: &Context,
-        gbuffer_layout: vk::DescriptorSetLayout,
-        layout_tex: vk::DescriptorSetLayout,
-        layout_up: vk::DescriptorSetLayout,
-    ) -> Result<Self> {
-        let pre = FullscreenPipeline::new(
-            ctx,
-            BLOOM_PREFILTER_SPV,
-            HDR_FORMAT,
-            &[gbuffer_layout],
-        )?;
-        let down = FullscreenPipeline::new(ctx, BLOOM_DOWN_SPV, HDR_FORMAT, &[layout_tex])?;
-        let up = FullscreenPipeline::new(ctx, BLOOM_UP_SPV, HDR_FORMAT, &[layout_up])?;
-        Ok(Self { prefilter: pre, down, up })
+    /// 配方对账不过，或管线创建失败。
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
+        let prefilter = FullscreenPipeline::new(ctx, &BLOOM_PREFILTER_PIPELINE, layouts, HDR_FORMAT)?;
+        let down = FullscreenPipeline::new(ctx, &BLOOM_DOWN_PIPELINE, layouts, HDR_FORMAT)?;
+        let up = FullscreenPipeline::new(ctx, &BLOOM_UP_PIPELINE, layouts, HDR_FORMAT)?;
+        Ok(Self { prefilter, down, up })
     }
 }
 

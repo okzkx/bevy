@@ -22,11 +22,41 @@ use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
 use crate::render::core::kit::depth_target::DepthTarget;
 use crate::render::core::kit::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::kit::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::kit::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::kit::shader_abi;
+use crate::render::resident::instance_table::INSTANCE_SET;
 
 pub const SHADOW_BINDING_UNIFORM: u32 = 0;
 pub const SHADOW_BINDING_MAP0: u32 = 1;
 pub const SHADOW_BINDING_MARK0: u32 = 5;
 pub const SHADOW_BINDING_CMD0: u32 = 6;
+
+const _: () = assert!(SHADOW_CASCADES == 4, "SHADOW_SET 按 4 级 cascade 逐个列 binding");
+const CS: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
+const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
+
+/// shadow 集：b0 均匀数据（绘制/合成/剔除都读）/ b1..b4 各级阴影图（合成采样）/
+/// b5 剔除标记 / b6..b9 各级命令环（后两类只给 compute）。
+pub(crate) static SHADOW_SET: SetLayoutDesc = SetLayoutDesc::new(
+    "shadow",
+    &[
+        BindingDesc::new(
+            SHADOW_BINDING_UNIFORM,
+            DescKind::UniformBuffer,
+            stages(&[vk::ShaderStageFlags::VERTEX, FS, CS]),
+        ),
+        BindingDesc::new(SHADOW_BINDING_MAP0, DescKind::SampledImage, FS),
+        BindingDesc::new(SHADOW_BINDING_MAP0 + 1, DescKind::SampledImage, FS),
+        BindingDesc::new(SHADOW_BINDING_MAP0 + 2, DescKind::SampledImage, FS),
+        BindingDesc::new(SHADOW_BINDING_MAP0 + 3, DescKind::SampledImage, FS),
+        BindingDesc::new(SHADOW_BINDING_MARK0, DescKind::StorageBuffer, CS),
+        BindingDesc::new(SHADOW_BINDING_CMD0, DescKind::StorageBuffer, CS),
+        BindingDesc::new(SHADOW_BINDING_CMD0 + 1, DescKind::StorageBuffer, CS),
+        BindingDesc::new(SHADOW_BINDING_CMD0 + 2, DescKind::StorageBuffer, CS),
+        BindingDesc::new(SHADOW_BINDING_CMD0 + 3, DescKind::StorageBuffer, CS),
+    ],
+);
 
 /// 一帧 shadow 绘制的录制输入（draw_frame 组装，`record_frame` 消费）。
 #[derive(Clone, Copy)]
@@ -123,40 +153,7 @@ impl ShadowTargets {
         }
         unsafe {
             let device = &ctx.device;
-            let uniform = vk::DescriptorSetLayoutBinding::default()
-                .binding(SHADOW_BINDING_UNIFORM)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(
-                    vk::ShaderStageFlags::VERTEX
-                        | vk::ShaderStageFlags::FRAGMENT
-                        | vk::ShaderStageFlags::COMPUTE,
-                );
-            let mut bindings = vec![uniform];
-            for b in 0..SHADOW_CASCADES as u32 {
-                bindings.push(
-                    vk::DescriptorSetLayoutBinding::default()
-                        .binding(SHADOW_BINDING_MAP0 + b)
-                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                        .descriptor_count(1)
-                        .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-                );
-            }
-            for b in 0..(1 + SHADOW_CASCADES) as u32 {
-                bindings.push(
-                    vk::DescriptorSetLayoutBinding::default()
-                        .binding(SHADOW_BINDING_MARK0 + b)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count(1)
-                        .stage_flags(vk::ShaderStageFlags::COMPUTE),
-                );
-            }
-            self.set_layout = device
-                .create_descriptor_set_layout(
-                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
-                    None,
-                )
-                .inspect_err(|_| self.destroy_buffers())?;
+            self.set_layout = SHADOW_SET.create(device).inspect_err(|_| self.destroy_buffers())?;
             self.pool = device
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
@@ -283,8 +280,8 @@ impl ShadowTargets {
 
     /// shadow set 布局句柄（管线/录制借源，拆除序先于本资源）。
     #[must_use]
-    pub fn set_layout(&self) -> vk::DescriptorSetLayout {
-        self.set_layout
+    pub fn set_layout(&self) -> SetLayout {
+        SetLayout::new(&SHADOW_SET, self.set_layout)
     }
 
     /// 本帧槽 shadow set。
@@ -351,145 +348,93 @@ pub struct ShadowPipeline {
     handle: PipelineHandle,
 }
 
-const SHADOW_WRITE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shadow_write.spv"));
 /// 4B push：cascade 索引（逐 pass 一推——帧级全局量的本职，cull 112B 同款理由）。
 pub const SHADOW_PUSH_SIZE: u32 = 4;
+
+pub(crate) static SHADOW_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "shadow_write",
+    shader: &shader_abi::SHADOW_WRITE,
+    entries: &[c"vs_main", c"fs_main"],
+    sets: &[&INSTANCE_SET, &SHADOW_SET],
+    push: Some(PushRange { stages: vk::ShaderStageFlags::VERTEX, size: SHADOW_PUSH_SIZE }),
+};
 
 impl ShadowPipeline {
     /// 建管线链（shader module → layout → depth-only 管线；失败全有或全无）。
     ///
     /// # Errors
-    /// shader module / layout / pipeline 创建失败。
-    pub fn new(
-        ctx: &Context,
-        set2_layout: vk::DescriptorSetLayout,
-        shadow_layout: vk::DescriptorSetLayout,
-    ) -> Result<Self> {
+    /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
         let device = &ctx.device;
-        let words: Vec<u32> = SHADOW_WRITE_SPV
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| u32::from_le_bytes(*c))
-            .collect();
-        let module = unsafe {
-            device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
-        }?;
-        let result = unsafe { Self::new_inner(device, set2_layout, shadow_layout, module) };
-        if result.is_err() {
-            unsafe { device.destroy_shader_module(module, None) };
-        }
-        result
+        SHADOW_WRITE_PIPELINE.build(device, layouts, |layout, stages| unsafe {
+            Self::create_pipeline(device, layout, stages)
+        })
     }
 
     /// # Safety
-    /// `module` 须刚创建成功且未销毁。
-    unsafe fn new_inner(
-        device: &Device,
-        set2_layout: vk::DescriptorSetLayout,
-        shadow_layout: vk::DescriptorSetLayout,
-        module: vk::ShaderModule,
-    ) -> Result<Self> {
-        unsafe {
-            let set_layouts = [set2_layout, shadow_layout];
-            let push_range = vk::PushConstantRange::default()
-                .stage_flags(vk::ShaderStageFlags::VERTEX)
-                .offset(0)
-                .size(SHADOW_PUSH_SIZE);
-            let layout = device
-                .create_pipeline_layout(
-                    &vk::PipelineLayoutCreateInfo::default()
-                        .set_layouts(&set_layouts)
-                        .push_constant_ranges(std::slice::from_ref(&push_range)),
-                    None,
-                )?;
-            let result = Self::create_pipeline(device, layout, module);
-            if result.is_err() {
-                device.destroy_pipeline_layout(layout, None);
-            }
-            result
-        }
-    }
-
-    /// # Safety
-    /// `module`/`layout` 须为合法句柄；入口名存在于 module。
+    /// `layout` 与 `stages` 里的 module 须为合法句柄。
     unsafe fn create_pipeline(
         device: &Device,
         layout: vk::PipelineLayout,
-        module: vk::ShaderModule,
+        stages: &[vk::PipelineShaderStageCreateInfo<'_>],
     ) -> Result<Self> {
-        unsafe {
-            let vs_main = c"vs_main";
-            let fs_main = c"fs_main";
-            let stages = [
-                vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::VERTEX)
-                    .module(module)
-                    .name(vs_main),
-                vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::FRAGMENT)
-                    .module(module)
-                    .name(fs_main),
-            ];
-            // 顶点输入与主管线同一份 32B 交错契约（mesh_convert 同源）
-            let vertex_binding = [vk::VertexInputBindingDescription::default()
+        // 顶点输入与主管线同一份 32B 交错契约（mesh_convert 同源）
+        let vertex_binding = [vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(crate::render::VERTEX_STRIDE as u32)
+            .input_rate(vk::VertexInputRate::VERTEX)];
+        let vertex_attributes = [
+            vk::VertexInputAttributeDescription::default()
+                .location(0)
                 .binding(0)
-                .stride(crate::render::VERTEX_STRIDE as u32)
-                .input_rate(vk::VertexInputRate::VERTEX)];
-            let vertex_attributes = [
-                vk::VertexInputAttributeDescription::default()
-                    .location(0)
-                    .binding(0)
-                    .format(vk::Format::R32G32B32_SFLOAT)
-                    .offset(0),
-            ];
-            let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-                .vertex_binding_descriptions(&vertex_binding)
-                .vertex_attribute_descriptions(&vertex_attributes);
-            let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-            let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-                .viewport_count(1)
-                .scissor_count(1);
-            let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
-                .polygon_mode(vk::PolygonMode::FILL)
-                .cull_mode(vk::CullModeFlags::NONE)
-                .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-                .line_width(1.0);
-            let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-            let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-                .depth_test_enable(true)
-                .depth_write_enable(true)
-                .depth_compare_op(vk::CompareOp::GREATER)
-                .min_depth_bounds(0.0)
-                .max_depth_bounds(1.0);
-            let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-            let dynamic_info =
-                vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-            // dynamic rendering：无色附件、深度 D32（VUID-08914 声明面 = 实例
-            // 附件全集——shadow 实例只有深度）
-            let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-                .depth_attachment_format(crate::render::core::kit::depth_target::DEPTH_FORMAT);
-            let info = vk::GraphicsPipelineCreateInfo::default()
-                .stages(&stages)
-                .vertex_input_state(&vertex_input)
-                .input_assembly_state(&input_assembly)
-                .viewport_state(&viewport_state)
-                .rasterization_state(&rasterization)
-                .multisample_state(&multisample)
-                .depth_stencil_state(&depth_stencil)
-                .dynamic_state(&dynamic_info)
-                .layout(layout)
-                .push_next(&mut rendering_info);
-            let pipeline = create_graphics_pipeline(device, &info)?;
-            device.destroy_shader_module(module, None);
-            info!(
-                "shadow 管线就绪: depth-only dynamic rendering（D32 reverse-Z GREATER），\
-                 顶点输入 32B 交错 pos 位，4B push cascade 索引，[set2, shadow set]"
-            );
-            Ok(Self { handle: PipelineHandle::new(device, layout, pipeline) })
-        }
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(0),
+        ];
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&vertex_binding)
+            .vertex_attribute_descriptions(&vertex_attributes);
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewport_count(1)
+            .scissor_count(1);
+        let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(vk::PolygonMode::FILL)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .line_width(1.0);
+        let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::GREATER)
+            .min_depth_bounds(0.0)
+            .max_depth_bounds(1.0);
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_info =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+        // dynamic rendering：无色附件、深度 D32（VUID-08914 声明面 = 实例
+        // 附件全集——shadow 实例只有深度）
+        let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+            .depth_attachment_format(crate::render::core::kit::depth_target::DEPTH_FORMAT);
+        let info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(stages)
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterization)
+            .multisample_state(&multisample)
+            .depth_stencil_state(&depth_stencil)
+            .dynamic_state(&dynamic_info)
+            .layout(layout)
+            .push_next(&mut rendering_info);
+        let pipeline = create_graphics_pipeline(device, &info)?;
+        info!(
+            "shadow 管线就绪: depth-only dynamic rendering（D32 reverse-Z GREATER），\
+             顶点输入 32B 交错 pos 位，4B push cascade 索引，[set2, shadow set]"
+        );
+        Ok(Self { handle: PipelineHandle::new(device, layout, pipeline) })
     }
 
     /// 管线句柄。

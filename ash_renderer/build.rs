@@ -4,6 +4,10 @@
 //! 复跑 spirv-val 兜底 → `OUT_DIR/<stem>.spv`（小端词流），由
 //! `include_bytes!(concat!(env!("OUT_DIR"), "/<stem>.spv"))` 消费。
 //!
+//! ABI 表：同一次 naga 校验的产物里，逐入口点列出实际用到的 set/binding/描述符种类/
+//! 数组形状与 push 字节数，汇成 `OUT_DIR/shader_abi.rs`（每个 shader 一个 `Shader`
+//! 静态项，spv 字节也挂在上面）；宿主创建 pipeline layout 前拿它和布局声明对账。
+//!
 //! 公共片段：独占一行的 `// #import <name>` 展开为 `shaders/common/<name>.wgsl` 全文，
 //! 递归展开；同一入口内每个片段只展开一次（菱形依赖去重），循环引用 = 构建错误。
 //! 片段只放 struct / 常量 / 函数，`@group/@binding` 声明留在各入口（组号随管线
@@ -64,6 +68,8 @@ fn main() {
     if val_exe.is_none() {
         println!("cargo:warning=未找到 spirv-val（VULKAN_SDK 未设且默认路径不存在）——shader 构建降级为无条件补丁，合法证据只剩运行期验证层");
     }
+    let mut abi_table = String::new();
+    let mut abi_names: Vec<String> = Vec::new();
     for path in &wgsl_paths {
         let stem = path.file_stem().expect("有扩展名的路径必有文件名").to_string_lossy().into_owned();
         println!("cargo:rerun-if-changed={}", path.display());
@@ -73,12 +79,21 @@ fn main() {
         let source = expand_imports(path, &common_dir);
         let expanded = out_dir.join(format!("{stem}.expanded.wgsl"));
         std::fs::write(&expanded, &source).unwrap_or_else(|e| panic!("写 {expanded:?} 失败: {e}"));
-        let words = compile(&source, &expanded, &stem);
+        let (words, abi) = compile(&source, &expanded, &stem);
         let words = gate_and_patch(words, &stem, val_exe.as_deref());
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         let out = out_dir.join(format!("{stem}.spv"));
         std::fs::write(&out, &bytes).unwrap_or_else(|e| panic!("写 {out:?} 失败: {e}"));
+        abi_table.push_str(&abi);
+        abi_names.push(stem.to_uppercase());
     }
+    abi_table.push_str("pub(crate) static ALL: &[&Shader] = &[");
+    for name in &abi_names {
+        abi_table.push_str(&format!("&{name}, "));
+    }
+    abi_table.push_str("];\n");
+    let abi_out = out_dir.join("shader_abi.rs");
+    std::fs::write(&abi_out, abi_table).unwrap_or_else(|e| panic!("写 {abi_out:?} 失败: {e}"));
     // MSVC 默认主线程栈 1MB 不够 init 链（Context::new 的 ash 枚举 + InitChain 元组）
     // 的栈深，会稳定栈溢出；主线程栈保留提到 16MB（Rust 子线程 2MB 默认不受影响）。
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
@@ -132,8 +147,9 @@ fn expand_into(
     }
 }
 
-/// 展开后的 WGSL → SPIR-V 词流。编译失败 = 构建错误（panic 带完整错误链，不静默）。
-fn compile(source: &str, expanded: &Path, stem: &str) -> Vec<u32> {
+/// 展开后的 WGSL → SPIR-V 词流 + 该模块的 ABI 表源码（见 [`reflect_abi`]）。
+/// 编译失败 = 构建错误（panic 带完整错误链，不静默）。
+fn compile(source: &str, expanded: &Path, stem: &str) -> (Vec<u32>, String) {
     let expanded_name = expanded.display().to_string();
     let module = match naga::front::wgsl::parse_str(source) {
         Ok(m) => m,
@@ -159,10 +175,89 @@ fn compile(source: &str, expanded: &Path, stem: &str) -> Vec<u32> {
     // 坑点：全部管线的正高度 viewport 朝向依赖 naga 对 @builtin(position) 注入的
     // Y 翻转；默认值已含此位，显式写出防默认值变动后画面整体上下颠倒。
     options.flags.insert(spv::WriterFlags::ADJUST_COORDINATE_SPACE);
-    match spv::write_vec(&module, &info, &options, None) {
+    let words = match spv::write_vec(&module, &info, &options, None) {
         Ok(w) => w,
         Err(e) => panic!("[{stem}] SPIR-V 生成失败: {e}"),
+    };
+    (words, reflect_abi(&module, &info, stem))
+}
+
+/// 生成一个 `Shader` 静态项的 Rust 源码（落 `OUT_DIR/shader_abi.rs`，由
+/// `src/render/core/kit/shader_abi.rs` include）：spv 字节 + 每个入口实际用到的
+/// `(set, binding, 描述符种类, 数组形状)` 与 immediate（push）字节数。
+/// 只列入口真正读写/查询过的全局量——声明了没用的 binding 不进表，管线布局
+/// 对它没有义务。
+fn reflect_abi(module: &naga::Module, info: &naga::valid::ModuleInfo, stem: &str) -> String {
+    let mut out = format!(
+        "pub(crate) static {}: Shader = Shader {{\n    name: \"{stem}\",\n    \
+         spv: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{stem}.spv\")),\n    entries: &[\n",
+        stem.to_uppercase()
+    );
+    for (index, entry) in module.entry_points.iter().enumerate() {
+        let stage = match entry.stage {
+            naga::ShaderStage::Vertex => "VERTEX",
+            naga::ShaderStage::Fragment => "FRAGMENT",
+            naga::ShaderStage::Compute => "COMPUTE",
+            other => panic!("[{stem}] 入口 {} 的阶段 {other:?} 未接入 ABI 表", entry.name),
+        };
+        let uses = info.get_entry_point(index);
+        let mut resources: Vec<(u32, u32, &str, &str)> = Vec::new();
+        let mut immediate_size = 0u32;
+        for (handle, var) in module.global_variables.iter() {
+            if uses[handle].is_empty() {
+                continue;
+            }
+            if var.space == naga::AddressSpace::Immediate {
+                immediate_size = module.types[var.ty].inner.size(module.to_ctx());
+                continue;
+            }
+            let Some(binding) = &var.binding else { continue };
+            let (kind, array) = resource_kind(module, var, stem);
+            resources.push((binding.group, binding.binding, kind, array));
+        }
+        resources.sort_by_key(|r| (r.0, r.1));
+        out.push_str(&format!(
+            "        EntryAbi {{ name: \"{}\", stage: vk::ShaderStageFlags::{stage}, immediate_size: {immediate_size}, resources: &[\n",
+            entry.name
+        ));
+        for (set, binding, kind, array) in resources {
+            out.push_str(&format!(
+                "            ResourceUse {{ set: {set}, binding: {binding}, kind: DescKind::{kind}, array: ArrayShape::{array} }},\n"
+            ));
+        }
+        out.push_str("        ] },\n");
     }
+    out.push_str("    ],\n};\n");
+    out
+}
+
+/// 全局量 → (描述符种类, 数组形状) 的源码名。binding_array 剥一层取元素种类。
+fn resource_kind(module: &naga::Module, var: &naga::GlobalVariable, stem: &str) -> (&'static str, &'static str) {
+    let (base, array) = match &module.types[var.ty].inner {
+        naga::TypeInner::BindingArray { base, size } => {
+            let array = match size {
+                naga::ArraySize::Dynamic => "Runtime",
+                _ => panic!("[{stem}] 定长 binding_array 未接入 ABI 表（宿主只用 runtime 长度的 bindless 表）"),
+            };
+            (*base, array)
+        }
+        _ => (var.ty, "Single"),
+    };
+    let kind = match var.space {
+        naga::AddressSpace::Uniform => "UniformBuffer",
+        naga::AddressSpace::Storage { .. } => "StorageBuffer",
+        naga::AddressSpace::Handle => match &module.types[base].inner {
+            naga::TypeInner::Image { class, .. } => match class {
+                naga::ImageClass::Sampled { .. } | naga::ImageClass::Depth { .. } => "SampledImage",
+                naga::ImageClass::Storage { .. } => "StorageImage",
+                naga::ImageClass::External => panic!("[{stem}] external texture 未接入 ABI 表"),
+            },
+            naga::TypeInner::Sampler { .. } => "Sampler",
+            other => panic!("[{stem}] handle 空间的全局量类型 {other:?} 未接入 ABI 表"),
+        },
+        other => panic!("[{stem}] 带 @binding 的全局量地址空间 {other:?} 未接入 ABI 表"),
+    };
+    (kind, array)
 }
 
 /// 跨端布局互证闸门：与宿主打包逐字节同源的记录结构体，naga 算出的

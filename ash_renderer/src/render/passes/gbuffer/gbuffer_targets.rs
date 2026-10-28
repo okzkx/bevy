@@ -29,6 +29,7 @@ use bevy::log::info;
 use crate::common::error::{Result, VulkanError};
 use crate::render::Context;
 use crate::render::core::kit::color_target::{ColorTarget, HDR_FORMAT};
+use crate::render::core::kit::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc};
 
 /// albedo 附件格式（线性 8bit——G-buffer 存采样端已解码的线性反照率，
 /// 编码恰好一次判定线不受影响：SRGB 编码仍只在最终 ROP 写出发生一次）。
@@ -51,6 +52,21 @@ pub const SAMPLED_BINDING_HDR: u32 = 2;
 pub const SAMPLED_BINDING_DEPTH: u32 = 3;
 pub const SAMPLED_BINDING_SAMPLER: u32 = 4;
 pub const SAMPLED_BINDING_MATPARAM: u32 = 5;
+
+const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
+
+/// G-buffer 采样集：五张附件视图 + 一个共享采样器，片元阶段读。
+pub(crate) static GBUFFER_SAMPLED_SET: SetLayoutDesc = SetLayoutDesc::new(
+    "gbuffer_sampled",
+    &[
+        BindingDesc::new(SAMPLED_BINDING_ALBEDO, DescKind::SampledImage, FS),
+        BindingDesc::new(SAMPLED_BINDING_NORMAL, DescKind::SampledImage, FS),
+        BindingDesc::new(SAMPLED_BINDING_HDR, DescKind::SampledImage, FS),
+        BindingDesc::new(SAMPLED_BINDING_DEPTH, DescKind::SampledImage, FS),
+        BindingDesc::new(SAMPLED_BINDING_MATPARAM, DescKind::SampledImage, FS),
+        BindingDesc::new(SAMPLED_BINDING_SAMPLER, DescKind::Sampler, FS),
+    ],
+);
 
 /// 每帧槽一份的 G-buffer 附件（在飞两帧并发写各自槽位）。
 struct GBufferSlot {
@@ -105,10 +121,10 @@ impl GBufferTargets {
         Ok(this)
     }
 
-    /// 采样集布局（合成/blit 管线 layout 的素材；集与布局同源纪律）。
+    /// 采样集布局（登记给管线组装；集与布局同源纪律）。
     #[must_use]
-    pub fn sampled_layout(&self) -> vk::DescriptorSetLayout {
-        self.set_layout
+    pub fn sampled_layout(&self) -> SetLayout {
+        SetLayout::new(&GBUFFER_SAMPLED_SET, self.set_layout)
     }
 
     /// 第 `slot` 帧槽的采样集（合成 pass 与 present tonemap 绑定）。
@@ -270,32 +286,7 @@ fn build_sampling(
     vk::Sampler,
 )> {
     let device = &ctx.device;
-    let stages = vk::ShaderStageFlags::FRAGMENT;
-    let sampled = |binding: u32| {
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(binding)
-            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-            .descriptor_count(1)
-            .stage_flags(stages)
-    };
-    let bindings = [
-        sampled(SAMPLED_BINDING_ALBEDO),
-        sampled(SAMPLED_BINDING_NORMAL),
-        sampled(SAMPLED_BINDING_HDR),
-        sampled(SAMPLED_BINDING_DEPTH),
-        sampled(SAMPLED_BINDING_MATPARAM),
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(SAMPLED_BINDING_SAMPLER)
-            .descriptor_type(vk::DescriptorType::SAMPLER)
-            .descriptor_count(1)
-            .stage_flags(stages),
-    ];
-    let set_layout = unsafe {
-        device.create_descriptor_set_layout(
-            &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
-            None,
-        )
-    }?;
+    let set_layout = GBUFFER_SAMPLED_SET.create(device)?;
     let result = unsafe { build_sampling_inner(ctx, extent, slots, depth_views, set_layout) };
     if result.is_err() {
         unsafe { device.destroy_descriptor_set_layout(set_layout, None) };

@@ -26,10 +26,21 @@ use crate::common::bytes::{put_f32s, put_mat4, put_u32};
 use crate::common::error::Result;
 
 use crate::render::core::kit::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
+use crate::render::core::kit::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::kit::set_layout::SetLayouts;
+use crate::render::core::kit::shader_abi;
+use crate::render::passes::visibility::hiz::HIZ_OCCLUSION_SET;
+use crate::render::resident::instance_table::INSTANCE_SET;
 use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物，spirv-val 已过）。
-const OCCLUSION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/occlusion.spv"));
+pub(crate) static OCCLUSION_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "occlusion",
+    shader: &shader_abi::OCCLUSION,
+    entries: &[c"cs_main"],
+    sets: &[&INSTANCE_SET, &HIZ_OCCLUSION_SET],
+    push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: OCCLUSION_PUSH_SIZE }),
+};
 
 /// compute push 总长（layout 声明 + WGSL `PushOcclusion` 同源）：
 /// mat4（64B）+ screen（8B @64）+ bound（u32 @72）+ 垫（到 16 对齐）= 80B。
@@ -171,15 +182,9 @@ impl OcclusionPass {
     /// 建管线：layout 借用 set2 + Hi-Z 独立小集布局。
     ///
     /// # Errors
-    /// shader module / layout / pipeline 任一创建失败。
-    pub fn new(ctx: &Context, set2_layout: vk::DescriptorSetLayout, hiz_layout: vk::DescriptorSetLayout) -> Result<Self> {
-        let pipeline = ComputePipeline::new(
-            &ctx.device,
-            OCCLUSION_SPV,
-            &[set2_layout, hiz_layout],
-            OCCLUSION_PUSH_SIZE,
-            c"cs_main",
-        )?;
+    /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
+        let pipeline = ComputePipeline::new(&ctx.device, &OCCLUSION_PIPELINE, layouts)?;
         Ok(Self { pipeline })
     }
 

@@ -20,7 +20,7 @@ use crate::{
         GBufferTargets, GBufferPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
         BloomPipelines, BloomTargets, InstanceTables, LodPass, MeshPool, OcclusionPass,
         SmaaPipelines, SmaaTargets,
-        OverlayPipeline, PresentTonemapPipeline,
+        OverlayPipeline, PresentTonemapPipeline, SetLayouts,
         ShadowBuildPass, ShadowPipeline, ShadowTargets, TransparentPasses, TransparentPipeline,
         TransparentTargets, LightClusters,
         Swapchain, UiVertexRing, Uploader,
@@ -110,83 +110,50 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         (0..MAX_FRAMES_IN_FLIGHT).map(|s| frames.depth_image(s)).collect();
     let hiz = HizPyramid::new(&ctx, swapchain.extent, &depth_images)?;
 
-    // ---- ⑤ 管线：无状态，只借 ③④ 的描述符布局。声明的附件格式必须和实际
+    // ---- ⑤ 管线：无状态，只借 ③④ 的描述符布局。③④ 先把布局登记进 SetLayouts，
+    // 各管线按自己的布局配方取用并与 shader ABI 对账。声明的附件格式必须和实际
     // 渲染用的附件完全一致，否则验证层报 VUID-08914 ----
+    let layouts = SetLayouts::new([
+        tables.bindless_layout(),
+        tables.frame_layout(),
+        instance_tables.set_layout(),
+        gbuffer.sampled_layout(),
+        light_clusters.set_layout(),
+        transparent_targets.set_layout(),
+        shadow_targets.set_layout(),
+        bloom_targets.tex_layout(),
+        bloom_targets.up_layout(),
+        smaa_targets.layout_a(),
+        smaa_targets.layout_b(),
+        hiz.occlusion_layout(),
+    ])?;
     // 图形管线（PipelineHandle）
-    let gbuffer_pipeline = GBufferPipeline::new(
-        &ctx,
-        &[ALBEDO_FORMAT, NORMAL_FORMAT, MATPARAM_FORMAT],
-        DEPTH_FORMAT,
-        tables.set0_layout(),
-        tables.set1_layout(),
-        instance_tables.set2_layout(),
-    )?;
-    let shadow_pipeline = ShadowPipeline::new(
-        &ctx,
-        instance_tables.set2_layout(),
-        shadow_targets.set_layout(),
-    )?;
-    let transparent_pipeline = TransparentPipeline::new(
-        &ctx,
-        crate::render::HDR_FORMAT,
-        DEPTH_FORMAT,
-        tables.set0_layout(),
-        tables.set1_layout(),
-        instance_tables.set2_layout(),
-        light_clusters.set_layout(),
-    )?;
+    let gbuffer_pipeline =
+        GBufferPipeline::new(&ctx, &layouts, &[ALBEDO_FORMAT, NORMAL_FORMAT, MATPARAM_FORMAT], DEPTH_FORMAT)?;
+    let shadow_pipeline = ShadowPipeline::new(&ctx, &layouts)?;
+    let transparent_pipeline = TransparentPipeline::new(&ctx, &layouts, crate::render::HDR_FORMAT, DEPTH_FORMAT)?;
     // overlay 不用深度，但深度格式仍要和实际附件一致（同上 VUID-08914）
-    let overlay_pipeline = OverlayPipeline::new(
-        &ctx,
-        swapchain.view_format,
-        DEPTH_FORMAT,
-        tables.set0_layout(),
-    )?;
+    let overlay_pipeline = OverlayPipeline::new(&ctx, &layouts, swapchain.view_format, DEPTH_FORMAT)?;
     // 全屏管线（FullscreenPipeline）
-    let composite_pipeline = CompositePipeline::new(
-        &ctx,
-        crate::render::HDR_FORMAT,
-        tables.set1_layout(),
-        gbuffer.sampled_layout(),
-        light_clusters.set_layout(),
-        shadow_targets.set_layout(),
-    )?;
-    let bloom_pipelines = BloomPipelines::new(
-        &ctx,
-        gbuffer.sampled_layout(),
-        bloom_targets.set_layout_tex(),
-        bloom_targets.set_layout_up(),
-    )?;
+    let composite_pipeline = CompositePipeline::new(&ctx, &layouts, crate::render::HDR_FORMAT)?;
+    let bloom_pipelines = BloomPipelines::new(&ctx, &layouts)?;
     // tonemap 输出存线性值，最后写屏幕时由 SRGB 视图做唯一一次 sRGB 编码
     let smaa_pipelines = SmaaPipelines::new(
         &ctx,
-        smaa_targets.set_layout_a(),
-        smaa_targets.set_layout_b(),
+        &layouts,
         vk::Format::R8G8B8A8_UNORM,
         vk::Format::R8G8B8A8_UNORM,
         swapchain.view_format,
     )?;
-    let tonemap_pipeline = PresentTonemapPipeline::new(
-        &ctx,
-        vk::Format::R8G8B8A8_UNORM,
-        tables.set1_layout(),
-        gbuffer.sampled_layout(),
-        bloom_targets.set_layout_up(),
-    )?;
+    let tonemap_pipeline = PresentTonemapPipeline::new(&ctx, &layouts, vk::Format::R8G8B8A8_UNORM)?;
     // Compute 管线（ComputePipeline）
-    let cull_pass = CullPass::new(&ctx, instance_tables.set2_layout(), shadow_targets.set_layout())?;
-    let indirect_pass = IndirectPass::new(&ctx, instance_tables.set2_layout())?;
-    let shadow_build_pass =
-        ShadowBuildPass::new(&ctx, instance_tables.set2_layout(), shadow_targets.set_layout())?;
-    let occlusion_pass = OcclusionPass::new(&ctx, instance_tables.set2_layout(), hiz.occlusion_layout())?;
-    let lod_pass = LodPass::new(&ctx, instance_tables.set2_layout())?;
-    let cluster_build_pass = ClusterBuildPass::new(&ctx, light_clusters.set_layout())?;
-    let transparent_passes = TransparentPasses::new(
-        &ctx,
-        instance_tables.set2_layout(),
-        light_clusters.set_layout(),
-        transparent_targets.set_layout(),
-    )?;
+    let cull_pass = CullPass::new(&ctx, &layouts)?;
+    let indirect_pass = IndirectPass::new(&ctx, &layouts)?;
+    let shadow_build_pass = ShadowBuildPass::new(&ctx, &layouts)?;
+    let occlusion_pass = OcclusionPass::new(&ctx, &layouts)?;
+    let lod_pass = LodPass::new(&ctx, &layouts)?;
+    let cluster_build_pass = ClusterBuildPass::new(&ctx, &layouts)?;
+    let transparent_passes = TransparentPasses::new(&ctx, &layouts)?;
 
     Ok(InitChain {
         ctx,

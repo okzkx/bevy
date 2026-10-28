@@ -24,6 +24,9 @@ use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
 use crate::render::core::kit::color_target::ColorTarget;
 use crate::render::core::kit::fullscreen_pipeline::FullscreenPipeline;
+use crate::render::core::kit::pipeline_layout::PipelineDesc;
+use crate::render::core::kit::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::kit::shader_abi;
 
 const SMAA_AREA_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_area_lut.png");
 const SMAA_SEARCH_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_search_lut.png");
@@ -35,6 +38,57 @@ pub const SMAA_BINDING_TEX1: u32 = 3;
 pub const SMAA_BINDING_TEX2: u32 = 4;
 
 pub(crate) const SMAA_INFO_SIZE: u32 = 32;
+
+const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
+const VS_FS: vk::ShaderStageFlags = stages(&[vk::ShaderStageFlags::VERTEX, FS]);
+
+/// edge/blend 共用：b0 主纹理 / b1 参数 UBO（VS 也读）/ b2 采样器 / b3、b4 两张辅助纹理。
+pub(crate) static SMAA_A_SET: SetLayoutDesc = SetLayoutDesc::new(
+    "smaa_a",
+    &[
+        BindingDesc::new(SMAA_BINDING_TEX0, DescKind::SampledImage, FS),
+        BindingDesc::new(SMAA_BINDING_INFO, DescKind::UniformBuffer, VS_FS),
+        BindingDesc::new(SMAA_BINDING_SAMPLER, DescKind::Sampler, FS),
+        BindingDesc::new(SMAA_BINDING_TEX1, DescKind::SampledImage, FS),
+        BindingDesc::new(SMAA_BINDING_TEX2, DescKind::SampledImage, FS),
+    ],
+);
+
+/// neighborhood：同 A，但 b4 换成第二个采样器。
+pub(crate) static SMAA_B_SET: SetLayoutDesc = SetLayoutDesc::new(
+    "smaa_b",
+    &[
+        BindingDesc::new(SMAA_BINDING_TEX0, DescKind::SampledImage, FS),
+        BindingDesc::new(SMAA_BINDING_INFO, DescKind::UniformBuffer, VS_FS),
+        BindingDesc::new(SMAA_BINDING_SAMPLER, DescKind::Sampler, FS),
+        BindingDesc::new(SMAA_BINDING_TEX1, DescKind::SampledImage, FS),
+        BindingDesc::new(SMAA_BINDING_TEX2, DescKind::Sampler, FS),
+    ],
+);
+
+pub(crate) static SMAA_EDGE_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "smaa_edge",
+    shader: &shader_abi::SMAA_EDGE,
+    entries: &[c"vs_main", c"fs_main"],
+    sets: &[&SMAA_A_SET],
+    push: None,
+};
+
+pub(crate) static SMAA_BLEND_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "smaa_blend",
+    shader: &shader_abi::SMAA_BLEND,
+    entries: &[c"vs_main", c"fs_main"],
+    sets: &[&SMAA_A_SET],
+    push: None,
+};
+
+pub(crate) static SMAA_NEIGHBORHOOD_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "smaa_neighborhood",
+    shader: &shader_abi::SMAA_NEIGHBORHOOD,
+    entries: &[c"vs_main", c"fs_main"],
+    sets: &[&SMAA_B_SET],
+    push: None,
+};
 
 /// SMAA 开关（BRP `smaa_set` 写，draw_frame 读）。
 #[derive(Resource)]
@@ -199,48 +253,8 @@ impl SmaaTargets {
     unsafe fn build_static(&mut self) -> Result<()> {
         unsafe {
         let device = &self.device;
-        let stages = vk::ShaderStageFlags::FRAGMENT;
-        let tex = |b: u32| {
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(b)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(1)
-                .stage_flags(stages)
-        };
-        let sampler = |b: u32| {
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(b)
-                .descriptor_type(vk::DescriptorType::SAMPLER)
-                .descriptor_count(1)
-                .stage_flags(stages)
-        };
-        let uniform = |b: u32| {
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(b)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(stages | vk::ShaderStageFlags::VERTEX)
-        };
-        self.set_layout_a = device.create_descriptor_set_layout(
-            &vk::DescriptorSetLayoutCreateInfo::default().bindings(&[
-                tex(SMAA_BINDING_TEX0),
-                uniform(SMAA_BINDING_INFO),
-                sampler(SMAA_BINDING_SAMPLER),
-                tex(SMAA_BINDING_TEX1),
-                tex(SMAA_BINDING_TEX2),
-            ]),
-            None,
-        )?;
-        self.set_layout_b = device.create_descriptor_set_layout(
-            &vk::DescriptorSetLayoutCreateInfo::default().bindings(&[
-                tex(SMAA_BINDING_TEX0),
-                uniform(SMAA_BINDING_INFO),
-                sampler(SMAA_BINDING_SAMPLER),
-                tex(SMAA_BINDING_TEX1),
-                sampler(SMAA_BINDING_TEX2),
-            ]),
-            None,
-        )?;
+        self.set_layout_a = SMAA_A_SET.create(device)?;
+        self.set_layout_b = SMAA_B_SET.create(device)?;
         let slots = MAX_FRAMES_IN_FLIGHT;
         self.sampler = crate::render::resident::images::sampler_key(
             &bevy::image::ImageSamplerDescriptor::linear(),
@@ -412,16 +426,16 @@ impl SmaaTargets {
         self.extent
     }
 
-    /// set_layout_a 句柄（edge/blend 管线 layout 借用）。
+    /// edge/blend 集布局。
     #[must_use]
-    pub fn set_layout_a(&self) -> vk::DescriptorSetLayout {
-        self.set_layout_a
+    pub fn layout_a(&self) -> SetLayout {
+        SetLayout::new(&SMAA_A_SET, self.set_layout_a)
     }
 
-    /// set_layout_b 句柄（neighborhood 管线 layout 借用）。
+    /// neighborhood 集布局。
     #[must_use]
-    pub fn set_layout_b(&self) -> vk::DescriptorSetLayout {
-        self.set_layout_b
+    pub fn layout_b(&self) -> SetLayout {
+        SetLayout::new(&SMAA_B_SET, self.set_layout_b)
     }
 
     #[must_use]
@@ -502,24 +516,18 @@ pub struct SmaaPipelines {
 
 impl SmaaPipelines {
     /// # Errors
-    /// shader 编译/管线创建失败。
+    /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(
         ctx: &Context,
-        layout_a: vk::DescriptorSetLayout,
-        layout_b: vk::DescriptorSetLayout,
+        layouts: &SetLayouts,
         edges_format: vk::Format,
         blend_format: vk::Format,
         swapchain_format: vk::Format,
     ) -> Result<Self> {
         Ok(Self {
-            edge: FullscreenPipeline::new(ctx, SMAA_EDGE_SPV, edges_format, &[layout_a])?,
-            blend: FullscreenPipeline::new(ctx, SMAA_BLEND_SPV, blend_format, &[layout_a])?,
-            neighborhood: FullscreenPipeline::new(
-                ctx,
-                SMAA_NB_SPV,
-                swapchain_format,
-                &[layout_b],
-            )?,
+            edge: FullscreenPipeline::new(ctx, &SMAA_EDGE_PIPELINE, layouts, edges_format)?,
+            blend: FullscreenPipeline::new(ctx, &SMAA_BLEND_PIPELINE, layouts, blend_format)?,
+            neighborhood: FullscreenPipeline::new(ctx, &SMAA_NEIGHBORHOOD_PIPELINE, layouts, swapchain_format)?,
         })
     }
 
@@ -548,10 +556,6 @@ impl SmaaPipelines {
         self.neighborhood.layout()
     }
 }
-
-const SMAA_EDGE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/smaa_edge.spv"));
-const SMAA_BLEND_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/smaa_blend.spv"));
-const SMAA_NB_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/smaa_neighborhood.spv"));
 
 
 /// 一帧 edge/blend 两 pass 的录制输入（smaa 开 = Some）。

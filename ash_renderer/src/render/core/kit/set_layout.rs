@@ -1,0 +1,199 @@
+//! 描述符集布局声明：每个资源族用一份静态 [`SetLayoutDesc`] 写清自己的 binding 表
+//!（编号、描述符种类、数量、可见阶段、binding 旗标、布局旗标），统一由
+//! [`SetLayoutDesc::create`] 建成 Vulkan 布局。同一份声明还是管线组装 pipeline layout
+//! 和 shader ABI 对账的依据（见 `pipeline_layout`）。
+//!
+//! 布局句柄仍归声明它的资源族持有和销毁；管线通过 [`SetLayouts`] 按声明名取句柄，
+//! 不再按位置接收裸句柄。
+
+use ash::{vk, Device};
+
+use crate::common::error::{Result, VulkanError};
+
+/// 描述符种类（WGSL 资源类型与 Vulkan 描述符类型的公共子集）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DescKind {
+    SampledImage,
+    StorageImage,
+    Sampler,
+    UniformBuffer,
+    StorageBuffer,
+}
+
+impl DescKind {
+    pub(crate) const fn vk(self) -> vk::DescriptorType {
+        match self {
+            Self::SampledImage => vk::DescriptorType::SAMPLED_IMAGE,
+            Self::StorageImage => vk::DescriptorType::STORAGE_IMAGE,
+            Self::Sampler => vk::DescriptorType::SAMPLER,
+            Self::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
+            Self::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
+        }
+    }
+}
+
+/// 阶段旗标的 const 合并（ash 的 `|` 不是 const）。
+pub(crate) const fn stages(list: &[vk::ShaderStageFlags]) -> vk::ShaderStageFlags {
+    let mut raw = 0;
+    let mut i = 0;
+    while i < list.len() {
+        raw |= list[i].as_raw();
+        i += 1;
+    }
+    vk::ShaderStageFlags::from_raw(raw)
+}
+
+/// 一个 binding 的声明。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BindingDesc {
+    pub binding: u32,
+    pub kind: DescKind,
+    /// 描述符个数；shader 侧非数组时必须是 1。
+    pub count: u32,
+    pub stages: vk::ShaderStageFlags,
+    pub flags: vk::DescriptorBindingFlags,
+}
+
+impl BindingDesc {
+    /// 单个描述符、无 binding 旗标。
+    pub(crate) const fn new(binding: u32, kind: DescKind, stages: vk::ShaderStageFlags) -> Self {
+        Self { binding, kind, count: 1, stages, flags: vk::DescriptorBindingFlags::empty() }
+    }
+
+    pub(crate) const fn array(self, count: u32, flags: vk::DescriptorBindingFlags) -> Self {
+        Self { count, flags, ..self }
+    }
+}
+
+/// 一个描述符集布局的完整声明。`name` 是它在 [`SetLayouts`] 里的身份，全局唯一。
+#[derive(Debug)]
+pub(crate) struct SetLayoutDesc {
+    pub name: &'static str,
+    pub bindings: &'static [BindingDesc],
+    pub flags: vk::DescriptorSetLayoutCreateFlags,
+}
+
+impl SetLayoutDesc {
+    pub(crate) const fn new(name: &'static str, bindings: &'static [BindingDesc]) -> Self {
+        Self { name, bindings, flags: vk::DescriptorSetLayoutCreateFlags::empty() }
+    }
+
+    pub(crate) fn binding(&self, binding: u32) -> Option<&BindingDesc> {
+        self.bindings.iter().find(|b| b.binding == binding)
+    }
+
+    /// 宿主侧自检：编号不重、数量与阶段非空、UPDATE_AFTER_BIND 三层配套里的布局层，
+    /// 以及 UAB 只用在设备启用了的描述符种类上。返回全部问题，空 = 通过。
+    pub(crate) fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.bindings.is_empty() {
+            out.push("没有任何 binding".to_owned());
+        }
+        for (i, b) in self.bindings.iter().enumerate() {
+            if self.bindings[..i].iter().any(|prev| prev.binding == b.binding) {
+                out.push(format!("b{} 重复声明", b.binding));
+            }
+            if b.count == 0 {
+                out.push(format!("b{} 描述符数量为 0", b.binding));
+            }
+            if b.stages.is_empty() {
+                out.push(format!("b{} 没有可见阶段", b.binding));
+            }
+            if b.flags.contains(vk::DescriptorBindingFlags::UPDATE_AFTER_BIND) {
+                // VUID-VkDescriptorSetLayoutCreateInfo-flags-03000
+                if !self.flags.contains(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL) {
+                    out.push(format!("b{} 带 UPDATE_AFTER_BIND，布局缺 UPDATE_AFTER_BIND_POOL", b.binding));
+                }
+                // Context 只启用了 descriptorBindingSampledImageUpdateAfterBind（覆盖 sampled image 与 sampler）
+                if !matches!(b.kind, DescKind::SampledImage | DescKind::Sampler) {
+                    out.push(format!("b{} 是 {:?}，设备没启用这一类的 UPDATE_AFTER_BIND", b.binding, b.kind));
+                }
+            }
+        }
+        out
+    }
+
+    /// 自检后建 Vulkan 布局；binding 旗标经 `BindingFlagsCreateInfo` 挂入。
+    ///
+    /// # Errors
+    /// 自检不通过，或布局创建失败。
+    pub(crate) fn create(&self, device: &Device) -> Result<vk::DescriptorSetLayout> {
+        let problems = self.problems();
+        if !problems.is_empty() {
+            return Err(VulkanError::Init(format!("描述符集布局 {} 声明有误：{}", self.name, problems.join("；"))));
+        }
+        let bindings: Vec<vk::DescriptorSetLayoutBinding> = self
+            .bindings
+            .iter()
+            .map(|b| {
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(b.binding)
+                    .descriptor_type(b.kind.vk())
+                    .descriptor_count(b.count)
+                    .stage_flags(b.stages)
+            })
+            .collect();
+        let binding_flags: Vec<vk::DescriptorBindingFlags> = self.bindings.iter().map(|b| b.flags).collect();
+        let mut flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
+        let mut info = vk::DescriptorSetLayoutCreateInfo::default().flags(self.flags).bindings(&bindings);
+        if binding_flags.iter().any(|f| !f.is_empty()) {
+            info = info.push_next(&mut flags_info);
+        }
+        Ok(unsafe { device.create_descriptor_set_layout(&info, None) }?)
+    }
+}
+
+/// 一个已建成的布局句柄和它的声明。句柄归资源族，这里只是借出时带上身份。
+#[derive(Clone, Copy)]
+pub struct SetLayout {
+    desc: &'static SetLayoutDesc,
+    raw: vk::DescriptorSetLayout,
+}
+
+impl SetLayout {
+    /// `raw` 必须是由 `desc.create` 建出来的。
+    pub(crate) fn new(desc: &'static SetLayoutDesc, raw: vk::DescriptorSetLayout) -> Self {
+        Self { desc, raw }
+    }
+
+    /// 裸句柄（给不走布局配方的探针用）。
+    #[must_use]
+    pub fn raw(self) -> vk::DescriptorSetLayout {
+        self.raw
+    }
+}
+
+/// 各资源族借出的布局登记表，管线按声明取句柄。
+pub struct SetLayouts {
+    entries: Vec<SetLayout>,
+}
+
+impl SetLayouts {
+    /// # Errors
+    /// 同名声明登记了两次，或登记了空句柄。
+    pub fn new(layouts: impl IntoIterator<Item = SetLayout>) -> Result<Self> {
+        let mut entries: Vec<SetLayout> = Vec::new();
+        for layout in layouts {
+            if entries.iter().any(|e| e.desc.name == layout.desc.name) {
+                return Err(VulkanError::Init(format!("描述符集布局 {} 登记了两次", layout.desc.name)));
+            }
+            if layout.raw == vk::DescriptorSetLayout::null() {
+                return Err(VulkanError::Init(format!("描述符集布局 {} 登记时还没建", layout.desc.name)));
+            }
+            entries.push(layout);
+        }
+        Ok(Self { entries })
+    }
+
+    /// 按声明取句柄；登记的必须正是这一份声明，不只是同名。
+    ///
+    /// # Errors
+    /// 登记表里没有这份声明。
+    pub(crate) fn get(&self, desc: &'static SetLayoutDesc) -> Result<vk::DescriptorSetLayout> {
+        self.entries
+            .iter()
+            .find(|e| std::ptr::eq(e.desc, desc))
+            .map(|e| e.raw)
+            .ok_or_else(|| VulkanError::Init(format!("描述符集布局 {} 没有登记", desc.name)))
+    }
+}

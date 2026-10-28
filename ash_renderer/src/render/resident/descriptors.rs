@@ -12,9 +12,10 @@
 //! 3. **槽位分配与发布**：free list 分槽、采样器按 [`sampler_key`]
 //!    功能参数去重、fallback 槽 0（白 1×1 + 线性采样器）、发布接上传票据。
 //!
-//! set/binding 表（本模块是 CPU 侧真身）：set0 b0 = `texture_2d` 数组（runtime，
-//! 无长度）、b1 = sampler 数组；set1 b0 = 每帧 UBO（[`FRAME_UBO_SIZE`]）；set2 归
-//! [`super::instance_table`]。场景 pipeline layout 无 push range。
+//! set/binding 表（本模块是 CPU 侧真身，声明见 [`BINDLESS_SET`] / [`FRAME_SET`]）：
+//! set0 b0 = `texture_2d` 数组（runtime，无长度）、b1 = sampler 数组；set1 b0 = 每帧
+//! UBO（[`FRAME_UBO_SIZE`]）；set2 归 [`super::instance_table`]。场景 pipeline layout
+//! 无 push range。
 //!
 //! stage flags 取 `COMPUTE|VERTEX|FRAGMENT` 超集：探针走 compute、主渲染走
 //! graphics，超集声明只影响驱动的描述符优化面，不改变合法性。
@@ -37,13 +38,34 @@ use crate::common::error::{Result, VulkanError};
 
 use super::images::{sampler_key, GpuImage, ImageSpec};
 use crate::render::core::device::memory::{BufferRole, GpuBuffer, MemoryContract};
+use crate::render::core::kit::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc};
 use super::uploader::{StagingImageCopy, UploadBatch, Uploader};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
-/// 常驻表容量。`BindlessTables::new` 按设备 UAB 轨五项限额核对，不够即报错——
-/// 不静默降容量。纹理表与采样器表同容量（双数组布局下无各自异容的必要；异容
-/// 需求出现时拆两个常量）。
+/// 常驻表容量（set0 两个 binding 的描述符数）。`BindlessTables::new` 按设备 UAB 轨
+/// 五项限额核对，不够即报错——不静默降容量。纹理表与采样器表同容量（双数组布局下
+/// 无各自异容的必要；异容需求出现时拆两个常量）。
 pub const TABLE_CAPACITY: u32 = 1024;
+
+const ALL_STAGES: vk::ShaderStageFlags =
+    stages(&[vk::ShaderStageFlags::COMPUTE, vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT]);
+const UAB_PARTIALLY: vk::DescriptorBindingFlags = vk::DescriptorBindingFlags::from_raw(
+    vk::DescriptorBindingFlags::UPDATE_AFTER_BIND.as_raw() | vk::DescriptorBindingFlags::PARTIALLY_BOUND.as_raw(),
+);
+
+/// set0 常驻双表：b0 贴图 / b1 采样器，各 [`TABLE_CAPACITY`] 个，UAB + PARTIALLY_BOUND。
+pub(crate) static BINDLESS_SET: SetLayoutDesc = SetLayoutDesc {
+    name: "bindless",
+    bindings: &[
+        BindingDesc::new(0, DescKind::SampledImage, ALL_STAGES).array(TABLE_CAPACITY, UAB_PARTIALLY),
+        BindingDesc::new(1, DescKind::Sampler, ALL_STAGES).array(TABLE_CAPACITY, UAB_PARTIALLY),
+    ],
+    flags: vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL,
+};
+
+/// set1 每帧 UBO（b0，[`FRAME_UBO_SIZE`]）。
+pub(crate) static FRAME_SET: SetLayoutDesc =
+    SetLayoutDesc::new("frame", &[BindingDesc::new(0, DescKind::UniformBuffer, ALL_STAGES)]);
 
 /// 每帧 UBO 字节数（set1 b0）。208B（mat4 view_proj + 灯光参数 + mode + mat4
 /// inv_view_proj + vec4 camera_pos，偏移见 `FrameUniformsLayout` 静态断言表）；
@@ -260,8 +282,11 @@ impl BindlessTables {
     /// 1+MAX_FRAMES_IN_FLIGHT 个 set → 每帧 UBO 与 set1 写入 → fallback 贴图
     /// 上传并占 0 号双槽。任何失败回收已建对象（全有或全无）。
     ///
+    /// `capacity` 是槽位预算，不超过布局里声明的 [`TABLE_CAPACITY`]（小于它只为测试
+    /// 耗尽路径）；限额对账和 pool 按布局声明的数量算。
+    ///
     /// # Errors
-    /// UAB 限额不满足容量、Vulkan 创建/分配失败、fallback 上传失败。
+    /// 预算超过布局容量、UAB 限额不满足布局容量、Vulkan 创建/分配失败、fallback 上传失败。
     pub fn new(
         device: &Device,
         instance: &Instance,
@@ -271,6 +296,10 @@ impl BindlessTables {
         graphics_family: u32,
         capacity: u32,
     ) -> Result<Self> {
+        if capacity > TABLE_CAPACITY {
+            return Err(VulkanError::Init(format!("槽位预算 {capacity} 超过 set0 布局容量 {TABLE_CAPACITY}")));
+        }
+        let layout_count = TABLE_CAPACITY;
         // ---- 1) 限额对账：UAB 轨五项,逐项落日志留证据。注意这组限额
         //不在普通 Limits 里——它们是 descriptorIndexing 的 properties2 扩展
         //（PhysicalDeviceDescriptorIndexingProperties,经 Properties2 push_next 查询,
@@ -285,66 +314,31 @@ impl BindlessTables {
         let per_set_sam = di_props.max_descriptor_set_update_after_bind_samplers;
         let all_pools = di_props.max_update_after_bind_descriptors_in_all_pools;
         info!(
-            "UAB 轨限额对账(候选容量 {capacity}): 每阶段 sampledImages {per_stage_smp} / 每 set {per_set_smp} \
+            "UAB 轨限额对账(布局容量 {layout_count}): 每阶段 sampledImages {per_stage_smp} / 每 set {per_set_smp} \
              | 每阶段 samplers {per_stage_sam} / 每 set {per_set_sam} | 全池总额 {all_pools}",
         );
         // 每阶段与每 set 是两道独立闸;全池总额按双表满载 + 每帧 UBO 计
-        let pool_total = u64::from(capacity) * 2 + MAX_FRAMES_IN_FLIGHT as u64;
+        let pool_total = u64::from(layout_count) * 2 + MAX_FRAMES_IN_FLIGHT as u64;
         let checks = [
-            ("每阶段 sampledImages", u64::from(per_stage_smp), u64::from(capacity)),
-            ("每 set sampledImages", u64::from(per_set_smp), u64::from(capacity)),
-            ("每阶段 samplers", u64::from(per_stage_sam), u64::from(capacity)),
-            ("每 set samplers", u64::from(per_set_sam), u64::from(capacity)),
+            ("每阶段 sampledImages", u64::from(per_stage_smp), u64::from(layout_count)),
+            ("每 set sampledImages", u64::from(per_set_smp), u64::from(layout_count)),
+            ("每阶段 samplers", u64::from(per_stage_sam), u64::from(layout_count)),
+            ("每 set samplers", u64::from(per_set_sam), u64::from(layout_count)),
             ("全池 UAB 总额", u64::from(all_pools), pool_total),
         ];
         if let Some((name, have, need)) = checks.iter().find(|(_, have, need)| have < need) {
             return Err(VulkanError::Init(format!(
-                "UAB 轨限额不够容量 {capacity}:{name} 实测 {have} < 需要 {need}——\
+                "UAB 轨限额不够容量 {layout_count}:{name} 实测 {have} < 需要 {need}——\
                  显式报错,不静默截断;调容量须回 set/binding 表文档对账"
             )));
         }
         info!(
-            "限额对账通过:容量 {capacity}×2 张表 + {MAX_FRAMES_IN_FLIGHT} 帧 UBO = {pool_total} 描述符,五项限额全满足"
+            "限额对账通过:容量 {layout_count}×2 张表 + {MAX_FRAMES_IN_FLIGHT} 帧 UBO = {pool_total} 描述符,五项限额全满足"
         );
 
-        // ---- 2) 双 layout:binding 旗标经 BindingFlagsCreateInfo 扩展结构挂入
-        //（ash 0.38 的 DescriptorSetLayoutBinding 无旗标字段）,
-        // layout 自身带 UPDATE_AFTER_BIND_POOL(VUID-03000 三层配套的第二层) ----
-        let stages = vk::ShaderStageFlags::COMPUTE
-            | vk::ShaderStageFlags::VERTEX
-            | vk::ShaderStageFlags::FRAGMENT;
-        let uab_partially = vk::DescriptorBindingFlags::UPDATE_AFTER_BIND
-            | vk::DescriptorBindingFlags::PARTIALLY_BOUND;
-        let set0_bindings = [
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(capacity)
-                .stage_flags(stages),
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(1)
-                .descriptor_type(vk::DescriptorType::SAMPLER)
-                .descriptor_count(capacity)
-                .stage_flags(stages),
-        ];
-        let set0_binding_flags = [uab_partially, uab_partially];
-        let mut set0_flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
-            .binding_flags(&set0_binding_flags);
-        // # Safety:device 合法句柄,创建参数为契约常量
-        let set0_layout = unsafe {
-            device.create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::default()
-                    .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
-                    .bindings(&set0_bindings)
-                    .push_next(&mut set0_flags_info),
-                None,
-            )
-        }?;
-        let set1_bindings = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(stages)];
+        // ---- 2) 双 layout:按 BINDLESS_SET / FRAME_SET 声明建(binding 旗标 +
+        // layout 的 UPDATE_AFTER_BIND_POOL 是 VUID-03000 三层配套的前两层) ----
+        let set0_layout = BINDLESS_SET.create(device)?;
         let mut guard = BindlessBuildGuard {
             device,
             set0_layout,
@@ -352,12 +346,7 @@ impl BindlessTables {
             pool: vk::DescriptorPool::null(),
             committed: false,
         };
-        guard.set1_layout = unsafe {
-            device.create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&set1_bindings),
-                None,
-            )
-        }?;
+        guard.set1_layout = FRAME_SET.create(device)?;
         let result = unsafe {
             Self::new_inner(
                 device,
@@ -367,6 +356,7 @@ impl BindlessTables {
                 uploader,
                 graphics_family,
                 capacity,
+                layout_count,
                 set0_layout,
                 guard.set1_layout,
                 &mut guard,
@@ -388,7 +378,7 @@ impl BindlessTables {
     /// 两个 layout 须刚创建成功且未销毁;`uploader` 须可用(fallback 上传走它)。
     #[expect(
         clippy::too_many_arguments,
-        reason = "Vulkan 创建链的参数表即依赖清单:设备/实例/物理设备/契约/上传器/族号/容量/两个 layout,逐项显式"
+        reason = "Vulkan 创建链的参数表即依赖清单:设备/实例/物理设备/契约/上传器/族号/槽位预算/布局容量/两个 layout,逐项显式"
     )]
     unsafe fn new_inner(
         device: &Device,
@@ -398,6 +388,7 @@ impl BindlessTables {
         uploader: &mut Uploader,
         graphics_family: u32,
         capacity: u32,
+        layout_count: u32,
         set0_layout: vk::DescriptorSetLayout,
         set1_layout: vk::DescriptorSetLayout,
         guard: &mut BindlessBuildGuard<'_>,
@@ -406,10 +397,10 @@ impl BindlessTables {
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(capacity),
+                .descriptor_count(layout_count),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLER)
-                .descriptor_count(capacity),
+                .descriptor_count(layout_count),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(MAX_FRAMES_IN_FLIGHT as u32),
@@ -553,16 +544,16 @@ impl BindlessTables {
         self.resident_set
     }
 
-    /// set0 布局(建 pipeline layout 的素材;集与布局同源,不可另建)。
+    /// set0 常驻双表的布局(登记给管线组装;集与布局同源,不可另建)。
     #[must_use]
-    pub fn set0_layout(&self) -> vk::DescriptorSetLayout {
-        self.set0_layout
+    pub fn bindless_layout(&self) -> SetLayout {
+        SetLayout::new(&BINDLESS_SET, self.set0_layout)
     }
 
-    /// set1 布局(同上)。
+    /// set1 每帧 UBO 的布局(同上)。
     #[must_use]
-    pub fn set1_layout(&self) -> vk::DescriptorSetLayout {
-        self.set1_layout
+    pub fn frame_layout(&self) -> SetLayout {
+        SetLayout::new(&FRAME_SET, self.set1_layout)
     }
 
     /// 第 `frame` 帧槽的 set1(按帧槽绑定)。

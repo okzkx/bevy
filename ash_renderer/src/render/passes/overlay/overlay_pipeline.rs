@@ -31,9 +31,22 @@ use crate::common::error::Result;
 use crate::render::Context;
 
 use crate::render::core::kit::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::kit::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::kit::set_layout::{stages, SetLayouts};
+use crate::render::core::kit::shader_abi;
+use crate::render::resident::descriptors::BINDLESS_SET;
 
-/// shader 模块字节（build.rs 产物，OUT_DIR 之下，与场景管线同一编译路径）。
-const OVERLAY_DRAW_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/overlay_draw.spv"));
+/// push 范围覆盖全 16B、双阶段：screen_size 在 vertex 用，槽位在 fragment 用。
+pub(crate) static OVERLAY_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "overlay_draw",
+    shader: &shader_abi::OVERLAY_DRAW,
+    entries: &[c"vs_main", c"fs_main"],
+    sets: &[&BINDLESS_SET],
+    push: Some(PushRange {
+        stages: stages(&[vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT]),
+        size: UI_PUSH_CONSTANTS_SIZE,
+    }),
+};
 
 /// push constant 冻结布局（16B）的 Rust 镜像：不参与运行时（字节由 [`pack_ui_push`]
 /// 按偏移常量手工排布），存在的意义是让 `offset_of!` 静态断言把 WGSL/管线/CPU
@@ -108,174 +121,124 @@ pub struct OverlayPipeline {
 }
 
 impl OverlayPipeline {
-    /// 建管线链：shader module（build.rs 补丁产物）→ pipeline layout（set0 + 16B
-    /// push）→ GraphicsPipelineCreateInfo（颜色 + 深度格式声明；深度读写全关）。
-    /// 任何失败回收已建对象（全有或全无）。
+    /// 按 [`OVERLAY_PIPELINE`] 建管线（set0 + 16B push；骨架见 `PipelineDesc::build`），
+    /// 颜色 + 深度格式声明，深度读写全关。任何失败回收已建对象（全有或全无）。
     ///
     /// # Errors
-    /// shader module / layout / pipeline 任一创建失败。
+    /// 配方对账不过，或 layout / shader module / pipeline 任一创建失败。
     pub fn new(
         ctx: &Context,
+        layouts: &SetLayouts,
         color_format: vk::Format,
         depth_format: vk::Format,
-        set0_layout: vk::DescriptorSetLayout,
     ) -> Result<Self> {
         let device = &ctx.device;
-        // 词流（小端）→ ash 的 &[u32]；build.rs 只写整词，as_chunks 即全部字节
-        let words: Vec<u32> = OVERLAY_DRAW_SPV
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| u32::from_le_bytes(*c))
-            .collect();
-        let module = unsafe {
-            device.create_shader_module(
-                &vk::ShaderModuleCreateInfo::default().code(&words),
-                None,
-            )
-        }?;
-        // push range 覆盖全 16B、双 stage：screen_size 在 vertex 用，槽位在 fragment 用
-        let push_range = vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-            .offset(0)
-            .size(UI_PUSH_CONSTANTS_SIZE);
-        let set_layouts = [set0_layout];
-        let layout = unsafe {
-            device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(&set_layouts)
-                    .push_constant_ranges(std::slice::from_ref(&push_range)),
-                None,
-            )
-        }?;
-        // # Safety:module/layout 均刚创建成功且未销毁（下方任一失败路径先回收
-        // 再返回），入口名 vs_main/fs_main 存在于 module
-        let result =
-            unsafe { Self::create_pipeline(device, color_format, depth_format, layout, module) };
-        if result.is_err() {
-            unsafe {
-                device.destroy_shader_module(module, None);
-                device.destroy_pipeline_layout(layout, None);
-            }
-        }
-        result
+        OVERLAY_PIPELINE.build(device, layouts, |layout, stages| unsafe {
+            Self::create_pipeline(device, color_format, depth_format, layout, stages)
+        })
     }
 
-    /// 管线状态装配（layout 已建；入口名 vs_main/fs_main 与 WGSL 同源）。
+    /// 管线状态装配（layout 已建；入口取自配方）。
     ///
     /// # Safety
-    /// `module`/`layout` 须为合法句柄；入口名存在于 module。
+    /// `layout` 与 `stages` 里的 module 须为合法句柄。
     unsafe fn create_pipeline(
         device: &Device,
         color_format: vk::Format,
         depth_format: vk::Format,
         layout: vk::PipelineLayout,
-        module: vk::ShaderModule,
+        stages: &[vk::PipelineShaderStageCreateInfo<'_>],
     ) -> Result<Self> {
-        unsafe {
-            let stages = [
-                vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::VERTEX)
-                    .module(module)
-                    .name(c"vs_main"),
-                vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::FRAGMENT)
-                    .module(module)
-                    .name(c"fs_main"),
-            ];
-            // 顶点输入 = epaint 顶点镜像的 20B 交错契约（pos/uv/color @ 0/8/16）
-            let vertex_binding = [vk::VertexInputBindingDescription::default()
+        // 顶点输入 = epaint 顶点镜像的 20B 交错契约（pos/uv/color @ 0/8/16）
+        let vertex_binding = [vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(UI_VERTEX_STRIDE)
+            .input_rate(vk::VertexInputRate::VERTEX)];
+        let vertex_attributes = [
+            vk::VertexInputAttributeDescription::default()
+                .location(0)
                 .binding(0)
-                .stride(UI_VERTEX_STRIDE)
-                .input_rate(vk::VertexInputRate::VERTEX)];
-            let vertex_attributes = [
-                vk::VertexInputAttributeDescription::default()
-                    .location(0)
-                    .binding(0)
-                    .format(vk::Format::R32G32_SFLOAT)
-                    .offset(0),
-                vk::VertexInputAttributeDescription::default()
-                    .location(1)
-                    .binding(0)
-                    .format(vk::Format::R32G32_SFLOAT)
-                    .offset(8),
-                // Color32 字节 → UNORM 解包即 /255 的 0..1（gamma 预乘 sRGBA）
-                vk::VertexInputAttributeDescription::default()
-                    .location(2)
-                    .binding(0)
-                    .format(vk::Format::R8G8B8A8_UNORM)
-                    .offset(16),
-            ];
-            let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-                .vertex_binding_descriptions(&vertex_binding)
-                .vertex_attribute_descriptions(&vertex_attributes);
-            let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-            let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-                .viewport_count(1)
-                .scissor_count(1);
-            let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
-                .polygon_mode(vk::PolygonMode::FILL)
-                // epaint 明言 UI 顶点绕向不保证一致，剔除保持 NONE（官方同款）
-                .cull_mode(vk::CullModeFlags::NONE)
-                .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-                .line_width(1.0);
-            let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-            // depth-stencil 全关（UI 不读不写深度）；深度格式仍须随渲染实例声明
-            //（VUID-08914，管线声明面 = 实例附件全集的形状声明）
-            let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-                .depth_test_enable(false)
-                .depth_write_enable(false);
-            let blend_attachment = [vk::PipelineColorBlendAttachmentState::default()
-                .blend_enable(true)
-                // egui 顶点色预乘 → src 用 ONE（官方 wgpu 后端 0.36.2 判据）
-                .src_color_blend_factor(vk::BlendFactor::ONE)
-                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-                .color_blend_op(vk::BlendOp::ADD)
-                .src_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_DST_ALPHA)
-                .dst_alpha_blend_factor(vk::BlendFactor::ONE)
-                .alpha_blend_op(vk::BlendOp::ADD)
-                .color_write_mask(vk::ColorComponentFlags::RGBA)];
-            let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
-                .attachments(&blend_attachment);
-            let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-            let dynamic_info =
-                vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-            // dynamic rendering 渲染信息：颜色 = swapchain SRGB view 同格式；深度
-            // 格式与实例附件**全等声明**——VUID-08914：未启用
-            // dynamicRenderingUnusedAttachments 特性时管线的 depthAttachmentFormat
-            // 必须等于实例深度附件格式（"不用即可 UNDEFINED"不成立，depth 读/写
-            // 关闭才是"不用"的表达位）
-            let color_formats = [color_format];
-            let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-                .color_attachment_formats(&color_formats)
-                .depth_attachment_format(depth_format);
-            let info = vk::GraphicsPipelineCreateInfo::default()
-                .stages(&stages)
-                .vertex_input_state(&vertex_input)
-                .input_assembly_state(&input_assembly)
-                .viewport_state(&viewport_state)
-                .rasterization_state(&rasterization)
-                .multisample_state(&multisample)
-                .depth_stencil_state(&depth_stencil)
-                .color_blend_state(&color_blend)
-                .dynamic_state(&dynamic_info)
-                .layout(layout)
-                .push_next(&mut rendering_info);
-            let pipeline = create_graphics_pipeline(device, &info)?;
-            // module 用毕即拆（与场景管线同纪律：创建收口即销毁，拆 Device 零泄漏）
-            device.destroy_shader_module(module, None);
-            info!(
-                "overlay 管线就绪: dynamic rendering（color {color_format:?}，depth {depth_format:?}\
-                 声明对齐读写关），顶点输入 20B（pos/uv/color @ 0/8/16），blend 开（color \
-                 ONE/ONE_MINUS_SRC_ALPHA，alpha ONE_MINUS_DST_ALPHA/ONE），剔除关，set0 \
-                 共享常驻表，push 16B（0/8/12）"
-            );
-            Ok(Self {
-                handle: PipelineHandle::new(device, layout, pipeline),
-            })
-        }
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(0),
+            vk::VertexInputAttributeDescription::default()
+                .location(1)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(8),
+            // Color32 字节 → UNORM 解包即 /255 的 0..1（gamma 预乘 sRGBA）
+            vk::VertexInputAttributeDescription::default()
+                .location(2)
+                .binding(0)
+                .format(vk::Format::R8G8B8A8_UNORM)
+                .offset(16),
+        ];
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&vertex_binding)
+            .vertex_attribute_descriptions(&vertex_attributes);
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewport_count(1)
+            .scissor_count(1);
+        let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(vk::PolygonMode::FILL)
+            // epaint 明言 UI 顶点绕向不保证一致，剔除保持 NONE（官方同款）
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .line_width(1.0);
+        let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        // depth-stencil 全关（UI 不读不写深度）；深度格式仍须随渲染实例声明
+        //（VUID-08914，管线声明面 = 实例附件全集的形状声明）
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(false)
+            .depth_write_enable(false);
+        let blend_attachment = [vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(true)
+            // egui 顶点色预乘 → src 用 ONE（官方 wgpu 后端 0.36.2 判据）
+            .src_color_blend_factor(vk::BlendFactor::ONE)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_DST_ALPHA)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE)
+            .alpha_blend_op(vk::BlendOp::ADD)
+            .color_write_mask(vk::ColorComponentFlags::RGBA)];
+        let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
+            .attachments(&blend_attachment);
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_info =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+        // dynamic rendering 渲染信息：颜色 = swapchain SRGB view 同格式；深度
+        // 格式与实例附件**全等声明**——VUID-08914：未启用
+        // dynamicRenderingUnusedAttachments 特性时管线的 depthAttachmentFormat
+        // 必须等于实例深度附件格式（"不用即可 UNDEFINED"不成立，depth 读/写
+        // 关闭才是"不用"的表达位）
+        let color_formats = [color_format];
+        let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&color_formats)
+            .depth_attachment_format(depth_format);
+        let info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(stages)
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterization)
+            .multisample_state(&multisample)
+            .depth_stencil_state(&depth_stencil)
+            .color_blend_state(&color_blend)
+            .dynamic_state(&dynamic_info)
+            .layout(layout)
+            .push_next(&mut rendering_info);
+        let pipeline = create_graphics_pipeline(device, &info)?;
+        info!(
+            "overlay 管线就绪: dynamic rendering（color {color_format:?}，depth {depth_format:?}\
+             声明对齐读写关），顶点输入 20B（pos/uv/color @ 0/8/16），blend 开（color \
+             ONE/ONE_MINUS_SRC_ALPHA，alpha ONE_MINUS_DST_ALPHA/ONE），剔除关，set0 \
+             共享常驻表，push 16B（0/8/12）"
+        );
+        Ok(Self {
+            handle: PipelineHandle::new(device, layout, pipeline),
+        })
     }
 
     /// 管线句柄（帧录制绑定用）。

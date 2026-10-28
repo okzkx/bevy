@@ -48,11 +48,33 @@ use crate::common::bytes::{put_f32s, put_mat4, put_u32, put_u32s, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
 use crate::render::core::device::memory::{align_up, BufferRole, GpuBuffer, MemoryContract};
+use crate::render::core::kit::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
 /// 对象表容量（实例槽数）。覆盖 10 万实例压测档（131072 ≥ 100000）；
 /// 用尽报错出局不静默截断（TABLE_CAPACITY 同纪律）。48B/记录。
 pub const OBJECT_TABLE_CAPACITY: u32 = 1 << 17;
+
+const SHARED: vk::ShaderStageFlags =
+    stages(&[vk::ShaderStageFlags::COMPUTE, vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT]);
+const COMPUTE: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
+
+/// set2 实例表（binding 含义见模块注释）：b0/b1/b2 图形与 compute 共读，b3..b9 compute 专属。
+pub(crate) static INSTANCE_SET: SetLayoutDesc = SetLayoutDesc::new(
+    "instance",
+    &[
+        BindingDesc::new(0, DescKind::StorageBuffer, SHARED),
+        BindingDesc::new(1, DescKind::StorageBuffer, SHARED),
+        BindingDesc::new(2, DescKind::StorageBuffer, SHARED),
+        BindingDesc::new(3, DescKind::StorageBuffer, COMPUTE),
+        BindingDesc::new(4, DescKind::StorageBuffer, COMPUTE),
+        BindingDesc::new(5, DescKind::StorageBuffer, COMPUTE),
+        BindingDesc::new(6, DescKind::StorageBuffer, COMPUTE),
+        BindingDesc::new(7, DescKind::StorageBuffer, COMPUTE),
+        BindingDesc::new(8, DescKind::StorageBuffer, COMPUTE),
+        BindingDesc::new(9, DescKind::StorageBuffer, COMPUTE),
+    ],
+);
 
 /// 材质槽容量（唯一材质数上界；bump-only 不回收）。
 pub(crate) const MATERIAL_TABLE_CAPACITY: u32 = 1 << 16;
@@ -427,42 +449,14 @@ impl InstanceTables {
         gap_mark_rings: &[GpuBuffer],
     ) -> Result<(vk::DescriptorSetLayout, Vec<vk::DescriptorSet>, vk::DescriptorPool)> {
         unsafe {
-            let stages = vk::ShaderStageFlags::COMPUTE
-                | vk::ShaderStageFlags::VERTEX
-                | vk::ShaderStageFlags::FRAGMENT;
-            let storage = |binding: u32| {
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(binding)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(1)
-                    .stage_flags(stages)
-            };
-            // b3/b4/b5/b6/b7/b8/b9 = 剔除标记(read_write)/在场环/命令环/遮挡标记
-            // (read_write)/LOD 变体表(read)/LOD 档位环(read_write)/缺口标记环
-            // (read_write) storage：compute 专属——图形 shader 不
-            // 声明不使用，stage 收窄到 COMPUTE（b0/b1/b2 的超集声明不动）。b5 的
-            // 另一读者 cmd_draw_indexed_indirect 不经描述符（命令参数直取 buffer），
-            // 不在此 stage 面内。
-            let compute_only = |binding: u32| {
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(binding)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
-            };
-            let bindings = [storage(0), storage(1), storage(2), compute_only(3), compute_only(4), compute_only(5), compute_only(6), compute_only(7), compute_only(8), compute_only(9)];
-            let set2_layout = device
-                .create_descriptor_set_layout(
-                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
-                    None,
-                )
-                .map_err(VulkanError::from)?;
+            let set2_layout = INSTANCE_SET.create(device)?;
+            let binding_count = INSTANCE_SET.bindings.len();
             let pool = match device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(MAX_FRAMES_IN_FLIGHT as u32)
                     .pool_sizes(&[vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count((MAX_FRAMES_IN_FLIGHT * bindings.len()) as u32)]),
+                        .descriptor_count((MAX_FRAMES_IN_FLIGHT * binding_count) as u32)]),
                 None,
             ) {
                 Ok(p) => p,
@@ -485,8 +479,8 @@ impl InstanceTables {
             };
             // 描述符一次写入:b0 对象表(全量)、b1..b9 各帧槽自己的环(全量)。
             // info 先收齐再构造 write——write 持有 info 的引用,infos 之后不再变
-            let mut infos = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * bindings.len());
-            let mut meta = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * bindings.len());
+            let mut infos = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * binding_count);
+            let mut meta = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * binding_count);
             for (frame, set) in sets.iter().enumerate() {
                 for (binding, buffer, range) in [
                     (
@@ -565,10 +559,10 @@ impl InstanceTables {
         }
     }
 
-    /// set2 布局句柄（建图形管线 layout 的素材；集与布局同源）。
+    /// set2 实例表的布局（登记给管线组装；集与布局同源）。
     #[must_use]
-    pub fn set2_layout(&self) -> vk::DescriptorSetLayout {
-        self.set2_layout
+    pub fn set_layout(&self) -> SetLayout {
+        SetLayout::new(&INSTANCE_SET, self.set2_layout)
     }
 
     /// 第 `frame` 帧槽的 set2（表集,按帧槽绑定）。

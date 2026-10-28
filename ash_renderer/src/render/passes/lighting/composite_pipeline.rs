@@ -4,13 +4,26 @@ use ash::vk;
 
 use crate::common::error::Result;
 use crate::render::core::kit::fullscreen_pipeline::FullscreenPipeline;
+use crate::render::core::kit::pipeline_layout::PipelineDesc;
+use crate::render::core::kit::set_layout::SetLayouts;
+use crate::render::core::kit::shader_abi;
+use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET;
+use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET;
+use crate::render::passes::shadow::shadow_map::SHADOW_SET;
+use crate::render::resident::descriptors::FRAME_SET;
 use crate::render::Context;
 
-const GBUFFER_COMPOSITE_SPV: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer_composite.spv"));
+/// set 依次为帧 UBO、G-buffer 采样集、光源分簇集、阴影集。
+pub(crate) static GBUFFER_COMPOSITE_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gbuffer_composite",
+    shader: &shader_abi::GBUFFER_COMPOSITE,
+    entries: &[c"vs_main", c"fs_main"],
+    sets: &[&FRAME_SET, &GBUFFER_SAMPLED_SET, &LIGHT_CLUSTER_SET, &SHADOW_SET],
+    push: None,
+};
 
-/// 合成管线。set 依次为帧 UBO、G-buffer 采样集、光源分簇集、阴影集；这些布局
-/// 归各自资源，本管线要先于它们销毁。
+/// 合成管线（配方 [`GBUFFER_COMPOSITE_PIPELINE`]）；用到的布局归各自资源，本管线要
+/// 先于它们销毁。
 #[derive(bevy::prelude::Resource)]
 pub struct CompositePipeline {
     inner: FullscreenPipeline,
@@ -18,23 +31,9 @@ pub struct CompositePipeline {
 
 impl CompositePipeline {
     /// # Errors
-    /// shader module / layout / pipeline 任一创建失败。
-    pub fn new(
-        ctx: &Context,
-        hdr_format: vk::Format,
-        frame_layout: vk::DescriptorSetLayout,
-        gbuffer_layout: vk::DescriptorSetLayout,
-        cluster_layout: vk::DescriptorSetLayout,
-        shadow_layout: vk::DescriptorSetLayout,
-    ) -> Result<Self> {
-        Ok(Self {
-            inner: FullscreenPipeline::new(
-                ctx,
-                GBUFFER_COMPOSITE_SPV,
-                hdr_format,
-                &[frame_layout, gbuffer_layout, cluster_layout, shadow_layout],
-            )?,
-        })
+    /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
+    pub fn new(ctx: &Context, layouts: &SetLayouts, hdr_format: vk::Format) -> Result<Self> {
+        Ok(Self { inner: FullscreenPipeline::new(ctx, &GBUFFER_COMPOSITE_PIPELINE, layouts, hdr_format)? })
     }
 
     #[must_use]

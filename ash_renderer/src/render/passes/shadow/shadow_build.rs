@@ -8,9 +8,20 @@ use bevy::log::info;
 use crate::common::bytes::put_u32;
 use crate::common::error::Result;
 use crate::render::core::kit::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
+use crate::render::core::kit::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::kit::set_layout::SetLayouts;
+use crate::render::core::kit::shader_abi;
+use crate::render::passes::shadow::shadow_map::SHADOW_SET;
+use crate::render::resident::instance_table::INSTANCE_SET;
 use crate::render::Context;
 
-const SHADOW_BUILD_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shadow_build.spv"));
+pub(crate) static SHADOW_BUILD_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "shadow_build",
+    shader: &shader_abi::SHADOW_BUILD,
+    entries: &[c"cs_main"],
+    sets: &[&INSTANCE_SET, &SHADOW_SET],
+    push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: SHADOW_BUILD_PUSH_SIZE }),
+};
 
 /// compute push 总长（WGSL `PushBuild` 同源）：count 4B。
 pub const SHADOW_BUILD_PUSH_SIZE: u32 = 4;
@@ -33,19 +44,9 @@ impl ShadowBuildPass {
     /// 建管线：layout 借用 set2 与 shadow set 布局。
     ///
     /// # Errors
-    /// shader module / layout / pipeline 创建失败。
-    pub fn new(
-        ctx: &Context,
-        set2_layout: vk::DescriptorSetLayout,
-        shadow_layout: vk::DescriptorSetLayout,
-    ) -> Result<Self> {
-        let pipeline = ComputePipeline::new(
-            &ctx.device,
-            SHADOW_BUILD_SPV,
-            &[set2_layout, shadow_layout],
-            SHADOW_BUILD_PUSH_SIZE,
-            c"cs_main",
-        )?;
+    /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
+        let pipeline = ComputePipeline::new(&ctx.device, &SHADOW_BUILD_PIPELINE, layouts)?;
         info!("shadow 命令组装管线就绪: shadow_build compute（[set2, shadow set] + 4B push count）");
         Ok(Self { pipeline })
     }

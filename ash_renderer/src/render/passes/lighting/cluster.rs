@@ -15,9 +15,31 @@ use crate::render::core::kit::compute_pipeline::{ComputeHandles, ComputePipeline
 use crate::render::core::device::memory::{BufferRole, GpuBuffer};
 use crate::render::LightRecord;
 use crate::render::Context;
+use crate::render::core::kit::pipeline_layout::PipelineDesc;
+use crate::render::core::kit::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::kit::shader_abi;
 use crate::render::core::kit::storage_sets;
 
-const CLUSTER_BUILD_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cluster_build.spv"));
+const CS_FS: vk::ShaderStageFlags = stages(&[vk::ShaderStageFlags::COMPUTE, vk::ShaderStageFlags::FRAGMENT]);
+
+/// 光源分簇集：b0 均匀数据 / b1 光源常驻表 / b2 每格列表 / b3 每格计数。
+pub(crate) static LIGHT_CLUSTER_SET: SetLayoutDesc = SetLayoutDesc::new(
+    "light_clusters",
+    &[
+        BindingDesc::new(0, DescKind::StorageBuffer, CS_FS),
+        BindingDesc::new(1, DescKind::StorageBuffer, CS_FS),
+        BindingDesc::new(2, DescKind::StorageBuffer, CS_FS),
+        BindingDesc::new(3, DescKind::StorageBuffer, CS_FS),
+    ],
+);
+
+pub(crate) static CLUSTER_BUILD_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "cluster_build",
+    shader: &shader_abi::CLUSTER_BUILD,
+    entries: &[c"cs_main"],
+    sets: &[&LIGHT_CLUSTER_SET],
+    push: None,
+};
 
 /// cluster 屏幕 tile 边长（px）。
 pub(crate) const CLUSTER_TILE_SIZE: u32 = 32;
@@ -216,10 +238,7 @@ impl LightClusters {
             lists: Vec::new(),
             counts: Vec::new(),
         };
-        this.set_layout = storage_sets::create_layout::<4>(
-            &ctx.device,
-            vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
-        )?;
+        this.set_layout = LIGHT_CLUSTER_SET.create(&ctx.device)?;
         this.build(ctx, light_buffers)?;
         this.extent = extent;
         info!(
@@ -272,8 +291,8 @@ impl LightClusters {
     }
 
     #[must_use]
-    pub fn set_layout(&self) -> vk::DescriptorSetLayout {
-        self.set_layout
+    pub fn set_layout(&self) -> SetLayout {
+        SetLayout::new(&LIGHT_CLUSTER_SET, self.set_layout)
     }
 
     #[must_use]
@@ -365,10 +384,9 @@ pub struct ClusterBuildPass {
 
 impl ClusterBuildPass {
     /// # Errors
-    /// shader module / layout / pipeline 任一创建失败。
-    pub fn new(ctx: &Context, cluster_layout: vk::DescriptorSetLayout) -> Result<Self> {
-        let pipeline =
-            ComputePipeline::new(&ctx.device, CLUSTER_BUILD_SPV, &[cluster_layout], 0, c"cs_main")?;
+    /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
+        let pipeline = ComputePipeline::new(&ctx.device, &CLUSTER_BUILD_PIPELINE, layouts)?;
         info!("cluster_build compute 就绪（光源分簇单集）");
         Ok(Self { pipeline })
     }

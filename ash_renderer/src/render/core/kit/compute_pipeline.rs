@@ -1,12 +1,13 @@
-//! compute 管线标准件：shader module 创建、单入口 compute 管线（layout = 借用
-//! 的 set layouts + 可选 COMPUTE push range）及其录制助手。gpu/ 下各 pass、
+//! compute 管线标准件：shader module 创建、单入口 compute 管线（layout 按布局
+//! 配方组装，见 `pipeline_layout`）及其录制助手。gpu/ 下各 pass、
 //! Hi-Z 归约与透明层 compute 共用；各 pass 只保留 push 打包与交接屏障形状。
-
-use std::ffi::CStr;
 
 use ash::{vk, Device};
 
 use crate::common::error::{Result, VulkanError};
+
+use super::pipeline_layout::PipelineDesc;
+use super::set_layout::SetLayouts;
 
 /// SPIR-V 字节（build.rs 产物，spirv-val 已过）→ shader module。字节按小端
 /// 4B 一字重组（`include_bytes!` 不保证 u32 对齐，不能直接转型）。
@@ -123,59 +124,32 @@ pub struct ComputePipeline {
 }
 
 impl ComputePipeline {
-    /// 建管线链：shader module → layout（`set_layouts` + `push_size` 字节的
-    /// COMPUTE push range，0 = 无 push range）→ compute pipeline。module 只活到
-    /// 管线创建返回；任一步失败逐层回收已建句柄（含半建返回的管线，ash 合约）。
+    /// 按配方建单入口 compute 管线（骨架见 [`PipelineDesc::build`]）。半建返回的
+    /// 管线逐个回收（ash 合约）。
     ///
     /// # Errors
-    /// shader module / layout / pipeline 任一创建失败。
-    pub(crate) fn new(
-        device: &Device,
-        spv: &[u8],
-        set_layouts: &[vk::DescriptorSetLayout],
-        push_size: u32,
-        entry: &CStr,
-    ) -> Result<Self> {
-        let module = create_shader_module(device, spv)?;
-        let push_range = vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::COMPUTE)
-            .offset(0)
-            .size(push_size);
-        let push_ranges: &[vk::PushConstantRange] =
-            if push_size > 0 { std::slice::from_ref(&push_range) } else { &[] };
-        unsafe {
-            let layout = device
-                .create_pipeline_layout(
-                    &vk::PipelineLayoutCreateInfo::default()
-                        .set_layouts(set_layouts)
-                        .push_constant_ranges(push_ranges),
-                    None,
-                )
-                .inspect_err(|_| device.destroy_shader_module(module, None))?;
-            let stage = vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::COMPUTE)
-                .module(module)
-                .name(entry);
+    /// 配方对账不过、入口不是一个，或 layout / module / pipeline 任一创建失败。
+    pub(crate) fn new(device: &Device, desc: &PipelineDesc, layouts: &SetLayouts) -> Result<Self> {
+        desc.build(device, layouts, |layout, stages| {
+            let &[stage] = stages else {
+                return Err(VulkanError::Init(format!("compute 管线 {} 须恰好一个入口", desc.label)));
+            };
             let info = vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout);
-            let created = device.create_compute_pipelines(vk::PipelineCache::null(), &[info], None);
-            device.destroy_shader_module(module, None);
-            match created {
-                Ok(mut pipelines) => match pipelines.pop() {
-                    Some(pipeline) => Ok(Self { device: device.clone(), handles: ComputeHandles { pipeline, layout } }),
-                    None => {
-                        device.destroy_pipeline_layout(layout, None);
-                        Err(VulkanError::Init(format!("compute 管线 {entry:?} 创建成功却未返回句柄")))
-                    }
-                },
+            match unsafe { device.create_compute_pipelines(vk::PipelineCache::null(), &[info], None) } {
+                Ok(mut pipelines) => pipelines
+                    .pop()
+                    .map(|pipeline| Self { device: device.clone(), handles: ComputeHandles { pipeline, layout } })
+                    .ok_or_else(|| {
+                        VulkanError::Init(format!("compute 管线 {} 创建成功却未返回句柄", desc.label))
+                    }),
                 Err((pipelines, e)) => {
                     for p in pipelines {
-                        device.destroy_pipeline(p, None);
+                        unsafe { device.destroy_pipeline(p, None) };
                     }
-                    device.destroy_pipeline_layout(layout, None);
                     Err(e.into())
                 }
             }
-        }
+        })
     }
 
     /// 录制句柄（Draw 输入束的素材）。

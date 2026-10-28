@@ -37,10 +37,21 @@ use crate::common::bytes::{put_f32s, put_u32};
 use crate::common::error::Result;
 
 use crate::render::core::kit::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
+use crate::render::core::kit::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::kit::set_layout::SetLayouts;
+use crate::render::core::kit::shader_abi;
+use crate::render::passes::shadow::shadow_map::SHADOW_SET;
+use crate::render::resident::instance_table::INSTANCE_SET;
 use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下；compute 编译链与图形同一闸门）。
-const CULL_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cull.spv"));
+pub(crate) static CULL_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "cull",
+    shader: &shader_abi::CULL,
+    entries: &[c"cs_main"],
+    sets: &[&INSTANCE_SET, &SHADOW_SET],
+    push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: CULL_PUSH_SIZE }),
+};
 
 /// compute push 总长（pipeline layout 声明 + WGSL `PushCull` 同源）：
 /// 6×vec4 平面（96B）+ bound（u32 @96）+ 主视图剔除启用位（u32 @100，0 = 关）+
@@ -167,14 +178,9 @@ impl CullPass {
     /// 平面）与交错标记环在第二集（cull.wgsl group(1)）。
     ///
     /// # Errors
-    /// shader module / layout / pipeline 任一创建失败。
-    pub fn new(
-        ctx: &Context,
-        set2_layout: vk::DescriptorSetLayout,
-        shadow_layout: vk::DescriptorSetLayout,
-    ) -> Result<Self> {
-        let pipeline =
-            ComputePipeline::new(&ctx.device, CULL_SPV, &[set2_layout, shadow_layout], CULL_PUSH_SIZE, c"cs_main")?;
+    /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
+        let pipeline = ComputePipeline::new(&ctx.device, &CULL_PIPELINE, layouts)?;
         Ok(Self { pipeline })
     }
 

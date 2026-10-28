@@ -12,20 +12,62 @@ use bevy::prelude::Resource;
 
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
-use crate::render::core::kit::compute_pipeline::{create_shader_module, ComputeHandles, ComputePipeline, Handoff};
+use crate::render::core::kit::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
 use crate::render::core::device::memory::{BufferRole, GpuBuffer};
 use crate::render::Context;
 use crate::render::core::kit::pipeline_handle::create_graphics_pipeline;
+use crate::render::core::kit::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::kit::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::kit::shader_abi;
 use crate::render::core::kit::storage_sets;
+use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET;
+use crate::render::resident::descriptors::{BINDLESS_SET, FRAME_SET};
+use crate::render::resident::instance_table::INSTANCE_SET;
 
-const TRANSPARENT_COLLECT_SPV: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/transparent_collect.spv"));
-const TRANSPARENT_GATHER_SPV: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/transparent_gather.spv"));
-const TRANSPARENT_SORT_SPV: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/transparent_sort.spv"));
-const TRANSPARENT_FORWARD_SPV: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/transparent_forward.spv"));
+const CS: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
+
+/// 透明命令集：b0 索引列表 / b1 深度键 / b2 命令环 / b3 计数，只给 compute。
+pub(crate) static TRANSPARENT_SET: SetLayoutDesc = SetLayoutDesc::new(
+    "transparent",
+    &[
+        BindingDesc::new(0, DescKind::StorageBuffer, CS),
+        BindingDesc::new(1, DescKind::StorageBuffer, CS),
+        BindingDesc::new(2, DescKind::StorageBuffer, CS),
+        BindingDesc::new(3, DescKind::StorageBuffer, CS),
+    ],
+);
+
+pub(crate) static TRANSPARENT_COLLECT_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "transparent_collect",
+    shader: &shader_abi::TRANSPARENT_COLLECT,
+    entries: &[c"cs_main"],
+    sets: &[&INSTANCE_SET, &LIGHT_CLUSTER_SET, &TRANSPARENT_SET],
+    push: Some(PushRange { stages: CS, size: TRANSPARENT_PUSH_SIZE }),
+};
+
+pub(crate) static TRANSPARENT_SORT_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "transparent_sort",
+    shader: &shader_abi::TRANSPARENT_SORT,
+    entries: &[c"cs_main"],
+    sets: &[&TRANSPARENT_SET],
+    push: Some(PushRange { stages: CS, size: TRANSPARENT_SORT_PUSH }),
+};
+
+pub(crate) static TRANSPARENT_GATHER_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "transparent_gather",
+    shader: &shader_abi::TRANSPARENT_GATHER,
+    entries: &[c"cs_main"],
+    sets: &[&INSTANCE_SET, &TRANSPARENT_SET],
+    push: Some(PushRange { stages: CS, size: TRANSPARENT_PUSH_SIZE }),
+};
+
+pub(crate) static TRANSPARENT_FORWARD_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "transparent_forward",
+    shader: &shader_abi::TRANSPARENT_FORWARD,
+    entries: &[c"vs_main", c"fs_main"],
+    sets: &[&BINDLESS_SET, &FRAME_SET, &INSTANCE_SET, &LIGHT_CLUSTER_SET],
+    push: None,
+};
 
 /// 透明行容量，索引列表、深度键、命令环都按它分配。在场行数超过它时
 /// [`TransparentPasses::collect`] 直接报错。
@@ -83,7 +125,7 @@ impl TransparentTargets {
                 this.counts[slot].buffer(),
             ]);
         }
-        this.set_layout = storage_sets::create_layout::<4>(&ctx.device, vk::ShaderStageFlags::COMPUTE)?;
+        this.set_layout = TRANSPARENT_SET.create(&ctx.device)?;
         (this.pool, this.sets) = unsafe { storage_sets::create_sets(&ctx.device, this.set_layout, &slots) }?;
         info!(
             "透明命令链就绪: 透明行容量 {TRANSPARENT_CAPACITY}（索引/键列表 + 命令环 + 计数）× {} 帧槽",
@@ -93,8 +135,8 @@ impl TransparentTargets {
     }
 
     #[must_use]
-    pub fn set_layout(&self) -> vk::DescriptorSetLayout {
-        self.set_layout
+    pub fn set_layout(&self) -> SetLayout {
+        SetLayout::new(&TRANSPARENT_SET, self.set_layout)
     }
 
     #[must_use]
@@ -222,39 +264,16 @@ pub struct TransparentPasses {
 }
 
 impl TransparentPasses {
-    /// 中途失败时已建的管线随作用域释放；传入的 set 布局归各自资源销毁。
+    /// 中途失败时已建的管线随作用域释放；set 布局归各自资源销毁。
     ///
     /// # Errors
-    /// shader module / layout / pipeline 任一创建失败。
-    pub fn new(
-        ctx: &Context,
-        set2_layout: vk::DescriptorSetLayout,
-        cluster_layout: vk::DescriptorSetLayout,
-        transparent_layout: vk::DescriptorSetLayout,
-    ) -> Result<Self> {
+    /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
         let device = &ctx.device;
         let sort_passes = bitonic_sequence(TRANSPARENT_CAPACITY)?;
-        let sort = ComputePipeline::new(
-            device,
-            TRANSPARENT_SORT_SPV,
-            &[transparent_layout],
-            TRANSPARENT_SORT_PUSH,
-            c"cs_main",
-        )?;
-        let collect = ComputePipeline::new(
-            device,
-            TRANSPARENT_COLLECT_SPV,
-            &[set2_layout, cluster_layout, transparent_layout],
-            TRANSPARENT_PUSH_SIZE,
-            c"cs_main",
-        )?;
-        let gather = ComputePipeline::new(
-            device,
-            TRANSPARENT_GATHER_SPV,
-            &[set2_layout, transparent_layout],
-            TRANSPARENT_PUSH_SIZE,
-            c"cs_main",
-        )?;
+        let sort = ComputePipeline::new(device, &TRANSPARENT_SORT_PIPELINE, layouts)?;
+        let collect = ComputePipeline::new(device, &TRANSPARENT_COLLECT_PIPELINE, layouts)?;
+        let gather = ComputePipeline::new(device, &TRANSPARENT_GATHER_PIPELINE, layouts)?;
         info!(
             "透明层 compute 三件就绪: collect（[set2, cluster, transparent]）/ sort（[transparent]）/ gather（[set2, transparent]）"
         );
@@ -387,168 +406,112 @@ impl TransparentPipeline {
     /// 坑：声明的颜色/深度格式必须与实际绑定的附件一致，否则报 VUID-08914。
     ///
     /// # Errors
-    /// shader module / layout / pipeline 任一创建失败。
+    /// 配方对账不过，或 layout / shader module / pipeline 任一创建失败。
     pub fn new(
         ctx: &Context,
+        layouts: &SetLayouts,
         color_format: vk::Format,
         depth_format: vk::Format,
-        set0_layout: vk::DescriptorSetLayout,
-        set1_layout: vk::DescriptorSetLayout,
-        set2_layout: vk::DescriptorSetLayout,
-        cluster_layout: vk::DescriptorSetLayout,
     ) -> Result<Self> {
         let device = &ctx.device;
-        let module = create_shader_module(device, TRANSPARENT_FORWARD_SPV)?;
-        let result = unsafe {
-            Self::new_inner(
-                device, color_format, depth_format, set0_layout, set1_layout, set2_layout,
-                cluster_layout, module,
-            )
-        };
-        if result.is_err() {
-            unsafe { device.destroy_shader_module(module, None) };
-        }
-        result
+        TRANSPARENT_FORWARD_PIPELINE.build(device, layouts, |layout, stages| unsafe {
+            Self::create_pipeline(device, color_format, depth_format, layout, stages)
+        })
     }
 
     /// # Safety
-    /// `module` 须刚创建成功且未销毁。
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "参数就是创建所需的依赖清单，逐项显式传"
-    )]
-    unsafe fn new_inner(
-        device: &Device,
-        color_format: vk::Format,
-        depth_format: vk::Format,
-        set0_layout: vk::DescriptorSetLayout,
-        set1_layout: vk::DescriptorSetLayout,
-        set2_layout: vk::DescriptorSetLayout,
-        cluster_layout: vk::DescriptorSetLayout,
-        module: vk::ShaderModule,
-    ) -> Result<Self> {
-        unsafe {
-            let set_layouts = [set0_layout, set1_layout, set2_layout, cluster_layout];
-            let layout = device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts),
-                None,
-            )?;
-            let result = Self::create_pipeline(device, color_format, depth_format, layout, module);
-            if result.is_err() {
-                device.destroy_pipeline_layout(layout, None);
-            }
-            result
-        }
-    }
-
-    /// # Safety
-    /// `module`/`layout` 须为合法句柄；入口名存在于 module。
+    /// `layout` 与 `stages` 里的 module 须为合法句柄。
     unsafe fn create_pipeline(
         device: &Device,
         color_format: vk::Format,
         depth_format: vk::Format,
         layout: vk::PipelineLayout,
-        module: vk::ShaderModule,
+        stages: &[vk::PipelineShaderStageCreateInfo<'_>],
     ) -> Result<Self> {
-        unsafe {
-            let vs_main = c"vs_main";
-            let fs_main = c"fs_main";
-            let stages = [
-                vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::VERTEX)
-                    .module(module)
-                    .name(vs_main),
-                vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::FRAGMENT)
-                    .module(module)
-                    .name(fs_main),
-            ];
-            // 顶点格式与场景管线一致：位置 12B + 法线 12B + UV 8B，共 32B
-            let vertex_binding = [vk::VertexInputBindingDescription::default()
+        // 顶点格式与场景管线一致：位置 12B + 法线 12B + UV 8B，共 32B
+        let vertex_binding = [vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(crate::render::VERTEX_STRIDE as u32)
+            .input_rate(vk::VertexInputRate::VERTEX)];
+        let vertex_attributes = [
+            vk::VertexInputAttributeDescription::default()
+                .location(0)
                 .binding(0)
-                .stride(crate::render::VERTEX_STRIDE as u32)
-                .input_rate(vk::VertexInputRate::VERTEX)];
-            let vertex_attributes = [
-                vk::VertexInputAttributeDescription::default()
-                    .location(0)
-                    .binding(0)
-                    .format(vk::Format::R32G32B32_SFLOAT)
-                    .offset(0),
-                vk::VertexInputAttributeDescription::default()
-                    .location(1)
-                    .binding(0)
-                    .format(vk::Format::R32G32B32_SFLOAT)
-                    .offset(12),
-                vk::VertexInputAttributeDescription::default()
-                    .location(2)
-                    .binding(0)
-                    .format(vk::Format::R32G32_SFLOAT)
-                    .offset(24),
-            ];
-            let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-                .vertex_binding_descriptions(&vertex_binding)
-                .vertex_attribute_descriptions(&vertex_attributes);
-            let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-            let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-                .viewport_count(1)
-                .scissor_count(1);
-            let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
-                .polygon_mode(vk::PolygonMode::FILL)
-                .cull_mode(vk::CullModeFlags::NONE)
-                .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-                .line_width(1.0);
-            let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-            // reverse-Z 用 GREATER；透明不写深度
-            let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-                .depth_test_enable(true)
-                .depth_write_enable(false)
-                .depth_compare_op(vk::CompareOp::GREATER)
-                .min_depth_bounds(0.0)
-                .max_depth_bounds(1.0);
-            // 非预乘 alpha 混合：src·α + dst·(1−α)；alpha 通道直接写 src
-            let blend_attachment = [vk::PipelineColorBlendAttachmentState::default()
-                .blend_enable(true)
-                .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
-                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-                .color_blend_op(vk::BlendOp::ADD)
-                .src_alpha_blend_factor(vk::BlendFactor::ONE)
-                .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
-                .alpha_blend_op(vk::BlendOp::ADD)
-                .color_write_mask(vk::ColorComponentFlags::RGBA)];
-            let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
-                .attachments(&blend_attachment);
-            let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-            let dynamic_info =
-                vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-            let color_formats = [color_format];
-            let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-                .color_attachment_formats(&color_formats)
-                .depth_attachment_format(depth_format);
-            let info = vk::GraphicsPipelineCreateInfo::default()
-                .stages(&stages)
-                .vertex_input_state(&vertex_input)
-                .input_assembly_state(&input_assembly)
-                .viewport_state(&viewport_state)
-                .rasterization_state(&rasterization)
-                .multisample_state(&multisample)
-                .depth_stencil_state(&depth_stencil)
-                .color_blend_state(&color_blend)
-                .dynamic_state(&dynamic_info)
-                .layout(layout)
-                .push_next(&mut rendering_info);
-            let pipeline = create_graphics_pipeline(device, &info)?;
-            device.destroy_shader_module(module, None);
-            info!(
-                "透明前向管线就绪: HDR {color_format:?}（SRC_ALPHA 混合）+ 深度 {depth_format:?}（重绑只测不写），常驻三集 + 光源分簇集"
-            );
-            Ok(Self {
-                device: device.clone(),
-                layout,
-                pipeline,
-            })
-        }
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(0),
+            vk::VertexInputAttributeDescription::default()
+                .location(1)
+                .binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(12),
+            vk::VertexInputAttributeDescription::default()
+                .location(2)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(24),
+        ];
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&vertex_binding)
+            .vertex_attribute_descriptions(&vertex_attributes);
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewport_count(1)
+            .scissor_count(1);
+        let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(vk::PolygonMode::FILL)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .line_width(1.0);
+        let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        // reverse-Z 用 GREATER；透明不写深度
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(false)
+            .depth_compare_op(vk::CompareOp::GREATER)
+            .min_depth_bounds(0.0)
+            .max_depth_bounds(1.0);
+        // 非预乘 alpha 混合：src·α + dst·(1−α)；alpha 通道直接写 src
+        let blend_attachment = [vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .alpha_blend_op(vk::BlendOp::ADD)
+            .color_write_mask(vk::ColorComponentFlags::RGBA)];
+        let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
+            .attachments(&blend_attachment);
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_info =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+        let color_formats = [color_format];
+        let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&color_formats)
+            .depth_attachment_format(depth_format);
+        let info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(stages)
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterization)
+            .multisample_state(&multisample)
+            .depth_stencil_state(&depth_stencil)
+            .color_blend_state(&color_blend)
+            .dynamic_state(&dynamic_info)
+            .layout(layout)
+            .push_next(&mut rendering_info);
+        let pipeline = create_graphics_pipeline(device, &info)?;
+        info!(
+            "透明前向管线就绪: HDR {color_format:?}（SRC_ALPHA 混合）+ 深度 {depth_format:?}（重绑只测不写），常驻三集 + 光源分簇集"
+        );
+        Ok(Self {
+            device: device.clone(),
+            layout,
+            pipeline,
+        })
     }
 
     #[must_use]

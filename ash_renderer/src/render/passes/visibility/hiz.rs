@@ -32,12 +32,36 @@ use crate::common::error::{Result, VulkanError};
 
 use crate::render::resident::images::full_mip_chain;
 use crate::render::core::kit::compute_pipeline::ComputePipeline;
+use crate::render::core::kit::pipeline_layout::PipelineDesc;
+use crate::render::core::kit::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::kit::shader_abi;
 use crate::render::core::device::readback::OneShotReadback;
 use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物；spirv-val 已过，naga textureLoad/
 /// textureDimensions/textureNumLevels 的 mip 层参数发射已实证）。
-const HIZ_DOWNSAMPLE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hiz_downsample.spv"));
+const CS: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
+
+/// 归约一级：b0 上一级（采样）/ b1 本级（存储写）。
+pub(crate) static HIZ_REDUCE_SET: SetLayoutDesc = SetLayoutDesc::new(
+    "hiz_reduce",
+    &[
+        BindingDesc::new(0, DescKind::SampledImage, CS),
+        BindingDesc::new(1, DescKind::StorageImage, CS),
+    ],
+);
+
+/// 遮挡测试读整条金字塔：b0 全 mip 采样视图。
+pub(crate) static HIZ_OCCLUSION_SET: SetLayoutDesc =
+    SetLayoutDesc::new("hiz_occlusion", &[BindingDesc::new(0, DescKind::SampledImage, CS)]);
+
+pub(crate) static HIZ_DOWNSAMPLE_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "hiz_downsample",
+    shader: &shader_abi::HIZ_DOWNSAMPLE,
+    entries: &[c"cs_main"],
+    sets: &[&HIZ_REDUCE_SET],
+    push: None,
+};
 
 /// 金字塔格式（R32_SFLOAT 单通道浮点——深度值域 [0,1] 直存，无语义压缩）。
 /// 支持查询在 [`HizPyramid::new`]，STORAGE_IMAGE + SAMPLED_IMAGE + TRANSFER_SRC
@@ -396,8 +420,8 @@ impl HizPyramid {
 
     /// 遮挡测试的描述符集布局（建遮挡管线 layout 的素材）。
     #[must_use]
-    pub fn occlusion_layout(&self) -> vk::DescriptorSetLayout {
-        self.occlusion_layout
+    pub fn occlusion_layout(&self) -> SetLayout {
+        SetLayout::new(&HIZ_OCCLUSION_SET, self.occlusion_layout)
     }
 
     /// 一次归约链录制完成后的走账：warmup 递减（ready 判据）。
@@ -626,31 +650,9 @@ impl HizPyramid {
     /// 合法 extent 的级数都装得下，rebuild 只 reset 不重建。
     fn build_reduction_pipeline(&mut self, ctx: &Context) -> Result<()> {
         let device = &ctx.device;
-        let bindings = [
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(1)
-                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-        ];
-        self.reduction.set_layout = unsafe {
-            device.create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
-                None,
-            )
-        }?;
-        self.reduction.pipeline = Some(ComputePipeline::new(
-            device,
-            HIZ_DOWNSAMPLE_SPV,
-            std::slice::from_ref(&self.reduction.set_layout),
-            0,
-            c"cs_main",
-        )?);
+        self.reduction.set_layout = HIZ_REDUCE_SET.create(device)?;
+        let layouts = SetLayouts::new([SetLayout::new(&HIZ_REDUCE_SET, self.reduction.set_layout)])?;
+        self.reduction.pipeline = Some(ComputePipeline::new(device, &HIZ_DOWNSAMPLE_PIPELINE, &layouts)?);
         let max_dim = ctx.limits().max_image_dimension2_d;
         self.reduction.pool_levels = full_mip_chain(max_dim, max_dim);
         let max_sets = crate::render::MAX_FRAMES_IN_FLIGHT as u32 * self.reduction.pool_levels;
@@ -748,18 +750,7 @@ impl HizPyramid {
         // pool 首建/重建分流：重建路径先 reset（释放旧 2 套再分——否则
         // OUT_OF_POOL_MEMORY，resize 负例实抓）
         if self.occlusion_pool == vk::DescriptorPool::null() {
-            let binding = vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE);
-            self.occlusion_layout = unsafe {
-                device.create_descriptor_set_layout(
-                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&[binding]),
-                    None,
-                )
-            }
-            .map_err(VulkanError::from)?;
+            self.occlusion_layout = HIZ_OCCLUSION_SET.create(device)?;
             self.occlusion_pool = unsafe {
                 device.create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()

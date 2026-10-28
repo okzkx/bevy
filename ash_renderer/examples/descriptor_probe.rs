@@ -489,7 +489,7 @@ fn run_sampling(
     let pipeline_layout = unsafe {
         device.create_pipeline_layout(
             &vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(&[tables.set0_layout(), tables.set1_layout(), set2_layout])
+                .set_layouts(&[tables.bindless_layout().raw(), tables.frame_layout().raw(), set2_layout])
                 .push_constant_ranges(&push_ranges),
             None,
         )

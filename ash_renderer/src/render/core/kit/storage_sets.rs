@@ -1,39 +1,15 @@
-//! 只含 storage buffer 的描述符集：一个布局 + 每帧槽一个集，binding 编号就是
-//! buffer 在数组里的下标。
+//! 只含 storage buffer 的描述符集：每帧槽一个集，binding 编号就是 buffer 在数组里的
+//! 下标。布局由各资源族的 `SetLayoutDesc` 声明并创建。
 
 use ash::{vk, Device};
 
 use crate::common::error::Result;
 
-/// 建 `N` 个 storage buffer binding（0..N）的 set 布局。
-///
-/// # Errors
-/// 布局创建失败。
-pub(crate) fn create_layout<const N: usize>(
-    device: &Device,
-    stages: vk::ShaderStageFlags,
-) -> Result<vk::DescriptorSetLayout> {
-    let bindings: [vk::DescriptorSetLayoutBinding; N] = std::array::from_fn(|b| {
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(b as u32)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(stages)
-    });
-    let layout = unsafe {
-        device.create_descriptor_set_layout(
-            &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
-            None,
-        )
-    }?;
-    Ok(layout)
-}
-
 /// 建 pool 并逐槽分配、写入描述符集：`slots[i][b]` 写进第 i 集的 binding b。
 /// 分配失败时 pool 当场销毁，不留半成品。
 ///
 /// # Safety
-/// `layout` 须由 [`create_layout::<N>`] 创建且未销毁；buffer 句柄须合法。
+/// `layout` 未销毁，b0..N 都是单个 STORAGE_BUFFER；buffer 句柄须合法。
 ///
 /// # Errors
 /// pool 创建或描述符集分配失败。

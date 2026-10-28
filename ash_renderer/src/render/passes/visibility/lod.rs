@@ -31,11 +31,21 @@ use crate::common::bytes::{put_f32, put_f32s, put_mat4, put_u32};
 use crate::common::error::Result;
 
 use crate::render::core::kit::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
+use crate::render::core::kit::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::kit::set_layout::SetLayouts;
+use crate::render::core::kit::shader_abi;
+use crate::render::resident::instance_table::INSTANCE_SET;
 use crate::render::Context;
 use crate::render::MAX_LOD_LEVELS;
 
 /// shader 模块字节（build.rs 产物，spirv-val 已过）。
-const LOD_SELECT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/lod_select.spv"));
+pub(crate) static LOD_SELECT_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "lod_select",
+    shader: &shader_abi::LOD_SELECT,
+    entries: &[c"cs_main"],
+    sets: &[&INSTANCE_SET],
+    push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: LOD_PUSH_SIZE }),
+};
 
 /// compute push 总长（layout 声明 + WGSL `PushLod` 同源）：
 /// mat4（64B）+ screen（8B @64）+ bound（u32 @72）+ threshold（f32 @76）+
@@ -176,9 +186,9 @@ impl LodPass {
     /// 建管线：layout 只借 set2（本段只读 set2 的 b0/b1、写 b8，无第二描述符集）。
     ///
     /// # Errors
-    /// shader module / layout / pipeline 任一创建失败。
-    pub fn new(ctx: &Context, set2_layout: vk::DescriptorSetLayout) -> Result<Self> {
-        let pipeline = ComputePipeline::new(&ctx.device, LOD_SELECT_SPV, &[set2_layout], LOD_PUSH_SIZE, c"cs_main")?;
+    /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
+        let pipeline = ComputePipeline::new(&ctx.device, &LOD_SELECT_PIPELINE, layouts)?;
         Ok(Self { pipeline })
     }
 

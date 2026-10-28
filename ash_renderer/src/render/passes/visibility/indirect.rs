@@ -32,10 +32,20 @@ use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
 
 use crate::render::core::kit::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
+use crate::render::core::kit::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::kit::set_layout::SetLayouts;
+use crate::render::core::kit::shader_abi;
+use crate::render::resident::instance_table::INSTANCE_SET;
 use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下；compute 编译链与图形同一闸门）。
-const BUILD_INDIRECT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/build_indirect.spv"));
+pub(crate) static BUILD_INDIRECT_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "build_indirect",
+    shader: &shader_abi::BUILD_INDIRECT,
+    entries: &[c"cs_main"],
+    sets: &[&INSTANCE_SET],
+    push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: INDIRECT_PUSH_SIZE }),
+};
 
 /// compute push 总长（pipeline layout 声明 + WGSL `PushBuild` 同源）：
 /// count（u32）4B。规范保证 maxPushConstantsSize ≥ 128，无需查询。
@@ -83,10 +93,9 @@ impl IndirectPass {
     /// 建管线：layout 只借 set2 + COMPUTE push range。
     ///
     /// # Errors
-    /// shader module / layout / pipeline 任一创建失败。
-    pub fn new(ctx: &Context, set2_layout: vk::DescriptorSetLayout) -> Result<Self> {
-        let pipeline =
-            ComputePipeline::new(&ctx.device, BUILD_INDIRECT_SPV, &[set2_layout], INDIRECT_PUSH_SIZE, c"cs_main")?;
+    /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
+        let pipeline = ComputePipeline::new(&ctx.device, &BUILD_INDIRECT_PIPELINE, layouts)?;
         let max_draw_indirect_count = ctx.limits().max_draw_indirect_count;
         info!(
             "indirect 组装管线就绪: build_indirect compute（set2 + 4B push count）,\
