@@ -14,7 +14,7 @@ use bevy::log::info;
 use crate::common::error::Result;
 use crate::render::Context;
 
-use super::pipeline_handle::PipelineHandle;
+use super::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与主管线同一编译路径）。
 const GBUFFER_COMPOSITE_SPV: &[u8] =
@@ -72,8 +72,7 @@ impl FullscreenPipeline {
                 .create_pipeline_layout(
                     &vk::PipelineLayoutCreateInfo::default().set_layouts(set_layouts),
                     None,
-                )
-                .inspect_err(|_| device.destroy_shader_module(module, None))?;
+                )?;
             let result = Self::create_pipeline(device, color_format, layout, module);
             if result.is_err() {
                 device.destroy_pipeline_layout(layout, None);
@@ -146,10 +145,7 @@ impl FullscreenPipeline {
                 .dynamic_state(&dynamic_info)
                 .layout(layout)
                 .push_next(&mut rendering_info);
-            let pipeline = device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
-                .map_err(|(_, e)| e)?
-                .remove(0);
+            let pipeline = create_graphics_pipeline(device, &info)?;
             device.destroy_shader_module(module, None);
             info!(
                 "全屏管线就绪: color {color_format:?}（无顶点输入全屏三角形 / 无深度 / 无混合，动态 viewport）"

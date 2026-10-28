@@ -2,6 +2,28 @@
 //! 各管线类型（场景/全屏/overlay/shadow）只负责建链，持有与拆除收在这里。
 
 use ash::{vk, Device};
+use crate::common::error::{Result, VulkanError};
+
+pub(crate) fn create_graphics_pipeline(
+    device: &Device,
+    info: &vk::GraphicsPipelineCreateInfo<'_>,
+) -> Result<vk::Pipeline> {
+    match unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &[*info], None) } {
+        Ok(mut pipelines) => pipelines
+            .pop()
+            .ok_or_else(|| VulkanError::Init("单条 graphics pipeline 创建未返回句柄".into())),
+        Err((pipelines, error)) => {
+            unsafe {
+                for pipeline in pipelines {
+                    if pipeline != vk::Pipeline::null() {
+                        device.destroy_pipeline(pipeline, None);
+                    }
+                }
+            }
+            Err(VulkanError::Vk(error))
+        }
+    }
+}
 
 /// 一条已建成的图形管线及其 layout（独占所有权，Drop 销毁两者）。
 pub(crate) struct PipelineHandle {

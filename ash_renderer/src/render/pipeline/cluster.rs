@@ -37,6 +37,7 @@ use crate::render::gpu::compute::{create_shader_module, ComputeHandles, ComputeP
 use crate::render::resources::{BufferRole, GpuBuffer};
 use crate::render::shading::LightRecord;
 use crate::render::Context;
+use super::pipeline_handle::create_graphics_pipeline;
 
 const CLUSTER_BUILD_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cluster_build.spv"));
 const TRANSPARENT_COLLECT_SPV: &[u8] =
@@ -1009,11 +1010,7 @@ impl TransparentPipeline {
                 .dynamic_state(&dynamic_info)
                 .layout(layout)
                 .push_next(&mut rendering_info);
-            let pipeline = device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
-                .map_err(|(_, e)| e)?
-                .pop()
-                .ok_or_else(|| VulkanError::Init("透明前向管线：单 info 未返回管线".into()))?;
+            let pipeline = create_graphics_pipeline(device, &info)?;
             device.destroy_shader_module(module, None);
             info!(
                 "透明前向管线就绪: HDR {color_format:?}（SRC_ALPHA 混合）+ 深度 {depth_format:?}（重绑只测不写），常驻三集 + cluster 小集"

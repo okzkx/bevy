@@ -173,6 +173,19 @@ impl PerfLedger {
     }
 }
 
+struct QueryPoolsBuildGuard<'a> {
+    device: &'a Device,
+    pools: Vec<vk::QueryPool>,
+}
+
+impl Drop for QueryPoolsBuildGuard<'_> {
+    fn drop(&mut self) {
+        for pool in self.pools.drain(..) {
+            unsafe { self.device.destroy_query_pool(pool, None) };
+        }
+    }
+}
+
 /// GPU timestamp 计时器：每帧槽一只 query pool，槽内 [`QUERIES_PER_FRAME`] 位逐帧重写。
 #[derive(bevy::prelude::Resource)]
 pub struct GpuTimer {
@@ -215,19 +228,21 @@ impl GpuTimer {
         // 实抓），而是靠 recorded 闸门：每槽首次取结果必在其首次
         // record（cmd_reset_query_pool 起周期）之后，未初始化态不可达。
         let pools = if enabled {
-            (0..super::MAX_FRAMES_IN_FLIGHT)
-                .map(|_| {
-                    unsafe {
-                        ctx.device.create_query_pool(
-                            &vk::QueryPoolCreateInfo::default()
-                                .query_type(vk::QueryType::TIMESTAMP)
-                                .query_count(QUERIES_PER_FRAME),
-                            None,
-                        )
-                    }
-                    .map_err(crate::common::error::VulkanError::from)
-                })
-                .collect::<Result<Vec<_>>>()?
+            let mut guard = QueryPoolsBuildGuard {
+                device: &ctx.device,
+                pools: Vec::with_capacity(super::MAX_FRAMES_IN_FLIGHT),
+            };
+            for _ in 0..super::MAX_FRAMES_IN_FLIGHT {
+                guard.pools.push(unsafe {
+                    ctx.device.create_query_pool(
+                        &vk::QueryPoolCreateInfo::default()
+                            .query_type(vk::QueryType::TIMESTAMP)
+                            .query_count(QUERIES_PER_FRAME),
+                        None,
+                    )
+                }?);
+            }
+            std::mem::take(&mut guard.pools)
         } else {
             Vec::new()
         };

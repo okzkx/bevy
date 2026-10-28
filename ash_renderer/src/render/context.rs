@@ -75,6 +75,38 @@ pub struct HeapBudgetReading {
     pub usage: u64,
 }
 
+struct ContextInitGuard {
+    instance: Instance,
+    debug: Option<(debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
+    surface_fns: Option<surface::Instance>,
+    surface: vk::SurfaceKHR,
+    device: Option<Device>,
+    committed: bool,
+}
+
+impl Drop for ContextInitGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        unsafe {
+            if let Some(device) = self.device.take() {
+                let _ = device.device_wait_idle();
+                device.destroy_device(None);
+            }
+            if self.surface != vk::SurfaceKHR::null()
+                && let Some(surface_fns) = &self.surface_fns
+            {
+                surface_fns.destroy_surface(self.surface, None);
+            }
+            if let Some((loader, messenger)) = self.debug.take() {
+                loader.destroy_debug_utils_messenger(messenger, None);
+            }
+            self.instance.destroy_instance(None);
+        }
+    }
+}
+
 /// 进程级 Vulkan 上下文。字段顺序即声明层级；`Drop` 手动反序（ash 无自动 Drop）。
 #[derive(bevy::prelude::Resource)]
 pub struct Context {
@@ -171,6 +203,14 @@ impl Context {
         }
         let instance = unsafe { entry.create_instance(&instance_info, None) }
             .map_err(|e| VulkanError::Init(format!("vkCreateInstance 失败: {e}")))?;
+        let mut guard = ContextInitGuard {
+            instance: instance.clone(),
+            debug: None,
+            surface_fns: None,
+            surface: vk::SurfaceKHR::null(),
+            device: None,
+            committed: false,
+        };
 
         // ---- 验证层 messenger（WARNING/ERROR 全接）----
         let debug = if validation {
@@ -189,13 +229,16 @@ impl Context {
             let messenger =
                 unsafe { loader.create_debug_utils_messenger(&messenger_info, None) }
                     .map_err(|e| VulkanError::Init(format!("创建验证 messenger 失败: {e}")))?;
-            Some((loader, messenger))
+            let debug = (loader, messenger);
+            guard.debug = Some((debug.0.clone(), debug.1));
+            Some(debug)
         } else {
             None
         };
 
         // ---- Surface（手写 Win32 路径）----
         let surface_fns = surface::Instance::new(&entry, &instance);
+        guard.surface_fns = Some(surface_fns.clone());
         let win32_fns = win32_surface::Instance::new(&entry, &instance);
         let surface = unsafe {
             win32_fns.create_win32_surface(
@@ -206,6 +249,7 @@ impl Context {
             )
         }
         .map_err(|e| VulkanError::Init(format!("vkCreateWin32SurfaceKHR 失败: {e}")))?;
+        guard.surface = surface;
 
         // ---- PhysicalDevice：1.3 基线硬校验（学习工程，不做老设备兼容路径）+ graphics+present 同族，离散卡优先 ----
         let physical_devices = unsafe { instance.enumerate_physical_devices() }
@@ -436,6 +480,7 @@ impl Context {
             )
         }
         .map_err(|e| VulkanError::Init(format!("vkCreateDevice 失败: {e}")))?;
+        guard.device = Some(device.clone());
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
         let transfer_queue = if transfer_queue_family_index == queue_family_index {
             queue
@@ -469,7 +514,7 @@ impl Context {
             if validation { "on" } else { "未找到" },
         );
 
-        Ok(Self {
+        let context = Self {
             entry,
             instance,
             surface_fns,
@@ -483,7 +528,9 @@ impl Context {
             transfer_queue,
             memory_contract,
             budget_enabled,
-        })
+        };
+        guard.committed = true;
+        Ok(context)
     }
 
     /// 冻结的内存契约(类型选择/atom 舍入的唯一裁判)。

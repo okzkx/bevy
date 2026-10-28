@@ -25,9 +25,10 @@
 use bevy::math::{Mat4, Vec3, Vec4};
 use bevy::prelude::Resource;
 
-use crate::render::pipeline::shadow::SHADOW_UBO_SIZE;
 
 /// 级联数量。
+/// ShadowUniformsLayout 的 Vulkan uniform buffer 总长（宿主打包与资源 range 共用）。
+pub const SHADOW_UBO_SIZE: u32 = 736;
 pub const SHADOW_CASCADES: usize = 4;
 /// shadow map 边长（D32_SFLOAT，正方形）。
 pub const SHADOW_MAP_SIZE: u32 = 2048;

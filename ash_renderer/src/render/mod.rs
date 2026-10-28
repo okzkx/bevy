@@ -124,7 +124,7 @@ pub use pipeline::atlas_gpu::AtlasGpu;
 pub use pipeline::ui_vertex_ring::UiVertexRing;
 pub(crate) use pipeline::ui_vertex_ring::UiVertex;
 pub use pipeline::graphics_pipeline::GraphicsPipeline;
-pub use pipeline::shadow::{ShadowPipeline, ShadowTargets, ShadowWriteDraw, SHADOW_UBO_SIZE};
+pub use pipeline::shadow::{ShadowPipeline, ShadowTargets, ShadowWriteDraw};
 pub use pipeline::smaa::{
     SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
 };
@@ -132,7 +132,7 @@ pub use gpu::shadow_build::ShadowBuildPass;
 pub use shading::shadow::{
     cascade_matrices, pack_shadow_uniforms, ShadowCascadeInput,
     ShadowCascades, ShadowDiagnostics, ShadowSettings, ShadowUniformsData, SHADOW_CASCADES,
-    SHADOW_MAP_SIZE,
+    SHADOW_MAP_SIZE, SHADOW_UBO_SIZE,
 };
 pub use resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
 pub use swapchain::{AcquireOutcome, Swapchain};

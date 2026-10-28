@@ -169,6 +169,29 @@ pub struct Frame {
     pub depth: DepthTarget,
 }
 
+struct FramePoolBuildGuard<'a> {
+    device: &'a Device,
+    command_pool: vk::CommandPool,
+    image_available: Vec<vk::Semaphore>,
+    fences: Vec<vk::Fence>,
+}
+
+impl Drop for FramePoolBuildGuard<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            for fence in self.fences.drain(..) {
+                self.device.destroy_fence(fence, None);
+            }
+            for semaphore in self.image_available.drain(..) {
+                self.device.destroy_semaphore(semaphore, None);
+            }
+            if self.command_pool != vk::CommandPool::null() {
+                self.device.destroy_command_pool(self.command_pool, None);
+            }
+        }
+    }
+}
+
 #[derive(bevy::prelude::Resource)]
 pub struct FramePool {
     device: Device,
@@ -196,6 +219,12 @@ impl FramePool {
                 None,
             )
         }?;
+        let mut guard = FramePoolBuildGuard {
+            device: &ctx.device,
+            command_pool,
+            image_available: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
+            fences: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
+        };
         let command_buffers = unsafe {
             ctx.device.allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default()
@@ -204,30 +233,37 @@ impl FramePool {
                     .command_buffer_count(MAX_FRAMES_IN_FLIGHT as u32),
             )
         }?;
-        let frames = command_buffers
-            .iter()
-            .map(|&command_buffer| {
-                Ok(Frame {
-                    command_buffer,
-                    image_available: unsafe {
-                        ctx.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-                    }?,
-                    // 初值 SIGNALED：第一帧"等上一轮完成"立即通过
-                    in_flight: unsafe {
-                        ctx.device.create_fence(
-                            &vk::FenceCreateInfo::default()
-                                .flags(vk::FenceCreateFlags::SIGNALED),
-                            None,
-                        )
-                    }?,
-                    depth: DepthTarget::new(ctx, swapchain_extent)?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut depths = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            depths.push(DepthTarget::new(ctx, swapchain_extent)?);
+        }
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            guard.image_available.push(unsafe {
+                ctx.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+            }?);
+            guard.fences.push(unsafe {
+                ctx.device.create_fence(
+                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                    None,
+                )
+            }?);
+        }
+        let mut frames = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        for (index, command_buffer) in command_buffers.into_iter().enumerate() {
+            frames.push(Frame {
+                command_buffer,
+                image_available: guard.image_available[index],
+                in_flight: guard.fences[index],
+                depth: depths.swap_remove(0),
+            });
+        }
         info!(
             "帧资源就绪：{MAX_FRAMES_IN_FLIGHT} 组在飞（命令缓冲 + image_available + fence + 深度附件 {}x{}；render_finished 按 image 住在 Swapchain）",
             swapchain_extent.width, swapchain_extent.height,
         );
+        let command_pool = std::mem::replace(&mut guard.command_pool, vk::CommandPool::null());
+        guard.image_available.clear();
+        guard.fences.clear();
         Ok(Self {
             device: ctx.device.clone(),
             command_pool,

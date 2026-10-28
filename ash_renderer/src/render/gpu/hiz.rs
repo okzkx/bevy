@@ -90,12 +90,34 @@ struct HizImage {
 /// 按层取）；归约逐级两视图（源/目标）——源 level 0 = 深度附件采样视图
 ///（指向该帧槽自己的深度 image），level L≥1 = 上一级金字塔的采样视图。
 struct HizViews {
+    device: Device,
     /// 遮挡测试的全链采样视图（SHADER_READ，GENERAL 布局，全 mip 层）。
     occlusion: vk::ImageView,
     /// 归约目标 storage 视图（每级一张）。
     storage: Vec<vk::ImageView>,
     /// 归约源采样视图（每级一张；[0] = 深度附件视图，[L] = 金字塔 L-1 级）。
     src: Vec<vk::ImageView>,
+}
+
+impl Drop for HizViews {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_image_view(self.occlusion, None);
+            for view in self.storage.drain(..).chain(self.src.drain(..)) {
+                self.device.destroy_image_view(view, None);
+            }
+        }
+    }
+}
+
+struct HizViewsBuildGuard {
+    views: Vec<HizViews>,
+}
+
+impl Drop for HizViewsBuildGuard {
+    fn drop(&mut self) {
+        self.views.clear();
+    }
 }
 
 /// 归约 compute 管线 + 描述符：单布局（b0 源采样 / b1 目标 storage），
@@ -528,7 +550,9 @@ impl HizPyramid {
             }
         }
         self.slots = slots;
-        let mut views = Vec::new();
+        let mut guard = HizViewsBuildGuard {
+            views: Vec::with_capacity(self.slots.len()),
+        };
         for (slot, hiz_image) in self.slots.iter().enumerate() {
             let occlusion = unsafe {
                 device.create_image_view(
@@ -541,17 +565,14 @@ impl HizPyramid {
                 )
             }
             .map_err(VulkanError::from)?;
-            let mut storage = Vec::with_capacity(self.levels as usize);
-            let mut src = Vec::with_capacity(self.levels as usize);
-            let mut fail = None;
+            let mut current = HizViews {
+                device: device.clone(),
+                occlusion,
+                storage: Vec::with_capacity(self.levels as usize),
+                src: Vec::with_capacity(self.levels as usize),
+            };
             for level in 0..self.levels {
-                match unsafe { create_level_view(device, hiz_image.image, level) } {
-                    Ok(v) => storage.push(v),
-                    Err(e) => {
-                        fail = Some(e);
-                        break;
-                    }
-                }
+                current.storage.push(unsafe { create_level_view(device, hiz_image.image, level) }?);
                 // 源视图：dispatch 从 level 1 起——level 0/1 的源 = 深度附件
                 //（D32，DEPTH aspect；[0] 槽位不派发，占位同深度），L≥2 = 上一级
                 let source = if level <= 1 {
@@ -559,27 +580,11 @@ impl HizPyramid {
                 } else {
                     unsafe { create_level_view(device, hiz_image.image, level - 1) }
                 };
-                match source {
-                    Ok(v) => src.push(v),
-                    Err(e) => {
-                        fail = Some(e);
-                        break;
-                    }
-                }
+                current.src.push(source?);
             }
-            if let Some(e) = fail {
-                unsafe { device.destroy_image_view(occlusion, None) };
-                for v in storage {
-                    unsafe { device.destroy_image_view(v, None) };
-                }
-                for v in src {
-                    unsafe { device.destroy_image_view(v, None) };
-                }
-                return Err(e);
-            }
-            views.push(HizViews { occlusion, storage, src });
+            guard.views.push(current);
         }
-        self.views = views;
+        self.views = std::mem::take(&mut guard.views);
         Ok(())
     }
 
@@ -776,18 +781,6 @@ impl HizPyramid {
     }
 
     fn drop_resources(&mut self) {
-        let device = &self.device;
-        for view_group in &self.views {
-            unsafe {
-                device.destroy_image_view(view_group.occlusion, None);
-                for v in &view_group.storage {
-                    device.destroy_image_view(*v, None);
-                }
-                for v in &view_group.src {
-                    device.destroy_image_view(*v, None);
-                }
-            }
-        }
         self.views.clear();
         for slot in self.slots.drain(..) {
             drop(slot);
