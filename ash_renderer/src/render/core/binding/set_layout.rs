@@ -113,6 +113,47 @@ impl SetLayoutDesc {
         out
     }
 
+    /// 布局带 UPDATE_AFTER_BIND binding 时，配套的 pool 必须带 UPDATE_AFTER_BIND 旗标
+    ///（VUID-03000 三层配套的第三层，pool 侧由这里推导，不再手写）。
+    pub(crate) const fn needs_uab_pool(&self) -> bool {
+        self.flags.contains(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+    }
+
+    /// 把 `set_count` 份该布局的集对 pool 的消耗累加进 `out`（按描述符种类聚合）。
+    /// 分配即按布局全 binding 扣，与是否写入无关（Vulkan 的 pool 记账口径）。
+    pub(crate) fn add_pool_sizes(&self, out: &mut Vec<vk::DescriptorPoolSize>, set_count: u32) {
+        for b in self.bindings {
+            let total = b.count * set_count;
+            if let Some(slot) = out.iter_mut().find(|s| s.ty == b.kind.vk()) {
+                slot.descriptor_count += total;
+            } else {
+                out.push(vk::DescriptorPoolSize::default().ty(b.kind.vk()).descriptor_count(total));
+            }
+        }
+    }
+
+    /// 单份布局 `set_count` 份集的 pool 消耗（单布局 pool 直接用）。
+    pub(crate) fn pool_sizes_vec(&self, set_count: u32) -> Vec<vk::DescriptorPoolSize> {
+        let mut out = Vec::new();
+        self.add_pool_sizes(&mut out, set_count);
+        out
+    }
+
+    /// binding 表是否为“0..N 连续的单个 storage buffer”——`storage_sets` 的
+    /// 前提形状。是则返回 N。
+    pub(crate) fn dense_storage(&self) -> Option<u32> {
+        for (i, b) in self.bindings.iter().enumerate() {
+            if b.binding != i as u32
+                || b.count != 1
+                || b.kind != DescKind::StorageBuffer
+                || !b.flags.is_empty()
+            {
+                return None;
+            }
+        }
+        u32::try_from(self.bindings.len()).ok().filter(|n| *n > 0)
+    }
+
     /// 自检后建 Vulkan 布局；binding 旗标经 `BindingFlagsCreateInfo` 挂入。
     ///
     /// # Errors
@@ -141,6 +182,15 @@ impl SetLayoutDesc {
         }
         Ok(unsafe { device.create_descriptor_set_layout(&info, None) }?)
     }
+}
+
+/// 多份布局一起挤一个 pool 时的合并消耗：`(声明, 集数)` 列表逐项累加。
+pub(crate) fn merged_pool_sizes(items: &[(&'static SetLayoutDesc, u32)]) -> Vec<vk::DescriptorPoolSize> {
+    let mut out = Vec::new();
+    for (desc, set_count) in items {
+        desc.add_pool_sizes(&mut out, *set_count);
+    }
+    out
 }
 
 /// 一个已建成的布局句柄和它的声明。句柄归资源族，这里只是借出时带上身份。

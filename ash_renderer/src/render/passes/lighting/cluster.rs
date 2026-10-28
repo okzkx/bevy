@@ -277,7 +277,7 @@ impl LightClusters {
                 self.counts[slot].buffer(),
             ]);
         }
-        (self.pool, self.sets) = unsafe { storage_sets::create_sets(&ctx.device, self.set_layout, &slots) }?;
+        (self.pool, self.sets) = unsafe { storage_sets::create_sets(&ctx.device, &LIGHT_CLUSTER_SET, self.set_layout, &slots) }?;
         Ok(())
     }
 

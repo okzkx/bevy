@@ -30,7 +30,7 @@ use crate::render::passes::visibility::hiz::{HIZ_DOWNSAMPLE_PIPELINE, HIZ_OCCLUS
 use crate::render::passes::visibility::indirect::BUILD_INDIRECT_PIPELINE;
 use crate::render::passes::visibility::lod::LOD_SELECT_PIPELINE;
 use crate::render::passes::visibility::occlusion::OCCLUSION_PIPELINE;
-use crate::render::resident::descriptors::{BINDLESS_SET, FRAME_SET};
+use crate::render::resident::descriptors::{BINDLESS_SET, FRAME_SET, TABLE_CAPACITY};
 use crate::render::resident::instance_table::INSTANCE_SET;
 
 /// 宿主建的全部管线。新增管线要登记在这里，否则 `every_shader_entry_has_a_pipeline` 会报。
@@ -252,6 +252,34 @@ fn rejects_bad_set_declarations() {
         &variant(&OVERLAY_PIPELINE, |d| d.sets = sets!(&UAB_WITHOUT_POOL)),
         "uab_without_pool: b0 带 UPDATE_AFTER_BIND",
     );
+}
+
+#[test]
+fn pool_sizes_and_flags_derive_from_declarations() {
+    use crate::render::core::binding::set_layout::merged_pool_sizes;
+
+    // storage_sets 的形状判定：dense storage 集 vs bindless（runtime 数组）
+    assert_eq!(LIGHT_CLUSTER_SET.dense_storage(), Some(4));
+    assert_eq!(TRANSPARENT_SET.dense_storage(), Some(4));
+    assert_eq!(BINDLESS_SET.dense_storage(), None);
+
+    // shadow 每份集 = 1 UBO + 4 阴影图 + 5 storage；×2 份
+    let sizes = SHADOW_SET.pool_sizes_vec(2);
+    let get = |ty| sizes.iter().find(|s| s.ty == ty).map(|s| s.descriptor_count);
+    assert_eq!(get(vk::DescriptorType::UNIFORM_BUFFER), Some(2));
+    assert_eq!(get(vk::DescriptorType::SAMPLED_IMAGE), Some(8));
+    assert_eq!(get(vk::DescriptorType::STORAGE_BUFFER), Some(10));
+
+    // 合并：一份常驻双表（每 binding 满载 TABLE_CAPACITY）+ 2 帧槽 UBO
+    let merged = merged_pool_sizes(&[(&BINDLESS_SET, 1), (&FRAME_SET, 2)]);
+    let get = |ty| merged.iter().find(|s| s.ty == ty).map(|s| s.descriptor_count);
+    assert_eq!(get(vk::DescriptorType::SAMPLED_IMAGE), Some(TABLE_CAPACITY));
+    assert_eq!(get(vk::DescriptorType::SAMPLER), Some(TABLE_CAPACITY));
+    assert_eq!(get(vk::DescriptorType::UNIFORM_BUFFER), Some(2));
+
+    // UAB pool 旗标从声明推导：bindless 要，frame 不要
+    assert!(BINDLESS_SET.needs_uab_pool());
+    assert!(!FRAME_SET.needs_uab_pool());
 }
 
 #[test]

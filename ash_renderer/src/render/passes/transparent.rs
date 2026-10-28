@@ -127,7 +127,7 @@ impl TransparentTargets {
             ]);
         }
         this.set_layout = TRANSPARENT_SET.create(&ctx.device)?;
-        (this.pool, this.sets) = unsafe { storage_sets::create_sets(&ctx.device, this.set_layout, &slots) }?;
+        (this.pool, this.sets) = unsafe { storage_sets::create_sets(&ctx.device, &TRANSPARENT_SET, this.set_layout, &slots) }?;
         info!(
             "透明命令链就绪: 透明行容量 {TRANSPARENT_CAPACITY}（索引/键列表 + 命令环 + 计数）× {} 帧槽",
             this.sets.len(),

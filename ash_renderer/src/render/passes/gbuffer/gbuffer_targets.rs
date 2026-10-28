@@ -312,17 +312,11 @@ unsafe fn build_sampling_inner(
 )> {
     unsafe {
         let device = &ctx.device;
+        let pool_sizes = GBUFFER_SAMPLED_SET.pool_sizes_vec(depth_views.len() as u32);
         let pool = device.create_descriptor_pool(
             &vk::DescriptorPoolCreateInfo::default()
                 .max_sets(depth_views.len() as u32)
-                .pool_sizes(&[
-                    vk::DescriptorPoolSize::default()
-                        .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                        .descriptor_count(5 * depth_views.len() as u32),
-                    vk::DescriptorPoolSize::default()
-                        .ty(vk::DescriptorType::SAMPLER)
-                        .descriptor_count(depth_views.len() as u32),
-                ]),
+                .pool_sizes(&pool_sizes),
             None,
         )?;
         let sets = device.allocate_descriptor_sets(

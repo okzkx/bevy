@@ -23,7 +23,7 @@ use crate::render::{Context, HDR_FORMAT, MAX_FRAMES_IN_FLIGHT};
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::target::color::ColorTarget;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
-use crate::render::core::binding::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::set_layout::{merged_pool_sizes, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET;
 
@@ -294,26 +294,17 @@ impl BloomTargets {
             &bevy::image::ImageSamplerDescriptor::linear(),
         )
         .create_sampler(device)?;
-        // 池容量按布局消耗计（分配即按 layout 全 binding 扣，与是否写入无关）：
-        // down 集 (N-1)×slots 张 L_tex = 1 image + 1 sampler；up 集 (N-1)×slots
-        // 与 tonemap 集 slots 张 L_up = 2 image + 1 sampler + 1 UBO
-        let n = BLOOM_LEVELS;
-        let slots = MAX_FRAMES_IN_FLIGHT;
-        let sets_total = (n - 1) * slots + (n - 1) * slots + slots;
+        // 池容量从布局声明推导（分配即按全 binding 扣，与是否写入无关）：
+        // down 集 (N-1)×slots 张 L_tex，up 集 (N-1)×slots + tonemap 集 slots 张 L_up
+        let n = BLOOM_LEVELS as u32;
+        let slots = MAX_FRAMES_IN_FLIGHT as u32;
+        let sets_total = 2 * (n - 1) * slots + slots;
+        let pool_sizes =
+            merged_pool_sizes(&[(&BLOOM_TEX_SET, (n - 1) * slots), (&BLOOM_UP_SET, (n - 1) * slots + slots)]);
         self.pool = device.create_descriptor_pool(
             &vk::DescriptorPoolCreateInfo::default()
-                .max_sets(sets_total as u32)
-                .pool_sizes(&[
-                    vk::DescriptorPoolSize::default()
-                        .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                        .descriptor_count((3 * (n - 1) * slots + 2 * slots) as u32),
-                    vk::DescriptorPoolSize::default()
-                        .ty(vk::DescriptorType::SAMPLER)
-                        .descriptor_count(((n - 1) * 2 * slots + slots) as u32),
-                    vk::DescriptorPoolSize::default()
-                        .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                        .descriptor_count(((n - 1) * slots + slots) as u32),
-                ]),
+                .max_sets(sets_total)
+                .pool_sizes(&pool_sizes),
             None,
         )?;
         Ok(())

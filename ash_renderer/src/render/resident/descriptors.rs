@@ -38,7 +38,7 @@ use crate::common::error::{Result, VulkanError};
 
 use super::images::{sampler_key, GpuImage, ImageSpec};
 use crate::render::core::device::memory::{BufferRole, GpuBuffer, MemoryContract};
-use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc};
+use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc};
 use super::uploader::{StagingImageCopy, UploadBatch, Uploader};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
@@ -356,7 +356,6 @@ impl BindlessTables {
                 uploader,
                 graphics_family,
                 capacity,
-                layout_count,
                 set0_layout,
                 guard.set1_layout,
                 &mut guard,
@@ -378,7 +377,7 @@ impl BindlessTables {
     /// 两个 layout 须刚创建成功且未销毁;`uploader` 须可用(fallback 上传走它)。
     #[expect(
         clippy::too_many_arguments,
-        reason = "Vulkan 创建链的参数表即依赖清单:设备/实例/物理设备/契约/上传器/族号/槽位预算/布局容量/两个 layout,逐项显式"
+        reason = "Vulkan 创建链的参数表即依赖清单:设备/实例/物理设备/契约/上传器/族号/槽位预算/两个 layout,逐项显式"
     )]
     unsafe fn new_inner(
         device: &Device,
@@ -388,27 +387,23 @@ impl BindlessTables {
         uploader: &mut Uploader,
         graphics_family: u32,
         capacity: u32,
-        layout_count: u32,
         set0_layout: vk::DescriptorSetLayout,
         set1_layout: vk::DescriptorSetLayout,
         guard: &mut BindlessBuildGuard<'_>,
     ) -> Result<Self> {
-        // ---- 3) UAB pool(三层配套的第三层;pool size 覆盖双表满载 + 每帧 UBO)----
-        let pool_sizes = [
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(layout_count),
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::SAMPLER)
-                .descriptor_count(layout_count),
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(MAX_FRAMES_IN_FLIGHT as u32),
-        ];
+        // ---- 3) UAB pool(三层配套的第三层;pool 尺寸与旗标都从 BINDLESS_SET/FRAME_SET
+        // 声明推导,覆盖双表满载 + 每帧 UBO)----
+        let pool_sizes =
+            merged_pool_sizes(&[(&BINDLESS_SET, 1), (&FRAME_SET, MAX_FRAMES_IN_FLIGHT as u32)]);
+        let pool_flags = if BINDLESS_SET.needs_uab_pool() {
+            vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND
+        } else {
+            vk::DescriptorPoolCreateFlags::empty()
+        };
         guard.pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
-                    .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND)
+                    .flags(pool_flags)
                     .max_sets(1 + MAX_FRAMES_IN_FLIGHT as u32)
                     .pool_sizes(&pool_sizes),
                 None,

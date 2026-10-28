@@ -451,12 +451,11 @@ impl InstanceTables {
         unsafe {
             let set2_layout = INSTANCE_SET.create(device)?;
             let binding_count = INSTANCE_SET.bindings.len();
+            let instance_pool_sizes = INSTANCE_SET.pool_sizes_vec(MAX_FRAMES_IN_FLIGHT as u32);
             let pool = match device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(MAX_FRAMES_IN_FLIGHT as u32)
-                    .pool_sizes(&[vk::DescriptorPoolSize::default()
-                        .ty(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count((MAX_FRAMES_IN_FLIGHT * binding_count) as u32)]),
+                    .pool_sizes(&instance_pool_sizes),
                 None,
             ) {
                 Ok(p) => p,

@@ -656,18 +656,12 @@ impl HizPyramid {
         let max_dim = ctx.limits().max_image_dimension2_d;
         self.reduction.pool_levels = full_mip_chain(max_dim, max_dim);
         let max_sets = crate::render::MAX_FRAMES_IN_FLIGHT as u32 * self.reduction.pool_levels;
+        let pool_sizes = HIZ_REDUCE_SET.pool_sizes_vec(max_sets);
         self.reduction.pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(max_sets)
-                    .pool_sizes(&[
-                        vk::DescriptorPoolSize::default()
-                            .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                            .descriptor_count(max_sets),
-                        vk::DescriptorPoolSize::default()
-                            .ty(vk::DescriptorType::STORAGE_IMAGE)
-                            .descriptor_count(max_sets),
-                    ]),
+                    .pool_sizes(&pool_sizes),
                 None,
             )
         }?;
@@ -751,13 +745,13 @@ impl HizPyramid {
         // OUT_OF_POOL_MEMORY，resize 负例实抓）
         if self.occlusion_pool == vk::DescriptorPool::null() {
             self.occlusion_layout = HIZ_OCCLUSION_SET.create(device)?;
+            let occlusion_pool_sizes =
+                HIZ_OCCLUSION_SET.pool_sizes_vec(crate::render::MAX_FRAMES_IN_FLIGHT as u32);
             self.occlusion_pool = unsafe {
                 device.create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
                         .max_sets(crate::render::MAX_FRAMES_IN_FLIGHT as u32)
-                        .pool_sizes(&[vk::DescriptorPoolSize::default()
-                            .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                            .descriptor_count(crate::render::MAX_FRAMES_IN_FLIGHT as u32)]),
+                        .pool_sizes(&occlusion_pool_sizes),
                     None,
                 )
             }

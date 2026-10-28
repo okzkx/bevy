@@ -25,7 +25,7 @@ use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 use crate::render::core::target::color::ColorTarget;
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
-use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 
 const SMAA_AREA_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_area_lut.png");
@@ -260,23 +260,13 @@ impl SmaaTargets {
             &bevy::image::ImageSamplerDescriptor::linear(),
         )
         .create_sampler(device)?;
-        // 池容量按布局消耗计（分配即按 layout 全 binding 扣，与是否写入无关）：
-        // 每槽 edge/blend 两张 L_a（3 image + 1 UBO + 1 sampler）+ nb 一张 L_b
-        //（2 image + 1 UBO + 2 sampler）= 8 image + 3 UBO + 4 sampler
+        // 池容量从布局声明推导：每槽 edge/blend 两张 L_a + nb 一张 L_b
+        let pool_sizes =
+            merged_pool_sizes(&[(&SMAA_A_SET, 2 * slots as u32), (&SMAA_B_SET, slots as u32)]);
         self.pool = device.create_descriptor_pool(
             &vk::DescriptorPoolCreateInfo::default()
                 .max_sets((3 * slots) as u32)
-                .pool_sizes(&[
-                    vk::DescriptorPoolSize::default()
-                        .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                        .descriptor_count((8 * slots) as u32),
-                    vk::DescriptorPoolSize::default()
-                        .ty(vk::DescriptorType::SAMPLER)
-                        .descriptor_count((4 * slots) as u32),
-                    vk::DescriptorPoolSize::default()
-                        .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                        .descriptor_count((3 * slots) as u32),
-                ]),
+                .pool_sizes(&pool_sizes),
             None,
         )?;
         Ok(())

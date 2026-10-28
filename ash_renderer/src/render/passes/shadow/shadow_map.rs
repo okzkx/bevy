@@ -154,21 +154,12 @@ impl ShadowTargets {
         unsafe {
             let device = &ctx.device;
             self.set_layout = SHADOW_SET.create(device).inspect_err(|_| self.destroy_buffers())?;
+            let shadow_pool_sizes = SHADOW_SET.pool_sizes_vec(slots as u32);
             self.pool = device
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
                         .max_sets(slots as u32)
-                        .pool_sizes(&[
-                            vk::DescriptorPoolSize::default()
-                                .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                                .descriptor_count(slots as u32),
-                            vk::DescriptorPoolSize::default()
-                                .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                                .descriptor_count((4 * slots) as u32),
-                            vk::DescriptorPoolSize::default()
-                                .ty(vk::DescriptorType::STORAGE_BUFFER)
-                                .descriptor_count(((1 + SHADOW_CASCADES) * slots) as u32),
-                        ]),
+                        .pool_sizes(&shadow_pool_sizes),
                     None,
                 )
                 .inspect_err(|_| {
