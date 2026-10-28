@@ -183,8 +183,8 @@ pub fn spawn_with_loaded_mesh(
     offset: Vec3,
     name_suffix: &str,
 ) -> Result<LoadedMeshReadback, ObjectOpError> {
-    let entity = spawn_primitive_clone(world, source, offset, name_suffix)?;
     let path = parse_asset_path(path)?;
+    let entity = spawn_primitive_clone(world, source, offset, name_suffix)?;
     // load 收 AssetPath<'static>（柄内保存）
     let handle = world.resource::<AssetServer>().load(path);
     let Some(mut slot) = world.get_mut::<Mesh3d>(entity) else {
