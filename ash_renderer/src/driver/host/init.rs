@@ -68,9 +68,6 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         1024 * 1024, // 暂存区 1MB
         2,           // 上传槽数
     )?;
-    // 坑：护栏必须声明在第一个会提交上传的创建步骤之前。
-    // 后面任一步失败时，它最先析构、先等 GPU 做完上传，再让其余半成品释放。
-    let drain_guard = InitDrainGuard(ctx.device.clone());
     let ui_ring = UiVertexRing::new(&ctx)?;
     // 设备不支持时间戳查询时自动停用，不影响渲染
     let gpu_timer = GpuTimer::new(&ctx)?;
@@ -78,7 +75,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
     // ---- ③ 常驻数据表：跨帧常驻的大 buffer + 槽位账，向 ⑤ 出借 set 布局 ----
     let pool = MeshPool::new(&ctx.device, ctx.memory_contract(), &ctx.sharing_families());
     let image_cache = ImageCache::default();
-    // 会提交上传：0 号槽的白色兜底贴图
+    // 会提交上传（构造内当场等完）：0 号槽的白色兜底贴图
     let tables = BindlessTables::new(
         &ctx.device,
         &ctx.instance,
@@ -105,7 +102,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
     let cluster_targets = ClusterTargets::new(&ctx, swapchain.extent, &light_ring_buffers)?;
     let shadow_targets = ShadowTargets::new(&ctx)?;
     let bloom_targets = BloomTargets::new(&ctx, swapchain.extent)?;
-    // 会提交上传：两张查找表贴图
+    // 会提交上传（构造内当场等完）：两张查找表贴图
     let smaa_targets = SmaaTargets::new(&ctx, &mut uploader, swapchain.extent)?;
     let depth_images: Vec<vk::Image> =
         (0..MAX_FRAMES_IN_FLIGHT).map(|s| frames.depth_image(s)).collect();
@@ -187,8 +184,6 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         instance_tables.set2_layout(),
     )?;
 
-    // 成功后护栏不再执行，等待 GPU 的事交给退出时的 teardown_vulkan
-    std::mem::forget(drain_guard);
     Ok(InitChain {
         ctx,
         swapchain,
@@ -222,17 +217,6 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         lod_pass,
         transparent_passes,
     })
-}
-
-/// 初始化失败时的护栏：析构时先等 GPU 做完已提交的上传，其余半成品资源才能安全释放。
-struct InitDrainGuard(ash::Device);
-
-impl Drop for InitDrainGuard {
-    fn drop(&mut self) {
-        unsafe { self.0.device_wait_idle() }.unwrap_or_else(|e| {
-            bevy::log::warn!("初始化失败路径排空失败（设备丢失？），继续拆除: {e}")
-        });
-    }
 }
 
 /// 退出时先等 GPU 空闲，再按 `init_chain!` 表的顺序逐个移除资源。

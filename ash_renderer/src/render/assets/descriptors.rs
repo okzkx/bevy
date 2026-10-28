@@ -37,7 +37,7 @@ use crate::common::error::{Result, VulkanError};
 
 use super::images::{sampler_key, GpuImage, ImageSpec};
 use crate::render::resources::{BufferRole, GpuBuffer, MemoryContract};
-use super::uploader::{StagingImageCopy, Ticket, UploadBatch, Uploader};
+use super::uploader::{StagingImageCopy, UploadBatch, Uploader};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
 /// 常驻表容量。`BindlessTables::new` 按设备 UAB 轨五项限额核对，不够即报错——
@@ -253,8 +253,6 @@ pub struct BindlessTables {
     retired_sampler_bodies: Vec<(u32, vk::Sampler)>,
     /// fallback 贴图本体（白 1×1；槽 0 的 view 来源，随表同寿）。
     fallback: GpuImage,
-    /// fallback 上传批次票据（仅留账；销毁前的等待由退出排空统一覆盖）。
-    fallback_ticket: Ticket,
 }
 
 impl BindlessTables {
@@ -508,6 +506,8 @@ impl BindlessTables {
                 ..Default::default()
             })?
             .ok_or_else(|| VulkanError::Upload("内部矛盾:fallback 批次非空却未产生提交".into()))?;
+        // 坑：必须当场等完。fallback 的 Drop 不等 GPU，后续任一步失败丢掉它时拷贝可能还在写
+        uploader.wait_until(fallback_ticket)?;
         let mut tables = Self {
             device: device.clone(),
             set0_layout,
@@ -525,7 +525,6 @@ impl BindlessTables {
             retired_samplers: Vec::new(),
             retired_sampler_bodies: Vec::new(),
             fallback,
-            fallback_ticket,
         };
         guard.pool = vk::DescriptorPool::null();
         guard.set0_layout = vk::DescriptorSetLayout::null();
@@ -543,7 +542,7 @@ impl BindlessTables {
             "常驻描述符表就绪:set0 双表(容量 {capacity}×2,UAB+PARTIALLY_BOUND 三层配套)\
              + set1 每帧 UBO×{MAX_FRAMES_IN_FLIGHT}({FRAME_UBO_SIZE}B,identity 初值);\
              fallback 白图占槽 0(texture+ sampler),fallback 票据 #{ticket}",
-            ticket = tables.fallback_ticket,
+            ticket = fallback_ticket,
         );
         Ok(tables)
     }

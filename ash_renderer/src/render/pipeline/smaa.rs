@@ -113,7 +113,7 @@ fn upload_lut(
         &spec,
         &sharing,
     )?;
-    let _ticket = uploader.submit_batch(crate::render::assets::uploader::UploadBatch {
+    let ticket = uploader.submit_batch(crate::render::assets::uploader::UploadBatch {
         staging: data,
         image_uploads: vec![crate::render::assets::uploader::StagingImageCopy {
             image: gpu.image(),
@@ -124,6 +124,10 @@ fn upload_lut(
         }],
         ..Default::default()
     })?;
+    // 坑：必须当场等完。gpu 的 Drop 不等 GPU，后续任一步失败丢掉它时拷贝可能还在写
+    if let Some(ticket) = ticket {
+        uploader.wait_until(ticket)?;
+    }
     Ok(gpu)
 }
 
