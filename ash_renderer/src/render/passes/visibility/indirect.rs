@@ -34,7 +34,7 @@ use crate::common::error::{Result, VulkanError};
 use crate::render::core::pipeline::compute::ComputePipeline;
 use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
-use crate::render::core::binding::set_layout::SetLayouts;
+use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::resident::instance_table::INSTANCE_SET;
 use crate::render::Context;
@@ -136,7 +136,7 @@ impl IndirectPass {
 pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
-    set2: vk::DescriptorSet,
+    set2: DescSet,
     indirect: &IndirectDraw,
 ) {
     indirect.pass.record(

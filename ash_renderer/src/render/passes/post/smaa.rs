@@ -25,8 +25,9 @@ use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 use crate::render::core::target::color::ColorTarget;
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
+use crate::render::core::pipeline::graphics::PipelineRef;
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 
 const SMAA_AREA_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_area_lut.png");
@@ -374,16 +375,16 @@ impl SmaaTargets {
     }
 
     #[must_use]
-    pub fn set_edge(&self, slot: usize) -> vk::DescriptorSet {
-        self.sets_edge[slot]
+    pub fn set_edge(&self, slot: usize) -> DescSet {
+        DescSet::new(&SMAA_A_SET, self.sets_edge[slot])
     }
     #[must_use]
-    pub fn set_blend(&self, slot: usize) -> vk::DescriptorSet {
-        self.sets_blend[slot]
+    pub fn set_blend(&self, slot: usize) -> DescSet {
+        DescSet::new(&SMAA_A_SET, self.sets_blend[slot])
     }
     #[must_use]
-    pub fn set_nb(&self, slot: usize) -> vk::DescriptorSet {
-        self.sets_nb[slot]
+    pub fn set_nb(&self, slot: usize) -> DescSet {
+        DescSet::new(&SMAA_B_SET, self.sets_nb[slot])
     }
     #[must_use]
     pub fn info(&self, slot: usize) -> &GpuBuffer {
@@ -467,6 +468,10 @@ impl SmaaPipelines {
     }
 
     #[must_use]
+    pub(crate) fn edge_rec(&self) -> PipelineRef {
+        self.edge.rec()
+    }
+
     pub fn edge_pipeline(&self) -> vk::Pipeline {
         self.edge.pipeline()
     }
@@ -475,6 +480,10 @@ impl SmaaPipelines {
         self.edge.layout()
     }
     #[must_use]
+    pub(crate) fn blend_rec(&self) -> PipelineRef {
+        self.blend.rec()
+    }
+
     pub fn blend_pipeline(&self) -> vk::Pipeline {
         self.blend.pipeline()
     }
@@ -483,6 +492,10 @@ impl SmaaPipelines {
         self.blend.layout()
     }
     #[must_use]
+    pub(crate) fn neighborhood_rec(&self) -> PipelineRef {
+        self.neighborhood.rec()
+    }
+
     pub fn neighborhood_pipeline(&self) -> vk::Pipeline {
         self.neighborhood.pipeline()
     }
@@ -496,12 +509,10 @@ impl SmaaPipelines {
 /// 一帧 edge/blend 两 pass 的录制输入（smaa 开 = Some）。
 #[derive(Clone, Copy)]
 pub struct SmaaEdgeBlendDraw {
-    pub edge_pipeline: vk::Pipeline,
-    pub edge_layout: vk::PipelineLayout,
-    pub blend_pipeline: vk::Pipeline,
-    pub blend_layout: vk::PipelineLayout,
-    pub edge_set: vk::DescriptorSet,
-    pub blend_set: vk::DescriptorSet,
+    pub edge: PipelineRef,
+    pub blend: PipelineRef,
+    pub edge_set: DescSet,
+    pub blend_set: DescSet,
     pub edges_view: vk::ImageView,
     pub edges_image: vk::Image,
     pub blend_view: vk::ImageView,
@@ -512,9 +523,8 @@ pub struct SmaaEdgeBlendDraw {
 /// neighborhood 终点 pass 的录制输入（恒 Some）。
 #[derive(Clone, Copy)]
 pub struct SmaaNbDraw {
-    pub nb_pipeline: vk::Pipeline,
-    pub nb_layout: vk::PipelineLayout,
-    pub nb_set: vk::DescriptorSet,
+    pub nb: PipelineRef,
+    pub nb_set: DescSet,
     pub ldr_view: vk::ImageView,
     pub ldr_image: vk::Image,
     pub ldr_extent: vk::Extent2D,

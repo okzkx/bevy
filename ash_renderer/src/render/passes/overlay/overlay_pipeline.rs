@@ -30,7 +30,7 @@ use crate::common::error::Result;
 
 use crate::render::Context;
 
-use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle, PipelineRef};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{stages, SetLayouts};
 use crate::render::core::binding::shader_abi;
@@ -237,8 +237,14 @@ impl OverlayPipeline {
              共享常驻表，push 16B（0/8/12）"
         );
         Ok(Self {
-            handle: PipelineHandle::new(device, layout, pipeline),
+            handle: PipelineHandle::new(device, layout, pipeline, OVERLAY_PIPELINE.sets),
         })
+    }
+
+    /// 录制投影（帧输入束携带）。
+    #[must_use]
+    pub(crate) fn rec(&self) -> PipelineRef {
+        self.handle.rec()
     }
 
     /// 管线句柄（帧录制绑定用）。

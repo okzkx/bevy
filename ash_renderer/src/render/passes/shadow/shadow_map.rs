@@ -21,10 +21,10 @@ use crate::render::passes::shadow::cascades::{SHADOW_CASCADES, SHADOW_MAP_SIZE, 
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
 use crate::render::core::target::depth::DepthTarget;
-use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle, PipelineRef};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::resident::instance_table::INSTANCE_SET;
 
@@ -62,10 +62,9 @@ pub(crate) static SHADOW_SET: SetLayoutDesc = SetLayoutDesc::new(
 /// 一帧 shadow 绘制的录制输入（draw_frame 组装，`record_frame` 消费）。
 #[derive(Clone, Copy)]
 pub struct ShadowWriteDraw {
-    pub pipeline: vk::Pipeline,
-    pub layout: vk::PipelineLayout,
-    pub set2: vk::DescriptorSet,
-    pub shadow_set: vk::DescriptorSet,
+    pub pipeline: PipelineRef,
+    pub set2: DescSet,
+    pub shadow_set: DescSet,
     pub views: [vk::ImageView; SHADOW_CASCADES],
     /// 深度图本体（布局屏障用——view 之外屏障吃 image）。
     pub images: [vk::Image; SHADOW_CASCADES],
@@ -233,8 +232,8 @@ impl ShadowTargets {
 
     /// 本帧槽 shadow set。
     #[must_use]
-    pub fn frame_set(&self, slot: usize) -> vk::DescriptorSet {
-        self.sets[slot]
+    pub fn frame_set(&self, slot: usize) -> DescSet {
+        DescSet::new(&SHADOW_SET, self.sets[slot])
     }
 
     /// 本帧槽 shadow UBO（宿主写入口，fence 纪律内）。
@@ -381,10 +380,16 @@ impl ShadowPipeline {
             "shadow 管线就绪: depth-only dynamic rendering（D32 reverse-Z GREATER），\
              顶点输入 32B 交错 pos 位，4B push cascade 索引，[set2, shadow set]"
         );
-        Ok(Self { handle: PipelineHandle::new(device, layout, pipeline) })
+        Ok(Self { handle: PipelineHandle::new(device, layout, pipeline, SHADOW_WRITE_PIPELINE.sets) })
     }
 
     /// 管线句柄。
+    /// 录制投影（帧输入束携带）。
+    #[must_use]
+    pub(crate) fn rec(&self) -> PipelineRef {
+        self.handle.rec()
+    }
+
     #[must_use]
     pub fn pipeline(&self) -> vk::Pipeline {
         self.handle.pipeline()

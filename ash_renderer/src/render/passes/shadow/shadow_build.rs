@@ -10,7 +10,7 @@ use crate::common::error::Result;
 use crate::render::core::pipeline::compute::ComputePipeline;
 use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
-use crate::render::core::binding::set_layout::SetLayouts;
+use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::passes::shadow::shadow_map::SHADOW_SET;
 use crate::render::resident::instance_table::INSTANCE_SET;
@@ -71,8 +71,8 @@ impl ShadowBuildPass {
 pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
-    set2: vk::DescriptorSet,
-    shadow_set: vk::DescriptorSet,
+    set2: DescSet,
+    shadow_set: DescSet,
     build: &ShadowBuildDraw,
 ) {
     build.pass.record(

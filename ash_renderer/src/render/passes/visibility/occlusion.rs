@@ -28,7 +28,7 @@ use crate::common::error::Result;
 use crate::render::core::pipeline::compute::ComputePipeline;
 use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
-use crate::render::core::binding::set_layout::SetLayouts;
+use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::passes::visibility::hiz::HIZ_OCCLUSION_SET;
 use crate::render::resident::instance_table::INSTANCE_SET;
@@ -170,7 +170,7 @@ pub struct OcclusionDraw {
     /// dispatch 组数 = bound 取整到 workgroup（64）。
     pub groups: u32,
     /// 本帧槽的 Hi-Z 全链采样描述符（HizPyramid::occlusion_set）。
-    pub hiz_set: vk::DescriptorSet,
+    pub hiz_set: DescSet,
 }
 
 /// 遮挡 compute 管线（[set2, hiz] 双集 + 80B push）。
@@ -196,7 +196,7 @@ impl OcclusionPass {
         view_proj: &Mat4,
         screen: [f32; 2],
         bound: u32,
-        hiz_set: vk::DescriptorSet,
+        hiz_set: DescSet,
     ) -> OcclusionDraw {
         OcclusionDraw {
             pass: self.pipeline.handles(),
@@ -214,7 +214,7 @@ impl OcclusionPass {
 pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
-    set2: vk::DescriptorSet,
+    set2: DescSet,
     occlusion: &OcclusionDraw,
 ) {
     occlusion.pass.record(

@@ -4,6 +4,7 @@ use ash::vk;
 
 use crate::common::error::Result;
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
+use crate::render::core::pipeline::graphics::PipelineRef;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
@@ -37,6 +38,10 @@ impl CompositePipeline {
     }
 
     #[must_use]
+    pub(crate) fn rec(&self) -> PipelineRef {
+        self.inner.rec()
+    }
+
     pub fn pipeline(&self) -> vk::Pipeline {
         self.inner.pipeline()
     }

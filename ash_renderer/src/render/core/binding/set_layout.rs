@@ -12,7 +12,7 @@ use crate::common::error::{Result, VulkanError};
 
 /// 描述符种类（WGSL 资源类型与 Vulkan 描述符类型的公共子集）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DescKind {
+pub enum DescKind {
     SampledImage,
     StorageImage,
     Sampler,
@@ -45,7 +45,7 @@ pub(crate) const fn stages(list: &[vk::ShaderStageFlags]) -> vk::ShaderStageFlag
 
 /// 一个 binding 的声明。
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct BindingDesc {
+pub struct BindingDesc {
     pub binding: u32,
     pub kind: DescKind,
     /// 描述符个数；shader 侧非数组时必须是 1。
@@ -67,7 +67,7 @@ impl BindingDesc {
 
 /// 一个描述符集布局的完整声明。`name` 是它在 [`SetLayouts`] 里的身份，全局唯一。
 #[derive(Debug)]
-pub(crate) struct SetLayoutDesc {
+pub struct SetLayoutDesc {
     pub name: &'static str,
     pub bindings: &'static [BindingDesc],
     pub flags: vk::DescriptorSetLayoutCreateFlags,
@@ -210,6 +210,51 @@ impl SetLayout {
     #[must_use]
     pub fn raw(self) -> vk::DescriptorSetLayout {
         self.raw
+    }
+}
+
+/// 一个已分配的描述符集，带着它的声明身份。帧录制绑定时据此按管线配方校验
+/// 绑定序（debug 断言；release 零成本）。
+#[derive(Clone, Copy)]
+pub struct DescSet {
+    desc: &'static SetLayoutDesc,
+    raw: vk::DescriptorSet,
+}
+
+impl DescSet {
+    /// `raw` 必须按 `desc` 的布局分配。
+    pub(crate) fn new(desc: &'static SetLayoutDesc, raw: vk::DescriptorSet) -> Self {
+        Self { desc, raw }
+    }
+
+    /// 裸句柄（vk 命令消费）。
+    #[must_use]
+    pub fn raw(self) -> vk::DescriptorSet {
+        self.raw
+    }
+
+    pub(crate) fn desc(self) -> &'static SetLayoutDesc {
+        self.desc
+    }
+}
+
+/// 绑定序校验：第 i 个集的声明必须是 expected[i]，数量也一并核对。
+/// 绑错顺序在 debug 构建当场 panic（声明名写进报错），release 零成本。
+#[track_caller]
+pub(crate) fn assert_set_sequence(expected: &[&'static SetLayoutDesc], sets: &[DescSet]) {
+    debug_assert!(
+        expected.len() == sets.len(),
+        "绑定序不匹配：管线要 {} 个集，实际给了 {} 个",
+        expected.len(),
+        sets.len()
+    );
+    for (i, (want, got)) in expected.iter().zip(sets).enumerate() {
+        debug_assert!(
+            std::ptr::eq(*want, got.desc()),
+            "绑定序错误：set{i} 应为 {}，实际是 {}",
+            want.name,
+            got.desc().name
+        );
     }
 }
 

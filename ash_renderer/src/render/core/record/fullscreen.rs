@@ -6,6 +6,8 @@ use std::slice;
 use ash::{vk, Device};
 
 use crate::render::core::record::barrier::{image_barrier, ImageBarrier};
+use crate::render::core::binding::set_layout::DescSet;
+use crate::render::core::pipeline::graphics::PipelineRef;
 use crate::render::core::record::graphics::{bind_graphics, full_rect, set_viewport_scissor};
 
 /// 全屏三角形 pass 的参数：一个颜色附件（写完保留，无深度）、管线、从 set 0 起绑定的描述符集。
@@ -14,9 +16,8 @@ pub(crate) struct FullscreenPass<'a> {
     pub extent: vk::Extent2D,
     /// `Some` 先清成这个颜色；`None` 不清也不保留旧内容，前提是这个 pass 会写满每个像素。
     pub clear: Option<[f32; 4]>,
-    pub pipeline: vk::Pipeline,
-    pub layout: vk::PipelineLayout,
-    pub sets: &'a [vk::DescriptorSet],
+    pub pipeline: PipelineRef,
+    pub sets: &'a [DescSet],
 }
 
 /// 录一个完整的全屏 pass（[`record_fullscreen_open`] 之后结束渲染）。
@@ -58,7 +59,7 @@ pub(crate) unsafe fn record_fullscreen_open(
                 .layer_count(1)
                 .color_attachments(slice::from_ref(&attachment)),
         );
-        bind_graphics(device, cb, pass.pipeline, pass.layout, pass.sets);
+        bind_graphics(device, cb, &pass.pipeline, pass.sets);
         set_viewport_scissor(device, cb, pass.extent);
         // 3 个顶点、无顶点 buffer：VS 按 vertex_index 生成一个盖满视口的三角形
         device.cmd_draw(cb, 3, 1, 0, 1);

@@ -4,6 +4,9 @@
 
 use ash::{vk, Device};
 
+use crate::render::core::binding::set_layout::{assert_set_sequence, DescSet};
+use crate::render::core::pipeline::graphics::PipelineRef;
+
 /// 覆盖整个 `extent` 的矩形，用作 renderArea 或 scissor。
 pub(crate) fn full_rect(extent: vk::Extent2D) -> vk::Rect2D {
     vk::Rect2D {
@@ -56,13 +59,14 @@ pub(crate) unsafe fn set_viewport_scissor(
 pub(crate) unsafe fn bind_graphics(
     device: &Device,
     cb: vk::CommandBuffer,
-    pipeline: vk::Pipeline,
-    layout: vk::PipelineLayout,
-    sets: &[vk::DescriptorSet],
+    pipeline: &PipelineRef,
+    sets: &[DescSet],
 ) {
+    assert_set_sequence(pipeline.sets, sets);
+    let raw: Vec<vk::DescriptorSet> = sets.iter().map(|s| s.raw()).collect();
     unsafe {
-        device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline);
-        device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::GRAPHICS, layout, 0, sets, &[]);
+        device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
+        device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::GRAPHICS, pipeline.layout, 0, &raw, &[]);
     }
 }
 

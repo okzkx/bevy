@@ -26,6 +26,8 @@ use crate::render::core::record::fullscreen::{
 use crate::render::core::record::graphics::{
     bind_graphics, bind_vertex_index, full_rect, set_viewport, set_viewport_scissor,
 };
+use crate::render::core::binding::set_layout::DescSet;
+use crate::render::core::pipeline::graphics::PipelineRef;
 use crate::render::passes::visibility::cull::CullDraw;
 use crate::render::passes::visibility::hiz::HizPyramid;
 use crate::render::passes::visibility::indirect::IndirectDraw;
@@ -48,14 +50,13 @@ pub const INDIRECT_COMMAND_STRIDE: u32 = 20;
 
 /// 一次绘制帧录制的全部输入（draw_frame 组装，`record_frame` 消费）。
 pub struct FrameDraw<'a> {
-    pub pipeline: vk::Pipeline,
-    pub layout: vk::PipelineLayout,
+    pub pipeline: PipelineRef,
     /// set0 常驻表（bindless 双表，整帧绑一次）。
-    pub set0: vk::DescriptorSet,
+    pub set0: DescSet,
     /// set1 本帧槽的 UBO 集（内容 = 相机 view_proj，后续扩灯光）。
-    pub set1: vk::DescriptorSet,
+    pub set1: DescSet,
     /// set2 本帧槽的表集（对象表 + 本帧模型/材质环，instance_table 契约）。
-    pub set2: vk::DescriptorSet,
+    pub set2: DescSet,
     pub vertex_buffer: Option<vk::Buffer>,
     pub index_buffer: Option<vk::Buffer>,
     /// 在场行数（= GPU 侧命令条数；0 = 空场/全暂缓，场景绘制整段跳过）。
@@ -67,30 +68,26 @@ pub struct FrameDraw<'a> {
     /// 也在其上——合成 pass 与 present tonemap 消费）。
     pub gbuffer: &'a GBufferTargets,
     /// 合成管线（G-buffer 光照累积 → HDR 中间目标；全屏，无深度/混合）。
-    pub composite_pipeline: vk::Pipeline,
-    pub composite_layout: vk::PipelineLayout,
+    pub composite: PipelineRef,
     /// 光源分簇集，合成与透明前向都绑。
-    pub cluster_set: vk::DescriptorSet,
+    pub cluster_set: DescSet,
     /// 空场为 None：没东西要画，不用算光源列表。
     pub cluster_build: Option<ClusterBuildDraw>,
     /// present tonemap 管线（HDR + Bloom → ACES → LDR 目标）。
-    pub tonemap_pipeline: vk::Pipeline,
-    pub tonemap_layout: vk::PipelineLayout,
+    pub tonemap: PipelineRef,
     /// SMAA 录制输入：edge/blend 两 pass（关 = None，neighborhood
     /// 直通）+ neighborhood 输入（恒 Some——swapchain 终点）。
     pub smaa_edge_blend: Option<crate::render::passes::post::smaa::SmaaEdgeBlendDraw>,
     pub smaa_nb: crate::render::passes::post::smaa::SmaaNbDraw,
     /// bloom 参数集（tonemap set2——up0 + 采样器 + 参数 UBO；恒 Some，
     /// 关闭帧 shader 内旁路 bloom 采样）。
-    pub bloom_params_set: vk::DescriptorSet,
+    pub bloom_params_set: DescSet,
     /// Bloom 链录制输入（关闭 = None——链整段跳过，up0 内容陈旧但
     /// tonemap 不采样）。
     pub bloom: Option<crate::render::passes::post::bloom::BloomFrameDraw>,
     /// overlay 管线（UI 半边的绘制入口；深度格式与实例对齐声明，读/写全关）。
-    pub overlay_pipeline: vk::Pipeline,
-    /// overlay 自有 pipeline layout（只借 set0，无 set1）——换管线后描述符绑定
-    /// 不延续，set0 须按这个 layout 对象重绑。
-    pub overlay_layout: vk::PipelineLayout,
+    /// 自有 layout（只借 set0，无 set1）——换管线后描述符绑定不延续，set0 须重绑。
+    pub overlay: PipelineRef,
     /// 本帧 UI 绘制产物（无 UI 帧为 None：首 pass 前空帧/超容丢弃/图集缺席）。
     pub ui: Option<&'a UiPaint>,
     /// 本帧槽 UI 顶点/索引 buffer（`ui` 为 Some 时必有当帧写入）。
@@ -121,7 +118,7 @@ pub struct FrameDraw<'a> {
     pub shadow: Option<ShadowWriteDraw>,
     /// shadow 域描述符集（合成 pass 的 shadow 采样取数面——b0 UBO +
     /// b1..4 级联深度图；恒 Some，关闭帧 shader 内旁路 shadow 采样）。
-    pub shadow_set: vk::DescriptorSet,
+    pub shadow_set: DescSet,
     /// 级联深度图本体：布局屏障恒录的面——composite 的 shadow 描述符
     /// 恒绑定（空场/关闭帧也在集内），四张图的布局必须始终合法。
     pub shadow_images: [vk::Image; 4],
@@ -384,7 +381,7 @@ impl FramePool {
                             .layer_count(1)
                             .depth_attachment(&shadow_depth_attachment),
                     );
-                    bind_graphics(device, cb, shadow.pipeline, shadow.layout, &[shadow.set2, shadow.shadow_set]);
+                    bind_graphics(device, cb, &shadow.pipeline, &[shadow.set2, shadow.shadow_set]);
                     // 池整绑（与主管线同一契约——命令引脚在 GPU 侧定位）
                     bind_vertex_index(device, cb, shadow.vertex_buffer, shadow.index_buffer);
                     set_viewport_scissor(device, cb, map_extent);
@@ -393,7 +390,7 @@ impl FramePool {
                     put_u32(&mut cascade_push, 0, c as u32);
                     device.cmd_push_constants(
                         cb,
-                        shadow.layout,
+                        shadow.pipeline.layout,
                         vk::ShaderStageFlags::VERTEX,
                         0,
                         &cascade_push,
@@ -494,7 +491,7 @@ impl FramePool {
                 // 常驻三集整帧绑一次：set0 = bindless 表（槽位在飞更新即生效），
                 // set1 = 本帧槽 UBO（内容 = 相机 view_proj），set2 = GPU 常驻
                 // 绘制数据（对象表 + 本帧模型/材质环，instance_table 契约）
-                bind_graphics(device, cb, draw.pipeline, draw.layout, &[draw.set0, draw.set1, draw.set2]);
+                bind_graphics(device, cb, &draw.pipeline, &[draw.set0, draw.set1, draw.set2]);
                 // 坑：viewport 正高度，原因见 set_viewport
                 set_viewport_scissor(device, cb, extent);
                 // 池整绑一次，逐命令在 GPU 侧定位（vertexOffset/firstIndex 已进命令）
@@ -558,8 +555,7 @@ impl FramePool {
                 view: draw.gbuffer.hdr_view(slot),
                 extent,
                 clear: Some(draw.clear),
-                pipeline: draw.composite_pipeline,
-                layout: draw.composite_layout,
+                pipeline: draw.composite,
                 sets: &[draw.set1, draw.gbuffer.sampled_set(slot), draw.cluster_set, draw.shadow_set],
             });
 
@@ -616,7 +612,7 @@ impl FramePool {
                         .color_attachments(slice::from_ref(&transparent_attachment))
                         .depth_attachment(&transparent_depth),
                 );
-                bind_graphics(device, cb, t.pipeline, t.layout, &[draw.set0, draw.set1, draw.set2, draw.cluster_set]);
+                bind_graphics(device, cb, &t.pipeline, &[draw.set0, draw.set1, draw.set2, draw.cluster_set]);
                 set_viewport_scissor(device, cb, extent);
                 let (vertex_buffer, index_buffer) = draw.pool_buffers()?;
                 bind_vertex_index(device, cb, vertex_buffer, index_buffer);
@@ -676,8 +672,7 @@ impl FramePool {
                     bloom.images_down[0],
                     bloom.views_down[0],
                     bloom.extents[0],
-                    bloom.prefilter_pipeline,
-                    bloom.prefilter_layout,
+                    bloom.prefilter,
                     bloom.gbuffer_set,
                 );
                 let downs = (1..BLOOM_LEVELS).map(|i| {
@@ -685,8 +680,7 @@ impl FramePool {
                         bloom.images_down[i],
                         bloom.views_down[i],
                         bloom.extents[i],
-                        bloom.down_pipeline,
-                        bloom.down_layout,
+                        bloom.down,
                         bloom.down_sets[i - 1],
                     )
                 });
@@ -695,12 +689,11 @@ impl FramePool {
                         bloom.images_up[i],
                         bloom.views_up[i],
                         bloom.extents[i],
-                        bloom.up_pipeline,
-                        bloom.up_layout,
+                        bloom.up,
                         bloom.up_sets[i],
                     )
                 });
-                for (target, target_view, target_extent, pipeline, layout, set) in
+                for (target, target_view, target_extent, pipeline, set) in
                     std::iter::once(prefilter).chain(downs).chain(ups)
                 {
                     record_fullscreen_sampled(
@@ -714,7 +707,6 @@ impl FramePool {
                             extent: target_extent,
                             clear: None,
                             pipeline,
-                            layout,
                             sets: &[set],
                         },
                     );
@@ -736,8 +728,7 @@ impl FramePool {
                     view: draw.smaa_nb.ldr_view,
                     extent: draw.smaa_nb.ldr_extent,
                     clear: None,
-                    pipeline: draw.tonemap_pipeline,
-                    layout: draw.tonemap_layout,
+                    pipeline: draw.tonemap,
                     sets: &[draw.set1, draw.gbuffer.sampled_set(slot), draw.bloom_params_set],
                 },
             );
@@ -746,9 +737,9 @@ impl FramePool {
             // 目标进出屏障恒录（UNDEFINED 进 = 内容可弃；目标按帧槽分配，同槽
             // 上一轮已被 fence 等完）。
             if let Some(smaa) = &draw.smaa_edge_blend {
-                for (target, target_view, pipeline, layout, set) in [
-                    (smaa.edges_image, smaa.edges_view, smaa.edge_pipeline, smaa.edge_layout, smaa.edge_set),
-                    (smaa.blend_image, smaa.blend_view, smaa.blend_pipeline, smaa.blend_layout, smaa.blend_set),
+                for (target, target_view, rec, set) in [
+                    (smaa.edges_image, smaa.edges_view, smaa.edge, smaa.edge_set),
+                    (smaa.blend_image, smaa.blend_view, smaa.blend, smaa.blend_set),
                 ] {
                     record_fullscreen_sampled(
                         device,
@@ -759,8 +750,7 @@ impl FramePool {
                             view: target_view,
                             extent: smaa.extent,
                             clear: None,
-                            pipeline,
-                            layout,
+                            pipeline: rec,
                             sets: &[set],
                         },
                     );
@@ -774,15 +764,14 @@ impl FramePool {
                 view,
                 extent,
                 clear: None,
-                pipeline: draw.smaa_nb.nb_pipeline,
-                layout: draw.smaa_nb.nb_layout,
+                pipeline: draw.smaa_nb.nb,
                 sets: &[draw.smaa_nb.nb_set],
             });
 
             if let Some(ui) = draw.ui {
                 // overlay 管线只声明 set0（UI 无 UBO），管线切换后 set0 须按 overlay
                 // 自己的 layout 对象重绑——描述符绑定随 layout，不随句柄。
-                bind_graphics(device, cb, draw.overlay_pipeline, draw.overlay_layout, &[draw.set0]);
+                bind_graphics(device, cb, &draw.overlay, &[draw.set0]);
                 // 全屏 viewport：场景分支不必然跑过，UI 段自带 viewport/scissor 状态
                 set_viewport(device, cb, extent);
                 bind_vertex_index(device, cb, draw.ui_buffers.0, draw.ui_buffers.1);
@@ -806,7 +795,7 @@ impl FramePool {
                     );
                     device.cmd_push_constants(
                         cb,
-                        draw.overlay_layout,
+                        draw.overlay.layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                         0,
                         &ui_push,

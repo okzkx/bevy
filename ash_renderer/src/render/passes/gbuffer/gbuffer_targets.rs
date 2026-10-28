@@ -30,7 +30,7 @@ use crate::common::error::{Result, VulkanError};
 use crate::render::Context;
 use crate::render::core::target::color::{ColorTarget, HDR_FORMAT};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc};
+use crate::render::core::binding::set_layout::{BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
 
 /// albedo 附件格式（线性 8bit——G-buffer 存采样端已解码的线性反照率，
 /// 编码恰好一次判定线不受影响：SRGB 编码仍只在最终 ROP 写出发生一次）。
@@ -130,8 +130,8 @@ impl GBufferTargets {
 
     /// 第 `slot` 帧槽的采样集（合成 pass 与 present tonemap 绑定）。
     #[must_use]
-    pub fn sampled_set(&self, slot: usize) -> vk::DescriptorSet {
-        self.sets[slot]
+    pub fn sampled_set(&self, slot: usize) -> DescSet {
+        DescSet::new(&GBUFFER_SAMPLED_SET, self.sets[slot])
     }
 
     /// 第 `slot` 帧槽的 albedo 附件视图（G-buffer pass attachment 0）。

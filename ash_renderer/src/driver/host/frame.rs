@@ -574,8 +574,7 @@ pub(crate) fn draw_frame(
     let shadow_write = shadow_write_draw(shadow, instances, &scene.pool, slot, indirect_count)?;
     let (smaa_edge_blend, smaa_nb) = smaa_draws(post, slot);
     let frame_draw = FrameDraw {
-        pipeline: core.gbuffer_pipeline.pipeline(),
-        layout: core.gbuffer_pipeline.layout(),
+        pipeline: core.gbuffer_pipeline.rec(),
         set0: core.tables.resident_set(),
         set1: core.tables.frame_set(slot),
         set2: instances.frame_set2(slot),
@@ -586,19 +585,16 @@ pub(crate) fn draw_frame(
         indirect_buffer: instances.indirect_buffer(slot),
         // FrameDraw 借 GBufferTargets 引用（record_frame 消费附件视图与采样集）
         gbuffer: &post.gbuffer,
-        composite_pipeline: post.composite.pipeline(),
-        composite_layout: post.composite.layout(),
+        composite: post.composite.rec(),
         cluster_set: cluster.clusters.frame_set(slot),
         cluster_build: (indirect_count > 0)
             .then(|| cluster.build_pass.draw(cluster.clusters.grid())),
-        tonemap_pipeline: post.tonemap.pipeline(),
-        tonemap_layout: post.tonemap.layout(),
+        tonemap: post.tonemap.rec(),
         bloom_params_set: post.bloom.params_set(slot),
         bloom: bloom_draw(post, slot),
         smaa_edge_blend,
         smaa_nb,
-        overlay_pipeline: core.overlay_pipeline.pipeline(),
-        overlay_layout: core.overlay_pipeline.layout(),
+        overlay: core.overlay_pipeline.rec(),
         ui: ui.as_ref().map(|(paint, _)| paint),
         // ui 为 None 时这两个句柄不被读（record_frame 的 UI 段整段跳过）
         ui_buffers: ui
@@ -1349,8 +1345,7 @@ fn transparent_draw(
         gather: Some(passes.gather(count)),
         sort: passes.sort_plan(),
         set2: instances.frame_set2(slot),
-        pipeline: transparent.pipeline.pipeline(),
-        layout: transparent.pipeline.layout(),
+        pipeline: transparent.pipeline.rec(),
         t_commands: targets.command_buffer(slot),
         t_keys: targets.key_buffer(slot),
         command_count: count,
@@ -1371,8 +1366,7 @@ fn shadow_write_draw(
     }
     let targets = &shadow.targets;
     Ok(Some(ShadowWriteDraw {
-        pipeline: shadow.pipeline.pipeline(),
-        layout: shadow.pipeline.layout(),
+        pipeline: shadow.pipeline.rec(),
         set2: instances.frame_set2(slot),
         shadow_set: targets.frame_set(slot),
         views: std::array::from_fn(|c| targets.map_view(c)),
@@ -1396,12 +1390,9 @@ fn bloom_draw(post: &PostInput, slot: usize) -> Option<BloomFrameDraw> {
     }
     let (targets, pipelines) = (&post.bloom, &post.bloom_pipelines);
     Some(BloomFrameDraw {
-        prefilter_pipeline: pipelines.prefilter_pipeline(),
-        prefilter_layout: pipelines.prefilter_layout(),
-        down_pipeline: pipelines.down_pipeline(),
-        down_layout: pipelines.down_layout(),
-        up_pipeline: pipelines.up_pipeline(),
-        up_layout: pipelines.up_layout(),
+        prefilter: pipelines.prefilter_rec(),
+        down: pipelines.down_rec(),
+        up: pipelines.up_rec(),
         gbuffer_set: post.gbuffer.sampled_set(slot),
         down_sets: std::array::from_fn(|i| targets.set_down(i + 1, slot)),
         up_sets: std::array::from_fn(|i| targets.set_up(i, slot)),
@@ -1418,10 +1409,8 @@ fn bloom_draw(post: &PostInput, slot: usize) -> Option<BloomFrameDraw> {
 fn smaa_draws(post: &PostInput, slot: usize) -> (Option<SmaaEdgeBlendDraw>, SmaaNbDraw) {
     let (targets, pipelines) = (&post.smaa, &post.smaa_pipelines);
     let edge_blend = post.smaa_settings.enabled.then(|| SmaaEdgeBlendDraw {
-        edge_pipeline: pipelines.edge_pipeline(),
-        edge_layout: pipelines.edge_layout(),
-        blend_pipeline: pipelines.blend_pipeline(),
-        blend_layout: pipelines.blend_layout(),
+        edge: pipelines.edge_rec(),
+        blend: pipelines.blend_rec(),
         edge_set: targets.set_edge(slot),
         blend_set: targets.set_blend(slot),
         edges_view: targets.edges_view(slot),
@@ -1431,8 +1420,7 @@ fn smaa_draws(post: &PostInput, slot: usize) -> (Option<SmaaEdgeBlendDraw>, Smaa
         extent: targets.ldr_extent(),
     });
     let nb = SmaaNbDraw {
-        nb_pipeline: pipelines.neighborhood_pipeline(),
-        nb_layout: pipelines.neighborhood_layout(),
+        nb: pipelines.neighborhood_rec(),
         nb_set: targets.set_nb(slot),
         ldr_view: targets.ldr_view(slot),
         ldr_image: targets.ldr_image(slot),

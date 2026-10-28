@@ -34,7 +34,7 @@ use crate::render::resident::images::full_mip_chain;
 use crate::render::core::pipeline::compute::ComputePipeline;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::set_layout::{BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::core::device::readback::OneShotReadback;
 use crate::render::Context;
@@ -415,8 +415,8 @@ impl HizPyramid {
 
     /// 第 `slot` 帧槽的遮挡测试描述符集（b0 = 全链采样视图）。
     #[must_use]
-    pub fn occlusion_set(&self, slot: usize) -> vk::DescriptorSet {
-        self.occlusion_sets[slot]
+    pub fn occlusion_set(&self, slot: usize) -> DescSet {
+        DescSet::new(&HIZ_OCCLUSION_SET, self.occlusion_sets[slot])
     }
 
     /// 遮挡测试的描述符集布局（建遮挡管线 layout 的素材）。
@@ -514,7 +514,6 @@ impl HizPyramid {
                     std::slice::from_ref(&barrier),
                 );
             }
-            device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, reduction.pipeline);
             // **级序取舍钉明（6.1.2 施工订正）**：从 level 1 起派发（level 1 =
             // 深度 2×2 MIN），**level 0 不派发**——原形状把 2×2 MIN 写进全尺寸
             // level 0，只有左上 1/4 被写、其余未定义，整条链读垃圾（运行实抓：
@@ -523,14 +522,7 @@ impl HizPyramid {
             // 1 起（2px tile）"为代价省掉它，occlusion 侧 mip 选择下限 1。
             for level in 1..self.levels.max(1) {
                 let set = self.reduction.sets[slot * self.levels as usize + level as usize];
-                device.cmd_bind_descriptor_sets(
-                    cb,
-                    vk::PipelineBindPoint::COMPUTE,
-                    reduction.layout,
-                    0,
-                    std::slice::from_ref(&set),
-                    &[],
-                );
+                reduction.bind(device, cb, &[DescSet::new(&HIZ_REDUCE_SET, set)]);
                 let (w, h) = self.level_dims(level);
                 device.cmd_dispatch(cb, w.div_ceil(8), h.div_ceil(8), 1);
                 // 级间屏障：本级写 → 下级读（下一 dispatch 的 textureLoad）

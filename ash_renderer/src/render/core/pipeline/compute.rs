@@ -30,7 +30,7 @@ impl ComputePipeline {
             match unsafe { device.create_compute_pipelines(vk::PipelineCache::null(), &[info], None) } {
                 Ok(mut pipelines) => pipelines
                     .pop()
-                    .map(|pipeline| Self { device: device.clone(), handles: ComputeHandles { pipeline, layout } })
+                    .map(|pipeline| Self { device: device.clone(), handles: ComputeHandles { pipeline, layout, sets: desc.sets } })
                     .ok_or_else(|| {
                         VulkanError::Init(format!("compute 管线 {} 创建成功却未返回句柄", desc.label))
                     }),

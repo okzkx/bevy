@@ -23,8 +23,9 @@ use crate::render::{Context, HDR_FORMAT, MAX_FRAMES_IN_FLIGHT};
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::target::color::ColorTarget;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
+use crate::render::core::pipeline::graphics::PipelineRef;
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{merged_pool_sizes, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::set_layout::{merged_pool_sizes, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET;
 
@@ -385,20 +386,20 @@ impl BloomTargets {
 
     /// 本帧槽 tonemap 参数集（up0 + 采样器 + 参数 UBO）。
     #[must_use]
-    pub fn params_set(&self, slot: usize) -> vk::DescriptorSet {
-        self.sets_params[slot]
+    pub fn params_set(&self, slot: usize) -> DescSet {
+        DescSet::new(&BLOOM_UP_SET, self.sets_params[slot])
     }
 
     /// 本帧槽 down 链源集（i=1..N-1 → 下标 (i-1)*slots+slot）。
     #[must_use]
-    pub fn set_down(&self, level: usize, slot: usize) -> vk::DescriptorSet {
-        self.sets_down[(level - 1) * MAX_FRAMES_IN_FLIGHT + slot]
+    pub fn set_down(&self, level: usize, slot: usize) -> DescSet {
+        DescSet::new(&BLOOM_TEX_SET, self.sets_down[(level - 1) * MAX_FRAMES_IN_FLIGHT + slot])
     }
 
     /// 本帧槽 up 链源集（i=0..N-2 → 下标 (N-1)*slots + i*slots + slot）。
     #[must_use]
-    pub fn set_up(&self, level: usize, slot: usize) -> vk::DescriptorSet {
-        self.sets_up[level * MAX_FRAMES_IN_FLIGHT + slot]
+    pub fn set_up(&self, level: usize, slot: usize) -> DescSet {
+        DescSet::new(&BLOOM_UP_SET, self.sets_up[level * MAX_FRAMES_IN_FLIGHT + slot])
     }
 
     /// 参数 UBO（宿主写入口，fence 纪律内）。
@@ -464,6 +465,10 @@ pub struct BloomPipelines {
 impl BloomPipelines {
     /// prefilter 管线句柄。
     #[must_use]
+    pub(crate) fn prefilter_rec(&self) -> PipelineRef {
+        self.prefilter.rec()
+    }
+
     pub fn prefilter_pipeline(&self) -> vk::Pipeline {
         self.prefilter.pipeline()
     }
@@ -474,6 +479,10 @@ impl BloomPipelines {
     }
     /// down 管线句柄。
     #[must_use]
+    pub(crate) fn down_rec(&self) -> PipelineRef {
+        self.down.rec()
+    }
+
     pub fn down_pipeline(&self) -> vk::Pipeline {
         self.down.pipeline()
     }
@@ -484,6 +493,10 @@ impl BloomPipelines {
     }
     /// up 管线句柄。
     #[must_use]
+    pub(crate) fn up_rec(&self) -> PipelineRef {
+        self.up.rec()
+    }
+
     pub fn up_pipeline(&self) -> vk::Pipeline {
         self.up.pipeline()
     }
@@ -510,15 +523,12 @@ impl BloomPipelines {
 /// 一帧 Bloom + tonemap 录制输入（draw_frame 组装）。
 #[derive(Clone, Copy)]
 pub struct BloomFrameDraw {
-    pub prefilter_pipeline: vk::Pipeline,
-    pub prefilter_layout: vk::PipelineLayout,
-    pub down_pipeline: vk::Pipeline,
-    pub down_layout: vk::PipelineLayout,
-    pub up_pipeline: vk::Pipeline,
-    pub up_layout: vk::PipelineLayout,
-    pub gbuffer_set: vk::DescriptorSet,
-    pub down_sets: [vk::DescriptorSet; BLOOM_LEVELS - 1],
-    pub up_sets: [vk::DescriptorSet; BLOOM_LEVELS - 1],
+    pub prefilter: PipelineRef,
+    pub down: PipelineRef,
+    pub up: PipelineRef,
+    pub gbuffer_set: DescSet,
+    pub down_sets: [DescSet; BLOOM_LEVELS - 1],
+    pub up_sets: [DescSet; BLOOM_LEVELS - 1],
     pub images_down: [vk::Image; BLOOM_LEVELS],
     pub images_up: [vk::Image; BLOOM_LEVELS - 1],
     pub views_down: [vk::ImageView; BLOOM_LEVELS],

@@ -3,12 +3,16 @@
 
 use ash::{vk, Device};
 
+use crate::render::core::binding::set_layout::{assert_set_sequence, DescSet, SetLayoutDesc};
+
 /// compute 管线的录制句柄（Copy）：Draw 输入束带它进录制层，录制不需要
 /// 持有方 Resource。
 #[derive(Clone, Copy)]
 pub struct ComputeHandles {
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
+    /// 预期的 set 声明序列（建管线时从配方抄入；绑定序校验用）。
+    pub(crate) sets: &'static [&'static SetLayoutDesc],
 }
 
 /// dispatch 后的交接屏障形状：src 恒为 COMPUTE_SHADER + SHADER_WRITE 的全局
@@ -46,11 +50,13 @@ impl Handoff {
 }
 
 impl ComputeHandles {
-    /// 绑 compute 管线 + 从 set 0 起连续绑 `sets`。
-    pub(crate) fn bind(&self, device: &Device, cb: vk::CommandBuffer, sets: &[vk::DescriptorSet]) {
+    /// 绑 compute 管线 + 从 set 0 起连续绑 `sets`（绑定序过配方校验）。
+    pub(crate) fn bind(&self, device: &Device, cb: vk::CommandBuffer, sets: &[DescSet]) {
+        assert_set_sequence(self.sets, sets);
+        let raw: Vec<vk::DescriptorSet> = sets.iter().map(|s| s.raw()).collect();
         unsafe {
             device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, self.pipeline);
-            device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::COMPUTE, self.layout, 0, sets, &[]);
+            device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &raw, &[]);
         }
     }
 
@@ -89,7 +95,7 @@ impl ComputeHandles {
         &self,
         device: &Device,
         cb: vk::CommandBuffer,
-        sets: &[vk::DescriptorSet],
+        sets: &[DescSet],
         push: &[u8],
         groups: u32,
         handoff: Handoff,

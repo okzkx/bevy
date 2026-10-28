@@ -39,7 +39,7 @@ use crate::common::error::{Result, VulkanError};
 use super::images::{sampler_key, GpuImage, ImageSpec};
 use crate::render::core::device::memory::{BufferRole, GpuBuffer, MemoryContract};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc};
+use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
 use super::uploader::{StagingImageCopy, UploadBatch, Uploader};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
@@ -520,8 +520,8 @@ impl BindlessTables {
 
     /// set0 常驻集句柄(帧录制绑定)。
     #[must_use]
-    pub fn resident_set(&self) -> vk::DescriptorSet {
-        self.resident_set
+    pub fn resident_set(&self) -> DescSet {
+        DescSet::new(&BINDLESS_SET, self.resident_set)
     }
 
     /// set0 常驻双表的布局(登记给管线组装;集与布局同源,不可另建)。
@@ -538,8 +538,8 @@ impl BindlessTables {
 
     /// 第 `frame` 帧槽的 set1(按帧槽绑定)。
     #[must_use]
-    pub fn frame_set(&self, frame: usize) -> vk::DescriptorSet {
-        self.frame_sets[frame]
+    pub fn frame_set(&self, frame: usize) -> DescSet {
+        DescSet::new(&FRAME_SET, self.frame_sets[frame])
     }
 
     /// 第 `frame` 帧槽的 UBO 本体(写相机/灯光数据的入口)。

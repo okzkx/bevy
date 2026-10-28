@@ -15,7 +15,7 @@ use crate::common::error::Result;
 
 use crate::render::Context;
 
-use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::pipeline::graphics::{PipelineRef, create_graphics_pipeline, PipelineHandle};
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
@@ -153,8 +153,14 @@ impl GBufferPipeline {
              viewport 正高度直出，剔除关，push 退役（5.3：firstInstance 携带槽号），set0/set1/set2 同源绑定"
         );
         Ok(Self {
-            handle: PipelineHandle::new(device, layout, pipeline),
+            handle: PipelineHandle::new(device, layout, pipeline, GBUFFER_WRITE_PIPELINE.sets),
         })
+    }
+
+    /// 录制投影（帧输入束携带）。
+    #[must_use]
+    pub(crate) fn rec(&self) -> PipelineRef {
+        self.handle.rec()
     }
 
     /// 管线句柄（帧录制绑定用）。

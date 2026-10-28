@@ -17,7 +17,7 @@ use crate::render::core::device::memory::{BufferRole, GpuBuffer};
 use crate::render::LightRecord;
 use crate::render::Context;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
-use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::set_layout::{DescSet, stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::core::binding::storage_sets;
 
@@ -297,8 +297,8 @@ impl LightClusters {
     }
 
     #[must_use]
-    pub fn frame_set(&self, slot: usize) -> vk::DescriptorSet {
-        self.sets[slot % self.sets.len()]
+    pub fn frame_set(&self, slot: usize) -> DescSet {
+        DescSet::new(&LIGHT_CLUSTER_SET, self.sets[slot % self.sets.len()])
     }
 
     /// 第 `slot` 帧槽的均匀数据，CPU 每帧写。
@@ -406,7 +406,7 @@ impl ClusterBuildPass {
 pub(crate) fn record_cluster_build(
     device: &Device,
     command_buffer: vk::CommandBuffer,
-    cluster_set: vk::DescriptorSet,
+    cluster_set: DescSet,
     draw: &ClusterBuildDraw,
 ) {
     draw.pass.record(device, command_buffer, &[cluster_set], &[], draw.groups, Handoff::ComputeFragmentRead);

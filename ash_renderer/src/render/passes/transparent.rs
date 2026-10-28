@@ -18,7 +18,8 @@ use crate::render::core::device::memory::{BufferRole, GpuBuffer};
 use crate::render::Context;
 use crate::render::core::pipeline::graphics::create_graphics_pipeline;
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
-use crate::render::core::binding::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::pipeline::graphics::PipelineRef;
+use crate::render::core::binding::set_layout::{BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::core::binding::storage_sets;
 use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET;
@@ -141,8 +142,8 @@ impl TransparentTargets {
     }
 
     #[must_use]
-    pub fn frame_set(&self, slot: usize) -> vk::DescriptorSet {
-        self.sets[slot % self.sets.len()]
+    pub fn frame_set(&self, slot: usize) -> DescSet {
+        DescSet::new(&TRANSPARENT_SET, self.sets[slot % self.sets.len()])
     }
 
     #[must_use]
@@ -208,16 +209,15 @@ pub const TRANSPARENT_PUSH_SIZE: u32 = 4;
 /// 一帧透明层的录制输入。光源分簇集和 cluster_build 不在这里，在 `FrameDraw`
 /// 上，因为不透明合成也要用。
 pub struct TransparentFrame {
-    pub transparent_set: vk::DescriptorSet,
+    pub transparent_set: DescSet,
     /// 在场行数 > 0 才 Some。
     pub collect: Option<TransparentCollectDraw>,
     pub gather: Option<TransparentGatherDraw>,
     /// 坑：只要场景非空每帧都要排，透明行从 0 变多的那一帧也不能读未排序的数组。
     pub sort: TransparentSortPlan,
     /// 常驻实例表，gather 和透明绘制都要绑。
-    pub set2: vk::DescriptorSet,
-    pub pipeline: vk::Pipeline,
-    pub layout: vk::PipelineLayout,
+    pub set2: DescSet,
+    pub pipeline: PipelineRef,
     pub t_commands: vk::Buffer,
     /// 每帧录制前填 -inf。
     pub t_keys: vk::Buffer,
@@ -347,9 +347,9 @@ fn bitonic_sequence(n: u32) -> Result<Vec<[u8; TRANSPARENT_SORT_PUSH as usize]>>
 pub(crate) fn record_transparent_collect(
     device: &Device,
     command_buffer: vk::CommandBuffer,
-    set2: vk::DescriptorSet,
-    cluster_set: vk::DescriptorSet,
-    transparent_set: vk::DescriptorSet,
+    set2: DescSet,
+    cluster_set: DescSet,
+    transparent_set: DescSet,
     draw: &TransparentCollectDraw,
 ) {
     draw.pass.record(
@@ -367,7 +367,7 @@ pub(crate) fn record_transparent_collect(
 pub(crate) fn record_transparent_sort(
     device: &Device,
     command_buffer: vk::CommandBuffer,
-    transparent_set: vk::DescriptorSet,
+    transparent_set: DescSet,
     plan: &TransparentSortPlan,
 ) {
     plan.pass.bind(device, command_buffer, &[transparent_set]);
@@ -380,8 +380,8 @@ pub(crate) fn record_transparent_sort(
 pub(crate) fn record_transparent_gather(
     device: &Device,
     command_buffer: vk::CommandBuffer,
-    set2: vk::DescriptorSet,
-    transparent_set: vk::DescriptorSet,
+    set2: DescSet,
+    transparent_set: DescSet,
     draw: &TransparentGatherDraw,
 ) {
     draw.pass.record(
@@ -401,6 +401,14 @@ pub struct TransparentPipeline {
     device: Device,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+}
+
+impl TransparentPipeline {
+    /// 录制投影（帧输入束携带；绑定序按 TRANSPARENT_FORWARD_PIPELINE 校验）。
+    #[must_use]
+    pub(crate) fn rec(&self) -> PipelineRef {
+        PipelineRef { pipeline: self.pipeline, layout: self.layout, sets: TRANSPARENT_FORWARD_PIPELINE.sets }
+    }
 }
 
 impl TransparentPipeline {

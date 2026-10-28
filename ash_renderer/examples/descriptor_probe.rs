@@ -554,7 +554,7 @@ fn run_sampling(
                 vk::PipelineBindPoint::COMPUTE,
                 pipeline_layout,
                 0,
-                &[tables.resident_set(), tables.frame_set(0), set2],
+                &[tables.resident_set().raw(), tables.frame_set(0).raw(), set2],
                 &[],
             );
             device.cmd_push_constants(
@@ -606,7 +606,7 @@ fn run_sampling(
     unsafe {
         device.update_descriptor_sets(
             &[vk::WriteDescriptorSet::default()
-                .dst_set(tables.resident_set())
+                .dst_set(tables.resident_set().raw())
                 .dst_binding(0)
                 .dst_array_element(3)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)

@@ -2,6 +2,7 @@
 //! 没有深度、不混合、单颜色附件、动态 viewport/scissor。合成、tonemap、Bloom、
 //! SMAA 各自传入布局配方复用它；录全屏 pass 见 `record::fullscreen`。
 
+use crate::render::core::pipeline::graphics::PipelineRef;
 use ash::{vk, Device};
 use bevy::log::info;
 
@@ -94,7 +95,7 @@ impl FullscreenPipeline {
             desc.label
         );
         Ok(Self {
-            handle: PipelineHandle::new(device, layout, pipeline),
+            handle: PipelineHandle::new(device, layout, pipeline, desc.sets),
         })
     }
 
@@ -108,5 +109,11 @@ impl FullscreenPipeline {
     #[must_use]
     pub fn layout(&self) -> vk::PipelineLayout {
         self.handle.layout()
+    }
+
+    /// 录制投影（帧输入束携带）。
+    #[must_use]
+    pub(crate) fn rec(&self) -> PipelineRef {
+        self.handle.rec()
     }
 }
