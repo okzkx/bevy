@@ -15,7 +15,7 @@ use crate::common::error::Result;
 
 use crate::render::Context;
 
-use crate::render::core::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::kit::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
 
 const GBUFFER_WRITE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer_write.spv"));
 

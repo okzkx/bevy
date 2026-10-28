@@ -31,8 +31,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::common::error::{Result, VulkanError};
 
 use crate::render::resident::images::full_mip_chain;
-use crate::render::core::compute_pipeline::ComputePipeline;
-use crate::render::core::readback::OneShotReadback;
+use crate::render::core::kit::compute_pipeline::ComputePipeline;
+use crate::render::core::device::readback::OneShotReadback;
 use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物；spirv-val 已过，naga textureLoad/

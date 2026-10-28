@@ -36,7 +36,7 @@ use bevy::log::info;
 use thiserror::Error;
 use wgpu_types::{TextureDimension, TextureFormat};
 
-use crate::render::core::resources::MemoryContract;
+use crate::render::core::device::memory::MemoryContract;
 use super::uploader::{Ticket, Uploader};
 use crate::common::error::{Result, VulkanError};
 

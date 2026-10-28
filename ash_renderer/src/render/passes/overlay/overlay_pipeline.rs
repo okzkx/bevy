@@ -30,7 +30,7 @@ use crate::common::error::Result;
 
 use crate::render::Context;
 
-use crate::render::core::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::kit::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与场景管线同一编译路径）。
 const OVERLAY_DRAW_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/overlay_draw.spv"));

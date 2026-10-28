@@ -11,11 +11,11 @@ use bevy::prelude::Resource;
 
 use crate::common::bytes::{put_f32, put_mat4, put_u32};
 use crate::common::error::{Result, VulkanError};
-use crate::render::core::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
-use crate::render::core::resources::{BufferRole, GpuBuffer};
+use crate::render::core::kit::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
+use crate::render::core::device::memory::{BufferRole, GpuBuffer};
 use crate::render::LightRecord;
 use crate::render::Context;
-use crate::render::core::storage_sets;
+use crate::render::core::kit::storage_sets;
 
 const CLUSTER_BUILD_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cluster_build.spv"));
 

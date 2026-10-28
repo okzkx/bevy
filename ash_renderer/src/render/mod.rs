@@ -3,7 +3,7 @@
 //!
 //! | 目录 | 内容 |
 //! |---|---|
-//! | `core` | Vulkan 地基（context、swapchain、内存与 buffer、屏障、诊断回读）+ 管线标准件（图形管线句柄、compute 管线、全屏管线骨架、颜色/深度目标、storage 描述符集） |
+//! | `core` | `device`：context、swapchain、内存与 buffer、诊断回读；`kit`：pass 标准件（图形管线句柄、compute 管线、全屏管线骨架、颜色/深度目标、storage 描述符集、屏障） |
 //! | `resident` | 常驻 GPU 数据：mesh 大池、贴图缓存、上传器、bindless 描述符表（含每帧 UBO）、实例表、光源表 |
 //! | `passes` | 渲染功能，一个功能一个模块：visibility（剔除/Hi-Z/遮挡/LOD/indirect）、gbuffer、shadow、lighting、transparent、post、overlay |
 //! | `frame` | 帧槽与同步、整帧录制编排、帧率同步设置、着色调试模式 |
@@ -22,8 +22,8 @@ mod passes;
 mod resident;
 mod stats;
 
-pub use self::core::context::{Context, MAX_FRAMES_IN_FLIGHT};
-pub use self::core::color_target::HDR_FORMAT;
+pub use self::core::device::context::{Context, MAX_FRAMES_IN_FLIGHT};
+pub use self::core::kit::color_target::HDR_FORMAT;
 pub use passes::visibility::cull::{
     aabb_visible, frustum_planes, CullDiagnostics, CullDraw, CullPass, CullSettings,
 };
@@ -31,7 +31,7 @@ pub use passes::visibility::hiz::{
     occluded_reverse_z, occlusion_mip_level, reduce_tile_reverse_z, HizCensus, HizPyramid,
 };
 // 诊断回读助手：BRP 读数方法族（remote/）与 render 内部共用，crate 级重出口。
-pub(crate) use self::core::readback::readback_buffer;
+pub(crate) use self::core::device::readback::readback_buffer;
 pub use passes::visibility::indirect::{IndirectDraw, IndirectPass, IndirectStats};
 pub use passes::visibility::lod::{
     lod_hysteresis_level, lod_raw_level, LodDiagnostics, LodDraw, LodPass, LodSettings,
@@ -87,7 +87,7 @@ pub(crate) use passes::post::bloom::BLOOM_LEVELS;
 pub use passes::gbuffer::gbuffer_targets::{
     GBufferTargets, ALBEDO_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
 };
-pub use self::core::depth_target::DEPTH_FORMAT;
+pub use self::core::kit::depth_target::DEPTH_FORMAT;
 pub use frame::frame_pool::{Frame, FramePool};
 pub use frame::frame_draw::FrameDraw;
 pub use passes::overlay::overlay_pipeline::{OverlayPipeline, UiDrawCall, UiPaint};
@@ -105,5 +105,5 @@ pub use passes::shadow::cascades::{
     ShadowCascades, ShadowDiagnostics, ShadowSettings, ShadowUniformsData, SHADOW_CASCADES,
     SHADOW_MAP_SIZE, SHADOW_UBO_SIZE,
 };
-pub use self::core::resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
-pub use self::core::swapchain::{AcquireOutcome, Swapchain};
+pub use self::core::device::memory::{align_up, BufferRole, GpuBuffer, MemoryContract};
+pub use self::core::device::swapchain::{AcquireOutcome, Swapchain};

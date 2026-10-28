@@ -1,7 +1,7 @@
 //! 整帧录制：[`FrameDraw`] 收齐一帧的全部输入，`FramePool::record_frame` 按固定顺序
 //! 录完所有 pass 并提交。
 //!
-//! 清屏+绘制走 Vulkan 1.3 动态渲染（feature 在 `crate::render::core::context` 设备创建时已开）：
+//! 清屏+绘制走 Vulkan 1.3 动态渲染（feature 在 `crate::render::core::device::context` 设备创建时已开）：
 //! 无 RenderPass/Framebuffer，`loadOp=CLEAR` 就是清屏。每帧的布局纪律：
 //! - 颜色：acquire 后布局不确定 → UNDEFINED→COLOR_ATTACHMENT_OPTIMAL（进场），
 //!   画完 → PRESENT_SRC_KHR（出场）；
@@ -19,11 +19,11 @@ use ash::vk;
 
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
-use crate::render::core::barrier::{image_barrier, image_barrier_with_memory, ImageBarrier};
-use crate::render::core::fullscreen_pipeline::{
+use crate::render::core::kit::barrier::{image_barrier, image_barrier_with_memory, ImageBarrier};
+use crate::render::core::kit::fullscreen_pipeline::{
     record_fullscreen, record_fullscreen_open, record_fullscreen_sampled, FullscreenPass,
 };
-use crate::render::core::pipeline_handle::{
+use crate::render::core::kit::pipeline_handle::{
     bind_graphics, bind_vertex_index, full_rect, set_viewport, set_viewport_scissor,
 };
 use crate::render::passes::visibility::cull::CullDraw;

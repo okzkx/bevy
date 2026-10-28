@@ -18,12 +18,12 @@ use bevy::log::info;
 use bevy::prelude::Resource;
 
 use crate::common::error::{Result, VulkanError};
-use crate::render::core::resources::{BufferRole, GpuBuffer};
+use crate::render::core::device::memory::{BufferRole, GpuBuffer};
 use crate::render::resident::images::GpuImage;
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
-use crate::render::core::color_target::ColorTarget;
-use crate::render::core::fullscreen_pipeline::FullscreenPipeline;
+use crate::render::core::kit::color_target::ColorTarget;
+use crate::render::core::kit::fullscreen_pipeline::FullscreenPipeline;
 
 const SMAA_AREA_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_area_lut.png");
 const SMAA_SEARCH_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_search_lut.png");

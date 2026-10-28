@@ -3,7 +3,7 @@
 use ash::vk;
 
 use crate::common::error::Result;
-use crate::render::core::fullscreen_pipeline::FullscreenPipeline;
+use crate::render::core::kit::fullscreen_pipeline::FullscreenPipeline;
 use crate::render::Context;
 
 const GBUFFER_COMPOSITE_SPV: &[u8] =

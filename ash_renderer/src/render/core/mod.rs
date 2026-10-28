@@ -1,15 +1,11 @@
-//! Vulkan 地基与管线标准件：设备上下文、交换链、内存与 buffer、图像屏障、诊断回读，
-//! 以及各 pass 共用的建管线件（图形管线句柄、compute 管线、全屏管线骨架）和
-//! 颜色/深度目标、storage 描述符集。`render` 下其余目录都建立在这一层之上。
+//! `render` 的最底层，其余目录都建立在它之上。分两半，依赖单向：
+//!
+//! | 子目录 | 内容 | 使用方 |
+//! |---|---|---|
+//! | `device` | 设备上下文、交换链、内存契约与 buffer、诊断回读 | 全部上层（`resident` 只用这一半） |
+//! | `kit` | pass 标准件：管线句柄、compute/全屏管线骨架、颜色/深度目标、storage 描述符集、图像屏障 | `passes`、`frame` |
+//!
+//! `kit` 依赖 `device`，`device` 不知道管线和渲染目标的存在。
 
-pub(super) mod barrier;
-pub(super) mod color_target;
-pub(super) mod compute_pipeline;
-pub(super) mod context;
-pub(super) mod depth_target;
-pub(super) mod fullscreen_pipeline;
-pub(super) mod pipeline_handle;
-pub(super) mod readback;
-pub(super) mod resources;
-pub(super) mod storage_sets;
-pub(super) mod swapchain;
+pub(super) mod device;
+pub(super) mod kit;

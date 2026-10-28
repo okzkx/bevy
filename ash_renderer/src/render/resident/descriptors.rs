@@ -36,7 +36,7 @@ use crate::common::bytes::{put_mat4, put_u32, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
 use super::images::{sampler_key, GpuImage, ImageSpec};
-use crate::render::core::resources::{BufferRole, GpuBuffer, MemoryContract};
+use crate::render::core::device::memory::{BufferRole, GpuBuffer, MemoryContract};
 use super::uploader::{StagingImageCopy, UploadBatch, Uploader};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 

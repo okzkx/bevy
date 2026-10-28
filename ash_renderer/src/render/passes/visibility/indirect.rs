@@ -31,7 +31,7 @@ use bevy::prelude::Resource;
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
 
-use crate::render::core::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
+use crate::render::core::kit::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
 use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下；compute 编译链与图形同一闸门）。

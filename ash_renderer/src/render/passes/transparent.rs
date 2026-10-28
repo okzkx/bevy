@@ -12,11 +12,11 @@ use bevy::prelude::Resource;
 
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
-use crate::render::core::compute_pipeline::{create_shader_module, ComputeHandles, ComputePipeline, Handoff};
-use crate::render::core::resources::{BufferRole, GpuBuffer};
+use crate::render::core::kit::compute_pipeline::{create_shader_module, ComputeHandles, ComputePipeline, Handoff};
+use crate::render::core::device::memory::{BufferRole, GpuBuffer};
 use crate::render::Context;
-use crate::render::core::pipeline_handle::create_graphics_pipeline;
-use crate::render::core::storage_sets;
+use crate::render::core::kit::pipeline_handle::create_graphics_pipeline;
+use crate::render::core::kit::storage_sets;
 
 const TRANSPARENT_COLLECT_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/transparent_collect.spv"));
@@ -132,12 +132,12 @@ impl TransparentTargets {
         indices: &mut [u8],
         keys: &mut [u8],
     ) -> Result<()> {
-        crate::render::core::readback::readback_buffer(
+        crate::render::core::device::readback::readback_buffer(
             ctx,
             self.index_lists[slot % self.index_lists.len()].buffer(),
             indices,
         )?;
-        crate::render::core::readback::readback_buffer(
+        crate::render::core::device::readback::readback_buffer(
             ctx,
             self.keys[slot % self.keys.len()].buffer(),
             keys,

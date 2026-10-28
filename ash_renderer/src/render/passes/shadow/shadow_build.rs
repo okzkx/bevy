@@ -7,7 +7,7 @@ use bevy::log::info;
 
 use crate::common::bytes::put_u32;
 use crate::common::error::Result;
-use crate::render::core::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
+use crate::render::core::kit::compute_pipeline::{ComputeHandles, ComputePipeline, Handoff};
 use crate::render::Context;
 
 const SHADOW_BUILD_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shadow_build.spv"));

@@ -10,8 +10,8 @@ use bevy::log::info;
 use crate::common::error::Result;
 use crate::render::Context;
 
-use crate::render::core::barrier::{image_barrier, ImageBarrier};
-use crate::render::core::pipeline_handle::{
+use crate::render::core::kit::barrier::{image_barrier, ImageBarrier};
+use crate::render::core::kit::pipeline_handle::{
     bind_graphics, create_graphics_pipeline, full_rect, set_viewport_scissor, PipelineHandle,
 };
 
