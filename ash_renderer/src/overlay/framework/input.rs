@@ -17,7 +17,7 @@
 //!
 //! 滚轮方向换算照 egui-winit（0.36.2 源码）：Line 单位 x/y 直通、不取反；
 //! Pixel 单位除以 pixels_per_point 转 Point 单位。指针位置是逻辑像素
-//! （= egui 的 points），无需换算。
+//!（= egui 的 points），无需换算。
 
 use bevy::{
     input::{
@@ -134,6 +134,7 @@ pub(crate) fn egui_raw_input(
     for ev in cursor.read() {
         let pos = egui::pos2(ev.position.x, ev.position.y);
         input.pointer_pos = Some(pos);
+        input.last_pointer_pos = Some(pos);
         events.push(egui::Event::PointerMoved(pos));
     }
     for _ in cursor_left.read() {
@@ -154,18 +155,16 @@ pub(crate) fn egui_raw_input(
                     modifiers,
                 });
             }
-        } else if input.pointer_pos.is_some() || input.buttons_down[button as usize] {
-            // 释放不能因指针离窗而丢：丢一条 = egui 永久"按住"，拖选/拖动跟随
-            // 鼠标。指针已离窗（pointer_pos 为 None）时用最近已知位置补报。
-            if let Some(pos) = input.pointer_pos.or(input.last_pointer_pos) {
-                input.buttons_down[button as usize] = false;
-                events.push(egui::Event::PointerButton {
-                    pos,
-                    button,
-                    pressed: false,
-                    modifiers,
-                });
-            }
+        } else if input.buttons_down[button as usize]
+            && let Some(pos) = input.pointer_pos.or(input.last_pointer_pos)
+        {
+            input.buttons_down[button as usize] = false;
+            events.push(egui::Event::PointerButton {
+                pos,
+                button,
+                pressed: false,
+                modifiers,
+            });
         }
     }
     let ppp = window.scale_factor();
@@ -186,20 +185,7 @@ pub(crate) fn egui_raw_input(
     }
     for ev in window_focused.read() {
         if !ev.focused {
-            // egui 失焦只清键盘不清鼠标（0.36.2 input_state/mod.rs:440）。
-            // 按住拖动中失焦（如拖到另一窗口上松开）收不到 bevy 的释放，
-            // 全部欠账在此补报，落点用最近已知位置。
-            for (idx, down) in input.buttons_down.iter_mut().enumerate() {
-                if *down && let Some(pos) = input.last_pointer_pos {
-                    events.push(egui::Event::PointerButton {
-                        pos,
-                        button: ALL_BUTTONS[idx],
-                        pressed: false,
-                        modifiers,
-                    });
-                }
-                *down = false;
-            }
+            events.extend(release_all_pointer_buttons(input, modifiers));
         }
         events.push(egui::Event::WindowFocused(ev.focused));
     }
@@ -221,10 +207,27 @@ pub(crate) fn egui_raw_input(
 }
 
 /// `ButtonInput<KeyCode>` → egui 修饰键。Windows：command = ctrl、mac_cmd 恒 false。
+fn release_all_pointer_buttons(input: &mut EguiInput, modifiers: egui::Modifiers) -> Vec<egui::Event> {
+    let mut events = Vec::new();
+    for (idx, down) in input.buttons_down.iter_mut().enumerate() {
+        if *down
+            && let Some(pos) = input.last_pointer_pos
+        {
+            events.push(egui::Event::PointerButton {
+                pos,
+                button: ALL_BUTTONS[idx],
+                pressed: false,
+                modifiers,
+            });
+        }
+        *down = false;
+    }
+    events
+}
+
 fn modifiers_from(keys: &ButtonInput<KeyCode>) -> egui::Modifiers {
     let pressed = |code: KeyCode| keys.pressed(code);
-    let ctrl =
-        pressed(KeyCode::ControlLeft) || pressed(KeyCode::ControlRight);
+    let ctrl = pressed(KeyCode::ControlLeft) || pressed(KeyCode::ControlRight);
     egui::Modifiers {
         alt: pressed(KeyCode::AltLeft) || pressed(KeyCode::AltRight),
         ctrl,
@@ -314,4 +317,31 @@ fn map_key(code: &KeyCode) -> Option<egui::Key> {
         B::KeyZ => E::Z,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{release_all_pointer_buttons, EguiInput, ALL_BUTTONS};
+
+    #[test]
+    fn focus_loss_releases_every_reported_pointer_button() {
+        let mut input = EguiInput {
+            last_pointer_pos: Some(egui::pos2(12.0, 34.0)),
+            buttons_down: [true, false, true, false, false],
+            ..Default::default()
+        };
+        let events = release_all_pointer_buttons(&mut input, egui::Modifiers::default());
+        assert_eq!(events.len(), 2);
+        assert!(!input.any_button_down());
+        assert!(events.iter().all(|event| matches!(event, egui::Event::PointerButton { pressed: false, .. })));
+        assert!(matches!(events[0], egui::Event::PointerButton { button, .. } if button == ALL_BUTTONS[0]));
+        assert!(matches!(events[1], egui::Event::PointerButton { button, .. } if button == ALL_BUTTONS[2]));
+    }
+
+    #[test]
+    fn focus_loss_clears_down_state_even_without_last_position() {
+        let mut input = EguiInput { buttons_down: [true, false, false, false, false], ..Default::default() };
+        assert!(release_all_pointer_buttons(&mut input, egui::Modifiers::default()).is_empty());
+        assert!(!input.any_button_down());
+    }
 }
