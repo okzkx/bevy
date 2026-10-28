@@ -46,6 +46,8 @@ pub(crate) fn layout_contract(In(_params): In<Option<Value>>) -> BrpResult {
                     "stages": format!("{:?}", p.stages),
                     "size": p.size,
                 })),
+                "color_formats": desc.color_formats.iter().map(|f| format!("{f:?}")).collect::<Vec<_>>(),
+                "depth_format": desc.depth_format.map(|f| format!("{f:?}")),
             })
         })
         .collect();

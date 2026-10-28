@@ -21,6 +21,8 @@ pub(crate) static PRESENT_TONEMAP_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"vs_main", c"fs_main"],
     sets: &[&FRAME_SET, &GBUFFER_SAMPLED_SET, &BLOOM_UP_SET],
     push: None,
+    color_formats: &[vk::Format::R8G8B8A8_UNORM],
+    depth_format: None,
 };
 
 /// tonemap 管线（配方 [`PRESENT_TONEMAP_PIPELINE`]）。
@@ -32,8 +34,8 @@ pub struct PresentTonemapPipeline {
 impl PresentTonemapPipeline {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
-    pub fn new(ctx: &Context, layouts: &SetLayouts, color_format: vk::Format) -> Result<Self> {
-        Ok(Self { inner: FullscreenPipeline::new(ctx, &PRESENT_TONEMAP_PIPELINE, layouts, color_format)? })
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
+        Ok(Self { inner: FullscreenPipeline::new(ctx, &PRESENT_TONEMAP_PIPELINE, layouts)? })
     }
 
     #[must_use]

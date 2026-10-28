@@ -22,6 +22,8 @@ pub(crate) static SHADOW_BUILD_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"cs_main"],
     sets: &[&INSTANCE_SET, &SHADOW_SET],
     push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: SHADOW_BUILD_PUSH_SIZE }),
+    color_formats: &[],
+    depth_format: None,
 };
 
 /// compute push 总长（WGSL `PushBuild` 同源）：count 4B。

@@ -46,6 +46,8 @@ pub(crate) static OVERLAY_PIPELINE: PipelineDesc = PipelineDesc {
         stages: stages(&[vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT]),
         size: UI_PUSH_CONSTANTS_SIZE,
     }),
+    color_formats: &[crate::render::SWAPCHAIN_COLOR_FORMAT],
+    depth_format: Some(crate::render::core::target::depth::DEPTH_FORMAT),
 };
 
 /// push constant 冻结布局（16B）的 Rust 镜像：不参与运行时（字节由 [`pack_ui_push`]
@@ -126,14 +128,9 @@ impl OverlayPipeline {
     ///
     /// # Errors
     /// 配方对账不过，或 layout / shader module / pipeline 任一创建失败。
-    pub fn new(
-        ctx: &Context,
-        layouts: &SetLayouts,
-        color_format: vk::Format,
-        depth_format: vk::Format,
-    ) -> Result<Self> {
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
         OVERLAY_PIPELINE.build(ctx, layouts, |layout, stages| unsafe {
-            Self::create_pipeline(&ctx.device, color_format, depth_format, layout, stages)
+            Self::create_pipeline(&ctx.device, layout, stages)
         })
     }
 
@@ -143,8 +140,6 @@ impl OverlayPipeline {
     /// `layout` 与 `stages` 里的 module 须为合法句柄。
     unsafe fn create_pipeline(
         device: &Device,
-        color_format: vk::Format,
-        depth_format: vk::Format,
         layout: vk::PipelineLayout,
         stages: &[vk::PipelineShaderStageCreateInfo<'_>],
     ) -> Result<Self> {
@@ -212,10 +207,9 @@ impl OverlayPipeline {
         // dynamicRenderingUnusedAttachments 特性时管线的 depthAttachmentFormat
         // 必须等于实例深度附件格式（"不用即可 UNDEFINED"不成立，depth 读/写
         // 关闭才是"不用"的表达位）
-        let color_formats = [color_format];
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(&color_formats)
-            .depth_attachment_format(depth_format);
+            .color_attachment_formats(OVERLAY_PIPELINE.color_formats)
+            .depth_attachment_format(OVERLAY_PIPELINE.depth_format.expect("overlay 声明深度"));
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)
             .vertex_input_state(&vertex_input)
@@ -230,10 +224,12 @@ impl OverlayPipeline {
             .push_next(&mut rendering_info);
         let pipeline = create_graphics_pipeline(device, &info)?;
         info!(
-            "overlay 管线就绪: dynamic rendering（color {color_format:?}，depth {depth_format:?}\
+            "overlay 管线就绪: dynamic rendering（color {:?}，depth {:?}\
              声明对齐读写关），顶点输入 20B（pos/uv/color @ 0/8/16），blend 开（color \
              ONE/ONE_MINUS_SRC_ALPHA，alpha ONE_MINUS_DST_ALPHA/ONE），剔除关，set0 \
-             共享常驻表，push 16B（0/8/12）"
+             共享常驻表，push 16B（0/8/12）",
+            OVERLAY_PIPELINE.color_formats,
+            OVERLAY_PIPELINE.depth_format
         );
         Ok(Self {
             handle: PipelineHandle::new(device, layout, pipeline, OVERLAY_PIPELINE.sets),

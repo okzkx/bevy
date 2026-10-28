@@ -46,6 +46,8 @@ pub(crate) static BUILD_INDIRECT_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"cs_main"],
     sets: &[&INSTANCE_SET],
     push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: INDIRECT_PUSH_SIZE }),
+    color_formats: &[],
+    depth_format: None,
 };
 
 /// compute push 总长（pipeline layout 声明 + WGSL `PushBuild` 同源）：

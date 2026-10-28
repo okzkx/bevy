@@ -41,6 +41,8 @@ pub(crate) static OCCLUSION_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"cs_main"],
     sets: &[&INSTANCE_SET, &HIZ_OCCLUSION_SET],
     push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: OCCLUSION_PUSH_SIZE }),
+    color_formats: &[],
+    depth_format: None,
 };
 
 /// compute push 总长（layout 声明 + WGSL `PushOcclusion` 同源）：

@@ -21,6 +21,8 @@ pub(crate) static GBUFFER_COMPOSITE_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"vs_main", c"fs_main"],
     sets: &[&FRAME_SET, &GBUFFER_SAMPLED_SET, &LIGHT_CLUSTER_SET, &SHADOW_SET],
     push: None,
+    color_formats: &[crate::render::HDR_FORMAT],
+    depth_format: None,
 };
 
 /// 合成管线（配方 [`GBUFFER_COMPOSITE_PIPELINE`]）；用到的布局归各自资源，本管线要
@@ -33,8 +35,8 @@ pub struct CompositePipeline {
 impl CompositePipeline {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
-    pub fn new(ctx: &Context, layouts: &SetLayouts, hdr_format: vk::Format) -> Result<Self> {
-        Ok(Self { inner: FullscreenPipeline::new(ctx, &GBUFFER_COMPOSITE_PIPELINE, layouts, hdr_format)? })
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
+        Ok(Self { inner: FullscreenPipeline::new(ctx, &GBUFFER_COMPOSITE_PIPELINE, layouts)? })
     }
 
     #[must_use]

@@ -40,6 +40,8 @@ pub(crate) static CLUSTER_BUILD_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"cs_main"],
     sets: &[&LIGHT_CLUSTER_SET],
     push: None,
+    color_formats: &[],
+    depth_format: None,
 };
 
 /// cluster 屏幕 tile 边长（px）。

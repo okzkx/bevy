@@ -46,6 +46,8 @@ pub(crate) static LOD_SELECT_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"cs_main"],
     sets: &[&INSTANCE_SET],
     push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: LOD_PUSH_SIZE }),
+    color_formats: &[],
+    depth_format: None,
 };
 
 /// compute push 总长（layout 声明 + WGSL `PushLod` 同源）：

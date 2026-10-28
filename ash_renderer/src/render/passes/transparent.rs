@@ -45,6 +45,8 @@ pub(crate) static TRANSPARENT_COLLECT_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"cs_main"],
     sets: &[&INSTANCE_SET, &LIGHT_CLUSTER_SET, &TRANSPARENT_SET],
     push: Some(PushRange { stages: CS, size: TRANSPARENT_PUSH_SIZE }),
+    color_formats: &[],
+    depth_format: None,
 };
 
 pub(crate) static TRANSPARENT_SORT_PIPELINE: PipelineDesc = PipelineDesc {
@@ -53,6 +55,8 @@ pub(crate) static TRANSPARENT_SORT_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"cs_main"],
     sets: &[&TRANSPARENT_SET],
     push: Some(PushRange { stages: CS, size: TRANSPARENT_SORT_PUSH }),
+    color_formats: &[],
+    depth_format: None,
 };
 
 pub(crate) static TRANSPARENT_GATHER_PIPELINE: PipelineDesc = PipelineDesc {
@@ -61,6 +65,8 @@ pub(crate) static TRANSPARENT_GATHER_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"cs_main"],
     sets: &[&INSTANCE_SET, &TRANSPARENT_SET],
     push: Some(PushRange { stages: CS, size: TRANSPARENT_PUSH_SIZE }),
+    color_formats: &[],
+    depth_format: None,
 };
 
 pub(crate) static TRANSPARENT_FORWARD_PIPELINE: PipelineDesc = PipelineDesc {
@@ -69,6 +75,8 @@ pub(crate) static TRANSPARENT_FORWARD_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"vs_main", c"fs_main"],
     sets: &[&BINDLESS_SET, &FRAME_SET, &INSTANCE_SET, &LIGHT_CLUSTER_SET],
     push: None,
+    color_formats: &[crate::render::HDR_FORMAT],
+    depth_format: Some(crate::render::core::target::depth::DEPTH_FORMAT),
 };
 
 /// 透明行容量，索引列表、深度键、命令环都按它分配。在场行数超过它时
@@ -415,14 +423,9 @@ impl TransparentPipeline {
     ///
     /// # Errors
     /// 配方对账不过，或 layout / shader module / pipeline 任一创建失败。
-    pub fn new(
-        ctx: &Context,
-        layouts: &SetLayouts,
-        color_format: vk::Format,
-        depth_format: vk::Format,
-    ) -> Result<Self> {
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
         TRANSPARENT_FORWARD_PIPELINE.build(ctx, layouts, |layout, stages| unsafe {
-            Self::create_pipeline(&ctx.device, color_format, depth_format, layout, stages)
+            Self::create_pipeline(&ctx.device, layout, stages)
         })
     }
 
@@ -430,8 +433,6 @@ impl TransparentPipeline {
     /// `layout` 与 `stages` 里的 module 须为合法句柄。
     unsafe fn create_pipeline(
         device: &Device,
-        color_format: vk::Format,
-        depth_format: vk::Format,
         layout: vk::PipelineLayout,
         stages: &[vk::PipelineShaderStageCreateInfo<'_>],
     ) -> Result<Self> {
@@ -494,10 +495,9 @@ impl TransparentPipeline {
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let color_formats = [color_format];
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(&color_formats)
-            .depth_attachment_format(depth_format);
+            .color_attachment_formats(TRANSPARENT_FORWARD_PIPELINE.color_formats)
+            .depth_attachment_format(TRANSPARENT_FORWARD_PIPELINE.depth_format.expect("透明前向声明深度"));
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)
             .vertex_input_state(&vertex_input)
@@ -512,7 +512,9 @@ impl TransparentPipeline {
             .push_next(&mut rendering_info);
         let pipeline = create_graphics_pipeline(device, &info)?;
         info!(
-            "透明前向管线就绪: HDR {color_format:?}（SRC_ALPHA 混合）+ 深度 {depth_format:?}（重绑只测不写），常驻三集 + 光源分簇集"
+            "透明前向管线就绪: HDR {:?}（SRC_ALPHA 混合）+ 深度 {:?}（重绑只测不写），常驻三集 + 光源分簇集",
+            TRANSPARENT_FORWARD_PIPELINE.color_formats,
+            TRANSPARENT_FORWARD_PIPELINE.depth_format
         );
         Ok(Self {
             device: device.clone(),

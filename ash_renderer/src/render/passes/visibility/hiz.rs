@@ -62,6 +62,8 @@ pub(crate) static HIZ_DOWNSAMPLE_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"cs_main"],
     sets: &[&HIZ_REDUCE_SET],
     push: None,
+    color_formats: &[],
+    depth_format: None,
 };
 
 /// 金字塔格式（R32_SFLOAT 单通道浮点——深度值域 [0,1] 直存，无语义压缩）。

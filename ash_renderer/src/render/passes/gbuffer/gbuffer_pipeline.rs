@@ -28,6 +28,8 @@ pub(crate) static GBUFFER_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"vs_main", c"fs_main"],
     sets: &[&BINDLESS_SET, &FRAME_SET, &INSTANCE_SET],
     push: None,
+    color_formats: &[crate::render::ALBEDO_FORMAT, crate::render::NORMAL_FORMAT, crate::render::MATPARAM_FORMAT],
+    depth_format: Some(crate::render::core::target::depth::DEPTH_FORMAT),
 };
 
 #[derive(bevy::prelude::Resource)]
@@ -44,11 +46,9 @@ impl GBufferPipeline {
     pub fn new(
         ctx: &Context,
         layouts: &SetLayouts,
-        color_formats: &[vk::Format],
-        depth_format: vk::Format,
     ) -> Result<Self> {
         GBUFFER_WRITE_PIPELINE.build(ctx, layouts, |layout, stages| unsafe {
-            Self::create_pipeline(&ctx.device, color_formats, depth_format, layout, stages)
+            Self::create_pipeline(&ctx.device, &GBUFFER_WRITE_PIPELINE, layout, stages)
         })
     }
 
@@ -58,8 +58,7 @@ impl GBufferPipeline {
     /// `layout` 与 `stages` 里的 module 须为合法句柄。
     unsafe fn create_pipeline(
         device: &Device,
-        color_formats: &[vk::Format],
-        depth_format: vk::Format,
+        desc: &'static PipelineDesc,
         layout: vk::PipelineLayout,
         stages: &[vk::PipelineShaderStageCreateInfo<'_>],
     ) -> Result<Self> {
@@ -112,7 +111,7 @@ impl GBufferPipeline {
             .max_depth_bounds(1.0);
         // 逐 color 附件一条 blend 态（8.1 起 G-buffer pass 双 color；
         // 声明面 = 实例附件全集，VUID-08914 纪律）
-        let blend_attachment: Vec<vk::PipelineColorBlendAttachmentState> = color_formats
+        let blend_attachment: Vec<vk::PipelineColorBlendAttachmentState> = desc.color_formats
             .iter()
             .map(|_| {
                 vk::PipelineColorBlendAttachmentState::default()
@@ -127,8 +126,8 @@ impl GBufferPipeline {
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
         // dynamic rendering：附件格式内联声明（无 RenderPass/Framebuffer）
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(color_formats)
-            .depth_attachment_format(depth_format);
+            .color_attachment_formats(desc.color_formats)
+            .depth_attachment_format(desc.depth_format.expect("gbuffer_write 声明深度"));
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)
             .vertex_input_state(&vertex_input)
@@ -147,9 +146,11 @@ impl GBufferPipeline {
         // 不拆即每次启动泄漏 1 个 VkShaderModule（验证层
         // VUID-vkDestroyDevice-device-05137 可抓获此类泄漏）。
         info!(
-            "图形管线就绪: dynamic rendering（color {color_formats:?} / depth {depth_format:?}），\
+            "图形管线就绪: dynamic rendering（color {:?} / depth {:?}），\
              顶点输入 32B 交错（pos/normal/uv @ 0/12/24），reverse-Z（clear 0 + GREATER），\
-             viewport 正高度直出，剔除关，push 退役（5.3：firstInstance 携带槽号），set0/set1/set2 同源绑定"
+             viewport 正高度直出，剔除关，push 退役（5.3：firstInstance 携带槽号），set0/set1/set2 同源绑定",
+            desc.color_formats,
+            desc.depth_format
         );
         Ok(Self {
             handle: PipelineHandle::new(device, layout, pipeline, GBUFFER_WRITE_PIPELINE.sets),

@@ -25,14 +25,9 @@ impl FullscreenPipeline {
     ///
     /// # Errors
     /// 配方对账不过，或 layout / shader module / pipeline 任一创建失败。
-    pub(crate) fn new(
-        ctx: &Context,
-        desc: &PipelineDesc,
-        layouts: &SetLayouts,
-        color_format: vk::Format,
-    ) -> Result<Self> {
+    pub(crate) fn new(ctx: &Context, desc: &PipelineDesc, layouts: &SetLayouts) -> Result<Self> {
         desc.build(ctx, layouts, |layout, stages| unsafe {
-            Self::create_pipeline(&ctx.device, desc, color_format, layout, stages)
+            Self::create_pipeline(&ctx.device, desc, layout, stages)
         })
     }
 
@@ -43,7 +38,6 @@ impl FullscreenPipeline {
     unsafe fn create_pipeline(
         device: &Device,
         desc: &PipelineDesc,
-        color_format: vk::Format,
         layout: vk::PipelineLayout,
         stages: &[vk::PipelineShaderStageCreateInfo<'_>],
     ) -> Result<Self> {
@@ -73,9 +67,8 @@ impl FullscreenPipeline {
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let color_formats = [color_format];
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(&color_formats);
+            .color_attachment_formats(desc.color_formats);
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)
             .vertex_input_state(&vertex_input)
@@ -90,8 +83,9 @@ impl FullscreenPipeline {
             .push_next(&mut rendering_info);
         let pipeline = create_graphics_pipeline(device, &info)?;
         info!(
-            "全屏管线 {} 就绪: color {color_format:?}（无顶点输入全屏三角形 / 无深度 / 无混合，动态 viewport）",
-            desc.label
+            "全屏管线 {} 就绪: color {:?}（无顶点输入全屏三角形 / 无深度 / 无混合，动态 viewport）",
+            desc.label,
+            desc.color_formats
         );
         Ok(Self {
             handle: PipelineHandle::new(device, layout, pipeline, desc.sets),

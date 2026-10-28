@@ -66,6 +66,10 @@ pub struct Swapchain {
     pub extent: vk::Extent2D,
 }
 
+/// swapchain 输出格式常量：BGRA8-UNORM 底板的 SRGB view 别名（3.4 输出编码定案）。
+/// [`Swapchain::new`] 的闸门保证 view_format 恒等于它——管线配方按此常量声明附件。
+pub const SWAPCHAIN_COLOR_FORMAT: vk::Format = vk::Format::B8G8R8A8_SRGB;
+
 impl Swapchain {
     /// 设备支持把 `srgb` 当颜色附件才返回它，否则 `None`。
     fn srgb_alias_if_supported(ctx: &Context, srgb: vk::Format) -> Option<vk::Format> {
@@ -95,35 +99,28 @@ impl Swapchain {
         if formats.is_empty() {
             return Err(VulkanError::Init("surface 无可用格式".into()));
         }
+        // 输出编码定案（3.4）：BGRA8-UNORM 底板 + SRGB view 别名。格式是管线配方
+        // 的常量（[`SWAPCHAIN_COLOR_FORMAT`]），不支持的设备显式报错退出——不静默
+        // 退回（退回 = 受光几何整体偏暗的隐性降级）。
         let surface_format = formats
             .iter()
             .find(|f| f.format == vk::Format::B8G8R8A8_UNORM)
             .copied()
-            .unwrap_or(formats[0]);
+            .ok_or_else(|| {
+                VulkanError::Init(format!(
+                    "surface 不支持 BGRA8-UNORM（候选：{:?}）——swapchain 格式是管线配方的常量，不静默降级",
+                    formats.iter().map(|f| f.format).collect::<Vec<_>>()
+                ))
+            })?;
         // image 用 UNORM 格式，渲染时套同一张图的 SRGB view 写入，写入时自动做 sRGB 编码，present 读 image 原样上屏。
         // 合法需要三样：context.rs 启用的 mutable_format 扩展、下面的格式清单和 MUTABLE_FORMAT 旗标、SRGB 格式支持当颜色附件。
-        // 坑：拿不到 SRGB view 时画面会整体偏暗，所以要记 warn，不能静默退回
-        let srgb_alias = match surface_format.format {
-            vk::Format::B8G8R8A8_UNORM => {
-                Self::srgb_alias_if_supported(ctx, vk::Format::B8G8R8A8_SRGB)
-            }
-            vk::Format::R8G8B8A8_UNORM => {
-                Self::srgb_alias_if_supported(ctx, vk::Format::R8G8B8A8_SRGB)
-            }
-            _ => None,
-        };
-        let view_format = srgb_alias.unwrap_or(surface_format.format);
-        if srgb_alias.is_some() {
-            info!("输出编码：UNORM 底板 + SRGB view 别名（ROP 写出自动编码，着色器全程线性）");
-        } else {
-            bevy::log::warn!("输出编码缺位：swapchain {:?} 无 SRGB view 别名（扩展/格式支持不足），受光几何中间调将偏暗——输出编码定案未生效", surface_format.format);
-        }
+        let view_format = Self::srgb_alias_if_supported(ctx, vk::Format::B8G8R8A8_SRGB).ok_or_else(|| {
+            VulkanError::Init("BGRA8-UNORM 无 SRGB view 别名（扩展/格式支持不足）——输出编码定案无法生效，显式退出".to_owned())
+        })?;
+        info!("输出编码：UNORM 底板 + SRGB view 别名（ROP 写出自动编码，着色器全程线性）");
         // 坑：格式清单必须包含 swapchain 自身格式（VUID-VkSwapchainCreateInfoKHR-pNext-07781）；
         // format_list 和 format_list_info 必须活到 create_swapchain 返回（pNext 只存指针）
-        let format_list: Vec<vk::Format> = match srgb_alias {
-            Some(srgb) => vec![surface_format.format, srgb],
-            None => vec![surface_format.format],
-        };
+        let format_list: Vec<vk::Format> = vec![surface_format.format, view_format];
         let mut format_list_info =
             vk::ImageFormatListCreateInfo::default().view_formats(&format_list);
         if caps.current_extent.width == u32::MAX {
@@ -165,7 +162,7 @@ impl Swapchain {
                     .present_mode(present_mode)
                     .clipped(true)
                     // 坑：有 SRGB view 时必须带这个旗标，否则验证层报 VUID-VkSwapchainCreateInfoKHR-flags-01977
-                    .flags(if srgb_alias.is_some() {
+                    .flags(if view_format == SWAPCHAIN_COLOR_FORMAT {
                         vk::SwapchainCreateFlagsKHR::MUTABLE_FORMAT
                     } else {
                         vk::SwapchainCreateFlagsKHR::empty()

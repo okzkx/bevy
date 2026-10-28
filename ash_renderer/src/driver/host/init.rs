@@ -24,8 +24,7 @@ use crate::{
         ShadowBuildPass, ShadowPipeline, ShadowTargets, TransparentPasses, TransparentPipeline,
         TransparentTargets, LightClusters,
         Swapchain, UiVertexRing, Uploader,
-        ALBEDO_FORMAT, DEPTH_FORMAT, LightTable, MATPARAM_FORMAT, MAX_FRAMES_IN_FLIGHT,
-        NORMAL_FORMAT, TABLE_CAPACITY,
+        LightTable, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
 
@@ -128,25 +127,19 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         hiz.occlusion_layout(),
     ])?;
     layouts.name_all(&ctx);
-    // 图形管线（PipelineHandle）
-    let gbuffer_pipeline =
-        GBufferPipeline::new(&ctx, &layouts, &[ALBEDO_FORMAT, NORMAL_FORMAT, MATPARAM_FORMAT], DEPTH_FORMAT)?;
+    // 图形管线（PipelineHandle）——附件格式由各管线配方声明（VUID-08914 对齐
+    // 实际附件；swapchain 输出格式已由 Swapchain::new 闸门钉为常量）
+    let gbuffer_pipeline = GBufferPipeline::new(&ctx, &layouts)?;
     let shadow_pipeline = ShadowPipeline::new(&ctx, &layouts)?;
-    let transparent_pipeline = TransparentPipeline::new(&ctx, &layouts, crate::render::HDR_FORMAT, DEPTH_FORMAT)?;
-    // overlay 不用深度，但深度格式仍要和实际附件一致（同上 VUID-08914）
-    let overlay_pipeline = OverlayPipeline::new(&ctx, &layouts, swapchain.view_format, DEPTH_FORMAT)?;
+    let transparent_pipeline = TransparentPipeline::new(&ctx, &layouts)?;
+    // overlay 不用深度，但深度格式仍在配方里声明（同上 VUID-08914）
+    let overlay_pipeline = OverlayPipeline::new(&ctx, &layouts)?;
     // 全屏管线（FullscreenPipeline）
-    let composite_pipeline = CompositePipeline::new(&ctx, &layouts, crate::render::HDR_FORMAT)?;
+    let composite_pipeline = CompositePipeline::new(&ctx, &layouts)?;
     let bloom_pipelines = BloomPipelines::new(&ctx, &layouts)?;
     // tonemap 输出存线性值，最后写屏幕时由 SRGB 视图做唯一一次 sRGB 编码
-    let smaa_pipelines = SmaaPipelines::new(
-        &ctx,
-        &layouts,
-        vk::Format::R8G8B8A8_UNORM,
-        vk::Format::R8G8B8A8_UNORM,
-        swapchain.view_format,
-    )?;
-    let tonemap_pipeline = PresentTonemapPipeline::new(&ctx, &layouts, vk::Format::R8G8B8A8_UNORM)?;
+    let smaa_pipelines = SmaaPipelines::new(&ctx, &layouts)?;
+    let tonemap_pipeline = PresentTonemapPipeline::new(&ctx, &layouts)?;
     // Compute 管线（ComputePipeline）
     let cull_pass = CullPass::new(&ctx, &layouts)?;
     let indirect_pass = IndirectPass::new(&ctx, &layouts)?;

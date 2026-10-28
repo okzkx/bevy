@@ -78,6 +78,8 @@ pub(crate) static SMAA_EDGE_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"vs_main", c"fs_main"],
     sets: &[&SMAA_A_SET],
     push: None,
+    color_formats: &[vk::Format::R8G8B8A8_UNORM],
+    depth_format: None,
 };
 
 pub(crate) static SMAA_BLEND_PIPELINE: PipelineDesc = PipelineDesc {
@@ -86,6 +88,8 @@ pub(crate) static SMAA_BLEND_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"vs_main", c"fs_main"],
     sets: &[&SMAA_A_SET],
     push: None,
+    color_formats: &[vk::Format::R8G8B8A8_UNORM],
+    depth_format: None,
 };
 
 pub(crate) static SMAA_NEIGHBORHOOD_PIPELINE: PipelineDesc = PipelineDesc {
@@ -94,6 +98,8 @@ pub(crate) static SMAA_NEIGHBORHOOD_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"vs_main", c"fs_main"],
     sets: &[&SMAA_B_SET],
     push: None,
+    color_formats: &[crate::render::SWAPCHAIN_COLOR_FORMAT],
+    depth_format: None,
 };
 
 /// SMAA 开关（BRP `smaa_set` 写，draw_frame 读）。
@@ -456,14 +462,11 @@ impl SmaaPipelines {
     pub fn new(
         ctx: &Context,
         layouts: &SetLayouts,
-        edges_format: vk::Format,
-        blend_format: vk::Format,
-        swapchain_format: vk::Format,
     ) -> Result<Self> {
         Ok(Self {
-            edge: FullscreenPipeline::new(ctx, &SMAA_EDGE_PIPELINE, layouts, edges_format)?,
-            blend: FullscreenPipeline::new(ctx, &SMAA_BLEND_PIPELINE, layouts, blend_format)?,
-            neighborhood: FullscreenPipeline::new(ctx, &SMAA_NEIGHBORHOOD_PIPELINE, layouts, swapchain_format)?,
+            edge: FullscreenPipeline::new(ctx, &SMAA_EDGE_PIPELINE, layouts)?,
+            blend: FullscreenPipeline::new(ctx, &SMAA_BLEND_PIPELINE, layouts)?,
+            neighborhood: FullscreenPipeline::new(ctx, &SMAA_NEIGHBORHOOD_PIPELINE, layouts)?,
         })
     }
 

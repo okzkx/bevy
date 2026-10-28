@@ -32,6 +32,10 @@ pub(crate) struct PipelineDesc {
     pub entries: &'static [&'static CStr],
     pub sets: &'static [&'static SetLayoutDesc],
     pub push: Option<PushRange>,
+    /// dynamic rendering 附件格式声明（VUID-08914）：compute 管线为空切片 +
+    /// None；图形管线至少一张颜色图，深度按实际附件有/无给 `Some`/`None`。
+    pub color_formats: &'static [vk::Format],
+    pub depth_format: Option<vk::Format>,
 }
 
 impl PipelineDesc {
@@ -40,6 +44,19 @@ impl PipelineDesc {
         let mut out = Vec::new();
         for desc in self.sets {
             out.extend(desc.problems().into_iter().map(|p| format!("{}: {p}", desc.name)));
+        }
+        // 附件格式形状：有顶点入口的（图形）至少声明颜色或深度之一（depth-only
+        // 合法），纯 compute 的必须没有
+        let has_vs = self.entries.iter().any(|e| {
+            self.shader
+                .entry(e.to_str().unwrap_or(""))
+                .is_some_and(|entry| entry.stage.contains(vk::ShaderStageFlags::VERTEX))
+        });
+        if has_vs && self.color_formats.is_empty() && self.depth_format.is_none() {
+            out.push("图形管线没声明任何附件格式（颜色/深度至少一项）".to_owned());
+        }
+        if !has_vs && (!self.color_formats.is_empty() || self.depth_format.is_some()) {
+            out.push("compute 管线不该声明附件格式".to_owned());
         }
         for name in self.entries {
             let name = name.to_str().unwrap_or("<非 UTF-8>");

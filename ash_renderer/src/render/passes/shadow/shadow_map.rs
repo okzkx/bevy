@@ -303,6 +303,8 @@ pub(crate) static SHADOW_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"vs_main", c"fs_main"],
     sets: &[&INSTANCE_SET, &SHADOW_SET],
     push: Some(PushRange { stages: vk::ShaderStageFlags::VERTEX, size: SHADOW_PUSH_SIZE }),
+    color_formats: &[],
+    depth_format: Some(crate::render::core::target::depth::DEPTH_FORMAT),
 };
 
 impl ShadowPipeline {
@@ -362,7 +364,7 @@ impl ShadowPipeline {
         // dynamic rendering：无色附件、深度 D32（VUID-08914 声明面 = 实例
         // 附件全集——shadow 实例只有深度）
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-            .depth_attachment_format(crate::render::core::target::depth::DEPTH_FORMAT);
+            .depth_attachment_format(SHADOW_WRITE_PIPELINE.depth_format.expect("shadow_write 声明深度"));
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)
             .vertex_input_state(&vertex_input)

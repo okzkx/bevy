@@ -65,6 +65,8 @@ pub(crate) static BLOOM_PREFILTER_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"vs_main", c"fs_main"],
     sets: &[&GBUFFER_SAMPLED_SET],
     push: None,
+    color_formats: &[crate::render::HDR_FORMAT],
+    depth_format: None,
 };
 
 pub(crate) static BLOOM_DOWN_PIPELINE: PipelineDesc = PipelineDesc {
@@ -73,6 +75,8 @@ pub(crate) static BLOOM_DOWN_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"vs_main", c"fs_main"],
     sets: &[&BLOOM_TEX_SET],
     push: None,
+    color_formats: &[crate::render::HDR_FORMAT],
+    depth_format: None,
 };
 
 pub(crate) static BLOOM_UP_PIPELINE: PipelineDesc = PipelineDesc {
@@ -81,6 +85,8 @@ pub(crate) static BLOOM_UP_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"vs_main", c"fs_main"],
     sets: &[&BLOOM_UP_SET],
     push: None,
+    color_formats: &[crate::render::HDR_FORMAT],
+    depth_format: None,
 };
 
 /// 参数 UBO 字节长（5×f32 + 垫，std140 对齐 16）。
@@ -513,9 +519,9 @@ impl BloomPipelines {
     /// # Errors
     /// 配方对账不过，或管线创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        let prefilter = FullscreenPipeline::new(ctx, &BLOOM_PREFILTER_PIPELINE, layouts, HDR_FORMAT)?;
-        let down = FullscreenPipeline::new(ctx, &BLOOM_DOWN_PIPELINE, layouts, HDR_FORMAT)?;
-        let up = FullscreenPipeline::new(ctx, &BLOOM_UP_PIPELINE, layouts, HDR_FORMAT)?;
+        let prefilter = FullscreenPipeline::new(ctx, &BLOOM_PREFILTER_PIPELINE, layouts)?;
+        let down = FullscreenPipeline::new(ctx, &BLOOM_DOWN_PIPELINE, layouts)?;
+        let up = FullscreenPipeline::new(ctx, &BLOOM_UP_PIPELINE, layouts)?;
         Ok(Self { prefilter, down, up })
     }
 }

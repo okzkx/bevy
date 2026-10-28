@@ -52,6 +52,8 @@ pub(crate) static CULL_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"cs_main"],
     sets: &[&INSTANCE_SET, &SHADOW_SET],
     push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: CULL_PUSH_SIZE }),
+    color_formats: &[],
+    depth_format: None,
 };
 
 /// compute push 总长（pipeline layout 声明 + WGSL `PushCull` 同源）：
