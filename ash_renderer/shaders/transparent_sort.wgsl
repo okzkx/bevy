@@ -13,8 +13,8 @@
 
 const TRANSPARENT_CAPACITY: u32 = 16384u;
 
-@group(0) @binding(4) var<storage, read_write> t_index_list: array<u32>;
-@group(0) @binding(5) var<storage, read_write> t_keys: array<f32>;
+@group(0) @binding(0) var<storage, read_write> t_index_list: array<u32>;
+@group(0) @binding(1) var<storage, read_write> t_keys: array<f32>;
 
 var<immediate> push: PushSort;
 struct PushSort {

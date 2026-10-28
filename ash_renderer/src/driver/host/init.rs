@@ -16,12 +16,13 @@ use crate::{
     common::error::Result,
     common::syntax::ResultTierExt,
     render::{
-        AtlasGpu, BindlessTables, ClusterTargets, CompositePipeline, Context, CullPass, FramePool,
-        GBufferTargets, GraphicsPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
+        AtlasGpu, BindlessTables, ClusterBuildPass, CompositePipeline, Context, CullPass, FramePool,
+        GBufferTargets, GBufferPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
         BloomPipelines, BloomTargets, InstanceTables, LodPass, MeshPool, OcclusionPass,
         SmaaPipelines, SmaaTargets,
         OverlayPipeline, PresentTonemapPipeline,
         ShadowBuildPass, ShadowPipeline, ShadowTargets, TransparentPasses, TransparentPipeline,
+        TransparentTargets, LightClusters,
         Swapchain, UiVertexRing, Uploader,
         ALBEDO_FORMAT, DEPTH_FORMAT, LightTable, MATPARAM_FORMAT, MAX_FRAMES_IN_FLIGHT,
         NORMAL_FORMAT, TABLE_CAPACITY,
@@ -99,7 +100,8 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
     let gbuffer = GBufferTargets::new(&ctx, swapchain.extent, &depth_views)?;
     let light_ring_buffers: Vec<vk::Buffer> =
         (0..MAX_FRAMES_IN_FLIGHT).map(|s| light_table.ring_buffer(s)).collect();
-    let cluster_targets = ClusterTargets::new(&ctx, swapchain.extent, &light_ring_buffers)?;
+    let light_clusters = LightClusters::new(&ctx, swapchain.extent, &light_ring_buffers)?;
+    let transparent_targets = TransparentTargets::new(&ctx)?;
     let shadow_targets = ShadowTargets::new(&ctx)?;
     let bloom_targets = BloomTargets::new(&ctx, swapchain.extent)?;
     // 会提交上传（构造内当场等完）：两张查找表贴图
@@ -111,7 +113,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
     // ---- ⑤ 管线：无状态，只借 ③④ 的描述符布局。声明的附件格式必须和实际
     // 渲染用的附件完全一致，否则验证层报 VUID-08914 ----
     // 图形管线（PipelineHandle）
-    let pipeline = GraphicsPipeline::new(
+    let gbuffer_pipeline = GBufferPipeline::new(
         &ctx,
         &[ALBEDO_FORMAT, NORMAL_FORMAT, MATPARAM_FORMAT],
         DEPTH_FORMAT,
@@ -131,7 +133,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         tables.set0_layout(),
         tables.set1_layout(),
         instance_tables.set2_layout(),
-        cluster_targets.set_layout(),
+        light_clusters.set_layout(),
     )?;
     // overlay 不用深度，但深度格式仍要和实际附件一致（同上 VUID-08914）
     let overlay_pipeline = OverlayPipeline::new(
@@ -146,7 +148,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         crate::render::HDR_FORMAT,
         tables.set1_layout(),
         gbuffer.sampled_layout(),
-        cluster_targets.set_layout(),
+        light_clusters.set_layout(),
         shadow_targets.set_layout(),
     )?;
     let bloom_pipelines = BloomPipelines::new(
@@ -178,10 +180,12 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         ShadowBuildPass::new(&ctx, instance_tables.set2_layout(), shadow_targets.set_layout())?;
     let occlusion_pass = OcclusionPass::new(&ctx, instance_tables.set2_layout(), hiz.occlusion_layout())?;
     let lod_pass = LodPass::new(&ctx, instance_tables.set2_layout())?;
+    let cluster_build_pass = ClusterBuildPass::new(&ctx, light_clusters.set_layout())?;
     let transparent_passes = TransparentPasses::new(
         &ctx,
-        cluster_targets.set_layout(),
         instance_tables.set2_layout(),
+        light_clusters.set_layout(),
+        transparent_targets.set_layout(),
     )?;
 
     Ok(InitChain {
@@ -197,12 +201,13 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         instance_tables,
         light_table,
         gbuffer,
-        cluster_targets,
+        light_clusters,
+        transparent_targets,
         shadow_targets,
         bloom_targets,
         smaa_targets,
         hiz,
-        pipeline,
+        gbuffer_pipeline,
         shadow_pipeline,
         transparent_pipeline,
         overlay_pipeline,
@@ -215,6 +220,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         shadow_build_pass,
         occlusion_pass,
         lod_pass,
+        cluster_build_pass,
         transparent_passes,
     })
 }
@@ -276,14 +282,16 @@ init_chain! {
     SmaaTargets => smaa_targets,
     TransparentPipeline => transparent_pipeline,
     TransparentPasses => transparent_passes,
-    ClusterTargets => cluster_targets,
+    ClusterBuildPass => cluster_build_pass,
+    TransparentTargets => transparent_targets,
+    LightClusters => light_clusters,
     LightTable => light_table,
     GBufferTargets => gbuffer,
     FramePool => frames,
     UiVertexRing => ui_ring,
     Swapchain => swapchain,
     OverlayPipeline => overlay_pipeline,
-    GraphicsPipeline => pipeline,
+    GBufferPipeline => gbuffer_pipeline,
     CullPass => cull_pass,
     IndirectPass => indirect_pass,
     LodPass => lod_pass,

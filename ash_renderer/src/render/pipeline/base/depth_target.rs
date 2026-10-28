@@ -1,9 +1,6 @@
-//! 深度附件：D32_SFLOAT reverse-Z 深度链的载体（3.6 P1 摊薄兑现：从 frames.rs
-//! 独立成侧文件——生命周期归帧槽，职责单一）。
-//!
-//! 支持查询先行（支持与启用分开，证据落日志）；每帧槽一张，尺寸随 swapchain
-//! 重建（[`FramePool::rebuild_depth`]，在 frames.rs）。销毁纪律：Drop 不等 GPU
-//! ——重建路径的等待在 rebuild_depth，退出排空在 teardown。
+//! 深度目标：D32_SFLOAT、reverse-Z。主深度每帧槽一张，随 swapchain 重建
+//!（[`crate::render::FramePool::rebuild_depth`]）；阴影的四张级联深度图也用它。
+//! Drop 不等 GPU：重建前由 rebuild_depth 等，退出前由 teardown 等。
 
 use ash::{vk, Device};
 use bevy::log::info;
@@ -12,14 +9,10 @@ use crate::common::error::{Result, VulkanError};
 
 use crate::render::Context;
 
-/// 深度附件格式（D32_SFLOAT，reverse-Z 深度链的载体）。支持查询在
-/// [`DepthTarget::new`]；管线的深度附件格式声明与这里同一常量
-///（pipeline.rs 只消费不另立）。
+/// 所有管线声明深度附件格式都用这个常量，不另写。
 pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
-/// 一张深度附件：VkImage（D32_SFLOAT，DEPTH_STENCIL_ATTACHMENT + SAMPLED
-/// 用途——6.1.2 起金字塔归约采样）+ dedicated memory + view（DEPTH aspect）。
-/// 生命周期 = 帧槽，重建见 `FramePool::rebuild_depth`。
+/// 一张可当深度附件、也可被采样（合成、Hi-Z、阴影查询）的深度图，独占一块内存。
 pub struct DepthTarget {
     device: Device,
     /// 本体 image（进场屏障的目标；FramePool 经 `raw_image` 访问）。

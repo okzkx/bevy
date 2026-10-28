@@ -1,5 +1,5 @@
 //! shadow 命令组装 compute 半边：管线 + 录制。命令环（IndirectCommands
-//! ×4）与标记环住在 [`super::super::pipeline::shadow::ShadowTargets`]；本模块
+//! ×4）与标记环住在 [`crate::render::ShadowTargets`]；本模块
 //! 只管"怎么派"。组装语义见 `shadow_build.wgsl`（两枚语义钉的执行面注释）。
 
 use ash::vk;

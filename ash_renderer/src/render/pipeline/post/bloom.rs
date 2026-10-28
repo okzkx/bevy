@@ -5,7 +5,7 @@
 //! 链路：composite HDR 线性输出 → prefilter（亮度阈值 + soft knee，读
 //! G-buffer 采样集 b2/b4）→ down 链（逐级半分辨率）→ up 链（tent 上采样
 //! 叠回降采样对应级）→ up[0] = 半分辨率 bloom 纹理，由 present tonemap
-//! 采样叠加。全屏 pass 三件套复用 FullscreenPipeline 脚手架（无深度、单
+//! 采样叠加。全屏 pass 三件套复用全屏管线骨架（无深度、单
 //! color、动态 viewport）。
 //!
 //! 布局族：L_tex = [texture, sampler]（down 链源集）；L_up = [texture, texture,
@@ -20,8 +20,8 @@ use crate::common::error::Result;
 use crate::render::core::resources::{BufferRole, GpuBuffer};
 use crate::render::{Context, HDR_FORMAT, MAX_FRAMES_IN_FLIGHT};
 
-use super::fullscreen_pipeline::FullscreenPipeline;
-use super::gbuffer::ColorTarget;
+use crate::render::pipeline::base::fullscreen_pipeline::FullscreenPipeline;
+use crate::render::pipeline::base::color_target::ColorTarget;
 
 const BLOOM_PREFILTER_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/bloom_prefilter.spv"));
@@ -230,7 +230,7 @@ impl BloomTargets {
     }
 
     fn mk_buffer(&self, ctx: &Context, role: BufferRole, size: u64) -> Result<GpuBuffer> {
-        let sharing = super::concurrent_families(ctx);
+        let sharing = ctx.sharing_families();
         GpuBuffer::create_with_families(&self.device, ctx.memory_contract(), size, role, &sharing)
     }
 
@@ -501,7 +501,7 @@ impl Drop for BloomTargets {
     }
 }
 
-/// Bloom 三全屏管线（prefilter/down/up；复用 FullscreenPipeline 脚手架）。
+/// Bloom 三全屏管线（prefilter/down/up；复用全屏管线骨架）。
 /// （drop：FullscreenPipeline 自带 Drop，本结构只持句柄拷贝——layout/pipeline
 /// 句柄经由 FullscreenPipeline 的值移动保留，析构随移动值 Drop 完成。）
 #[derive(bevy::prelude::Resource)]

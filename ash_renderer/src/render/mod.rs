@@ -14,18 +14,11 @@
 //! | `stats/egui_pass_timing` | 进程级 | egui pass 自计时读数(overlay 写、BRP 读) |
 //! | `stats/frame_sync_settings` | 进程级 | 帧率同步设置契约(开关 + 主屏刷新率读数,driver 应用、UI/BRP 读写) |
 //! | `pipeline/frames` | 帧级 | 命令缓冲 + 双信号量 + fence,`MAX_FRAMES_IN_FLIGHT` 组轮转复用;帧录制编排 |
-//! | `pipeline/depth` | 帧级 | 深度附件本体(D32 reverse-Z,随帧槽/swapchain 重建) |
-//! | `pipeline/gbuffer` | resize 级 | G-buffer 附件 + HDR 中间颜色目标 |
-//! | `pipeline/graphics_pipeline` | 进程级 | 不透明场景图形管线(dynamic rendering)+ pipeline layout(set0/set1/set2) |
-//! | `pipeline/fullscreen_pipeline` | 进程级 | 全屏管线骨架:G-buffer 合成 + present tonemap;全屏三角形 pass 录制 |
-//! | `pipeline/pipeline_handle` | 进程级 | 图形管线句柄(建管线/销毁)+ 绑定与 viewport/scissor 录制助手 |
-//! | `pipeline/overlay_pipeline` | 进程级 | overlay 管线(set0 共享 + 16B push + 深度声明对齐读写关 + blend)+ UI 录制契约 |
-//! | `pipeline/ui_vertex_ring` | 帧级 | UI 顶点环(每帧槽一对 HOST_VISIBLE 顶点/索引 buffer)+ epaint 顶点镜像 UiVertex |
-//! | `pipeline/atlas_gpu` | 资产级 | overlay 字体图集 GPU 账面:当前代 + 槽位 + 旧代停尸房 |
-//! | `pipeline/cluster` | resize 级+进程级 | 透明 Clustered Forward:cluster 表/透明命令链资源 + compute 四件 + 透明前向管线 |
-//! | `pipeline/shadow` | 进程级 | CSM 资源族:级联深度图 + shadow UBO + 标记/命令环 + depth-only 管线 |
-//! | `pipeline/post` | resize 级 | Bloom 资源族(dual-Kawase 降/升采样链 + 参数 UBO) |
-//! | `pipeline/smaa` | resize 级 | SMAA 1x 资源族(LDR/edges/blend 目标 + LUT + 三 pass 管线) |
+//! | `pipeline/base` | 进程级 | 管线公共件:图形管线句柄与录制助手、全屏管线骨架、颜色/深度目标、storage 描述符集 |
+//! | `pipeline/geometry` | resize 级+进程级 | G-buffer 目标与写入管线、透明层(透明命令链 + 三条 compute + 透明前向管线) |
+//! | `pipeline/lighting` | resize 级+进程级 | 光源分簇(cluster 表 + cluster_build)、CSM 阴影、延迟光照合成管线 |
+//! | `pipeline/post` | resize 级 | Bloom、present tonemap、SMAA 1x |
+//! | `pipeline/overlay` | 帧级+资产级 | overlay 管线 + UI 录制契约、字体图集 GPU 账面、UI 顶点环 |
 //! | `assets/pool` | 资产级 | 顶点/索引大池:bump 分配 + 资产身份驻留缓存 |
 //! | `assets/uploader` | 批次级 | staging 环 + timeline 票据 + transfer 合批提交 |
 //! | `assets/mesh_convert` | 纯函数 | `Assets<Mesh>` → 32B 交错顶点 + U32 索引 |
@@ -98,28 +91,33 @@ pub use stats::egui_pass_timing::EguiPassTiming;
 pub use stats::frame_sync_settings::FrameSyncSettings;
 pub(crate) use stats::monitor_history::MonitorHistory;
 pub use shading::{LightRecord, LightTable, RenderMode, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT};
-pub use pipeline::cluster::{
-    cluster_reference, pack_cluster_uniforms, TransparentFrame,
-    ClusterGrid, ClusterTargets, TransparentPasses, TransparentPipeline, TRANSPARENT_CAPACITY,
+pub use pipeline::lighting::cluster::{
+    cluster_reference, pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, ClusterGrid,
+    LightClusters,
 };
-pub use pipeline::fullscreen_pipeline::{CompositePipeline, PresentTonemapPipeline};
-pub use pipeline::post::{
+pub use pipeline::geometry::transparent::{
+    TransparentFrame, TransparentPasses, TransparentPipeline, TransparentTargets,
+    TRANSPARENT_CAPACITY,
+};
+pub use pipeline::lighting::composite_pipeline::CompositePipeline;
+pub use pipeline::post::present_tonemap_pipeline::PresentTonemapPipeline;
+pub use pipeline::post::bloom::{
     pack_bloom_params, BloomFrameDraw, BloomPipelines, BloomParamsData, BloomSettings,
     BloomTargets, TonemapCurve,
 };
-pub(crate) use pipeline::post::BLOOM_LEVELS;
-pub use pipeline::gbuffer::{
+pub(crate) use pipeline::post::bloom::BLOOM_LEVELS;
+pub use pipeline::geometry::gbuffer::{
     GBufferTargets, ALBEDO_FORMAT, HDR_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
 };
-pub use pipeline::depth::DEPTH_FORMAT;
+pub use pipeline::base::depth_target::DEPTH_FORMAT;
 pub use pipeline::frames::{FrameDraw, Frame, FramePool, MAX_FRAMES_IN_FLIGHT};
-pub use pipeline::overlay_pipeline::{OverlayPipeline, UiDrawCall, UiPaint};
-pub use pipeline::atlas_gpu::AtlasGpu;
-pub use pipeline::ui_vertex_ring::UiVertexRing;
-pub(crate) use pipeline::ui_vertex_ring::UiVertex;
-pub use pipeline::graphics_pipeline::GraphicsPipeline;
-pub use pipeline::shadow::{ShadowPipeline, ShadowTargets, ShadowWriteDraw};
-pub use pipeline::smaa::{
+pub use pipeline::overlay::overlay_pipeline::{OverlayPipeline, UiDrawCall, UiPaint};
+pub use pipeline::overlay::atlas_gpu::AtlasGpu;
+pub use pipeline::overlay::ui_vertex_ring::UiVertexRing;
+pub(crate) use pipeline::overlay::ui_vertex_ring::UiVertex;
+pub use pipeline::geometry::gbuffer_pipeline::GBufferPipeline;
+pub use pipeline::lighting::shadow::{ShadowPipeline, ShadowTargets, ShadowWriteDraw};
+pub use pipeline::post::smaa::{
     SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
 };
 pub use gpu::shadow_build::ShadowBuildPass;

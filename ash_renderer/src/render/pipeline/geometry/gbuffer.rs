@@ -11,16 +11,16 @@
 //! | 1 | normal | R16G16B16A16_SFLOAT | 世界空间法线 xyz 直存（w 未用；编码取舍见施工记录） |
 //! | 2 | motion vectors | ——（不分配） | 留位：槽位号保留 |
 //! | 3 | matparam | R8G8B8A8_UNORM | 材质标量（8.2.1）：r=metallic / g=AO / b=perceptualRoughness / a=reflectance（8.2.3 转正）——光照累积的 PBR 入参 |
-//! | — | depth | D32_SFLOAT | reverse-Z 深度（本体按帧槽在 [`super::depth`]） |
+//! | — | depth | D32_SFLOAT | reverse-Z 深度（本体按帧槽在 [`crate::render::pipeline::base::depth_target`]） |
 //!
 //! **HDR 中间目标 hdr**（R16G16B16A16_SFLOAT）：合成（G-buffer 光照）与透明
 //! forward 层的落色面——HDR 契约留位一次到位（8.4 正式启用 Bloom/ToneMapping）；
-//! present blit 从它采样写 swapchain（SRGB view 的 ROP 编码恰好一次）。
+//! present tonemap 从它采样。
 //! 该格式的 blending 支持是步骤 8 前置闸门的实测项——[`ColorTarget::new`]
 //! 逐格式查证落日志（支持≠启用纪律）。
 //!
 //! 采样集（[`Self::sampled_set`]）把附件视图以 SHADER_READ_ONLY 布局发布：
-//! 合成 pass 读 albedo/normal/depth，present blit 读 hdr。视图本体寿命令归
+//! 合成 pass 读 albedo/normal/depth，present tonemap 读 hdr。视图本体寿命令归
 //! 本结构，"视图先于附件销毁"由拆除序（本结构先于 FramePool）保证。
 
 use ash::{vk, Device};
@@ -28,6 +28,7 @@ use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
 use crate::render::Context;
+use crate::render::pipeline::base::color_target::ColorTarget;
 
 /// albedo 附件格式（线性 8bit——G-buffer 存采样端已解码的线性反照率，
 /// 编码恰好一次判定线不受影响：SRGB 编码仍只在最终 ROP 写出发生一次）。
@@ -45,161 +46,13 @@ pub const MATPARAM_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 /// HDR 中间目标格式（透明层的 alpha blending 也落在此目标上）。
 pub const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
-/// 采样集 binding 编号（合成 pass 与 present blit 共用同一布局）。
+/// 采样集 binding 编号（合成 pass 与 present tonemap 共用同一布局）。
 pub const SAMPLED_BINDING_ALBEDO: u32 = 0;
 pub const SAMPLED_BINDING_NORMAL: u32 = 1;
 pub const SAMPLED_BINDING_HDR: u32 = 2;
 pub const SAMPLED_BINDING_DEPTH: u32 = 3;
 pub const SAMPLED_BINDING_SAMPLER: u32 = 4;
 pub const SAMPLED_BINDING_MATPARAM: u32 = 5;
-
-/// 一张颜色附件：VkImage + dedicated memory + view（COLOR_ATTACHMENT |
-/// SAMPLED 用途——G-buffer 附件渲染后由合成/blit 采样；8.4 Bloom 链复用）。
-pub(crate) struct ColorTarget {
-    device: Device,
-    image: vk::Image,
-    memory: vk::DeviceMemory,
-    view: vk::ImageView,
-}
-
-impl ColorTarget {
-    /// image 句柄（布局屏障用）。
-    #[must_use]
-    pub(crate) fn image(&self) -> vk::Image {
-        self.image
-    }
-
-    /// view 句柄（附件/采样描述符用）。
-    #[must_use]
-    pub(crate) fn view(&self) -> vk::ImageView {
-        self.view
-    }
-
-}
-
-impl ColorTarget {
-    /// 按契约创建颜色附件：格式 feature 逐位查证（支持与启用分开），全有或全无。
-    ///
-    /// # Errors
-    /// 格式 feature 不足或 Vulkan 创建/分配/绑定失败。
-    pub(crate) fn new(
-        ctx: &Context,
-        extent: vk::Extent2D,
-        format: vk::Format,
-        need_blend: bool,
-        role: &str,
-    ) -> Result<Self> {
-        let _ = extent;
-        let features = unsafe {
-            ctx.instance
-                .get_physical_device_format_properties(ctx.physical_device, format)
-        }
-        .optimal_tiling_features;
-        let required =
-            vk::FormatFeatureFlags::COLOR_ATTACHMENT | vk::FormatFeatureFlags::SAMPLED_IMAGE;
-        if !features.contains(required) {
-            return Err(VulkanError::Init(format!(
-                "{role} 格式 {format:?} 的 optimal tiling features {features:?} 不含 {required:?}，G-buffer 无法按该使用角色建立"
-            )));
-        }
-        // HDR 契约前置闸门（步骤级计划 §1 8.1）：中间目标要接透明层 blending
-        //——支持位实测落日志（该格式 blending 核心规范 mandatory，仍不省查询）
-        if need_blend && !features.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND) {
-            return Err(VulkanError::Init(format!(
-                "{role} 格式 {format:?} 不支持 COLOR_ATTACHMENT_BLEND，透明层 blending 前置闸门不通过"
-            )));
-        }
-        // # Safety:create_image 参数全为合法常量 + 查过的格式/usage,无裸指针
-        let image = unsafe {
-            ctx.device.create_image(
-                &vk::ImageCreateInfo::default()
-                    .image_type(vk::ImageType::TYPE_2D)
-                    .format(format)
-                    .extent(vk::Extent3D {
-                        width: extent.width,
-                        height: extent.height,
-                        depth: 1,
-                    })
-                    .mip_levels(1)
-                    .array_layers(1)
-                    .samples(vk::SampleCountFlags::TYPE_1)
-                    .tiling(vk::ImageTiling::OPTIMAL)
-                    .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .initial_layout(vk::ImageLayout::UNDEFINED),
-                None,
-            )
-        }?;
-        let result = unsafe { Self::create_inner(ctx, image, format) };
-        if result.is_err() {
-            unsafe { ctx.device.destroy_image(image, None) };
-        }
-        result
-    }
-
-    /// 创建链后半段（image 已建）：失败路径回收 memory/view。
-    ///
-    /// # Safety
-    /// `image` 须刚创建成功且未销毁；错误返回后调用方不得再使用它。
-    unsafe fn create_inner(ctx: &Context, image: vk::Image, format: vk::Format) -> Result<Self> {
-        unsafe {
-            let reqs = ctx.device.get_image_memory_requirements(image);
-            let memory_type = ctx.memory_contract().find_type(
-                reqs.memory_type_bits,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                vk::MemoryPropertyFlags::empty(),
-            )?;
-            let memory = ctx.device.allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(reqs.size)
-                    .memory_type_index(memory_type),
-                None,
-            )?;
-            if let Err(e) = ctx.device.bind_image_memory(image, memory, 0) {
-                ctx.device.free_memory(memory, None);
-                return Err(VulkanError::Vk(e));
-            }
-            // view:COLOR aspect、mip0 单层
-            let view = ctx.device.create_image_view(
-                &vk::ImageViewCreateInfo::default()
-                    .image(image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(format)
-                    .subresource_range(
-                        vk::ImageSubresourceRange::default()
-                            .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .level_count(1)
-                            .layer_count(1),
-                    ),
-                None,
-            );
-            let view = match view {
-                Ok(v) => v,
-                Err(e) => {
-                    ctx.device.free_memory(memory, None);
-                    return Err(VulkanError::Vk(e));
-                }
-            };
-            Ok(Self {
-                device: ctx.device.clone(),
-                image,
-                memory,
-                view,
-            })
-        }
-    }
-}
-
-impl Drop for ColorTarget {
-    fn drop(&mut self) {
-        // 契约边界：不等 GPU——重建路径的等待在 rebuild，退出排空在 teardown
-        unsafe {
-            self.device.destroy_image_view(self.view, None);
-            self.device.destroy_image(self.image, None);
-            self.device.free_memory(self.memory, None);
-        }
-    }
-}
 
 /// 每帧槽一份的 G-buffer 附件（在飞两帧并发写各自槽位）。
 struct GBufferSlot {
@@ -215,7 +68,7 @@ pub struct GBufferTargets {
     device: Device,
     extent: vk::Extent2D,
     slots: Vec<GBufferSlot>,
-    /// 采样集布局（合成 pass 与 present blit 管线的 layout 素材）。
+    /// 采样集布局（合成 pass 与 present tonemap 管线的 layout 素材）。
     set_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     /// 采样集：帧槽一一对应（b0 albedo / b1 normal / b2 hdr / b3 depth / b4 采样器）。
@@ -260,7 +113,7 @@ impl GBufferTargets {
         self.set_layout
     }
 
-    /// 第 `slot` 帧槽的采样集（合成 pass 与 present blit 绑定）。
+    /// 第 `slot` 帧槽的采样集（合成 pass 与 present tonemap 绑定）。
     #[must_use]
     pub fn sampled_set(&self, slot: usize) -> vk::DescriptorSet {
         self.sets[slot]
@@ -269,50 +122,50 @@ impl GBufferTargets {
     /// 第 `slot` 帧槽的 albedo 附件视图（G-buffer pass attachment 0）。
     #[must_use]
     pub fn albedo_view(&self, slot: usize) -> vk::ImageView {
-        self.slots[slot].albedo.view
+        self.slots[slot].albedo.view()
     }
 
     /// 第 `slot` 帧槽的 normal 附件视图（attachment 1）。
     #[must_use]
     pub fn normal_view(&self, slot: usize) -> vk::ImageView {
-        self.slots[slot].normal.view
+        self.slots[slot].normal.view()
     }
 
     /// 第 `slot` 帧槽的 matparam 附件视图（attachment 2，槽位号 3——motion
     /// vectors 留位不动，8.2.1）。
     #[must_use]
     pub fn matparam_view(&self, slot: usize) -> vk::ImageView {
-        self.slots[slot].matparam.view
+        self.slots[slot].matparam.view()
     }
 
     /// 第 `slot` 帧槽的 HDR 中间目标视图（合成/透明层 attachment 0）。
     #[must_use]
     pub fn hdr_view(&self, slot: usize) -> vk::ImageView {
-        self.slots[slot].hdr.view
+        self.slots[slot].hdr.view()
     }
 
     /// 第 `slot` 帧槽的 albedo image 句柄（进场/转只读屏障的目标，8.1）。
     #[must_use]
     pub fn albedo_image(&self, slot: usize) -> vk::Image {
-        self.slots[slot].albedo.image
+        self.slots[slot].albedo.image()
     }
 
     /// 第 `slot` 帧槽的 normal image 句柄（同上）。
     #[must_use]
     pub fn normal_image(&self, slot: usize) -> vk::Image {
-        self.slots[slot].normal.image
+        self.slots[slot].normal.image()
     }
 
     /// 第 `slot` 帧槽的 matparam image 句柄（同上，8.2.1）。
     #[must_use]
     pub fn matparam_image(&self, slot: usize) -> vk::Image {
-        self.slots[slot].matparam.image
+        self.slots[slot].matparam.image()
     }
 
     /// 第 `slot` 帧槽的 HDR image 句柄（同上）。
     #[must_use]
     pub fn hdr_image(&self, slot: usize) -> vk::Image {
-        self.slots[slot].hdr.image
+        self.slots[slot].hdr.image()
     }
 
     /// 当前尺寸（resize 幂等判据）。
@@ -523,15 +376,15 @@ unsafe fn build_sampling_inner(
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             };
             infos.push(vec![
-                image_info(slot.albedo.view),
-                image_info(slot.normal.view),
-                image_info(slot.hdr.view),
+                image_info(slot.albedo.view()),
+                image_info(slot.normal.view()),
+                image_info(slot.hdr.view()),
                 // 深度布局与帧编排的转只读目标一致（VUID-00344：描述符布局
                 // 须与 draw 时实际布局一致——DEPTH_READ_ONLY 非 SHADER_READ_ONLY）
                 vk::DescriptorImageInfo::default()
                     .image_view(*depth_view)
                     .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL),
-                image_info(slot.matparam.view),
+                image_info(slot.matparam.view()),
                 vk::DescriptorImageInfo::default().sampler(sampler),
             ]);
         }

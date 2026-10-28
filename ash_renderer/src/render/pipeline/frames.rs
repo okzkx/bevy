@@ -11,7 +11,7 @@
 //!   present 已被 present engine 消费完——这是帧 fence 给不了的保证（fence 只证提交
 //!   完成，不证 present engine 的消费进度；依据 Khronos Vulkan Guide "Swapchain
 //!   semaphore reuse"；同一队列上提交有序，下一次 signal 排在前一个 present 消费之后）。
-//! - **深度附件按帧槽分配**：数量 = MAX_FRAMES_IN_FLIGHT，本体在 [`super::depth`]。
+//! - **深度附件按帧槽分配**：数量 = MAX_FRAMES_IN_FLIGHT，本体在 [`crate::render::pipeline::base::depth_target`]。
 //!   两份同步证据：① 在飞的两帧各用各的槽位深度，并发写
 //!   不可能撞同一张图；② 同槽深度的两次使用之间隔着 `wait_for_slot` 的 fence
 //!   等待（录制前 CPU 已确认上一轮提交完成）——不把"归帧级"当无冲突证明，冲突
@@ -36,10 +36,10 @@ use bevy::log::info;
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::barrier::{image_barrier, image_barrier_with_memory, ImageBarrier};
-use super::fullscreen_pipeline::{
+use crate::render::pipeline::base::fullscreen_pipeline::{
     record_fullscreen, record_fullscreen_open, record_fullscreen_sampled, FullscreenPass,
 };
-use super::pipeline_handle::{
+use crate::render::pipeline::base::pipeline_handle::{
     bind_graphics, bind_vertex_index, full_rect, set_viewport, set_viewport_scissor,
 };
 use crate::render::gpu::cull::CullDraw;
@@ -48,14 +48,15 @@ use crate::render::gpu::indirect::IndirectDraw;
 use crate::render::gpu::lod::LodDraw;
 use crate::render::gpu::occlusion::OcclusionDraw;
 use crate::render::gpu::shadow_build::ShadowBuildDraw;
-use crate::render::pipeline::shadow::ShadowWriteDraw;
+use crate::render::pipeline::lighting::shadow::ShadowWriteDraw;
 use crate::render::shading::shadow::SHADOW_MAP_SIZE;
 use crate::render::GBufferTargets;
-use crate::render::pipeline::cluster::TransparentFrame;
-use crate::render::pipeline::overlay_pipeline::{pack_ui_push, UiPaint};
+use crate::render::pipeline::lighting::cluster::ClusterBuildDraw;
+use crate::render::pipeline::geometry::transparent::TransparentFrame;
+use crate::render::pipeline::overlay::overlay_pipeline::{pack_ui_push, UiPaint};
 use crate::render::stats::perf::GpuTimer;
 use crate::render::{Context, BLOOM_LEVELS};
-use super::depth::DepthTarget;
+use crate::render::pipeline::base::depth_target::DepthTarget;
 
 
 /// CPU 领先 GPU 的最大帧数：第 N 帧要等第 N-2 帧的组资源空出来才能重录。
@@ -83,27 +84,28 @@ pub struct FrameDraw<'a> {
     /// 本帧槽命令环 buffer（build_indirect 每帧重写，`count > 0` 时消费）。
     pub indirect_buffer: vk::Buffer,
     /// G-buffer 附件 + HDR 中间目标（多 pass 帧编排的附件面，采样集
-    /// 也在其上——合成 pass 与 present blit 消费）。
+    /// 也在其上——合成 pass 与 present tonemap 消费）。
     pub gbuffer: &'a GBufferTargets,
     /// 合成管线（G-buffer 光照累积 → HDR 中间目标；全屏，无深度/混合）。
     pub composite_pipeline: vk::Pipeline,
     pub composite_layout: vk::PipelineLayout,
-    /// cluster 集（合成光照累积的取数面——b0 网格参数 / b1 光源常驻表
-    /// / b2 逐 cluster 列表；与透明层同一 layout 对象）。
+    /// 光源分簇集，合成与透明前向都绑。
     pub cluster_set: vk::DescriptorSet,
+    /// 空场为 None：没东西要画，不用算光源列表。
+    pub cluster_build: Option<ClusterBuildDraw>,
     /// present tonemap 管线（HDR + Bloom → ACES → LDR 目标）。
     pub tonemap_pipeline: vk::Pipeline,
     pub tonemap_layout: vk::PipelineLayout,
     /// SMAA 录制输入：edge/blend 两 pass（关 = None，neighborhood
     /// 直通）+ neighborhood 输入（恒 Some——swapchain 终点）。
-    pub smaa_edge_blend: Option<crate::render::pipeline::smaa::SmaaEdgeBlendDraw>,
-    pub smaa_nb: crate::render::pipeline::smaa::SmaaNbDraw,
+    pub smaa_edge_blend: Option<crate::render::pipeline::post::smaa::SmaaEdgeBlendDraw>,
+    pub smaa_nb: crate::render::pipeline::post::smaa::SmaaNbDraw,
     /// bloom 参数集（tonemap set2——up0 + 采样器 + 参数 UBO；恒 Some，
     /// 关闭帧 shader 内旁路 bloom 采样）。
     pub bloom_params_set: vk::DescriptorSet,
     /// Bloom 链录制输入（关闭 = None——链整段跳过，up0 内容陈旧但
     /// tonemap 不采样）。
-    pub bloom: Option<crate::render::pipeline::post::BloomFrameDraw>,
+    pub bloom: Option<crate::render::pipeline::post::bloom::BloomFrameDraw>,
     /// overlay 管线（UI 半边的绘制入口；深度格式与实例对齐声明，读/写全关）。
     pub overlay_pipeline: vk::Pipeline,
     /// overlay 自有 pipeline layout（只借 set0，无 set1）——换管线后描述符绑定
@@ -521,36 +523,37 @@ impl FramePool {
                 crate::render::gpu::shadow_build::record(device, cb, draw.set2, draw.shadow_set, sb);
             }
 
-            // —— 透明层 dispatch：cluster 光源列表构建 → 透明行收集（alpha<1
-            // 紧凑 + 深度键）→ bitonic 排序 → 命令组装。空场 = transparent None
-            //（dispatch 与透明绘制整段跳过）。
+            // —— 光源列表：必须在合成和透明前向之前算好。
+            if let Some(build) = &draw.cluster_build {
+                crate::render::pipeline::lighting::cluster::record_cluster_build(device, cb, draw.cluster_set, build);
+            }
+
+            // —— 透明层：collect → sort → gather。空场为 None，透明 dispatch 与绘制都跳过。
             if let Some(t) = draw.transparent.as_ref() {
-                if let Some(build) = &t.cluster_build {
-                    crate::render::pipeline::cluster::record_cluster_build(device, cb, t.cluster_set, build);
-                }
                 if let Some(collect) = &t.collect {
-                    crate::render::pipeline::cluster::record_transparent_collect(
+                    crate::render::pipeline::geometry::transparent::record_transparent_collect(
                         device,
                         cb,
                         draw.set2,
-                        t.cluster_set,
+                        draw.cluster_set,
+                        t.transparent_set,
                         collect,
                     );
                 }
                 // bitonic 排序链（collect 与 gather 之间）：固定容量数组每个非空帧
                 // 都重排，确保本帧新增长的透明行不会从未排序尾部进入 gather。
-                crate::render::pipeline::cluster::record_transparent_sort(
+                crate::render::pipeline::geometry::transparent::record_transparent_sort(
                     device,
                     cb,
-                    t.cluster_set,
+                    t.transparent_set,
                     &t.sort,
                 );
                 if let Some(gather) = &t.gather {
-                    crate::render::pipeline::cluster::record_transparent_gather(
+                    crate::render::pipeline::geometry::transparent::record_transparent_gather(
                         device,
                         cb,
                         draw.set2,
-                        t.cluster_set,
+                        t.transparent_set,
                         gather,
                     );
                 }
@@ -713,9 +716,7 @@ impl FramePool {
                 // set1 = 本帧槽 UBO（内容 = 相机 view_proj），set2 = GPU 常驻
                 // 绘制数据（对象表 + 本帧模型/材质环，instance_table 契约）
                 bind_graphics(device, cb, draw.pipeline, draw.layout, &[draw.set0, draw.set1, draw.set2]);
-                // 动态 viewport/scissor：正高度直出（朝向定案见 graphics_pipeline
-                // 模块注释——负高度翻转反而上下颠倒，与"教科书式 Vulkan 翻转"的
-                // 直觉相反）
+                // 坑：viewport 正高度，原因见 set_viewport
                 set_viewport_scissor(device, cb, extent);
                 // 池整绑一次，逐命令在 GPU 侧定位（vertexOffset/firstIndex 已进命令）
                 bind_vertex_index(device, cb, vertex_buffer, index_buffer);
@@ -836,7 +837,7 @@ impl FramePool {
                         .color_attachments(slice::from_ref(&transparent_attachment))
                         .depth_attachment(&transparent_depth),
                 );
-                bind_graphics(device, cb, t.pipeline, t.layout, &[draw.set0, draw.set1, draw.set2, t.cluster_set]);
+                bind_graphics(device, cb, t.pipeline, t.layout, &[draw.set0, draw.set1, draw.set2, draw.cluster_set]);
                 set_viewport_scissor(device, cb, extent);
                 let (vertex_buffer, index_buffer) = draw.pool_buffers()?;
                 bind_vertex_index(device, cb, vertex_buffer, index_buffer);

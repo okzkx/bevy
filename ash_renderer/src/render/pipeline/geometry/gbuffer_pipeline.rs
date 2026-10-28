@@ -1,27 +1,12 @@
-//! 图形管线：dynamic rendering 图形管线 + pipeline layout（set0/set1/set2）。
+//! G-buffer 写入管线：不透明物体写 albedo / normal / matparam 三个颜色附件和深度。
 //!
-//! 管线吃的是三方契约：set0/set1 layout 来自 [`super::BindlessTables`]、set2
-//! layout 来自 [`super::InstanceTables`]（"集与布局同源，不可另建"）。push
-//! constant 已**彻底退役**（5.3）：5.1 把 96B 逐对象参数缩到 4B 实例槽号，
-//! 5.3 起 firstInstance 携带槽号、VS 按 `@builtin(instance_index)` 读——
-//! pipeline layout 无 push range，逐对象标识也不再有 CPU 推送入口（判定线 1
-//! 的字节层面：场景绘制的 push 字节恒 0）。
-//!
-//! 状态选型（面板定案）：
-//! - **顶点输入**：交错 32B（pos12+normal12+uv8，[`crate::render::VERTEX_STRIDE`]），与
-//!   mesh_convert 是同一份契约；vertex-input 布局不默认等同 storage 布局。
-//! - **reverse-Z 成套**：bevy 透视投影是无限反向 Z（`get_clip_from_view`），
-//!   深度清值 0 + `GREATER` 比较成套使用，不混正向 Z 的 LESS 模板。
-//! - **viewport 直出**（朝向定案）：bevy 投影走 glam 的 directx 变体（Y-up
-//!   NDC、Z ∈ [0,1]，`bevy_math` 重出口）；光栅级实验（顶点直出已知 clip 坐
-//!   标）与官方 color_grading 示例同相机对照截图共同实证：本机 Vulkan **正高度
-//!   viewport 直出即与官方 wgpu 渲染同向**，负高度翻转反而上下颠倒——"教科书式
-//!   Vulkan 需要翻转"的直觉在此不成立，以实测为准。
-//!   正高度下屏幕绕向未被镜像，仍先关背面剔除（HoseMat 双面、镜片按
-//!   不透明覆盖），开剔除前的绕向核验另立判定。
-//! - **混合关闭**：不透明调试绘制，alpha 写出不参与混合（LensesMat 的 BLEND
-//!   按 opaque 覆盖）。
-//! - **动态 viewport/scissor**：随 swapchain 尺寸逐帧设置，重建不重建管线。
+//! - set0/set1 布局来自 [`crate::render::BindlessTables`]，set2 来自
+//!   [`crate::render::InstanceTables`]，不另建。没有 push：实例槽号走
+//!   firstInstance，VS 用 `instance_index` 读。
+//! - 顶点 32B 交错（位置 12 + 法线 12 + UV 8），与 mesh_convert 同一格式。
+//! - reverse-Z：深度清 0、比较用 `GREATER`。
+//! - 坑：viewport 用正高度。Y 已在 shader 里翻过，再用负高度翻一次画面会倒过来。
+//! - 不剔除背面（有双面材质），不混合；viewport/scissor 动态设置，resize 不重建管线。
 
 use ash::{vk, Device};
 use bevy::log::info;
@@ -30,20 +15,16 @@ use crate::common::error::Result;
 
 use crate::render::Context;
 
-use super::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
+use crate::render::pipeline::base::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
 
-/// shader 模块字节（build.rs 产物，OUT_DIR 之下，与探针同一编译路径）。
-/// 8.1 起场景管线 = G-buffer 写入（albedo+normal 双 color + 深度）；
-/// debug_draw.wgsl（forward 直出）退役为 A/B 对照参照，不再进主管线。
 const GBUFFER_WRITE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer_write.spv"));
 
-/// 图形管线 + pipeline layout（dynamic rendering 形态，无 RenderPass）。
 #[derive(bevy::prelude::Resource)]
-pub struct GraphicsPipeline {
+pub struct GBufferPipeline {
     handle: PipelineHandle,
 }
 
-impl GraphicsPipeline {
+impl GBufferPipeline {
     /// 建管线链：shader module（build.rs 补丁产物）→ pipeline layout（三 set +
     /// push range）→ GraphicsPipelineCreateInfo（dynamic rendering 附件格式声明）。
     /// 任何失败回收已建对象（全有或全无）。

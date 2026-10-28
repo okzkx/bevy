@@ -8,7 +8,7 @@
 // alpha = 材质 base_color.a。深度 = 不透明 G-buffer 深度附件重绑（loadOp
 // LOAD、只测不写——被不透明覆盖的透明片元被 depth test 剔除）。
 //
-// 接口：set0/set1/set2 与主管线同一冻结表；set3 = 透明族小集
+// 接口：set0/set1/set2 与主管线同一冻结表；set3 = 光源分簇集
 //（b0 ClusterParams / b1 lights / b2 cluster 列表）。
 enable wgpu_binding_array;
 // #import mesh

@@ -49,7 +49,7 @@ use crate::{
     render::{
         conservative_world_aabb, frustum_planes, pack_frame_uniforms, AcquireOutcome,
         BindlessTables, Context, CullDiagnostics, CullDraw, CullPass, CullSettings, FrameDraw,
-        FramePool, FrameSample, FrameUniformsData, GpuBuffer, GraphicsPipeline, GpuTimer,
+        FramePool, FrameSample, FrameUniformsData, GpuBuffer, GBufferPipeline, GpuTimer,
         HizPyramid, ImageCache, IndirectDraw, IndirectPass, IndirectStats, InstanceTables,
         LOD_LEVEL_SIZE, LodDiagnostics, LodDraw, LodPass, LodSettings, MAX_LOD_LEVELS, MeshPool,
         OcclusionDiagnostics, OcclusionDraw, OcclusionFallback, OcclusionPass,
@@ -60,7 +60,7 @@ use crate::{
 
 use super::drawlist::{self, DrawabilitySources, ParityDirty};
 use crate::render::{
-    cascade_matrices, pack_cluster_uniforms, pack_shadow_uniforms, ClusterTargets,
+    cascade_matrices, pack_cluster_uniforms, pack_shadow_uniforms, ClusterBuildPass, LightClusters,
     BloomFrameDraw, BloomPipelines, BloomSettings, BloomTargets, CompositePipeline,
     GBufferTargets, LightTable,
     SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
@@ -68,7 +68,7 @@ use crate::render::{
     ShadowCascadeInput, ShadowCascades, ShadowDiagnostics, ShadowPipeline, ShadowSettings,
     ShadowTargets,
     ShadowUniformsData, ShadowWriteDraw, TransparentFrame, TransparentPasses,
-    TransparentPipeline,
+    TransparentPipeline, TransparentTargets,
     SHADOW_CASCADES, SHADOW_MAP_SIZE,
 };
 
@@ -175,6 +175,7 @@ pub(crate) struct FrameInput<'w, 's> {
     lod: LodInput<'w>,
     shadow: ShadowInput<'w>,
     post: PostInput<'w>,
+    cluster: ClusterInput<'w>,
     transparent: TransparentInput<'w>,
     /// GPU 缺口快照：帧起在 fence 纪律内读缺口标记环的采样落点——驻留管理器
     /// tick（Last，帧提交后）与 BRP census 经此消费，不直读环。
@@ -195,7 +196,7 @@ pub(crate) struct FrameCore<'w, 's> {
     frames: ResMut<'w, FramePool>,
     tables: ResMut<'w, BindlessTables>,
     resized: MessageReader<'w, 's, WindowResized>,
-    pipeline: Res<'w, GraphicsPipeline>,
+    gbuffer_pipeline: Res<'w, GBufferPipeline>,
     /// overlay 管线：UI 半边绑定用（init 链与场景管线同批创建）。
     overlay_pipeline: Res<'w, OverlayPipeline>,
     /// 上传器：普通帧只读票号，overlay 在场时图集整传要走它提交批次（独占写点）。
@@ -288,15 +289,20 @@ pub(crate) struct PostInput<'w> {
     smaa_settings: Res<'w, SmaaSettings>,
 }
 
-/// 透明 Clustered Forward 层：cluster 资源（光源环/uniform/计数的宿主写点 + 集
-/// 句柄）、build/collect/gather compute、透明前向管线、光源常驻表（BRP light_*
-/// 方法族的落账面，脏行增量重写）。
+/// 光源分簇：cluster 资源、cluster_build 管线和光源常驻表。合成与透明前向共用。
+#[derive(SystemParam)]
+pub(crate) struct ClusterInput<'w> {
+    clusters: ResMut<'w, LightClusters>,
+    build_pass: Res<'w, ClusterBuildPass>,
+    lights: ResMut<'w, LightTable>,
+}
+
+/// 透明层：透明命令链资源、三条 compute 管线和透明前向管线。
 #[derive(SystemParam)]
 pub(crate) struct TransparentInput<'w> {
-    clusters: ResMut<'w, ClusterTargets>,
+    targets: ResMut<'w, TransparentTargets>,
     passes: Res<'w, TransparentPasses>,
     pipeline: Res<'w, TransparentPipeline>,
-    lights: ResMut<'w, LightTable>,
 }
 
 /// 帧循环日志状态（跨帧 `Local`）：缺资源/相机告警去重 + 一次性收账。
@@ -345,6 +351,7 @@ pub(crate) fn draw_frame(
         ref mut lod,
         ref mut shadow,
         ref mut post,
+        ref mut cluster,
         ref mut transparent,
         ref mut gap_snapshot,
         ref mut gate,
@@ -359,7 +366,7 @@ pub(crate) fn draw_frame(
     // pending 保持置位、全部重建成功才清：重建失败的帧在 or_warn/or_fatal 处
     // 让路或退出，下个帧首原样重试
     if gate.pending {
-        rebuild_size_dependent(core, &mut occlusion.hiz, post, transparent)?;
+        rebuild_size_dependent(core, &mut occlusion.hiz, post, cluster)?;
         gate.pending = false;
     }
 
@@ -467,7 +474,8 @@ pub(crate) fn draw_frame(
     let scene_aabb = scene_world_aabb(ledger, &scene.pool);
     write_shadow_ubo(shadow, slot, &view, &light, scene_aabb)?;
     write_post_ubos(post, slot)?;
-    write_transparent_slot(transparent, slot, &view, core.swapchain.extent)?;
+    write_cluster_slot(cluster, slot, &view, core.swapchain.extent)?;
+    write_transparent_slot(transparent, slot)?;
     // 双环写入：模型环增量 + 材质环全量 + 在场环 + LOD 表增量（hazard 纪律表见
     // instance_table 模块文档）。
     let rings_clock = Instant::now();
@@ -566,8 +574,8 @@ pub(crate) fn draw_frame(
     let shadow_write = shadow_write_draw(shadow, instances, &scene.pool, slot, indirect_count)?;
     let (smaa_edge_blend, smaa_nb) = smaa_draws(post, slot);
     let frame_draw = FrameDraw {
-        pipeline: core.pipeline.pipeline(),
-        layout: core.pipeline.layout(),
+        pipeline: core.gbuffer_pipeline.pipeline(),
+        layout: core.gbuffer_pipeline.layout(),
         set0: core.tables.resident_set(),
         set1: core.tables.frame_set(slot),
         set2: instances.frame_set2(slot),
@@ -580,8 +588,9 @@ pub(crate) fn draw_frame(
         gbuffer: &post.gbuffer,
         composite_pipeline: post.composite.pipeline(),
         composite_layout: post.composite.layout(),
-        // 合成光照累积的 cluster 集（与透明层同一 layout 对象）
-        cluster_set: transparent.clusters.frame_set(slot),
+        cluster_set: cluster.clusters.frame_set(slot),
+        cluster_build: (indirect_count > 0)
+            .then(|| cluster.build_pass.draw(cluster.clusters.grid())),
         tonemap_pipeline: post.tonemap.pipeline(),
         tonemap_layout: post.tonemap.layout(),
         bloom_params_set: post.bloom.params_set(slot),
@@ -687,7 +696,7 @@ fn rebuild_size_dependent(
     core: &mut FrameCore,
     hiz: &mut HizPyramid,
     post: &mut PostInput,
-    transparent: &mut TransparentInput,
+    cluster: &mut ClusterInput,
 ) -> Result<(), BevyError> {
     let ctx: &Context = &core.ctx;
     core.swapchain
@@ -708,11 +717,11 @@ fn rebuild_size_dependent(
     post.gbuffer
         .rebuild(ctx, extent, &per_slot(|s| core.frames.depth_view(s)))
         .or_fatal("G-buffer 附件重建失败，渲染链无法继续")?;
-    // 光源常驻表环不在重建域（容量与尺寸无关），描述符重绑由 rebuild 接收
-    transparent
+    // 光源常驻表与尺寸无关不重建，只把它的 buffer 重新绑进新描述符集
+    cluster
         .clusters
-        .rebuild(ctx, extent, &per_slot(|s| transparent.lights.ring_buffer(s)))
-        .or_fatal("透明层 cluster 表重建失败，渲染链无法继续")?;
+        .rebuild(ctx, extent, &per_slot(|s| cluster.lights.ring_buffer(s)))
+        .or_fatal("光源分簇 cluster 表重建失败，渲染链无法继续")?;
     // SMAA 三目标（LDR/edges/blend；描述符集随 build_descriptors 重写）——resize
     // 后 tonemap/edge/blend 的 renderArea 与附件尺寸必须同帧对齐
     post.smaa
@@ -1000,10 +1009,9 @@ fn write_post_ubos(post: &mut PostInput, slot: usize) -> Result<(), BevyError> {
         .or_fatal("SmaaInfo UBO 写失败，渲染链无法继续")
 }
 
-/// 透明层帧侧宿主写（fence 纪律内）：cluster 均匀数据（view_proj/inv_view_proj/
-/// 网格标量）、光源常驻表脏行、透明行计数清零。
-fn write_transparent_slot(
-    transparent: &mut TransparentInput,
+/// 写本帧槽的 cluster 均匀数据和光源常驻表脏行。调用时该槽 fence 已等过。
+fn write_cluster_slot(
+    cluster: &mut ClusterInput,
     slot: usize,
     view: &FrameView,
     extent: vk::Extent2D,
@@ -1012,24 +1020,27 @@ fn write_transparent_slot(
         &view.view_proj,
         &view.inv_view_proj,
         extent,
-        transparent.clusters.grid(),
-        transparent.lights.light_count(),
+        cluster.clusters.grid(),
+        cluster.lights.light_count(),
     );
-    transparent
+    cluster
         .clusters
         .uniform(slot)
         .write(0, &cluster_uniform)
         .or_fatal("cluster 均匀数据写失败，渲染链无法继续")?;
-    // 光源常驻表脏行增量重写（fence 纪律同模型环；稳态零写，变更帧只写脏行且
-    // 覆盖两个帧槽才出账）
-    transparent
+    // 只写脏行；一行要在两个帧槽都写过才算清
+    cluster
         .lights
         .write_dirty(slot)
         .or_fatal("光源常驻表脏行写失败，渲染链无法继续")?;
-    // 清零 = collect 的 atomicAdd 基线。
+    Ok(())
+}
+
+/// 本帧槽透明行数清零，collect 在 GPU 上从 0 原子累加。
+fn write_transparent_slot(transparent: &mut TransparentInput, slot: usize) -> Result<(), BevyError> {
     transparent
-        .clusters
-        .t_count(slot)
+        .targets
+        .count(slot)
         .write(0, &0u32.to_le_bytes())
         .or_fatal("透明行计数清零失败，渲染链无法继续")?;
     Ok(())
@@ -1317,8 +1328,7 @@ fn indirect_half(
     Ok(dispatch)
 }
 
-/// 透明层录制输入：在场行 > 0 才录 cluster/collect/gather 与透明绘制；collect 可失败
-///（透明行容量上界，显式报错）。排序每个非空帧都执行以覆盖计数从 0 增长的过渡。
+/// 在场行 > 0 才录透明层；在场行数超过透明行容量时报错退出。
 fn transparent_draw(
     transparent: &TransparentInput,
     instances: &InstanceTables,
@@ -1328,10 +1338,9 @@ fn transparent_draw(
     if count == 0 {
         return Ok(None);
     }
-    let (clusters, passes) = (&transparent.clusters, &transparent.passes);
+    let (targets, passes) = (&transparent.targets, &transparent.passes);
     Ok(Some(TransparentFrame {
-        cluster_build: Some(passes.build(clusters.grid())),
-        cluster_set: clusters.frame_set(slot),
+        transparent_set: targets.frame_set(slot),
         collect: Some(
             passes
                 .collect(count)
@@ -1342,8 +1351,8 @@ fn transparent_draw(
         set2: instances.frame_set2(slot),
         pipeline: transparent.pipeline.pipeline(),
         layout: transparent.pipeline.layout(),
-        t_commands: clusters.t_command_buffer(slot),
-        t_keys: clusters.t_key_buffer(slot),
+        t_commands: targets.command_buffer(slot),
+        t_keys: targets.key_buffer(slot),
         command_count: count,
     }))
 }

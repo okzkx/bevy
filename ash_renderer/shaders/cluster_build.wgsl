@@ -2,7 +2,7 @@
 // cluster，逐 cluster 以世界空间 AABB 与点光球求交，写光源索引表（b2）+ 逐
 // cluster 计数（b3，HOST_VISIBLE——ash_renderer/cluster_census 逐 tile 对照的读数面）。
 //
-// 接口（透明族独立小集，src/render/pipeline/cluster.rs 布局契约，不进 set2）：
+// 接口（光源分簇集，src/render/pipeline/cluster.rs 布局契约，不进 set2）：
 // - b0 ClusterParams（160B，每帧槽直写）。
 // - b1 LightRecord 数组（光源常驻表本帧槽环——脏行增量重写，稳态零上传；
 //   槽号即 cluster 列表引用的稳定身份）。

@@ -1,6 +1,6 @@
-//! overlay 图形管线：egui 镶嵌顶点的第二 GraphicsPipeline。
+//! overlay 图形管线：画 egui 镶嵌出的顶点。
 //!
-//! 与场景管线（[`crate::render::pipeline::graphics_pipeline`]）的关系是"**布局共享、状态各管**"：
+//! 与场景管线（[`crate::render::pipeline::geometry::gbuffer_pipeline`]）的关系是"**布局共享、状态各管**"：
 //! - **set0 共享**：layout 只声明常驻表 set0（UI 无 UBO，不声明 set1），表在飞
 //!   更新对两管线同时生效——"布局=未来管线公共 ABI"的兑现位。切换管线后 set0
 //!   需按本布局对象重绑（同句柄、不同 layout 对象）。
@@ -30,7 +30,7 @@ use crate::common::error::Result;
 
 use crate::render::Context;
 
-use super::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
+use crate::render::pipeline::base::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下，与场景管线同一编译路径）。
 const OVERLAY_DRAW_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/overlay_draw.spv"));

@@ -3,8 +3,8 @@
 // transparent_sort bitonic 排序的排序键。
 //
 // 接口：set0 = set2（对象表 b0 / 模型环 b1 / 材质环 b2 / 在场环 b4），
-// set1 = 透明族小集（b0 ClusterParams / b4 索引列表 / b5 键 / b7 计数——原子
-// 累加，宿主每帧清零）。push（var<immediate>，4B）：count = 在场行数（dispatch
+// set1 = 光源分簇集（只读 b0 ClusterParams 的 view_proj），set2 = 透明命令链集
+//（b0 索引列表 / b1 键 / b3 计数——原子累加，宿主每帧清零）。push（var<immediate>，4B）：count = 在场行数（dispatch
 // 上界，CPU 在账）。
 //
 // 并发语义：atomicAdd 抢透明行下标（列表顺序 = 完成序，非在场序——排序与
@@ -18,11 +18,11 @@
 @group(0) @binding(2) var<storage, read> materials: array<MaterialRecord>;
 @group(0) @binding(4) var<storage, read> presence: array<u32>;
 @group(1) @binding(0) var<storage, read> params: ClusterParams;
-@group(1) @binding(4) var<storage, read_write> t_index_list: array<u32>;
-@group(1) @binding(5) var<storage, read_write> t_keys: array<f32>;
-@group(1) @binding(7) var<storage, read_write> t_count: array<atomic<u32>>;
+@group(2) @binding(0) var<storage, read_write> t_index_list: array<u32>;
+@group(2) @binding(1) var<storage, read_write> t_keys: array<f32>;
+@group(2) @binding(3) var<storage, read_write> t_count: array<atomic<u32>>;
 
-const TRANSPARENT_CAPACITY: u32 = 16384u;  // cluster.rs 同名常量
+const TRANSPARENT_CAPACITY: u32 = 16384u;  // transparent.rs 同名常量
 
 var<immediate> push: PushCollect;
 struct PushCollect {

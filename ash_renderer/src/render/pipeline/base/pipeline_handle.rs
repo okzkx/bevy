@@ -75,7 +75,7 @@ pub(crate) fn full_rect(extent: vk::Extent2D) -> vk::Rect2D {
 }
 
 /// 全幅 viewport，深度范围 [0,1]。
-/// 坑：高度用正值，不要改成负高度翻转 Y——Y 已在 shader 里翻过，再翻画面会倒过来（见 graphics_pipeline 模块注释）。
+/// 坑：高度用正值，不要改成负高度翻转 Y——Y 已在 shader 里翻过，再翻画面会倒过来（见 gbuffer_pipeline 模块注释）。
 ///
 /// # Safety
 /// 见模块注释。

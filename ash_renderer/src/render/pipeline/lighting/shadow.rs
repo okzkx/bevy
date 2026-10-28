@@ -5,7 +5,7 @@
 //! 写/shadow draw 读）。
 //!
 //! 深度图 = [`DepthTarget`] ×4（D32_SFLOAT，DEPTH+SAMPLED 用途，reverse-Z
-//! clear 0——与主深度链同向，[`super::depth`] 模块注释的成套纪律）；固定
+//! clear 0——与主深度链同向，[`crate::render::pipeline::base::depth_target`] 模块注释的成套纪律）；固定
 //! [`SHADOW_MAP_SIZE`]² 不随 swapchain resize 重建（级联覆盖面与屏幕分辨率
 //! 无关，resize 判定线由此免受影响）。
 //!
@@ -20,8 +20,8 @@ use crate::render::core::resources::{BufferRole, GpuBuffer};
 use crate::render::shading::shadow::{SHADOW_CASCADES, SHADOW_MAP_SIZE, SHADOW_UBO_SIZE};
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
-use super::depth::DepthTarget;
-use super::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
+use crate::render::pipeline::base::depth_target::DepthTarget;
+use crate::render::pipeline::base::pipeline_handle::{create_graphics_pipeline, PipelineHandle};
 
 pub const SHADOW_BINDING_UNIFORM: u32 = 0;
 pub const SHADOW_BINDING_MAP0: u32 = 1;
@@ -105,7 +105,7 @@ impl ShadowTargets {
     /// 深度图已建成功；失败路径由调用方回收已建半成品。
     unsafe fn build(&mut self, ctx: &Context) -> Result<()> {
         let slots = MAX_FRAMES_IN_FLIGHT;
-        let sharing = super::concurrent_families(ctx);
+        let sharing = ctx.sharing_families();
         let mk = |role: BufferRole, size: u64| -> Result<GpuBuffer> {
             GpuBuffer::create_with_families(&ctx.device, ctx.memory_contract(), size, role, &sharing)
         };
@@ -470,7 +470,7 @@ impl ShadowPipeline {
             // dynamic rendering：无色附件、深度 D32（VUID-08914 声明面 = 实例
             // 附件全集——shadow 实例只有深度）
             let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-                .depth_attachment_format(super::depth::DEPTH_FORMAT);
+                .depth_attachment_format(crate::render::pipeline::base::depth_target::DEPTH_FORMAT);
             let info = vk::GraphicsPipelineCreateInfo::default()
                 .stages(&stages)
                 .vertex_input_state(&vertex_input)

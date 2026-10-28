@@ -19,8 +19,8 @@ use serde_json::{json, Value};
 use ash_macros::system;
 
 use crate::render::{
-    cluster_reference, conservative_world_aabb, ClusterGrid, ClusterTargets, Context, LightRecord,
-    LightTable, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT, TRANSPARENT_CAPACITY,
+    cluster_reference, conservative_world_aabb, ClusterGrid, Context, LightClusters, LightRecord,
+    LightTable, TransparentTargets, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT, TRANSPARENT_CAPACITY,
 };
 use crate::scene::InstanceLedger;
 
@@ -193,7 +193,7 @@ pub(crate) fn light_stats(In(_params): In<Option<Value>>, table: Res<'_, LightTa
 #[system]
 pub(crate) fn cluster_census(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
     // 渲染目标 extent（cluster 网格与对照共用同一口径，随 swapchain 重建）
-    let extent = world.resource::<ClusterTargets>().extent();
+    let extent = world.resource::<LightClusters>().extent();
     // 相机矩阵 handler 现算 = 参照口径
     let view_proj = brp_view_proj(world, "CPU 参照无法提取视锥")?;
     let inv_view_proj = view_proj.inverse();
@@ -202,17 +202,18 @@ pub(crate) fn cluster_census(In(_params): In<Option<Value>>, world: &mut World) 
     let gpu_counts: Vec<u32>;
     let transparent_rows: u32;
     {
-        let mut targets = world.resource_mut::<ClusterTargets>();
-        grid = targets.grid();
+        let mut clusters = world.resource_mut::<LightClusters>();
+        grid = clusters.grid();
         let mut bytes = vec![0u8; grid.cluster_count() as usize * 4];
-        targets
-            .cluster_counts(0)
+        clusters
+            .counts(0)
             .read(0, &mut bytes)
             .map_err(|e| BrpError::internal(format!("cluster 计数读失败: {e}")))?;
         gpu_counts = words(&bytes);
         let mut t_bytes = [0u8; 4];
-        targets
-            .t_count(0)
+        world
+            .resource_mut::<TransparentTargets>()
+            .count(0)
             .read(0, &mut t_bytes)
             .map_err(|e| BrpError::internal(format!("透明行计数读失败: {e}")))?;
         transparent_rows = u32::from_le_bytes(t_bytes);
@@ -296,7 +297,7 @@ pub(crate) fn transparent_sort_check(In(_params): In<Option<Value>>, world: &mut
     let mut keys_bytes = vec![0u8; capacity * 4];
     {
         let ctx = world.resource::<Context>();
-        let targets = world.resource::<ClusterTargets>();
+        let targets = world.resource::<TransparentTargets>();
         targets
             .readback_sort(ctx, 0, &mut indices_bytes, &mut keys_bytes)
             .map_err(|e: VulkanError| BrpError::internal(format!("透明排序回读失败: {e}")))?;

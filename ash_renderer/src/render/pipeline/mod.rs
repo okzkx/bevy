@@ -1,28 +1,18 @@
-//! pipeline 子目录：渲染管线主体——帧编排、图形管线、附件对象（deferred/透明层/
-//! 合成/后处理都落此目录）。
+//! 渲染管线主体，按帧内阶段分组。依赖只朝一个方向：`base` 被各阶段组共用，
+//! `frames` 在最上层把各组串成一帧，组与组之间不互相引用内部文件。
+//!
+//! | 组 | 内容 |
+//! |---|---|
+//! | `frames` | 帧槽（命令缓冲 + 同步）与整帧录制编排 |
+//! | `base` | 管线公共件：图形管线句柄与录制助手、全屏管线骨架、颜色/深度目标、storage 描述符集 |
+//! | `geometry` | 画场景几何：G-buffer 目标与写入管线、透明层 |
+//! | `lighting` | 光照：光源分簇、级联阴影、延迟光照合成 |
+//! | `post` | 后处理：Bloom、tonemap、SMAA |
+//! | `overlay` | UI：overlay 管线、字体图集、UI 顶点环 |
 
-use crate::render::Context;
-
-pub(crate) mod atlas_gpu;
-pub(crate) mod depth;
+pub(crate) mod base;
 pub(crate) mod frames;
-pub(crate) mod cluster;
-pub(crate) mod fullscreen_pipeline;
-pub(crate) mod gbuffer;
-pub(crate) mod graphics_pipeline;
-pub(crate) mod overlay_pipeline;
-pub(crate) mod pipeline_handle;
+pub(crate) mod geometry;
+pub(crate) mod lighting;
+pub(crate) mod overlay;
 pub(crate) mod post;
-pub(crate) mod shadow;
-pub(crate) mod smaa;
-pub(crate) mod ui_vertex_ring;
-
-/// 资源 CONCURRENT 共享的队列族列表：transfer 族与图形族不同时为两族，同族时
-/// 为空（= EXCLUSIVE）。
-fn concurrent_families(ctx: &Context) -> Vec<u32> {
-    if ctx.transfer_queue_family_index != ctx.queue_family_index {
-        vec![ctx.transfer_queue_family_index, ctx.queue_family_index]
-    } else {
-        Vec::new()
-    }
-}

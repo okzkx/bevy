@@ -22,11 +22,11 @@ use crate::render::core::resources::{BufferRole, GpuBuffer};
 use crate::render::assets::images::GpuImage;
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
-use super::gbuffer::ColorTarget;
-use super::fullscreen_pipeline::FullscreenPipeline;
+use crate::render::pipeline::base::color_target::ColorTarget;
+use crate::render::pipeline::base::fullscreen_pipeline::FullscreenPipeline;
 
-const SMAA_AREA_LUT_PNG: &[u8] = include_bytes!("../../../shaders/_smaa_area_lut.png");
-const SMAA_SEARCH_LUT_PNG: &[u8] = include_bytes!("../../../shaders/_smaa_search_lut.png");
+const SMAA_AREA_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_area_lut.png");
+const SMAA_SEARCH_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_search_lut.png");
 
 pub const SMAA_BINDING_TEX0: u32 = 0;
 pub const SMAA_BINDING_INFO: u32 = 1;
@@ -96,7 +96,7 @@ fn upload_lut(
     bytes: &[u8],
     role: &str,
 ) -> Result<GpuImage> {
-    let sharing = super::concurrent_families(ctx);
+    let sharing = ctx.sharing_families();
     let (data, w, h) = decode_lut_png(bytes, role)?;
     let spec = crate::render::assets::images::ImageSpec {
         width: w,
@@ -188,7 +188,7 @@ impl SmaaTargets {
     }
 
     fn mk_buffer(&self, ctx: &Context, role: BufferRole, size: u64) -> Result<GpuBuffer> {
-        let sharing = super::concurrent_families(ctx);
+        let sharing = ctx.sharing_families();
         GpuBuffer::create_with_families(&self.device, ctx.memory_contract(), size, role, &sharing)
     }
 
@@ -491,7 +491,7 @@ impl Drop for SmaaTargets {
 }
 
 
-/// SMAA 三全屏管线（edge/blend/neighborhood；复用 FullscreenPipeline 脚手架，
+/// SMAA 三全屏管线（edge/blend/neighborhood；复用全屏管线骨架，
 /// 本体持有——句柄拷贝陷阱照 8.4 教训）。
 #[derive(Resource)]
 pub struct SmaaPipelines {

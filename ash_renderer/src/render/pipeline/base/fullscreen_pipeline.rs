@@ -1,12 +1,6 @@
-//! 全屏绘制管线（8.1）：合成（G-buffer 光照）与 present blit 共用的管线骨架
-//! ——无顶点输入（VS 按 `@builtin(vertex_index)` 直出全屏三角形，无顶点
-//! buffer）、无深度附件、无混合、单 color 附件、动态 viewport/scissor。
-//!
-//! set 布局由调用方传入（集与布局同源纪律）：合成 pass = [set1 帧UBO layout,
-//! G-buffer 采样集 layout, cluster 集 layout, shadow 域 layout（8.3）]，
-//! present blit = [G-buffer 采样集 layout]——
-//! 采样集布局里本 pass 用不到的 binding 合法闲置（描述符写入完整，非
-//! partially-bound 的悬空）。
+//! 全屏管线骨架：没有顶点输入（VS 用 `vertex_index` 生成盖满视口的三角形）、
+//! 没有深度、不混合、单颜色附件、动态 viewport/scissor。合成、tonemap、Bloom、
+//! SMAA 各自传入 shader 和 set 布局复用它；这里还有录全屏 pass 的助手。
 
 use std::slice;
 
@@ -17,15 +11,9 @@ use crate::common::error::Result;
 use crate::render::Context;
 
 use crate::render::core::barrier::{image_barrier, ImageBarrier};
-use super::pipeline_handle::{
+use crate::render::pipeline::base::pipeline_handle::{
     bind_graphics, create_graphics_pipeline, full_rect, set_viewport_scissor, PipelineHandle,
 };
-
-/// shader 模块字节（build.rs 产物，OUT_DIR 之下，与主管线同一编译路径）。
-const GBUFFER_COMPOSITE_SPV: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer_composite.spv"));
-const PRESENT_TONEMAP_SPV: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/present_tonemap.spv"));
 
 /// 全屏管线 + pipeline layout（dynamic rendering 形态）。
 #[derive(bevy::prelude::Resource)]
@@ -34,8 +22,8 @@ pub struct FullscreenPipeline {
 }
 
 impl FullscreenPipeline {
-    /// 建管线链：shader module（build.rs 产物，spirv-val 已过）→ layout
-    ///（调用方给的 set layouts，无 push）→ GraphicsPipelineCreateInfo。
+    /// 用调用方给的 shader 和 set 布局建管线，没有 push。set 布局里这个 pass
+    /// 用不到的 binding 可以闲置，只要描述符都写过。
     ///
     /// # Errors
     /// shader module / layout / pipeline 任一创建失败。
@@ -171,91 +159,6 @@ impl FullscreenPipeline {
     #[must_use]
     pub fn layout(&self) -> vk::PipelineLayout {
         self.handle.layout()
-    }
-}
-
-/// 合成管线资源（8.1/8.2.3）：G-buffer 光照累积 → HDR 中间目标。
-/// layout = [set1 帧 UBO, G-buffer 采样集, cluster 集]（集与布局同源纪律——
-/// 三个 layout 对象分别借用 BindlessTables、GBufferTargets 与 ClusterTargets，
-/// 拆除序先于三者）。cluster 集为 8.2.3 光照累积的取数面（b0 网格参数 /
-/// b1 光源常驻表 / b2 逐 cluster 列表）。
-#[derive(bevy::prelude::Resource)]
-pub struct CompositePipeline {
-    inner: FullscreenPipeline,
-}
-
-impl CompositePipeline {
-    /// # Errors
-    /// shader module / layout / pipeline 任一创建失败。
-    pub fn new(
-        ctx: &Context,
-        hdr_format: vk::Format,
-        frame_layout: vk::DescriptorSetLayout,
-        gbuffer_layout: vk::DescriptorSetLayout,
-        cluster_layout: vk::DescriptorSetLayout,
-        shadow_layout: vk::DescriptorSetLayout,
-    ) -> Result<Self> {
-        Ok(Self {
-            inner: FullscreenPipeline::new(
-                ctx,
-                GBUFFER_COMPOSITE_SPV,
-                hdr_format,
-                &[frame_layout, gbuffer_layout, cluster_layout, shadow_layout],
-            )?,
-        })
-    }
-
-    /// 管线句柄。
-    #[must_use]
-    pub fn pipeline(&self) -> vk::Pipeline {
-        self.inner.pipeline()
-    }
-
-    /// layout 句柄。
-    #[must_use]
-    pub fn layout(&self) -> vk::PipelineLayout {
-        self.inner.layout()
-    }
-}
-
-/// present tonemap 管线资源（8.4 接缝正式启用；8.1 的 blit 退役）：HDR + Bloom
-/// → ACES → swapchain。layout = [帧 UBO, G-buffer 采样集, bloom 参数集]——
-/// mode 旁路面（debug 仪器直出）+ hdr + bloom/参数。
-#[derive(bevy::prelude::Resource)]
-pub struct PresentTonemapPipeline {
-    inner: FullscreenPipeline,
-}
-
-impl PresentTonemapPipeline {
-    /// # Errors
-    /// shader module / layout / pipeline 任一创建失败。
-    pub fn new(
-        ctx: &Context,
-        color_format: vk::Format,
-        frame_layout: vk::DescriptorSetLayout,
-        gbuffer_layout: vk::DescriptorSetLayout,
-        bloom_layout: vk::DescriptorSetLayout,
-    ) -> Result<Self> {
-        Ok(Self {
-            inner: FullscreenPipeline::new(
-                ctx,
-                PRESENT_TONEMAP_SPV,
-                color_format,
-                &[frame_layout, gbuffer_layout, bloom_layout],
-            )?,
-        })
-    }
-
-    /// 管线句柄。
-    #[must_use]
-    pub fn pipeline(&self) -> vk::Pipeline {
-        self.inner.pipeline()
-    }
-
-    /// layout 句柄。
-    #[must_use]
-    pub fn layout(&self) -> vk::PipelineLayout {
-        self.inner.layout()
     }
 }
 
