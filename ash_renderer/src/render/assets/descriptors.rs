@@ -178,8 +178,39 @@ impl SlotAllocator {
         }
     }
 
+    fn retire(&mut self, slot: u32) {
+        self.free.push(slot);
+    }
+
     fn used(&self) -> u32 {
         self.used
+    }
+}
+
+struct BindlessBuildGuard<'a> {
+    device: &'a Device,
+    set0_layout: vk::DescriptorSetLayout,
+    set1_layout: vk::DescriptorSetLayout,
+    pool: vk::DescriptorPool,
+    committed: bool,
+}
+
+impl Drop for BindlessBuildGuard<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        unsafe {
+            if self.pool != vk::DescriptorPool::null() {
+                self.device.destroy_descriptor_pool(self.pool, None);
+            }
+            if self.set1_layout != vk::DescriptorSetLayout::null() {
+                self.device.destroy_descriptor_set_layout(self.set1_layout, None);
+            }
+            if self.set0_layout != vk::DescriptorSetLayout::null() {
+                self.device.destroy_descriptor_set_layout(self.set0_layout, None);
+            }
+        }
     }
 }
 
@@ -219,7 +250,7 @@ pub struct BindlessTables {
     retired_textures: Vec<u32>,
     retired_samplers: Vec<u32>,
     /// 待销毁的采样器本体（已从 sampler_bodies 摘出，等排空点）。
-    retired_sampler_bodies: Vec<vk::Sampler>,
+    retired_sampler_bodies: Vec<(u32, vk::Sampler)>,
     /// fallback 贴图本体（白 1×1；槽 0 的 view 来源，随表同寿）。
     fallback: GpuImage,
     /// fallback 上传批次票据（仅留账；销毁前的等待由退出排空统一覆盖）。
@@ -316,7 +347,14 @@ impl BindlessTables {
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
             .stage_flags(stages)];
-        let set1_layout = unsafe {
+        let mut guard = BindlessBuildGuard {
+            device,
+            set0_layout,
+            set1_layout: vk::DescriptorSetLayout::null(),
+            pool: vk::DescriptorPool::null(),
+            committed: false,
+        };
+        guard.set1_layout = unsafe {
             device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&set1_bindings),
                 None,
@@ -332,14 +370,12 @@ impl BindlessTables {
                 graphics_family,
                 capacity,
                 set0_layout,
-                set1_layout,
+                guard.set1_layout,
+                &mut guard,
             )
         };
-        if result.is_err() {
-            unsafe {
-                device.destroy_descriptor_set_layout(set1_layout, None);
-                device.destroy_descriptor_set_layout(set0_layout, None);
-            }
+        if result.is_ok() {
+            guard.committed = true;
         }
         result
     }
@@ -366,6 +402,7 @@ impl BindlessTables {
         capacity: u32,
         set0_layout: vk::DescriptorSetLayout,
         set1_layout: vk::DescriptorSetLayout,
+        guard: &mut BindlessBuildGuard<'_>,
     ) -> Result<Self> {
         // ---- 3) UAB pool(三层配套的第三层;pool size 覆盖双表满载 + 每帧 UBO)----
         let pool_sizes = [
@@ -379,7 +416,7 @@ impl BindlessTables {
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(MAX_FRAMES_IN_FLIGHT as u32),
         ];
-        let pool = unsafe {
+        guard.pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND)
@@ -388,6 +425,7 @@ impl BindlessTables {
                 None,
             )
         }?;
+        let pool = guard.pool;
         // ---- 4) 分配 set0×1 + set1×MAX_FRAMES(一次 allocate,普通 set 与 UAB set 同池合法)----
         let mut layouts = vec![set0_layout];
         layouts.extend(std::iter::repeat_n(set1_layout, MAX_FRAMES_IN_FLIGHT));
@@ -398,13 +436,7 @@ impl BindlessTables {
                     .set_layouts(&layouts),
             )
         };
-        let sets = match sets {
-            Ok(s) => s,
-            Err(e) => {
-                unsafe { device.destroy_descriptor_pool(pool, None) };
-                return Err(VulkanError::Vk(e));
-            }
-        };
+        let sets = sets.map_err(VulkanError::from)?;
         let mut frame_sets = sets;
         let resident_set = frame_sets.remove(0);
         // ---- 5) 每帧 UBO(帧槽一一对应)+ set1 描述符写入(初值 = identity view_proj
@@ -495,6 +527,10 @@ impl BindlessTables {
             fallback,
             fallback_ticket,
         };
+        guard.pool = vk::DescriptorPool::null();
+        guard.set0_layout = vk::DescriptorSetLayout::null();
+        guard.set1_layout = vk::DescriptorSetLayout::null();
+        guard.committed = true;
         // fallback 占双表 0 号槽(采样器去重账本同步登记 linear 键;本体
         // 由表按键创建持有,不取 GpuImage 的采样器——GpuImage 不建采样器)
         let slots = tables.publish(
@@ -599,7 +635,7 @@ impl BindlessTables {
                     }
                     // 半建回滚:纹理/采样器两槽归还,本体不落账
                     Err(e) => {
-                        self.samplers.free.push(slot);
+                        self.samplers.retire(slot);
                         self.textures.free.push(texture);
                         return Err(e);
                     }
@@ -656,9 +692,10 @@ impl BindlessTables {
     /// 此移除——新发布者拿新槽，不与待回收槽交叠）。本体随槽进
     /// 待销毁账，排空点统一 vkDestroySampler。
     pub fn retire_sampler(&mut self, key: &super::images::SamplerKey, sampler: u32) {
-        self.sampler_slots.remove(key);
-        if let Some(body) = self.sampler_bodies.remove(&sampler) {
-            self.retired_sampler_bodies.push(body);
+        if self.sampler_slots.remove(key) == Some(sampler)
+            && let Some(body) = self.sampler_bodies.remove(&sampler)
+        {
+            self.retired_sampler_bodies.push((sampler, body));
         }
     }
 
@@ -680,10 +717,10 @@ impl BindlessTables {
     /// 使用"通过后）——此刻无在飞 draw 再采样这些槽，归还 free list 可复用；
     /// 采样器本体同点销毁。返回归还的槽总数（读数口）。
     pub fn drain_retired_slots(&mut self) -> usize {
-        let count =
-            self.retired_textures.len() + self.retired_samplers.len();
-        for sampler in self.retired_sampler_bodies.drain(..) {
+        let count = self.retired_textures.len() + self.retired_sampler_bodies.len();
+        for (slot, sampler) in self.retired_sampler_bodies.drain(..) {
             unsafe { self.device.destroy_sampler(sampler, None) };
+            self.retired_samplers.push(slot);
         }
         self.textures.free.append(&mut self.retired_textures);
         self.samplers.free.append(&mut self.retired_samplers);
@@ -693,7 +730,7 @@ impl BindlessTables {
     /// 待回收槽数（排空判定的统计口）。
     #[must_use]
     pub fn retired_slot_count(&self) -> usize {
-        self.retired_textures.len() + self.retired_samplers.len()
+        self.retired_textures.len() + self.retired_sampler_bodies.len()
     }
 }
 
@@ -701,8 +738,6 @@ impl Drop for BindlessTables {
     fn drop(&mut self) {
         // 契约边界(与 Uploader/GpuBuffer 同款):不等 GPU;退出排空由
         // teardown_vulkan 的 device_wait_idle 先于一切资源 Drop。
-        // pool 先拆(frees 全部 sets),layout 次拆;采样器本体(含待销毁
-        // 账里未排空的)随后;UBO/fallback 随字段自动 Drop。
         unsafe {
             self.device.destroy_descriptor_pool(self.pool, None);
             self.device
@@ -712,7 +747,7 @@ impl Drop for BindlessTables {
             for sampler in self.sampler_bodies.values() {
                 self.device.destroy_sampler(*sampler, None);
             }
-            for sampler in self.retired_sampler_bodies.drain(..) {
+            for (_, sampler) in self.retired_sampler_bodies.drain(..) {
                 self.device.destroy_sampler(sampler, None);
             }
         }
