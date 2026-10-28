@@ -137,7 +137,7 @@ fn main() {
         );
     }
 
-    group_a_mapping();
+    group_a_mapping(validation_installed);
 
     let (device, gfx_family, gfx_queue, transfer_family, transfer_queue) =
         create_device(&instance, pd);
@@ -161,14 +161,14 @@ fn main() {
         }
     );
 
-    group_b_upload_closure(&ctx, transfer_family, transfer_queue);
+    group_b_upload_closure(&ctx, transfer_family, transfer_queue, validation_installed);
     if cross_family {
-        group_c_cross_family(&ctx, transfer_family, transfer_queue);
+        group_c_cross_family(&ctx, transfer_family, transfer_queue, validation_installed);
     } else {
         println!("\n== 组 C(跨族所有权观察):本机无专用 transfer 族,EXCLUSIVE release/acquire 路径无硬件载体——");
         println!("   回退路径未实测(诚实注明);同族形状已由组 B 在验证层下零 VUID 覆盖。");
     }
-    group_d_negative(&ctx, transfer_family, transfer_queue);
+    group_d_negative(&ctx, transfer_family, transfer_queue, validation_installed);
 
     unsafe { device.destroy_device(None) };
 
@@ -180,7 +180,9 @@ fn main() {
 
     println!("\n== 验证层消息收账(全程)==");
     let vu = take_vu();
-    if vu.is_empty() {
+    if !validation_installed {
+        println!("  [SKIP] validation layer 未安装：功能性内容回读结果不能构成 Vulkan 验证证据");
+    } else if vu.is_empty() {
         println!("  (零条——各组已在自身收账行分账:组 A/B/C 目标路径清净,组 D 负例一条已入档)");
     } else {
         for m in vu.iter() {
@@ -221,7 +223,7 @@ fn bevy_image(format: TextureFormat, bytes: Vec<u8>) -> Image {
 
 // ============ 组 A:映射观察(纯 CPU)============
 
-fn group_a_mapping() {
+fn group_a_mapping(validation_installed: bool) {
     println!("\n== 组 A(映射观察:格式角色 + 采样解析 + 拒绝策略)==");
 
     // sRGB / 线性双角色映射
@@ -307,8 +309,13 @@ fn group_a_mapping() {
     ));
     println!("[拒绝] 无数据 ✓  D1 ✓  mip 链 3 ✓  Rgba16Float ✓(Tier①:warn 一次跳过,帧循环照常)");
 
-    assert!(take_vu().is_empty(), "组 A 纯 CPU 组不应有任何验证层消息");
-    println!("[收账] 组 A 零 VUID");
+    let vu = take_vu();
+    if validation_installed {
+        assert!(vu.is_empty(), "组 A CPU 映射组不应有验证层消息: {vu:?}");
+        println!("[收账] 组 A 验证层零消息");
+    } else {
+        println!("[SKIP] 组 A 验证层检查跳过（layer 未安装；CPU 映射断言已执行）");
+    }
 }
 
 // ============ 设备侧参数束 ============
@@ -330,6 +337,7 @@ fn group_b_upload_closure(
     ctx: &ProbeCtx,
     transfer_family: u32,
     transfer_queue: vk::Queue,
+    validation_installed: bool,
 ) {
     let ProbeCtx {
         instance,
@@ -483,13 +491,22 @@ fn group_b_upload_closure(
     drop(gpu_unorm);
 
     let vu = take_vu();
-    assert!(vu.is_empty(), "组 B 目标路径应零 VUID,实际: {vu:?}");
-    println!("[收账] 组 B 零 VUID");
+    if validation_installed {
+        assert!(vu.is_empty(), "组 B 目标路径应零 VUID,实际: {vu:?}");
+        println!("[收账] 组 B 零 VUID");
+    } else {
+        println!("[收账] 组 B VUID 检查跳过（validation layer 未安装；内容回读仍通过）");
+    }
 }
 
 // ============ 组 C:跨族所有权(release → graphics 等票据 + acquire + 真实读)============
 
-fn group_c_cross_family(ctx: &ProbeCtx, transfer_family: u32, transfer_queue: vk::Queue) {
+fn group_c_cross_family(
+    ctx: &ProbeCtx,
+    transfer_family: u32,
+    transfer_queue: vk::Queue,
+    validation_installed: bool,
+) {
     let ProbeCtx {
         instance,
         pd,
@@ -668,13 +685,22 @@ fn group_c_cross_family(ctx: &ProbeCtx, transfer_family: u32, transfer_queue: vk
     drop(gpu);
 
     let vu = take_vu();
-    assert!(vu.is_empty(), "组 C 目标路径应零 VUID,实际: {vu:?}");
-    println!("[收账] 组 C 零 VUID");
+    if validation_installed {
+        assert!(vu.is_empty(), "组 C 目标路径应零 VUID,实际: {vu:?}");
+        println!("[收账] 组 C 零 VUID");
+    } else {
+        println!("[收账] 组 C VUID 检查跳过（validation layer 未安装；读回仍通过）");
+    }
 }
 
 // ============ 组 D:负例诊断(record-only)============
 
-fn group_d_negative(ctx: &ProbeCtx, transfer_family: u32, transfer_queue: vk::Queue) {
+fn group_d_negative(
+    ctx: &ProbeCtx,
+    transfer_family: u32,
+    transfer_queue: vk::Queue,
+    validation_installed: bool,
+) {
     let ProbeCtx {
         instance,
         pd,
@@ -724,13 +750,26 @@ fn group_d_negative(ctx: &ProbeCtx, transfer_family: u32, transfer_queue: vk::Qu
         device.destroy_fence(fence, None);
     }
     let vu = take_vu();
-    assert!(
-        !vu.is_empty(),
-        "组 D 预期验证层执法(布局违例),实际零消息——验证层没盯图像布局?"
-    );
-    println!("[执法] 验证层收账 {} 条,首条:", vu.len());
-    println!("  {}", vu[0]);
-    println!("[结论] 图像布局被验证层 + 同步验证盯防——目标路径的零 VUID 不是静默(组 D 图已弃)。");
+    if validation_installed {
+        // 录制期 cb 不知道图像初始布局，层在 vkQueueSubmit 按全局布局账执法，
+        // 消息挂的 VUID 号随层版本变化——按"期望 TRANSFER_DST、实际 UNDEFINED"内容判定
+        let is_layout_violation = |message: &String| {
+            message.contains("VUID-vkCmdCopyBufferToImage-dstImageLayout-")
+                || (message.contains("VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL")
+                    && message.contains("current layout is VK_IMAGE_LAYOUT_UNDEFINED"))
+        };
+        assert!(
+            vu.iter().any(is_layout_violation),
+            "组 D 预期图像布局违例消息，实际消息: {vu:?}"
+        );
+        println!("[执法] 命中预期图像布局违例（期望 TRANSFER_DST_OPTIMAL、实际 UNDEFINED），相关消息:");
+        for message in vu.iter().filter(|message| is_layout_violation(message)) {
+            println!("  {message}");
+        }
+        println!("[结论] 验证层对非法目标布局给出预期执法消息。");
+    } else {
+        println!("[SKIP] 组 D layout VUID 检查跳过（validation layer 未安装）；负例提交不构成执法证据。");
+    }
 
     unsafe { device.destroy_command_pool(pool, None) };
     drop(gpu);

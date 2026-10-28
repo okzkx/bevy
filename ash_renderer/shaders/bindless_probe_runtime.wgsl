@@ -39,13 +39,15 @@ var<immediate> push: PushParams;
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // 引用 frame 防"声明即裁剪"歧义：乘 0 不改变采样坐标（uniform 内容运行时值，不会被折叠）
     let uv = vec2f(0.3, 0.5) + vec2f(frame.view_proj[0][0] * 0.0, 0.0);
-    // 路径一：push 索引（一致路径）→ out[0]
-    out[0] = textureSampleLevel(
-        textures[push.tex_index],
-        samplers[push.sampler_index],
-        uv,
-        0.0,
-    );
+    // 一致路径只由 invocation 0 写出，避免同 workgroup 的相同值并发写。
+    if gid.x == 0u {
+        out[0] = textureSampleLevel(
+            textures[push.tex_index],
+            samplers[push.sampler_index],
+            uv,
+            0.0,
+        );
+    }
     // 路径二：每调用 storage 索引（非一致路径）→ out[1+gid.x]
     let i = gid.x;
     out[1u + i] = textureSampleLevel(

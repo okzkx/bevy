@@ -8,10 +8,11 @@
 //! - 组 B（发布与去重 + 耗尽负例）：生产表上发布三张测试贴图（红/绿/蓝，两张
 //!   线性一张 NEAREST 采样器）——纹理槽 1/2/3 顺位、采样器按功能键去重（两张
 //!   线性共享槽 1）；小容量表（容量 4）第 4 次发布 → 槽耗尽报错（不越界不截断）。
-//! - 组 C（采样读回 + update-after-bind）：compute dispatch 经**生产 set0/set1**
+//! - 组 C（采样读回 + descriptor update-after-bind 配置）：compute dispatch 经**生产 set0/set1**
 //!   采样（push 一致路径 + storage 非一致路径），读回比对纹理选择与采样器槽位；
-//!   首次提交完成**之后**改写纹理槽 3（UAB 的存在意义），二次 dispatch 读回新
-//!   内容——"set 绑定后可更新"在生产表上实证。全程 VUID 收账，零告警为过。
+//!   首次提交完成之后改写纹理槽 3，二次 dispatch 读回新内容，验证 UAB layout/pool
+//!   配置及已提交集合的后续观察。此操作不声称验证“命令仍在飞时更新”的同步行为。
+//!   全程 VUID 收账；验证层缺席时结果降级为观察。
 //!
 //! 自含 Entry→Instance→Device 最小链（不碰窗口），验证层 + 同步验证常开；
 //! SPIR-V 走 build.rs 正式编译路径（`OUT_DIR/descriptor_probe.spv`，含 capability
@@ -216,7 +217,9 @@ fn main() {
 
     println!("\n== 验证层消息收账(全程)==");
     let vu = VU_TOTAL.lock().unwrap_or_else(|p| p.into_inner());
-    if vu.is_empty() {
+    if !validation_installed {
+        println!("  [SKIP] Validation-layer evidence unavailable; descriptor behavior was only observed.");
+    } else if vu.is_empty() {
         println!("  (零条——生产表全链在验证层 + 同步验证下清净)");
     } else {
         for m in vu.iter() {

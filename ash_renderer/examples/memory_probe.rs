@@ -207,9 +207,9 @@ fn main() {
                 .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL),
             "pool 契约:DEVICE_LOCAL 必须命中"
         );
-        assert!(
-            !pool.host_visible(),
-            "离散卡上 pool 不应有宿主映射(集成卡合法例外,见打印)"
+        println!(
+            "[类型②] DEVICE_LOCAL 契约成立；host_visible={} 属设备内存拓扑信息，不作为失败条件",
+            pool.host_visible()
         );
 
         let mut readback = GpuBuffer::create(&device, &contract, 1 << 20, BufferRole::Readback)
@@ -253,12 +253,17 @@ fn main() {
             .is_empty();
         println!(
             "[组 A 诊断] 验证层消息 {}",
-            if clean_so_far {
+            if !validation_installed {
+                "跳过(VK_LAYER_KHRONOS_validation 未安装)"
+            } else if clean_so_far {
                 "零条——合同正路在执法下清净"
             } else {
                 "非空——见结尾收账,组 A 不清净"
             }
         );
+        if validation_installed {
+            assert!(clean_so_far, "组 A 正向合同路径收到验证层消息");
+        }
         unsafe { device.destroy_device(None) };
     }
 
@@ -306,9 +311,9 @@ fn main() {
                 ),
                 Err(e) => println!("[组 B 观察] 驱动拒绝绑定: {e:?}(记录实际返回码,不假设固定错误码)"),
             }
-            unsafe { device.destroy_buffer(buffer, None) };
             unsafe { device.free_memory(memory, None) };
         }
+        unsafe { device.destroy_buffer(buffer, None) };
         let hit = VU_LOG
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -316,12 +321,17 @@ fn main() {
             .any(|m| m.contains("VUID-vkBindBufferMemory"));
         println!(
             "[组 B 诊断] 对齐整数倍条款(01036/新修订 10739){}",
-            if hit {
+            if !validation_installed {
+                "跳过(VK_LAYER_KHRONOS_validation 未安装)"
+            } else if hit {
                 "已被验证层执法收账"
             } else {
-                "未见(验证层未运行或未覆盖此检查)"
+                "失败(验证层已安装但未见预期 VUID)"
             }
         );
+        if validation_installed {
+            assert!(hit, "组 B 应由验证层报告 vkBindBufferMemory 的对齐 VUID");
+        }
         unsafe { device.destroy_device(None) };
     }
 
@@ -336,7 +346,9 @@ fn main() {
     let vu = VU_LOG
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if vu.is_empty() {
+    if !validation_installed {
+        println!("  [SKIP] validation layer 未安装：VUID 总账无有效证据");
+    } else if vu.is_empty() {
         println!("  (零条——组 B 未触发,收账以组内打印为准)");
     } else {
         for m in vu.iter() {

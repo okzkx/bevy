@@ -206,7 +206,7 @@ fn main() {
     }
 
     // ============ 组 D:负例诊断 ============
-    group_d_negative(&instance, pd, &runtime.words, &patched_runtime);
+    group_d_negative(&instance, pd, &runtime.words, &patched_runtime, validation_installed);
 
     // messenger 先于 instance 销毁——ash 0.38 无自动 Drop,漏了会被 VUID-00629 收账
     if let Some(messenger) = _debug {
@@ -219,8 +219,10 @@ fn main() {
     let vu = VU_TOTAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if vu.is_empty() {
-        println!("  (零条——探针目标路径在验证层 + 同步验证下清净;组 D 负例按组内口径报告)");
+    if !validation_installed {
+        println!("  [SKIP] Validation-layer evidence unavailable; this run is a device/CPU observation only.");
+    } else if vu.is_empty() {
+        println!("  (零条——验证层目标路径清净;组 D 负例按组内口径报告)");
     } else {
         for m in vu.iter() {
             println!("  {m}");
@@ -1434,7 +1436,12 @@ fn group_d_negative(
     pd: vk::PhysicalDevice,
     raw_words: &[u32],
     patched_words: &[u32],
+    validation_installed: bool,
 ) {
+    if !validation_installed {
+        println!("\n== 组 D [SKIP] validation layer 未安装，负例不构成执法证据 ==");
+        return;
+    }
     println!("\n== 组 D(负例诊断:关 runtimeDescriptorArray 特性,双案)==");
     let families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
     let gfx_family = families

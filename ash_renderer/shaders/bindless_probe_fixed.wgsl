@@ -33,12 +33,14 @@ var<immediate> push: PushParams;
 @compute @workgroup_size(2, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let uv = vec2f(0.3, 0.5) + vec2f(frame.view_proj[0][0] * 0.0, 0.0);
-    out[0] = textureSampleLevel(
-        textures[push.tex_index],
-        samplers[push.sampler_index],
-        uv,
-        0.0,
-    );
+    if gid.x == 0u {
+        out[0] = textureSampleLevel(
+            textures[push.tex_index],
+            samplers[push.sampler_index],
+            uv,
+            0.0,
+        );
+    }
     let i = gid.x;
     out[1u + i] = textureSampleLevel(
         textures[draw_indices.tex[i]],
