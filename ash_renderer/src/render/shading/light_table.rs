@@ -22,7 +22,7 @@ use bevy::log::info;
 
 use crate::common::bytes::{put_u32, put_vec4};
 use crate::common::error::{Result, VulkanError};
-use crate::render::resources::{BufferRole, GpuBuffer, MemoryContract};
+use crate::render::core::resources::{BufferRole, GpuBuffer, MemoryContract};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
 /// 光源表容量（槽位数；BRP 注入的测试灯与远期场景灯共用）。

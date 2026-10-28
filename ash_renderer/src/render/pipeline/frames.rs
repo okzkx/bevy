@@ -7,7 +7,7 @@
 //!   acquire 隔 MAX_FRAMES_IN_FLIGHT 帧，且 fence 保证上一轮提交真的执行完了——
 //!   提交失败路径一律 Tier② 退出，不留"signal 无人等"的残局）；
 //! - render_finished（GPU → present engine）：**按 swapchain image 分配**，住在
-//!   [`super::swapchain::Swapchain`]。同一 image 再次被 acquire 即证明其上一轮
+//!   [`crate::render::Swapchain`]。同一 image 再次被 acquire 即证明其上一轮
 //!   present 已被 present engine 消费完——这是帧 fence 给不了的保证（fence 只证提交
 //!   完成，不证 present engine 的消费进度；依据 Khronos Vulkan Guide "Swapchain
 //!   semaphore reuse"；同一队列上提交有序，下一次 signal 排在前一个 present 消费之后）。
@@ -18,7 +18,7 @@
 //!   不存在是由 fence + 槽位隔离证出来的。尺寸随 swapchain 重建（[`Self::rebuild_depth`]，
 //!   extent 不变即空手而归），销毁前自带 device_wait_idle 与 swapchain 重建同纪律。
 //!
-//! 清屏+绘制走 Vulkan 1.3 动态渲染（feature 在 `crate::render::context` 设备创建时已开）：
+//! 清屏+绘制走 Vulkan 1.3 动态渲染（feature 在 `crate::render::core::context` 设备创建时已开）：
 //! 无 RenderPass/Framebuffer，`loadOp=CLEAR` 就是清屏。每帧的布局纪律：
 //! - 颜色：acquire 后布局不确定 → UNDEFINED→COLOR_ATTACHMENT_OPTIMAL（进场），
 //!   画完 → PRESENT_SRC_KHR（出场）；
@@ -35,7 +35,13 @@ use bevy::log::info;
 
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
-use crate::render::cmd::{self, FullscreenPass, ImageBarrier};
+use crate::render::core::barrier::{image_barrier, image_barrier_with_memory, ImageBarrier};
+use super::fullscreen_pipeline::{
+    record_fullscreen, record_fullscreen_open, record_fullscreen_sampled, FullscreenPass,
+};
+use super::pipeline_handle::{
+    bind_graphics, bind_vertex_index, full_rect, set_viewport, set_viewport_scissor,
+};
 use crate::render::gpu::cull::CullDraw;
 use crate::render::gpu::hiz::HizPyramid;
 use crate::render::gpu::indirect::IndirectDraw;
@@ -47,7 +53,7 @@ use crate::render::shading::shadow::SHADOW_MAP_SIZE;
 use crate::render::GBufferTargets;
 use crate::render::pipeline::cluster::TransparentFrame;
 use crate::render::pipeline::overlay_pipeline::{pack_ui_push, UiPaint};
-use crate::render::perf::GpuTimer;
+use crate::render::stats::perf::GpuTimer;
 use crate::render::{Context, BLOOM_LEVELS};
 use super::depth::DepthTarget;
 
@@ -404,7 +410,7 @@ impl FramePool {
             // 排在 acquire 对 image 的读之后——提交在 COLOR_ATTACHMENT_OUTPUT 阶段等
             // image_available（等待点语义见下方提交段），屏障 srcStage 就提到这里；
             // dst_access 带上 COLOR_ATTACHMENT_WRITE，与后续 loadOp 清屏写收口。
-            cmd::image_barrier(
+            image_barrier(
                 device,
                 cb,
                 &ImageBarrier::discard_to_color(image, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT),
@@ -415,7 +421,7 @@ impl FramePool {
             // 屏障）。src 作用域为空的合法性：本槽深度图的上一轮使用已被
             // wait_for_slot 的 fence 等完（模块注释的同步证据②），录制时不存在
             // 并发引用。
-            cmd::image_barrier(device, cb, &ImageBarrier {
+            image_barrier(device, cb, &ImageBarrier {
                 image: frame.depth_image(),
                 aspect: vk::ImageAspectFlags::DEPTH,
                 old_layout: vk::ImageLayout::UNDEFINED,
@@ -438,7 +444,7 @@ impl FramePool {
                 draw.gbuffer.matparam_image(slot),
                 draw.gbuffer.hdr_image(slot),
             ] {
-                cmd::image_barrier(
+                image_barrier(
                     device,
                     cb,
                     &ImageBarrier::discard_to_color(
@@ -562,7 +568,7 @@ impl FramePool {
             // 合法）；UNDEFINED 作 oldLayout = 声明旧内容可丢弃，从任意终态都合法
             //（loadOp CLEAR 每帧重写，depth 内容不跨帧持久）。
             for &shadow_image in &draw.shadow_images {
-                cmd::image_barrier(device, cb, &ImageBarrier {
+                image_barrier(device, cb, &ImageBarrier {
                     image: shadow_image,
                     aspect: vk::ImageAspectFlags::DEPTH,
                     old_layout: vk::ImageLayout::UNDEFINED,
@@ -592,14 +598,14 @@ impl FramePool {
                     device.cmd_begin_rendering(
                         cb,
                         &vk::RenderingInfo::default()
-                            .render_area(cmd::full_rect(map_extent))
+                            .render_area(full_rect(map_extent))
                             .layer_count(1)
                             .depth_attachment(&shadow_depth_attachment),
                     );
-                    cmd::bind_graphics(device, cb, shadow.pipeline, shadow.layout, &[shadow.set2, shadow.shadow_set]);
+                    bind_graphics(device, cb, shadow.pipeline, shadow.layout, &[shadow.set2, shadow.shadow_set]);
                     // 池整绑（与主管线同一契约——命令引脚在 GPU 侧定位）
-                    cmd::bind_vertex_index(device, cb, shadow.vertex_buffer, shadow.index_buffer);
-                    cmd::set_viewport_scissor(device, cb, map_extent);
+                    bind_vertex_index(device, cb, shadow.vertex_buffer, shadow.index_buffer);
+                    set_viewport_scissor(device, cb, map_extent);
                     // 4B push = cascade 索引（帧级全局量的本职，cull 112B 同款理由）
                     let mut cascade_push = [0u8; 4];
                     put_u32(&mut cascade_push, 0, c as u32);
@@ -623,7 +629,7 @@ impl FramePool {
             // 出场：ATTACHMENT→SHADER_READ_ONLY（合成 pass 采样）——恒录
             //（pass 跳过帧也送回，保持描述符布局合法）
             for &shadow_image in &draw.shadow_images {
-                cmd::image_barrier(device, cb, &ImageBarrier {
+                image_barrier(device, cb, &ImageBarrier {
                     image: shadow_image,
                     aspect: vk::ImageAspectFlags::DEPTH,
                     old_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -691,7 +697,7 @@ impl FramePool {
             device.cmd_begin_rendering(
                 cb,
                 &vk::RenderingInfo::default()
-                    .render_area(cmd::full_rect(extent))
+                    .render_area(full_rect(extent))
                     .layer_count(1)
                     .color_attachments(&gbuffer_attachments)
                     .depth_attachment(&depth_attachment),
@@ -706,13 +712,13 @@ impl FramePool {
                 // 常驻三集整帧绑一次：set0 = bindless 表（槽位在飞更新即生效），
                 // set1 = 本帧槽 UBO（内容 = 相机 view_proj），set2 = GPU 常驻
                 // 绘制数据（对象表 + 本帧模型/材质环，instance_table 契约）
-                cmd::bind_graphics(device, cb, draw.pipeline, draw.layout, &[draw.set0, draw.set1, draw.set2]);
+                bind_graphics(device, cb, draw.pipeline, draw.layout, &[draw.set0, draw.set1, draw.set2]);
                 // 动态 viewport/scissor：正高度直出（朝向定案见 graphics_pipeline
                 // 模块注释——负高度翻转反而上下颠倒，与"教科书式 Vulkan 翻转"的
                 // 直觉相反）
-                cmd::set_viewport_scissor(device, cb, extent);
+                set_viewport_scissor(device, cb, extent);
                 // 池整绑一次，逐命令在 GPU 侧定位（vertexOffset/firstIndex 已进命令）
-                cmd::bind_vertex_index(device, cb, vertex_buffer, index_buffer);
+                bind_vertex_index(device, cb, vertex_buffer, index_buffer);
                 // 一次 indirect 提交：count = 在场行数（CPU 在账信息，非可见集
                 // 回读）；不可见行 instanceCount=0，GPU 零工作。stride = 20B
                 //（VkDrawIndexedIndirectCommand，命令环步长同源）。
@@ -758,7 +764,7 @@ impl FramePool {
                     dst_access: vk::AccessFlags::SHADER_READ,
                 },
             ] {
-                cmd::image_barrier(device, cb, &barrier);
+                image_barrier(device, cb, &barrier);
             }
 
             // —— 合成 pass（延迟合成，全屏）：读 G-buffer 出光照——HDR 中间目标
@@ -768,7 +774,7 @@ impl FramePool {
             // set0 = 帧 UBO（与场景管线 set1 同一 layout 对象），set1 = G-buffer
             // 采样集，set2 = cluster 集（光照累积取数），set3 = shadow 域（级联
             // 深度图 + shadow UBO——PCSS 采样取数面）
-            cmd::record_fullscreen(device, cb, &FullscreenPass {
+            record_fullscreen(device, cb, &FullscreenPass {
                 view: draw.gbuffer.hdr_view(slot),
                 extent,
                 clear: Some(draw.clear),
@@ -788,7 +794,7 @@ impl FramePool {
                     .dst_access_mask(
                         vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
                     );
-                cmd::image_barrier_with_memory(
+                image_barrier_with_memory(
                     device,
                     cb,
                     &ImageBarrier {
@@ -825,15 +831,15 @@ impl FramePool {
                 device.cmd_begin_rendering(
                     cb,
                     &vk::RenderingInfo::default()
-                        .render_area(cmd::full_rect(extent))
+                        .render_area(full_rect(extent))
                         .layer_count(1)
                         .color_attachments(slice::from_ref(&transparent_attachment))
                         .depth_attachment(&transparent_depth),
                 );
-                cmd::bind_graphics(device, cb, t.pipeline, t.layout, &[draw.set0, draw.set1, draw.set2, t.cluster_set]);
-                cmd::set_viewport_scissor(device, cb, extent);
+                bind_graphics(device, cb, t.pipeline, t.layout, &[draw.set0, draw.set1, draw.set2, t.cluster_set]);
+                set_viewport_scissor(device, cb, extent);
                 let (vertex_buffer, index_buffer) = draw.pool_buffers()?;
-                cmd::bind_vertex_index(device, cb, vertex_buffer, index_buffer);
+                bind_vertex_index(device, cb, vertex_buffer, index_buffer);
                 // 一次 indirect 提交消费透明命令环（count = 在场行数上界，
                 // 非透明行 instanceCount=0）——透明 draw 调用数恒 ≤ 1
                 device.cmd_draw_indexed_indirect(
@@ -847,7 +853,7 @@ impl FramePool {
             }
 
             // —— HDR 目标转只读（合成 + 透明写 → Bloom prefilter / tonemap 采样）。
-            cmd::image_barrier(device, cb, &ImageBarrier::color_to_sampled(draw.gbuffer.hdr_image(slot)));
+            image_barrier(device, cb, &ImageBarrier::color_to_sampled(draw.gbuffer.hdr_image(slot)));
 
             // —— 帧计时 T4：合成区间（含透明层）结束点位。
             mark(4);
@@ -855,7 +861,7 @@ impl FramePool {
             // —— 透明层深度重绑归还：ATTACHMENT→READ_ONLY（Hi-Z 归约采样；
             // transparent None 时深度已在 READ_ONLY，跳过）
             if draw.transparent.is_some() {
-                cmd::image_barrier(device, cb, &ImageBarrier {
+                image_barrier(device, cb, &ImageBarrier {
                     image: frame.depth_image(),
                     aspect: vk::ImageAspectFlags::DEPTH,
                     old_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -917,7 +923,7 @@ impl FramePool {
                 for (target, target_view, target_extent, pipeline, layout, set) in
                     std::iter::once(prefilter).chain(downs).chain(ups)
                 {
-                    cmd::record_fullscreen_sampled(
+                    record_fullscreen_sampled(
                         device,
                         cb,
                         target,
@@ -941,7 +947,7 @@ impl FramePool {
             // 进场屏障：LDR 上一轮（同槽，fence 等完）停在 SHADER_READ_ONLY，
             // UNDEFINED 进 = 内容可弃，无屏障则是 VUID-09592 布局竞争
             //（UNDEFINED/SHADER_READ_ONLY 实抓）。出场转只读供 edge/neighborhood 采样。
-            cmd::record_fullscreen_sampled(
+            record_fullscreen_sampled(
                 device,
                 cb,
                 draw.smaa_nb.ldr_image,
@@ -964,7 +970,7 @@ impl FramePool {
                     (smaa.edges_image, smaa.edges_view, smaa.edge_pipeline, smaa.edge_layout, smaa.edge_set),
                     (smaa.blend_image, smaa.blend_view, smaa.blend_pipeline, smaa.blend_layout, smaa.blend_set),
                 ] {
-                    cmd::record_fullscreen_sampled(
+                    record_fullscreen_sampled(
                         device,
                         cb,
                         target,
@@ -984,7 +990,7 @@ impl FramePool {
             // —— neighborhood 混合（终点）：LDR + blend → swapchain（SRGB view
             // 编码恰好一次）；关 = shader 权重清零直通。loadOp DON'T CARE（全像素
             // 覆写）。UI 在本实例接画（raster order 保证 UI 盖在场景之上）。
-            cmd::record_fullscreen_open(device, cb, &FullscreenPass {
+            record_fullscreen_open(device, cb, &FullscreenPass {
                 view,
                 extent,
                 clear: None,
@@ -996,10 +1002,10 @@ impl FramePool {
             if let Some(ui) = draw.ui {
                 // overlay 管线只声明 set0（UI 无 UBO），管线切换后 set0 须按 overlay
                 // 自己的 layout 对象重绑——描述符绑定随 layout，不随句柄。
-                cmd::bind_graphics(device, cb, draw.overlay_pipeline, draw.overlay_layout, &[draw.set0]);
+                bind_graphics(device, cb, draw.overlay_pipeline, draw.overlay_layout, &[draw.set0]);
                 // 全屏 viewport：场景分支不必然跑过，UI 段自带 viewport/scissor 状态
-                cmd::set_viewport(device, cb, extent);
-                cmd::bind_vertex_index(device, cb, draw.ui_buffers.0, draw.ui_buffers.1);
+                set_viewport(device, cb, extent);
+                bind_vertex_index(device, cb, draw.ui_buffers.0, draw.ui_buffers.1);
                 // push 对全帧 UI 恒定（screen_size + 图集双槽位），循环外打包一次
                 let ui_push = pack_ui_push(ui.screen_pt, ui.atlas_texture, ui.atlas_sampler);
                 for call in &ui.draws {
@@ -1043,7 +1049,7 @@ impl FramePool {
 
             // —— 出场：颜色画完到 present 引擎接管之间必须收口；PRESENT_SRC 是
             // present 专用布局。深度无出场（采完即弃 + 下帧 UNDEFINED 重进）。
-            cmd::image_barrier(device, cb, &ImageBarrier {
+            image_barrier(device, cb, &ImageBarrier {
                 image,
                 aspect: vk::ImageAspectFlags::COLOR,
                 old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,

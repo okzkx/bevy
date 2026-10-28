@@ -4,20 +4,21 @@
 //!
 //! | 位置 | 生命周期 | 职责 |
 //! |---|---|---|
-//! | `context` | 进程级 | Entry/Instance/Surface/Device/Queue,随进程活 |
-//! | `swapchain` | resize 级 | swapchain + images/views,随窗口尺寸整体重建 |
-//! | `resources` | 资产级 | 内存契约:类型选择/绑定/对齐/coherent 分支 |
-//! | `cmd` | 纯函数 | 命令录制标准件:图像布局屏障、全幅 viewport/scissor、图形管线/池绑定、全屏 pass |
-//! | `readback` | 调用级 | 诊断回读:一次性 staging + 命令池 + fence 的同步回读(BRP 读数族与 render 内部共用) |
-//! | `perf` | 进程级 | GPU timestamp 计时(GpuTimer 每帧槽 query pool)+ 帧样本账(PerfLedger 分位数) |
-//! | `monitor_history` | 进程级 | 持续监控历史账(fps/进程与系统内存/显存堆级预算采样点,overlay 采样、BRP 与监控页同读) |
-//! | `egui_pass_timing` | 进程级 | egui pass 自计时读数(overlay 写、BRP 读) |
-//! | `frame_sync_settings` | 进程级 | 帧率同步设置契约(开关 + 主屏刷新率读数,driver 应用、UI/BRP 读写) |
+//! | `core/context` | 进程级 | Entry/Instance/Surface/Device/Queue,随进程活 |
+//! | `core/swapchain` | resize 级 | swapchain + images/views,随窗口尺寸整体重建 |
+//! | `core/resources` | 资产级 | 内存契约:类型选择/绑定/对齐/coherent 分支 |
+//! | `core/barrier` | 纯函数 | 图像布局屏障录制助手(单 mip/单 layer,可附全局内存屏障) |
+//! | `core/readback` | 调用级 | 诊断回读:一次性 staging + 命令池 + fence 的同步回读(BRP 读数族与 render 内部共用) |
+//! | `stats/perf` | 进程级 | GPU timestamp 计时(GpuTimer 每帧槽 query pool)+ 帧样本账(PerfLedger 分位数) |
+//! | `stats/monitor_history` | 进程级 | 持续监控历史账(fps/进程与系统内存/显存堆级预算采样点,overlay 采样、BRP 与监控页同读) |
+//! | `stats/egui_pass_timing` | 进程级 | egui pass 自计时读数(overlay 写、BRP 读) |
+//! | `stats/frame_sync_settings` | 进程级 | 帧率同步设置契约(开关 + 主屏刷新率读数,driver 应用、UI/BRP 读写) |
 //! | `pipeline/frames` | 帧级 | 命令缓冲 + 双信号量 + fence,`MAX_FRAMES_IN_FLIGHT` 组轮转复用;帧录制编排 |
 //! | `pipeline/depth` | 帧级 | 深度附件本体(D32 reverse-Z,随帧槽/swapchain 重建) |
 //! | `pipeline/gbuffer` | resize 级 | G-buffer 附件 + HDR 中间颜色目标 |
 //! | `pipeline/graphics_pipeline` | 进程级 | 不透明场景图形管线(dynamic rendering)+ pipeline layout(set0/set1/set2) |
-//! | `pipeline/fullscreen_pipeline` | 进程级 | 全屏管线骨架:G-buffer 合成 + present tonemap |
+//! | `pipeline/fullscreen_pipeline` | 进程级 | 全屏管线骨架:G-buffer 合成 + present tonemap;全屏三角形 pass 录制 |
+//! | `pipeline/pipeline_handle` | 进程级 | 图形管线句柄(建管线/销毁)+ 绑定与 viewport/scissor 录制助手 |
 //! | `pipeline/overlay_pipeline` | 进程级 | overlay 管线(set0 共享 + 16B push + 深度声明对齐读写关 + blend)+ UI 录制契约 |
 //! | `pipeline/ui_vertex_ring` | 帧级 | UI 顶点环(每帧槽一对 HOST_VISIBLE 顶点/索引 buffer)+ epaint 顶点镜像 UiVertex |
 //! | `pipeline/atlas_gpu` | 资产级 | overlay 字体图集 GPU 账面:当前代 + 槽位 + 旧代停尸房 |
@@ -47,20 +48,13 @@
 //! 内部；本层不依赖 common 以外的任何顶层模块。
 
 mod assets;
-mod cmd;
-mod context;
-mod egui_pass_timing;
-mod frame_sync_settings;
+mod core;
 mod gpu;
-mod monitor_history;
-mod perf;
 mod pipeline;
-mod readback;
-mod resources;
 mod shading;
-mod swapchain;
+mod stats;
 
-pub use context::Context;
+pub use self::core::context::Context;
 pub use gpu::cull::{
     aabb_visible, frustum_planes, CullDiagnostics, CullDraw, CullPass, CullSettings,
 };
@@ -68,7 +62,7 @@ pub use gpu::hiz::{
     occluded_reverse_z, occlusion_mip_level, reduce_tile_reverse_z, HizCensus, HizPyramid,
 };
 // 诊断回读助手：BRP 读数方法族（remote/）与 render 内部共用，crate 级重出口。
-pub(crate) use readback::readback_buffer;
+pub(crate) use self::core::readback::readback_buffer;
 pub use gpu::indirect::{IndirectDraw, IndirectPass, IndirectStats};
 pub use gpu::lod::{
     lod_hysteresis_level, lod_raw_level, LodDiagnostics, LodDraw, LodPass, LodSettings,
@@ -99,10 +93,10 @@ pub use assets::uploader::{
     CopyRegion, ImageRelease, Release, StagingCopy, StagingImageCopy, UploadBatch, Uploader,
 };
 pub(crate) use assets::uploader::Ticket;
-pub use perf::{FrameSample, GpuTimer, PerfLedger};
-pub use egui_pass_timing::EguiPassTiming;
-pub use frame_sync_settings::FrameSyncSettings;
-pub(crate) use monitor_history::MonitorHistory;
+pub use stats::perf::{FrameSample, GpuTimer, PerfLedger};
+pub use stats::egui_pass_timing::EguiPassTiming;
+pub use stats::frame_sync_settings::FrameSyncSettings;
+pub(crate) use stats::monitor_history::MonitorHistory;
 pub use shading::{LightRecord, LightTable, RenderMode, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT};
 pub use pipeline::cluster::{
     cluster_reference, pack_cluster_uniforms, TransparentFrame,
@@ -134,5 +128,5 @@ pub use shading::shadow::{
     ShadowCascades, ShadowDiagnostics, ShadowSettings, ShadowUniformsData, SHADOW_CASCADES,
     SHADOW_MAP_SIZE, SHADOW_UBO_SIZE,
 };
-pub use resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
-pub use swapchain::{AcquireOutcome, Swapchain};
+pub use self::core::resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
+pub use self::core::swapchain::{AcquireOutcome, Swapchain};

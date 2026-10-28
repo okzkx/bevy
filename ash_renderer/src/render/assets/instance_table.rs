@@ -47,7 +47,7 @@ use bevy::pbr::StandardMaterial;
 use crate::common::bytes::{put_f32s, put_mat4, put_u32, put_u32s, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
-use crate::render::resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
+use crate::render::core::resources::{align_up, BufferRole, GpuBuffer, MemoryContract};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
 /// 对象表容量（实例槽数）。覆盖 10 万实例压测档（131072 ≥ 100000）；

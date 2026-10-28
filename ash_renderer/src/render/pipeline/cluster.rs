@@ -34,7 +34,7 @@ use bevy::prelude::Resource;
 use crate::common::bytes::{put_f32, put_mat4, put_u32};
 use crate::common::error::{Result, VulkanError};
 use crate::render::gpu::compute::{create_shader_module, ComputeHandles, ComputePipeline, Handoff};
-use crate::render::resources::{BufferRole, GpuBuffer};
+use crate::render::core::resources::{BufferRole, GpuBuffer};
 use crate::render::shading::LightRecord;
 use crate::render::Context;
 use super::pipeline_handle::create_graphics_pipeline;
@@ -495,12 +495,12 @@ impl ClusterTargets {
         indices: &mut [u8],
         keys: &mut [u8],
     ) -> Result<()> {
-        crate::render::readback::readback_buffer(
+        crate::render::core::readback::readback_buffer(
             ctx,
             self.t_index_lists[slot % self.t_index_lists.len()].buffer(),
             indices,
         )?;
-        crate::render::readback::readback_buffer(
+        crate::render::core::readback::readback_buffer(
             ctx,
             self.t_keys[slot % self.t_keys.len()].buffer(),
             keys,
@@ -525,7 +525,7 @@ impl ClusterTargets {
     /// # Errors
     /// 读回提交失败（设备丢失等）。
     pub fn readback_index_list(&self, ctx: &Context, slot: usize, bytes: &mut [u8]) -> Result<()> {
-        crate::render::readback::readback_buffer(
+        crate::render::core::readback::readback_buffer(
             ctx,
             self.t_index_lists[slot % self.t_index_lists.len()].buffer(),
             bytes,

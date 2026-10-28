@@ -32,7 +32,7 @@ use crate::common::error::{Result, VulkanError};
 
 use crate::render::assets::images::full_mip_chain;
 use crate::render::gpu::compute::ComputePipeline;
-use crate::render::readback::OneShotReadback;
+use crate::render::core::readback::OneShotReadback;
 use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物；spirv-val 已过，naga textureLoad/

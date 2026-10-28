@@ -8,7 +8,7 @@
 //!    SAMPLER×容量，UAB+PARTIALLY_BOUND）+ set1 每帧 UBO。UAB 三层配套
 //!    在此收齐后两层：binding 旗标 + layout 创建旗标（`UPDATE_AFTER_BIND_POOL`，
 //!    VUID-03000）+ pool 旗标（`UPDATE_AFTER_BIND`）；feature 位第一层在
-//!    [`crate::render::context`]。
+//!    [`crate::render::Context`]。
 //! 3. **槽位分配与发布**：free list 分槽、采样器按 [`sampler_key`]
 //!    功能参数去重、fallback 槽 0（白 1×1 + 线性采样器）、发布接上传票据。
 //!
@@ -36,7 +36,7 @@ use crate::common::bytes::{put_mat4, put_u32, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
 use super::images::{sampler_key, GpuImage, ImageSpec};
-use crate::render::resources::{BufferRole, GpuBuffer, MemoryContract};
+use crate::render::core::resources::{BufferRole, GpuBuffer, MemoryContract};
 use super::uploader::{StagingImageCopy, UploadBatch, Uploader};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 

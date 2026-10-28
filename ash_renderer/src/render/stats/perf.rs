@@ -34,7 +34,7 @@ use bevy::log::warn;
 
 use crate::common::error::Result;
 
-use super::Context;
+use crate::render::Context;
 
 fn wrapping_timestamp_delta(start: u64, end: u64, mask: u64) -> u64 {
     end.wrapping_sub(start) & mask
@@ -203,7 +203,7 @@ pub struct GpuTimer {
     /// reset 过但从未执行的查询取结果回 VK_NOT_READY，不进取数路径）。
     /// AtomicBool：Resource 须 Sync（bevy Resource 约束），原子布尔置位
     /// 足够（单线程录制，无竞争面）。
-    recorded: [AtomicBool; super::MAX_FRAMES_IN_FLIGHT],
+    recorded: [AtomicBool; crate::render::MAX_FRAMES_IN_FLIGHT],
     /// 支持性闸门结果（false = 队列族无 timestamp，全机 GPU 半边停用）。
     pub enabled: bool,
 }
@@ -241,9 +241,9 @@ impl GpuTimer {
         let pools = if enabled {
             let mut guard = QueryPoolsBuildGuard {
                 device: &ctx.device,
-                pools: Vec::with_capacity(super::MAX_FRAMES_IN_FLIGHT),
+                pools: Vec::with_capacity(crate::render::MAX_FRAMES_IN_FLIGHT),
             };
-            for _ in 0..super::MAX_FRAMES_IN_FLIGHT {
+            for _ in 0..crate::render::MAX_FRAMES_IN_FLIGHT {
                 guard.pools.push(unsafe {
                     ctx.device.create_query_pool(
                         &vk::QueryPoolCreateInfo::default()

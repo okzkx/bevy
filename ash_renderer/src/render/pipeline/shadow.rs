@@ -16,7 +16,7 @@ use ash::{vk, Device};
 use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
-use crate::render::resources::{BufferRole, GpuBuffer};
+use crate::render::core::resources::{BufferRole, GpuBuffer};
 use crate::render::shading::shadow::{SHADOW_CASCADES, SHADOW_MAP_SIZE, SHADOW_UBO_SIZE};
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 

@@ -169,7 +169,7 @@ pub fn align_up(value: u64, alignment: u64) -> u64 {
 
 /// 内存契约:设备侧不可变事实(内存类型/堆表 + `nonCoherentAtomSize`)创建时一次
 /// 查询冻结,类型选择的唯一裁判。设备事实恒定,克隆即拷贝快照(池/上传各持一份,
-/// 原件住 [`super::Context`])。
+/// 原件住 [`crate::render::Context`])。
 #[derive(Clone)]
 pub struct MemoryContract {
     properties: vk::PhysicalDeviceMemoryProperties,

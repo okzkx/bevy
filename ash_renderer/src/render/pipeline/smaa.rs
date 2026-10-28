@@ -18,7 +18,7 @@ use bevy::log::info;
 use bevy::prelude::Resource;
 
 use crate::common::error::{Result, VulkanError};
-use crate::render::resources::{BufferRole, GpuBuffer};
+use crate::render::core::resources::{BufferRole, GpuBuffer};
 use crate::render::assets::images::GpuImage;
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 

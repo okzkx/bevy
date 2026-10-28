@@ -14,17 +14,17 @@
 
 | 站 | 落点 | 规模（行） | 对象类别 | 主题与校验要点 |
 |---|---|---|---|---|
-| 1 | `main.rs` + `driver/host/init.rs` + `driver/host/mod.rs` | ~540 | 五类总览（创建方） | 入口与插件装配。看清渲染器以 Bevy 为宿主的插件拓扑；init 只当目录和依赖图读，不钻构造函数。量小热身。 |
-| 2 | `render/context.rs` | 558 | ① Context | instance/device/queue 创建与 Vulkan 特性开关。全库一切 Vulkan 调用的地基；"支持/启用/使用三件事"纪律的主战场。 |
-| 3 | `render/swapchain.rs` + `render/frame_sync_settings.rs` | ~550 | ① Swapchain + ② | present 模式、帧槽、UNORM+SRGB view 三件套。看懂"一帧占一槽、fence 管执行序"的节拍——后面所有跨帧问题都挂在这个模型上。 |
-| 4 | `render/cmd.rs` | 260 | 不持有资源 | 屏障与全屏 pass 标准件。体量最小杠杆最大：复盘里十几处屏障修复全按这里的约定改写；先吃透，后面读任何 pass 都能顺手校验屏障对不对。 |
-| 5 | `render/assets/`（descriptors、pool、instance_table、mesh_convert、uploader） | ~3870 | ③（+ ② Uploader） | **bindless 的心脏**，学习目标第一核心：GPU 常驻资源、描述符堆、实例表、上传票据。工作量最大，值得拆两次讲。 |
-| 6 | `render/gpu/`（compute + cull、hiz、occlusion、lod、shadow_build） | ~2310 | ⑤ compute（+ ④ HizPyramid） | **GPU-driven 核心**，学习目标第二核心。六处 compute 骨架下沉的 `compute.rs` 是总钥匙，先读它再逐个环节。 |
-| 7 | `render/pipeline/` + `render/shading/` | ~6860 | ④ + ⑤ 图形/全屏 | 图形管线族：graphics_pipeline、shadow、gbuffer、post、smaa、cluster、light_table。"装备库"性质，按想先看的效果挑内部顺序也行。 |
-| 8 | `scene/content/` + `scene/mechanism/`（ledger、residency、collect_report 优先） | ~2800 | CPU 侧账本（驱动 ③ 增删） | Bevy 侧账本：一份资产两份真身（CPU 容器 + GPU 显存）、两层索引账（Ledger 行按实体粒度 / residency 按资产粒度）。大世界流送第三核心。 |
-| 9 | `driver/host/frame.rs`（draw_frame）+ `frame_sync.rs` + `render/pipeline/frames.rs`（record_frame） | ~2700 | 五类全部（消费方） | 终点验收考场：质量复盘把 draw_frame 从 1065 行拆到 350 行、record_frame 从 1958 行拆到 1109 行（提交 bd48cb0a2 口径）。前八站读完后，这里的每一行都能对上前面的某个标准件——读它就是全库复盘。 |
+| 1 | `main.rs` + `driver/host/init.rs` + `driver/host/mod.rs` | ~555 | 五类总览（创建方） | 入口与插件装配。看清渲染器以 Bevy 为宿主的插件拓扑；init 只当目录和依赖图读，不钻构造函数。量小热身。 |
+| 2 | `render/core/context.rs` | 605 | ① Context | instance/device/queue 创建与 Vulkan 特性开关。全库一切 Vulkan 调用的地基；"支持/启用/使用三件事"纪律的主战场。 |
+| 3 | `render/core/swapchain.rs` + `render/stats/frame_sync_settings.rs` | ~390 | ① Swapchain + ② | present 模式、帧槽、UNORM+SRGB view 三件套。看懂"一帧占一槽、fence 管执行序"的节拍——后面所有跨帧问题都挂在这个模型上。 |
+| 4 | `render/core/barrier.rs` | ~100 | 不持有资源 | 图像布局屏障助手。体量最小杠杆最大：吃透"谁等谁、谁对谁可见"的屏障语义，后面读任何 pass 都能顺手校验屏障对不对。目前只有帧录制（`pipeline/frames.rs`）在用它；uploader、Hi-Z、回读仍直接调 `cmd_pipeline_barrier`，compute 侧另有 `Handoff` 助手，读到时用同一套语义校验。 |
+| 5 | `render/assets/`（descriptors、pool、instance_table、mesh_convert、uploader） | ~3910 | ③（+ ② Uploader） | **bindless 的心脏**，学习目标第一核心：GPU 常驻资源、描述符堆、实例表、上传票据。工作量最大，值得拆两次讲。 |
+| 6 | `render/gpu/`（compute + cull、hiz、occlusion、lod、shadow_build） | ~2380 | ⑤ compute（+ ④ HizPyramid） | **GPU-driven 核心**，学习目标第二核心。六处 compute 骨架下沉的 `compute.rs` 是总钥匙，先读它再逐个环节。 |
+| 7 | `render/pipeline/` + `render/shading/` | ~6720 | ④ + ⑤ 图形/全屏 | 图形管线族：pipeline_handle（建管线 + 绑定与 viewport 录制助手）、fullscreen_pipeline（全屏管线 + 全屏 pass 录制）、graphics_pipeline、shadow、gbuffer、post、smaa、cluster、light_table。"装备库"性质，建议先读前两个，其余按想先看的效果挑顺序。 |
+| 8 | `scene/content/` + `scene/mechanism/`（ledger、residency、collect_report 优先） | ~5730（优先三件 ~1810） | CPU 侧账本（驱动 ③ 增删） | Bevy 侧账本：一份资产两份真身（CPU 容器 + GPU 显存）、两层索引账（Ledger 行按实体粒度 / residency 按资产粒度）。大世界流送第三核心。 |
+| 9 | `driver/host/frame.rs`（draw_frame）+ `frame_sync.rs` + `render/pipeline/frames.rs`（record_frame） | ~2750 | 五类全部（消费方） | 终点验收考场：质量复盘把 draw_frame 从 1065 行拆到 350 行、record_frame 从 1958 行拆到 1109 行（提交 bd48cb0a2 口径）。前八站读完后，这里的每一行都能对上前面的某个标准件——读它就是全库复盘。 |
 
-行数为 2026-10-27 实测 `wc -l` 快照，仅供量力安排，不作为长期口径。
+行数为 2026-10-28 实测 `wc -l` 快照（main=fb74ff2cc），仅供量力安排，不作为长期口径。
 
 ## 边界
 
