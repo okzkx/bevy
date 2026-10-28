@@ -38,6 +38,7 @@ use crate::common::error::{Result, VulkanError};
 
 use super::images::{sampler_key, GpuImage, ImageSpec};
 use crate::render::core::device::memory::{BufferRole, GpuBuffer, MemoryContract};
+use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc};
 use super::uploader::{StagingImageCopy, UploadBatch, Uploader};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
@@ -432,28 +433,12 @@ impl BindlessTables {
             ubo.write(0, &pack_frame_uniforms(&identity_frame_uniforms()))?;
             frame_ubos.push(ubo);
         }
-        let ubo_infos: Vec<vk::DescriptorBufferInfo> = frame_ubos
-            .iter()
-            .map(|ubo| {
-                vk::DescriptorBufferInfo::default()
-                    .buffer(ubo.buffer())
-                    .offset(0)
-                    .range(FRAME_UBO_SIZE)
-            })
-            .collect();
-        let writes: Vec<vk::WriteDescriptorSet> = frame_sets
-            .iter()
-            .zip(&ubo_infos)
-            .map(|(set, info)| {
-                vk::WriteDescriptorSet::default()
-                    .dst_set(*set)
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .buffer_info(std::slice::from_ref(info))
-            })
-            .collect();
-        // # Safety:set 与 info 均合法,Vulkan 写入契约由参数构造保证
-        unsafe { device.update_descriptor_sets(&writes, &[]) };
+        // 写入过声明校验（FRAME_SET b0 = UBO，写满才提交）
+        for (set, ubo) in frame_sets.iter().zip(&frame_ubos) {
+            let mut writer = DescriptorWriter::new(&FRAME_SET, *set);
+            writer.buffer(0, ubo.buffer(), 0, FRAME_UBO_SIZE);
+            writer.submit(device)?;
+        }
         // ---- 6) fallback:白 1×1(UNORM 线性白 = 任意色彩域的安全缺省)走普通
         // 上传链进 GPU,占 0 号双槽;真实贴图从 1 号起分槽。跨族设备 CONCURRENT
         // 双族(与生产贴图同款) ----
@@ -628,31 +613,12 @@ impl BindlessTables {
                 slot
             }
         };
-        let image_info = vk::DescriptorImageInfo::default()
-            .image_view(view)
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-        let sampler_info = vk::DescriptorImageInfo::default()
-            .sampler(self.sampler_bodies[&sampler_slot]);
-        // # Safety:set 常驻、binding 0/1 带 UAB 旗标,写入经 update_descriptor_sets 合法
-        unsafe {
-            self.device.update_descriptor_sets(
-                &[
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(self.resident_set)
-                        .dst_binding(0)
-                        .dst_array_element(texture)
-                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                        .image_info(std::slice::from_ref(&image_info)),
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(self.resident_set)
-                        .dst_binding(1)
-                        .dst_array_element(sampler_slot)
-                        .descriptor_type(vk::DescriptorType::SAMPLER)
-                        .image_info(std::slice::from_ref(&sampler_info)),
-                ],
-                &[],
-            );
-        }
+        // 按槽发布（UAB 数组元素写入），种类/元素界过声明校验；PARTIALLY_BOUND
+        // 集不做写满要求
+        let mut writer = DescriptorWriter::new(&BINDLESS_SET, self.resident_set);
+        writer.image_at(0, texture, view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        writer.sampler_at(1, sampler_slot, self.sampler_bodies[&sampler_slot]);
+        writer.submit(&self.device)?;
         Ok(SlotBinding {
             texture,
             sampler: sampler_slot,

@@ -5,6 +5,7 @@ use ash::{vk, Device};
 
 use crate::common::error::{Result, VulkanError};
 
+use super::descriptor_writer::DescriptorWriter;
 use super::set_layout::SetLayoutDesc;
 
 /// 建 pool 并逐槽分配、写入描述符集：`slots[i][b]` 写进第 i 集的 binding b。
@@ -53,30 +54,14 @@ pub(crate) unsafe fn create_sets<const N: usize>(
                 return Err(e.into());
             }
         };
-        let infos: Vec<vk::DescriptorBufferInfo> = slots
-            .iter()
-            .flatten()
-            .map(|buffer| {
-                vk::DescriptorBufferInfo::default()
-                    .buffer(*buffer)
-                    .offset(0)
-                    .range(vk::WHOLE_SIZE)
-            })
-            .collect();
-        let writes: Vec<vk::WriteDescriptorSet> = sets
-            .iter()
-            .zip(infos.chunks(N))
-            .flat_map(|(set, infos)| {
-                infos.iter().enumerate().map(|(b, info)| {
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(*set)
-                        .dst_binding(b as u32)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(std::slice::from_ref(info))
-                })
-            })
-            .collect();
-        device.update_descriptor_sets(&writes, &[]);
+        // 写入过声明校验（每个 binding 单个 STORAGE_BUFFER，写满才提交）
+        for (set, buffers) in sets.iter().zip(slots) {
+            let mut writer = DescriptorWriter::new(desc, *set);
+            for (b, buffer) in buffers.iter().enumerate() {
+                writer.buffer(b as u32, *buffer, 0, vk::WHOLE_SIZE);
+            }
+            writer.submit(device)?;
+        }
         Ok((pool, sets))
     }
 }

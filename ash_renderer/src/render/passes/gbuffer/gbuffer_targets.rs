@@ -29,6 +29,7 @@ use bevy::log::info;
 use crate::common::error::{Result, VulkanError};
 use crate::render::Context;
 use crate::render::core::target::color::{ColorTarget, HDR_FORMAT};
+use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc};
 
 /// albedo 附件格式（线性 8bit——G-buffer 存采样端已解码的线性反照率，
@@ -349,54 +350,20 @@ unsafe fn build_sampling_inner(
                 return Err(VulkanError::from(e));
             }
         };
-        // 先收集所有 image_info（ owned，WriteDescriptorSet 借用它们——
-        // 集合生命周期覆盖 update_descriptor_sets 调用）
-        let mut infos: Vec<Vec<vk::DescriptorImageInfo>> = Vec::with_capacity(sets.len());
-        for ((_, slot), depth_view) in sets.iter().zip(slots).zip(depth_views) {
-            let image_info = |view: vk::ImageView| {
-                vk::DescriptorImageInfo::default()
-                    .image_view(view)
-                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            };
-            infos.push(vec![
-                image_info(slot.albedo.view()),
-                image_info(slot.normal.view()),
-                image_info(slot.hdr.view()),
+        // 写入过声明校验：种类按 GBUFFER_SAMPLED_SET 核对，写满才提交
+        for ((set, slot), depth_view) in sets.iter().zip(slots).zip(depth_views) {
+            let mut writer = DescriptorWriter::new(&GBUFFER_SAMPLED_SET, *set);
+            writer
+                .image(SAMPLED_BINDING_ALBEDO, slot.albedo.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image(SAMPLED_BINDING_NORMAL, slot.normal.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image(SAMPLED_BINDING_HDR, slot.hdr.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 // 深度布局与帧编排的转只读目标一致（VUID-00344：描述符布局
                 // 须与 draw 时实际布局一致——DEPTH_READ_ONLY 非 SHADER_READ_ONLY）
-                vk::DescriptorImageInfo::default()
-                    .image_view(*depth_view)
-                    .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL),
-                image_info(slot.matparam.view()),
-                vk::DescriptorImageInfo::default().sampler(sampler),
-            ]);
+                .image(SAMPLED_BINDING_DEPTH, *depth_view, vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+                .image(SAMPLED_BINDING_MATPARAM, slot.matparam.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .sampler(SAMPLED_BINDING_SAMPLER, sampler);
+            writer.submit(device)?;
         }
-        let bindings = [
-            SAMPLED_BINDING_ALBEDO,
-            SAMPLED_BINDING_NORMAL,
-            SAMPLED_BINDING_HDR,
-            SAMPLED_BINDING_DEPTH,
-            SAMPLED_BINDING_MATPARAM,
-            SAMPLED_BINDING_SAMPLER,
-        ];
-        let writes: Vec<vk::WriteDescriptorSet> = sets
-            .iter()
-            .zip(&infos)
-            .flat_map(|(set, infos)| {
-                bindings.iter().zip(infos).map(|(binding, info)| {
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(*set)
-                        .dst_binding(*binding)
-                        .descriptor_type(if *binding == SAMPLED_BINDING_SAMPLER {
-                            vk::DescriptorType::SAMPLER
-                        } else {
-                            vk::DescriptorType::SAMPLED_IMAGE
-                        })
-                        .image_info(std::slice::from_ref(info))
-                })
-            })
-            .collect();
-        device.update_descriptor_sets(&writes, &[]);
         info!(
             "G-buffer 采样集就绪: b0 albedo / b1 normal / b2 hdr / b3 depth / b4 线性采样器 / b5 matparam × {} 帧槽（{}x{}）",
             depth_views.len(),

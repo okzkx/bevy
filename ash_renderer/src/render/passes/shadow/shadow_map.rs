@@ -23,6 +23,7 @@ use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 use crate::render::core::target::depth::DepthTarget;
 use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::resident::instance_table::INSTANCE_SET;
@@ -180,70 +181,25 @@ impl ShadowTargets {
                 })?;
             // 描述符写入：b0 UBO（逐槽）、b1..4 深度图 sampled view（全槽同源
             // ——固定尺寸图不随帧变）、b5 标记 / b6..9 命令环（逐槽）。
-            // 两段式：先收全部 info（记账索引），再统一造 writes——避免
-            // "push 下一条时上一条的 last() 借用还活着"的借用交叠。
-            let mut image_infos: Vec<vk::DescriptorImageInfo> = Vec::new();
-            let mut buffer_infos: Vec<vk::DescriptorBufferInfo> = Vec::new();
-            // (set 索引, binding, 类型, info 在其向量里的下标)
-            let mut plan: Vec<(usize, u32, vk::DescriptorType, usize, bool)> = Vec::new();
+            // 写入过声明校验（种类按 SHADOW_SET 核对，写满才提交）。
             for slot in 0..slots {
-                buffer_infos.push(
-                    vk::DescriptorBufferInfo::default()
-                        .buffer(self.ubos[slot].buffer())
-                        .offset(0)
-                        .range(vk::WHOLE_SIZE),
-                );
-                plan.push((slot, SHADOW_BINDING_UNIFORM, vk::DescriptorType::UNIFORM_BUFFER,
-                    buffer_infos.len() - 1, true));
+                let mut writer = DescriptorWriter::new(&SHADOW_SET, self.sets[slot]);
+                writer.buffer(SHADOW_BINDING_UNIFORM, self.ubos[slot].buffer(), 0, vk::WHOLE_SIZE);
                 for (c, map) in self.maps.iter().enumerate() {
-                    image_infos.push(
-                        vk::DescriptorImageInfo::default()
-                            .image_view(map.view)
-                            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-                    );
-                    plan.push((slot, SHADOW_BINDING_MAP0 + c as u32, vk::DescriptorType::SAMPLED_IMAGE,
-                        image_infos.len() - 1, false));
+                    writer.image(SHADOW_BINDING_MAP0 + c as u32, map.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
                 }
                 // b5 = 单份交错标记环（[槽][cascade]）
-                buffer_infos.push(
-                    vk::DescriptorBufferInfo::default()
-                        .buffer(self.marks[slot].buffer())
-                        .offset(0)
-                        .range(vk::WHOLE_SIZE),
-                );
-                plan.push((slot, SHADOW_BINDING_MARK0, vk::DescriptorType::STORAGE_BUFFER,
-                    buffer_infos.len() - 1, true));
+                writer.buffer(SHADOW_BINDING_MARK0, self.marks[slot].buffer(), 0, vk::WHOLE_SIZE);
                 for c in 0..SHADOW_CASCADES {
-                    buffer_infos.push(
-                        vk::DescriptorBufferInfo::default()
-                            .buffer(self.commands[slot * SHADOW_CASCADES + c].buffer())
-                            .offset(0)
-                            .range(vk::WHOLE_SIZE),
+                    writer.buffer(
+                        SHADOW_BINDING_CMD0 + c as u32,
+                        self.commands[slot * SHADOW_CASCADES + c].buffer(),
+                        0,
+                        vk::WHOLE_SIZE,
                     );
-                    plan.push((slot, SHADOW_BINDING_CMD0 + c as u32, vk::DescriptorType::STORAGE_BUFFER,
-                        buffer_infos.len() - 1, true));
                 }
+                writer.submit(device)?;
             }
-            let writes: Vec<vk::WriteDescriptorSet> = plan
-                .iter()
-                .map(|&(slot, binding, ty, idx, is_buffer)| {
-                    let set = self.sets[slot];
-                    if is_buffer {
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(set)
-                            .dst_binding(binding)
-                            .descriptor_type(ty)
-                            .buffer_info(&buffer_infos[idx..idx + 1])
-                    } else {
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(set)
-                            .dst_binding(binding)
-                            .descriptor_type(ty)
-                            .image_info(&image_infos[idx..idx + 1])
-                    }
-                })
-                .collect();
-            device.update_descriptor_sets(&writes, &[]);
         }
         Ok(())
     }

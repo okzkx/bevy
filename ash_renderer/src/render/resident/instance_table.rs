@@ -48,6 +48,7 @@ use crate::common::bytes::{put_f32s, put_mat4, put_u32, put_u32s, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
 use crate::render::core::device::memory::{align_up, BufferRole, GpuBuffer, MemoryContract};
+use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc};
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
@@ -450,7 +451,6 @@ impl InstanceTables {
     ) -> Result<(vk::DescriptorSetLayout, Vec<vk::DescriptorSet>, vk::DescriptorPool)> {
         unsafe {
             let set2_layout = INSTANCE_SET.create(device)?;
-            let binding_count = INSTANCE_SET.bindings.len();
             let instance_pool_sizes = INSTANCE_SET.pool_sizes_vec(MAX_FRAMES_IN_FLIGHT as u32);
             let pool = match device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
@@ -478,82 +478,25 @@ impl InstanceTables {
             };
             // 描述符一次写入:b0 对象表(全量)、b1..b9 各帧槽自己的环(全量)。
             // info 先收齐再构造 write——write 持有 info 的引用,infos 之后不再变
-            let mut infos = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * binding_count);
-            let mut meta = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT * binding_count);
+            // 写入过声明校验：b0..b9 全部 STORAGE_BUFFER，每份集写满才提交
             for (frame, set) in sets.iter().enumerate() {
+                let mut writer = DescriptorWriter::new(&INSTANCE_SET, *set);
+                writer.buffer(0, object_buffer.buffer(), 0, OBJECT_TABLE_CAPACITY as u64 * OBJECT_RECORD_SIZE);
                 for (binding, buffer, range) in [
-                    (
-                        0u32,
-                        object_buffer,
-                        OBJECT_TABLE_CAPACITY as u64 * OBJECT_RECORD_SIZE,
-                    ),
-                    (
-                        1,
-                        &model_rings[frame],
-                        OBJECT_TABLE_CAPACITY as u64 * MODEL_STRIDE,
-                    ),
-                    (
-                        2,
-                        &material_rings[frame],
-                        MATERIAL_TABLE_CAPACITY as u64 * MATERIAL_RECORD_SIZE,
-                    ),
-                    (
-                        3,
-                        &mark_rings[frame],
-                        OBJECT_TABLE_CAPACITY as u64 * MARK_SIZE,
-                    ),
-                    (
-                        4,
-                        &presence_rings[frame],
-                        OBJECT_TABLE_CAPACITY as u64 * PRESENCE_ENTRY_SIZE,
-                    ),
-                    (
-                        5,
-                        &command_rings[frame],
-                        OBJECT_TABLE_CAPACITY as u64 * INDIRECT_COMMAND_SIZE,
-                    ),
-                    (
-                        6,
-                        &occ_mark_rings[frame],
-                        OBJECT_TABLE_CAPACITY as u64 * OCC_MARK_SIZE,
-                    ),
-                    (
-                        7,
-                        &lod_table_rings[frame],
-                        OBJECT_TABLE_CAPACITY as u64 * LOD_TABLE_STRIDE,
-                    ),
-                    (
-                        8,
-                        &lod_level_rings[frame],
-                        OBJECT_TABLE_CAPACITY as u64 * LOD_LEVEL_SIZE,
-                    ),
-                    (
-                        9,
-                        &gap_mark_rings[frame],
-                        OBJECT_TABLE_CAPACITY as u64 * GAP_MARK_SIZE,
-                    ),
+                    (1u32, &model_rings[frame], OBJECT_TABLE_CAPACITY as u64 * MODEL_STRIDE),
+                    (2, &material_rings[frame], MATERIAL_TABLE_CAPACITY as u64 * MATERIAL_RECORD_SIZE),
+                    (3, &mark_rings[frame], OBJECT_TABLE_CAPACITY as u64 * MARK_SIZE),
+                    (4, &presence_rings[frame], OBJECT_TABLE_CAPACITY as u64 * PRESENCE_ENTRY_SIZE),
+                    (5, &command_rings[frame], OBJECT_TABLE_CAPACITY as u64 * INDIRECT_COMMAND_SIZE),
+                    (6, &occ_mark_rings[frame], OBJECT_TABLE_CAPACITY as u64 * OCC_MARK_SIZE),
+                    (7, &lod_table_rings[frame], OBJECT_TABLE_CAPACITY as u64 * LOD_TABLE_STRIDE),
+                    (8, &lod_level_rings[frame], OBJECT_TABLE_CAPACITY as u64 * LOD_LEVEL_SIZE),
+                    (9, &gap_mark_rings[frame], OBJECT_TABLE_CAPACITY as u64 * GAP_MARK_SIZE),
                 ] {
-                    infos.push(
-                        vk::DescriptorBufferInfo::default()
-                            .buffer(buffer.buffer())
-                            .offset(0)
-                            .range(range),
-                    );
-                    meta.push((*set, binding));
+                    writer.buffer(binding, buffer.buffer(), 0, range);
                 }
+                writer.submit(device)?;
             }
-            let writes: Vec<vk::WriteDescriptorSet> = meta
-                .iter()
-                .zip(&infos)
-                .map(|((set, binding), info)| {
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(*set)
-                        .dst_binding(*binding)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(std::slice::from_ref(info))
-                })
-                .collect();
-            device.update_descriptor_sets(&writes, &[]);
             Ok((set2_layout, sets.to_vec(), pool))
         }
     }

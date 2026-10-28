@@ -20,7 +20,7 @@ use crate::render::passes::post::smaa::{
     SMAA_A_SET, SMAA_BLEND_PIPELINE, SMAA_B_SET, SMAA_EDGE_PIPELINE, SMAA_NEIGHBORHOOD_PIPELINE,
 };
 use crate::render::passes::shadow::shadow_build::SHADOW_BUILD_PIPELINE;
-use crate::render::passes::shadow::shadow_map::{SHADOW_SET, SHADOW_WRITE_PIPELINE};
+use crate::render::passes::shadow::shadow_map::{SHADOW_SET, SHADOW_WRITE_PIPELINE, SHADOW_BINDING_UNIFORM};
 use crate::render::passes::transparent::{
     TRANSPARENT_COLLECT_PIPELINE, TRANSPARENT_FORWARD_PIPELINE, TRANSPARENT_GATHER_PIPELINE, TRANSPARENT_SET,
     TRANSPARENT_SORT_PIPELINE,
@@ -280,6 +280,51 @@ fn pool_sizes_and_flags_derive_from_declarations() {
     // UAB pool 旗标从声明推导：bindless 要，frame 不要
     assert!(BINDLESS_SET.needs_uab_pool());
     assert!(!FRAME_SET.needs_uab_pool());
+}
+
+#[test]
+fn writer_validates_writes_against_declaration() {
+    use crate::common::error::VulkanError;
+    use crate::render::core::binding::descriptor_writer::DescriptorWriter;
+    use crate::render::passes::shadow::shadow_map::SHADOW_SET;
+
+    // 合法写入：shadow 集 b0 UBO + 4 张图 + 5 storage，一次写满
+    let set = vk::DescriptorSet::from_raw(7);
+    let mut w = DescriptorWriter::new(&SHADOW_SET, set);
+    w.buffer(0, vk::Buffer::from_raw(1), 0, 64);
+    for c in 0..4u32 {
+        w.image(1 + c, vk::ImageView::from_raw(10 + c as u64), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        w.buffer(6 + c, vk::Buffer::from_raw(20 + c as u64), 0, 128);
+    }
+    w.buffer(5, vk::Buffer::from_raw(30), 0, 128);
+    assert!(w.check().is_ok());
+
+    // 种类错：往 UBO 槽写图
+    let mut w = DescriptorWriter::new(&SHADOW_SET, set);
+    w.image(SHADOW_BINDING_UNIFORM, vk::ImageView::from_raw(1), vk::ImageLayout::GENERAL);
+    assert!(matches!(w.check(), Err(VulkanError::Init(_))));
+
+    // binding 不存在
+    let mut w = DescriptorWriter::new(&SHADOW_SET, set);
+    w.buffer(99, vk::Buffer::from_raw(1), 0, 4);
+    assert!(w.check().is_err());
+
+    // 完备性：b1..b4 没写
+    let mut w = DescriptorWriter::new(&SHADOW_SET, set);
+    w.buffer(0, vk::Buffer::from_raw(1), 0, 4);
+    let e = w.check().unwrap_err().to_string();
+    assert!(e.contains("b1：声明要求写满 1 个，还缺 1"), "{e}");
+
+    // PARTIALLY_BOUND 不要求写满：bindless 只按槽发布
+    let mut w = DescriptorWriter::new(&BINDLESS_SET, set);
+    w.image_at(0, 5, vk::ImageView::from_raw(1), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+    w.sampler_at(1, 5, vk::Sampler::from_raw(2));
+    assert!(w.check().is_ok());
+
+    // 数组元素越界
+    let mut w = DescriptorWriter::new(&BINDLESS_SET, set);
+    w.image_at(0, TABLE_CAPACITY, vk::ImageView::from_raw(1), vk::ImageLayout::GENERAL);
+    assert!(w.check().is_err());
 }
 
 #[test]

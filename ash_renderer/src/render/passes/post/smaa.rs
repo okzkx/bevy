@@ -25,6 +25,7 @@ use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 use crate::render::core::target::color::ColorTarget;
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
+use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 
@@ -43,14 +44,18 @@ const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
 const VS_FS: vk::ShaderStageFlags = stages(&[vk::ShaderStageFlags::VERTEX, FS]);
 
 /// edge/blend 共用：b0 主纹理 / b1 参数 UBO（VS 也读）/ b2 采样器 / b3、b4 两张辅助纹理。
+/// b3/b4 只有 blend 集写（search/area 查找表），edge 集不写不读——标 PARTIALLY_BOUND
+/// 免除写满要求，shader 侧也只有 blend 声明并访问它们。
 pub(crate) static SMAA_A_SET: SetLayoutDesc = SetLayoutDesc::new(
     "smaa_a",
     &[
         BindingDesc::new(SMAA_BINDING_TEX0, DescKind::SampledImage, FS),
         BindingDesc::new(SMAA_BINDING_INFO, DescKind::UniformBuffer, VS_FS),
         BindingDesc::new(SMAA_BINDING_SAMPLER, DescKind::Sampler, FS),
-        BindingDesc::new(SMAA_BINDING_TEX1, DescKind::SampledImage, FS),
-        BindingDesc::new(SMAA_BINDING_TEX2, DescKind::SampledImage, FS),
+        BindingDesc::new(SMAA_BINDING_TEX1, DescKind::SampledImage, FS)
+            .array(1, vk::DescriptorBindingFlags::PARTIALLY_BOUND),
+        BindingDesc::new(SMAA_BINDING_TEX2, DescKind::SampledImage, FS)
+            .array(1, vk::DescriptorBindingFlags::PARTIALLY_BOUND),
     ],
 );
 
@@ -296,96 +301,36 @@ impl SmaaTargets {
                 .descriptor_pool(self.pool)
                 .set_layouts(&std::iter::repeat_n(self.set_layout_b, slots).collect::<Vec<_>>()),
         )?;
-        // 三组集逐槽写（plan 两段式，照 ShadowTargets 纪律）
-        let mut image_infos: Vec<vk::DescriptorImageInfo> = Vec::new();
-        let mut buf_infos: Vec<vk::DescriptorBufferInfo> = Vec::new();
-        let mut plan: Vec<(usize, u32, vk::DescriptorType, usize, bool)> = Vec::new();
-        let push_img = |infos: &mut Vec<vk::DescriptorImageInfo>,
-                        view: vk::ImageView,
-                        is_sampler: bool,
-                        plan: &mut Vec<(usize, u32, vk::DescriptorType, usize, bool)>,
-                        set_i: usize,
-                        binding: u32| {
-            let info = if is_sampler {
-                vk::DescriptorImageInfo::default().sampler(self.sampler)
-            } else {
-                vk::DescriptorImageInfo::default()
-                    .image_view(view)
-                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            };
-            infos.push(info);
-            plan.push((
-                set_i,
-                binding,
-                if is_sampler { vk::DescriptorType::SAMPLER } else { vk::DescriptorType::SAMPLED_IMAGE },
-                infos.len() - 1,
-                false,
-            ));
-        };
+        // 三组集逐槽写，写入过声明校验（种类按 SMAA_A_SET / SMAA_B_SET 核对）
+        let ro = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+        let info_buf = |slot: usize| self.infos[slot % MAX_FRAMES_IN_FLIGHT].buffer();
         for slot in 0..slots {
-            // edge set：b0 ldr
-            push_img(&mut image_infos, self.ldrs[slot].view(), false, &mut plan, slot, SMAA_BINDING_TEX0);
-            self.push_buf(&mut buf_infos, &mut plan, slot, SMAA_BINDING_INFO);
-            push_img(&mut image_infos, vk::ImageView::null(), true, &mut plan, slot, SMAA_BINDING_SAMPLER);
+            // edge set：b0 ldr + b1 参数 + b2 采样器
+            let mut edge = DescriptorWriter::new(&SMAA_A_SET, self.sets_edge[slot]);
+            edge.image(SMAA_BINDING_TEX0, self.ldrs[slot].view(), ro)
+                .sampler(SMAA_BINDING_SAMPLER, self.sampler)
+                .buffer(SMAA_BINDING_INFO, info_buf(slot), 0, vk::WHOLE_SIZE);
+            edge.submit(device)?;
             // blend set：b0 edges + b3 search + b4 area
-            let si = slots + slot;
-            push_img(&mut image_infos, self.edges[slot].view(), false, &mut plan, si, SMAA_BINDING_TEX0);
-            self.push_buf(&mut buf_infos, &mut plan, si, SMAA_BINDING_INFO);
-            push_img(&mut image_infos, vk::ImageView::null(), true, &mut plan, si, SMAA_BINDING_SAMPLER);
-            push_img(&mut image_infos, self.search_lut.view(), false, &mut plan, si, SMAA_BINDING_TEX1);
-            push_img(&mut image_infos, self.area_lut.view(), false, &mut plan, si, SMAA_BINDING_TEX2);
+            let mut blend = DescriptorWriter::new(&SMAA_A_SET, self.sets_blend[slot]);
+            blend
+                .image(SMAA_BINDING_TEX0, self.edges[slot].view(), ro)
+                .sampler(SMAA_BINDING_SAMPLER, self.sampler)
+                .image(SMAA_BINDING_TEX1, self.search_lut.view(), ro)
+                .image(SMAA_BINDING_TEX2, self.area_lut.view(), ro)
+                .buffer(SMAA_BINDING_INFO, info_buf(slot), 0, vk::WHOLE_SIZE);
+            blend.submit(device)?;
             // nb set：b0 ldr + b3 blend + b4 blend 采样器
-            let ni = 2 * slots + slot;
-            push_img(&mut image_infos, self.ldrs[slot].view(), false, &mut plan, ni, SMAA_BINDING_TEX0);
-            self.push_buf(&mut buf_infos, &mut plan, ni, SMAA_BINDING_INFO);
-            push_img(&mut image_infos, vk::ImageView::null(), true, &mut plan, ni, SMAA_BINDING_SAMPLER);
-            push_img(&mut image_infos, self.blends[slot].view(), false, &mut plan, ni, SMAA_BINDING_TEX1);
-            push_img(&mut image_infos, vk::ImageView::null(), true, &mut plan, ni, SMAA_BINDING_TEX2);
+            let mut nb = DescriptorWriter::new(&SMAA_B_SET, self.sets_nb[slot]);
+            nb.image(SMAA_BINDING_TEX0, self.ldrs[slot].view(), ro)
+                .sampler(SMAA_BINDING_SAMPLER, self.sampler)
+                .image(SMAA_BINDING_TEX1, self.blends[slot].view(), ro)
+                .sampler(SMAA_BINDING_TEX2, self.sampler)
+                .buffer(SMAA_BINDING_INFO, info_buf(slot), 0, vk::WHOLE_SIZE);
+            nb.submit(device)?;
         }
-        let all: Vec<vk::DescriptorSet> = self
-            .sets_edge
-            .iter()
-            .chain(self.sets_blend.iter())
-            .chain(self.sets_nb.iter())
-            .copied()
-            .collect();
-        let writes: Vec<vk::WriteDescriptorSet> = plan
-            .iter()
-            .map(|&(set_i, binding, ty, idx, is_buf)| {
-                if is_buf {
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(all[set_i])
-                        .dst_binding(binding)
-                        .descriptor_type(ty)
-                        .buffer_info(&buf_infos[idx..idx + 1])
-                } else {
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(all[set_i])
-                        .dst_binding(binding)
-                        .descriptor_type(ty)
-                        .image_info(&image_infos[idx..idx + 1])
-                }
-            })
-            .collect();
-        device.update_descriptor_sets(&writes, &[]);
         Ok(())
         }
-    }
-
-    fn push_buf(
-        &self,
-        buf_infos: &mut Vec<vk::DescriptorBufferInfo>,
-        plan: &mut Vec<(usize, u32, vk::DescriptorType, usize, bool)>,
-        set_i: usize,
-        binding: u32,
-    ) {
-        buf_infos.push(
-            vk::DescriptorBufferInfo::default()
-                .buffer(self.infos[set_i % MAX_FRAMES_IN_FLIGHT].buffer())
-                .offset(0)
-                .range(vk::WHOLE_SIZE),
-        );
-        plan.push((set_i, binding, vk::DescriptorType::UNIFORM_BUFFER, buf_infos.len() - 1, true));
     }
 
     /// 随 swapchain 重建（闸门③，幂等）：三目标销毁重建 + pool reset 后重分配

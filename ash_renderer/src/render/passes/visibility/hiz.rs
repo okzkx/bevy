@@ -33,6 +33,7 @@ use crate::common::error::{Result, VulkanError};
 use crate::render::resident::images::full_mip_chain;
 use crate::render::core::pipeline::compute::ComputePipeline;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
+use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::core::device::readback::OneShotReadback;
@@ -695,45 +696,28 @@ impl HizPyramid {
         // 逐源对应（VUID-00344：描述符声明的 layout 须与 image 实际布局一致）
         // ——level 0/1 源 = 深度附件（DEPTH_READ_ONLY，frame_draw.rs 帧尾屏障落位；
         // [0] 槽位不派发），其余 = 金字塔（恒 GENERAL）
-        let mut image_infos = Vec::with_capacity(sets_total * 2);
-        let mut meta = Vec::with_capacity(sets_total * 2);
+        // 写入过声明校验：b0 sampled / b1 storage（种类按 HIZ_REDUCE_SET 核对，
+        // 写满才提交）；布局声明逐源对应（VUID-00344）——level 0/1 源 = 深度附件
+        //（DEPTH_READ_ONLY，frame_draw.rs 帧尾屏障落位；[0] 槽位不派发），
+        // 其余 = 金字塔（恒 GENERAL）
         for slot in 0..crate::render::MAX_FRAMES_IN_FLIGHT {
             for level in 0..self.levels as usize {
                 let set = sets[slot * self.levels as usize + level];
-                image_infos.push(
-                    vk::DescriptorImageInfo::default()
-                        .image_view(self.views[slot].src[level])
-                        .image_layout(if level <= 1 {
+                let mut writer = DescriptorWriter::new(&HIZ_REDUCE_SET, set);
+                writer
+                    .image(
+                        0,
+                        self.views[slot].src[level],
+                        if level <= 1 {
                             vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
                         } else {
                             vk::ImageLayout::GENERAL
-                        }),
-                );
-                meta.push((set, 0u32, false));
-                image_infos.push(
-                    vk::DescriptorImageInfo::default()
-                        .image_view(self.views[slot].storage[level])
-                        .image_layout(vk::ImageLayout::GENERAL),
-                );
-                meta.push((set, 1u32, true));
+                        },
+                    )
+                    .image(1, self.views[slot].storage[level], vk::ImageLayout::GENERAL);
+                writer.submit(device)?;
             }
         }
-        let writes: Vec<vk::WriteDescriptorSet> = meta
-            .iter()
-            .zip(&image_infos)
-            .map(|((set, binding, storage), info)| {
-                vk::WriteDescriptorSet::default()
-                    .dst_set(*set)
-                    .dst_binding(*binding)
-                    .descriptor_type(if *storage {
-                        vk::DescriptorType::STORAGE_IMAGE
-                    } else {
-                        vk::DescriptorType::SAMPLED_IMAGE
-                    })
-                    .image_info(std::slice::from_ref(info))
-            })
-            .collect();
-        unsafe { device.update_descriptor_sets(&writes, &[]) };
         self.reduction.sets = sets;
         Ok(())
     }
@@ -772,28 +756,11 @@ impl HizPyramid {
             )
         }
         .map_err(VulkanError::from)?;
-        let image_infos: Vec<vk::DescriptorImageInfo> = self
-            .views
-            .iter()
-            .map(|v| {
-                vk::DescriptorImageInfo::default()
-                    .image_view(v.occlusion)
-                    .image_layout(vk::ImageLayout::GENERAL)
-            })
-            .collect();
-        let writes: Vec<vk::WriteDescriptorSet> = self
-            .occlusion_sets
-            .iter()
-            .zip(&image_infos)
-            .map(|(set, info)| {
-                vk::WriteDescriptorSet::default()
-                    .dst_set(*set)
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                    .image_info(std::slice::from_ref(info))
-            })
-            .collect();
-        unsafe { device.update_descriptor_sets(&writes, &[]) };
+        for (set, views) in self.occlusion_sets.iter().zip(&self.views) {
+            let mut writer = DescriptorWriter::new(&HIZ_OCCLUSION_SET, *set);
+            writer.image(0, views.occlusion, vk::ImageLayout::GENERAL);
+            writer.submit(device)?;
+        }
         Ok(())
     }
 

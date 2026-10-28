@@ -23,6 +23,7 @@ use crate::render::{Context, HDR_FORMAT, MAX_FRAMES_IN_FLIGHT};
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::target::color::ColorTarget;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
+use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{merged_pool_sizes, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET;
@@ -332,97 +333,42 @@ impl BloomTargets {
         self.sets_down = alloc(self.set_layout_tex, (n - 1) * slots)?;
         self.sets_up = alloc(self.set_layout_up, (n - 1) * slots)?;
         self.sets_params = alloc(self.set_layout_up, slots)?;
-        let mut infos: Vec<vk::DescriptorImageInfo> = Vec::new();
-        let mut buf_infos: Vec<vk::DescriptorBufferInfo> = Vec::new();
-        let mut plan: Vec<(usize, u32, vk::DescriptorType, usize, bool)> = Vec::new();
-        let push_img = |infos: &mut Vec<vk::DescriptorImageInfo>,
-                        view: vk::ImageView,
-                        plan: &mut Vec<(usize, u32, vk::DescriptorType, usize, bool)>,
-                        set_i: usize,
-                        binding: u32| {
-            infos.push(
-                vk::DescriptorImageInfo::default()
-                    .image_view(view)
-                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-            );
-            plan.push((set_i, binding, vk::DescriptorType::SAMPLED_IMAGE, infos.len() - 1, false));
-        };
+        // 写入过声明校验：down/up/params 三段各自收集、写满提交（种类按
+        // BLOOM_TEX_SET / BLOOM_UP_SET 核对）
+        let ro = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
         for i in 1..n {
             for slot in 0..slots {
                 let set_i = (i - 1) * slots + slot;
-                push_img(&mut infos, self.down[i - 1].view(), &mut plan, set_i, BLOOM_BINDING_TEX0);
-                infos.push(
-                    vk::DescriptorImageInfo::default().sampler(sampler),
-                );
-                plan.push((set_i, BLOOM_BINDING_SAMPLER, vk::DescriptorType::SAMPLER,
-                    infos.len() - 1, false));
+                let mut writer = DescriptorWriter::new(&BLOOM_TEX_SET, self.sets_down[set_i]);
+                writer.image(BLOOM_BINDING_TEX0, self.down[i - 1].view(), ro);
+                writer.sampler(BLOOM_BINDING_SAMPLER, sampler);
+                writer.submit(device)?;
             }
         }
         for i in 0..n - 1 {
             for slot in 0..slots {
-                let set_i = (n - 1) * slots + i * slots + slot;
+                let set_i = i * slots + slot;
                 let up_src = if i + 1 == n - 1 { self.down[n - 1].view() } else { self.up[i + 1].view() };
-                push_img(&mut infos, up_src, &mut plan, set_i, BLOOM_BINDING_TEX0);
-                push_img(&mut infos, self.down[i].view(), &mut plan, set_i, BLOOM_BINDING_TEX1);
-                infos.push(vk::DescriptorImageInfo::default().sampler(sampler));
-                plan.push((set_i, BLOOM_BINDING_SAMPLER, vk::DescriptorType::SAMPLER,
-                    infos.len() - 1, false));
-                buf_infos.push(
-                    vk::DescriptorBufferInfo::default()
-                        .buffer(self.ubos[slot].buffer())
-                        .offset(0)
-                        .range(vk::WHOLE_SIZE),
-                );
-                plan.push((set_i, BLOOM_BINDING_PARAMS, vk::DescriptorType::UNIFORM_BUFFER,
-                    buf_infos.len() - 1, true));
+                let mut writer = DescriptorWriter::new(&BLOOM_UP_SET, self.sets_up[set_i]);
+                writer
+                    .image(BLOOM_BINDING_TEX0, up_src, ro)
+                    .image(BLOOM_BINDING_TEX1, self.down[i].view(), ro)
+                    .sampler(BLOOM_BINDING_SAMPLER, sampler)
+                    .buffer(BLOOM_BINDING_PARAMS, self.ubos[slot].buffer(), 0, vk::WHOLE_SIZE);
+                writer.submit(device)?;
             }
         }
         for slot in 0..slots {
-            let set_i = (n - 1) * 2 * slots + slot;
-            push_img(&mut infos, self.up[0].view(), &mut plan, set_i, BLOOM_BINDING_TEX0);
-            push_img(&mut infos, self.up[0].view(), &mut plan, set_i, BLOOM_BINDING_TEX1);
-            infos.push(vk::DescriptorImageInfo::default().sampler(sampler));
-            plan.push((set_i, BLOOM_BINDING_SAMPLER, vk::DescriptorType::SAMPLER,
-                infos.len() - 1, false));
-            buf_infos.push(
-                vk::DescriptorBufferInfo::default()
-                    .buffer(self.ubos[slot].buffer())
-                    .offset(0)
-                    .range(vk::WHOLE_SIZE),
-            );
-            plan.push((set_i, BLOOM_BINDING_PARAMS, vk::DescriptorType::UNIFORM_BUFFER,
-                buf_infos.len() - 1, true));
+            let mut writer = DescriptorWriter::new(&BLOOM_UP_SET, self.sets_params[slot]);
+            writer
+                .image(BLOOM_BINDING_TEX0, self.up[0].view(), ro)
+                .image(BLOOM_BINDING_TEX1, self.up[0].view(), ro)
+                .sampler(BLOOM_BINDING_SAMPLER, sampler)
+                .buffer(BLOOM_BINDING_PARAMS, self.ubos[slot].buffer(), 0, vk::WHOLE_SIZE);
+            writer.submit(device)?;
         }
-        let writes: Vec<vk::WriteDescriptorSet> = plan
-            .iter()
-            .map(|&(set_i, binding, ty, idx, is_buf)| {
-                if is_buf {
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(self.all_sets()[set_i])
-                        .dst_binding(binding)
-                        .descriptor_type(ty)
-                        .buffer_info(&buf_infos[idx..idx + 1])
-                } else {
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(self.all_sets()[set_i])
-                        .dst_binding(binding)
-                        .descriptor_type(ty)
-                        .image_info(&infos[idx..idx + 1])
-                }
-            })
-            .collect();
-        device.update_descriptor_sets(&writes, &[]);
         Ok(())
         }
-    }
-
-    fn all_sets(&self) -> Vec<vk::DescriptorSet> {
-        self.sets_down
-            .iter()
-            .chain(self.sets_up.iter())
-            .chain(self.sets_params.iter())
-            .copied()
-            .collect()
     }
 
     /// 升采样集布局（up 管线与 tonemap 的 bloom 输入集共用）。
