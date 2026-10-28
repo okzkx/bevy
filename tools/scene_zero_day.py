@@ -81,20 +81,14 @@ def parse_glb(path):
 
     import math
 
-    def xform(m, p):
-        x, y, z = p
-        return (
-            m[0] * x + m[4] * y + m[8] * z + m[12],
-            m[1] * x + m[5] * y + m[9] * z + m[13],
-            m[2] * x + m[6] * y + m[10] * z + m[14],
-        )
+    nodes = gltf.get("nodes", [])
+    world_matrices = _node_world_matrices(nodes)
 
-    ident = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
     mins, maxs = [1e30] * 3, [-1e30] * 3
-    for node in gltf.get("nodes", []):
+    for node_index, node in enumerate(nodes):
         if "mesh" not in node:
             continue
-        m = node.get("matrix", ident)
+        m = world_matrices[node_index]
         mesh = gltf["meshes"][node["mesh"]]
         for prim in mesh.get("primitives", []):
             acc = gltf["accessors"][prim["attributes"]["POSITION"]]
@@ -108,7 +102,7 @@ def parse_glb(path):
                 (acc["min"][0], acc["max"][1], acc["max"][2]),
                 (acc["max"][0], acc["max"][1], acc["max"][2]),
             ]:
-                w = xform(m, corner)
+                w = _xform(m, corner)
                 for i in range(3):
                     mins[i] = min(mins[i], w[i])
                     maxs[i] = max(maxs[i], w[i])
@@ -117,6 +111,53 @@ def parse_glb(path):
         "primitives": prims, "materials": mats, "images": imgs,
         "mins": mins, "maxs": maxs, "diag": diag,
     }
+
+
+def _mat_mul(a, b):
+    return [sum(a[k * 4 + row] * b[col * 4 + k] for k in range(4))
+            for col in range(4) for row in range(4)]
+
+
+def _node_local_matrix(node):
+    if "matrix" in node:
+        return node["matrix"]
+    tx, ty, tz = node.get("translation", [0.0, 0.0, 0.0])
+    x, y, z, w = node.get("rotation", [0.0, 0.0, 0.0, 1.0])
+    sx, sy, sz = node.get("scale", [1.0, 1.0, 1.0])
+    return [
+        (1 - 2 * (y*y + z*z)) * sx, (2 * (x*y + z*w)) * sx, (2 * (x*z - y*w)) * sx, 0.0,
+        (2 * (x*y - z*w)) * sy, (1 - 2 * (x*x + z*z)) * sy, (2 * (y*z + x*w)) * sy, 0.0,
+        (2 * (x*z + y*w)) * sz, (2 * (y*z - x*w)) * sz, (1 - 2 * (x*x + y*y)) * sz, 0.0,
+        tx, ty, tz, 1.0,
+    ]
+
+
+def _node_world_matrices(nodes):
+    parents = {}
+    for parent, node in enumerate(nodes):
+        for child in node.get("children", []):
+            parents[child] = parent
+    world = {}
+
+    def resolve(index):
+        if index not in world:
+            local = _node_local_matrix(nodes[index])
+            parent = parents.get(index)
+            world[index] = _mat_mul(resolve(parent), local) if parent is not None else local
+        return world[index]
+
+    for index in range(len(nodes)):
+        resolve(index)
+    return world
+
+
+def _xform(m, p):
+    x, y, z = p
+    return (
+        m[0] * x + m[4] * y + m[8] * z + m[12],
+        m[1] * x + m[5] * y + m[9] * z + m[13],
+        m[2] * x + m[6] * y + m[10] * z + m[14],
+    )
 
 
 def wait_brp(seconds=60):

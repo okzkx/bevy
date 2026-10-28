@@ -121,7 +121,7 @@ def iter_processes():
     import csv
     import io
     out = subprocess.run(
-        ["tasklist", "/FI", "IMAGENAME eq ash_renderer.exe", "/FO", "CSV", "/NH"],
+        ["tasklist", "/FI", f"IMAGENAME eq {HOST_NAME}", "/FO", "CSV", "/NH"],
         capture_output=True,
     ).stdout.decode("gbk", errors="replace")
     rows = []

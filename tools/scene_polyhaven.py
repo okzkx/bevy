@@ -246,17 +246,16 @@ def main():
         else:
             check("②b/②c", False, "used_image_bytes 未填充（fine_grained 未生效？）")
 
-    print("\n== ③ 真 PBR 读图（四件同场对照）==")
-    # 四件一字排开（set_transform 摆位），同光源对照
-    ents = rpc("world.query", {"data": {"components": []},
-                               "filter": {"with": ["bevy_transform::components::global_transform::GlobalTransform"]}})
-    x = -3.0
-    for name, prims, mats, imgs in ASSETS:
-        pass  # 摆位需要每件根实体；简化 = 相机环拍四件自然落位
+    print("\n== ③ 真 PBR 视觉对照（待人工复核）==")
     rpc("ash_renderer/set_camera", {"target": [0.0, 0.8, 0.0], "yaw_deg": 60, "pitch_deg": 8, "radius": 4.0})
     time.sleep(2.5)
     if host_pid is not None:
-        capture(host_pid, os.path.join(REPO, ".temp", "7.3", "polyhaven_lineup.png"))
+        shot = os.path.join(REPO, ".temp", "7.3", "polyhaven_lineup.png")
+        capture(host_pid, shot)
+        check("③ 截图证据已生成（四种 PBR 材质外观未由脚本判定）", os.path.isfile(shot), shot)
+        print("  [NEEDS VISUAL REVIEW] 确认四个 asset 是否均可见且 roughness/metalness/normal 差异可辨；脚本只留截图，不计外观通过")
+    else:
+        print("  [NEEDS VISUAL REVIEW] 既有实例未取截图；脚本未判定 PBR 画面差异")
 
     print("\n== ④ 零 VUID（仅脚本自启的宿主有日志可查）==")
     if host_pid is not None and not args.skip_launch:

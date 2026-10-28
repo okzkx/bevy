@@ -120,7 +120,7 @@ def iter_processes():
     import csv
     import io
     out = subprocess.run(
-        ["tasklist", "/FI", "IMAGENAME eq ash_renderer.exe", "/FO", "CSV", "/NH"],
+        ["tasklist", "/FI", f"IMAGENAME eq {HOST_NAME}", "/FO", "CSV", "/NH"],
         capture_output=True,
     ).stdout.decode("gbk", errors="replace")
     rows = []
@@ -208,8 +208,10 @@ def main():
     c_on = read_census()
     counts = c_on["level_counts"]
     print(f"  档位分布 {counts}，rows={c_on['rows_compared']}，dispatched={c_on['bound'] > 0}")
-    check("① 选档生效（最高档 > 0，远处实例被派粗档）", max(counts) > 0 and counts[0] >= 1,
-          f"counts={counts}")
+    coarse_candidates = [row for row in c_on["rows"] if row.get("in_group") and row.get("raw", 0) > 0]
+    check("① 选档生效（驻留的粗档候选至少一行实际选到粗档）",
+          any(row.get("gpu", 0) > 0 for row in coarse_candidates),
+          f"candidates={len(coarse_candidates)} coarse={sum(row.get('gpu', 0) > 0 for row in coarse_candidates)} counts={counts}")
 
     print("\n== ② CPU 参照逐实例一致（同一公式 + 同一迟滞状态）==")
     check("② mismatches == 0（静止场景收敛一致）", len(c_on["mismatches"]) == 0,
