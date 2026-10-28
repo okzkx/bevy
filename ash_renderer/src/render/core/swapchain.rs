@@ -1,17 +1,7 @@
-//! Swapchain：resize 级生命周期。
+//! 交换链：窗口尺寸一变就整体重建，images、views、格式、尺寸全换。
 //!
-//! 生命周期四层里的"resize 级"（VulkanContext字段释义：从Entry到Swapchain.md §12）：窗口尺寸一变整体重建，
-//! images/views/format/extent 全换。帧槽对象（fence / image_available / 命令缓冲）跨重建
-//! 复用；而 render_finished（present-wait 信号量）**按 image 分配**、挂在本结构
-//! 下随重建换血——同一 image 再次被 acquire 即证明上一轮 present 已被消费完，这是
-//! 唯一有依据的复用闸门，帧槽轮转给不了这个保证（详见 frames.rs 模块注释）。
-//!
-//! `pre_transform`/`composite_alpha`/`present_mode` 等选型与创建链一致：
-//! MAILBOX 优先（FIFO 兜底）、BGRA8_UNORM 优先、EXCLUSIVE 共享、clipped。
-//!
-//! 输出编码定案：image 保持 UNORM 底板，view 套 SRGB 别名当渲染附件（needs
-//! `VK_KHR_swapchain_mutable_format` + VkImageFormatListCreateInfo，见 `new` 内定案
-//! 注释）——`view_format` 字段承载"底板 vs 渲染 view"两个格式。
+//! 帧槽对象（fence、image_available、命令缓冲）跨重建复用，不归这里管；
+//! render_finished 信号量按 image 分配，挂在本结构下随重建一起换（原因见 `pipeline/frames.rs` 模块注释）。
 
 use ash::{khr::swapchain, vk, Device};
 use bevy::log::info;
@@ -19,20 +9,21 @@ use bevy::log::info;
 use crate::common::error::{Result, VulkanError};
 use crate::render::Context;
 
-/// acquire 的三种结局。SUBOPTIMAL 拿得到图但下次要重建——照常渲染完这帧再重建。
+/// acquire 成功的两种结局（OUT_OF_DATE 走 `Err`）。`Suboptimal` 也拿到了图：照常画完这帧，之后再重建。
 #[derive(Debug, Clone, Copy)]
 pub enum AcquireOutcome {
     Ready(u32),
     Suboptimal(u32),
 }
 
-/// present 的结局：SUBOPTIMAL 同样是"这张已交出，重建下帧再说"。
+/// present 成功的两种结局。`Suboptimal` 表示这帧已交出，之后需要重建。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentOutcome {
     Done,
     Suboptimal,
 }
 
+/// `Swapchain::new` 中途失败时的回滚护栏：析构时销毁已建成的对象；成功后把句柄取走，析构即空操作。
 struct SwapchainBuildGuard {
     fns: swapchain::Device,
     device: Device,
@@ -60,26 +51,23 @@ impl Drop for SwapchainBuildGuard {
 #[derive(bevy::prelude::Resource)]
 pub struct Swapchain {
     fns: swapchain::Device,
-    /// image view 的创建/销毁在 Device 上（core 1.0），自持一份供 Drop 用
+    /// 销毁 image view 和信号量要用
     device: Device,
     pub swapchain: vk::SwapchainKHR,
     pub images: Vec<vk::Image>,
     pub views: Vec<vk::ImageView>,
-    /// 按 image index 分配的 present-wait 信号量（render_finished）。
-    /// 帧循环（`driver::host`）按 acquire 返回的 index 取用，**不是**按帧槽轮转；生命周期与
-    /// swapchain 绑定，重建时随旧 image 集合一起销毁。
+    /// present 等待的信号量，每张 image 一个。坑：按 acquire 返回的 image index 取用，不是按帧槽轮转。
     pub render_finished: Vec<vk::Semaphore>,
-    /// swapchain 底板格式（present engine 的母语；present 路径不碰 view）。
+    /// swapchain image 本身的格式，present 直接读它。
     pub format: vk::Format,
-    /// 渲染附件 view 的格式：底板 UNORM 时的 SRGB 别名（输出编码定案）——
-    /// 写入时 ROP 自动编码；别名不可用时 == `format`（缺位形态，重建日志有 warn）。
+    /// 渲染时写入用的 view 格式：通常是 `format` 的 SRGB 版本，写入时硬件自动做 sRGB 编码；
+    /// 不支持时等于 `format`。
     pub view_format: vk::Format,
     pub extent: vk::Extent2D,
 }
 
 impl Swapchain {
-    /// UNORM 底板 → SRGB 别名候选：color attachment 支持查过才用（支持与启用
-    /// 分开），不满足回退 None（调用方回退 UNORM 直出并 warn）。
+    /// 设备支持把 `srgb` 当颜色附件才返回它，否则 `None`。
     fn srgb_alias_if_supported(ctx: &Context, srgb: vk::Format) -> Option<vk::Format> {
         let features = unsafe {
             ctx.instance
@@ -91,10 +79,11 @@ impl Swapchain {
             .then_some(srgb)
     }
 
+    /// 按窗口当前尺寸建交换链。偏好 BGRA8_UNORM 格式、MAILBOX 呈现模式（不支持时退回 FIFO）。
     pub fn new(ctx: &Context) -> Result<Self> {
         let fns = swapchain::Device::new(&ctx.instance, &ctx.device);
 
-        // 每次重建都重查 caps：current_extent 是驱动认定的窗口尺寸，唯一的权威来源
+        // 每次重建都重查：current_extent 是驱动认定的窗口尺寸，以它为准
         let caps = unsafe {
             ctx.surface_fns
                 .get_physical_device_surface_capabilities(ctx.physical_device, ctx.surface)
@@ -111,16 +100,9 @@ impl Swapchain {
             .find(|f| f.format == vk::Format::B8G8R8A8_UNORM)
             .copied()
             .unwrap_or(formats[0]);
-        // 输出编码定案（与 context.rs 的 swapchain_mutable_format 扩展配套）：
-        // swapchain image 保持 UNORM 底板，view 用 SRGB 别名当渲染附件——写入时由
-        // ROP 自动做线性→sRGB 编码（blend 在编码前，仍是线性域），present 直接读
-        // image 本体不经 view，编码结果原样上屏。别名合法性三件套：
-        // ① 设备扩展（context.rs 已查+启用）；② 创建时挂 VkImageFormatListCreateInfo
-        // 声明双格式（swapchain image 由此按 MUTABLE_FORMAT 形态创建）；③ SRGB 变体
-        // 的 color attachment 支持查过才用（支持与启用分开），不满足回退 UNORM 直出
-        // 并响亮记日志——输出编码缺位会在受光中间调上显形（偏暗），不能静默。
-        // R8G8B8A8_UNORM 底板（移动/部分平台常见）同享 SRGB 别名分支——
-        // 缺此分支则该平台的输出编码契约静默降级
+        // image 用 UNORM 格式，渲染时套同一张图的 SRGB view 写入，写入时自动做 sRGB 编码，present 读 image 原样上屏。
+        // 合法需要三样：context.rs 启用的 mutable_format 扩展、下面的格式清单和 MUTABLE_FORMAT 旗标、SRGB 格式支持当颜色附件。
+        // 坑：拿不到 SRGB view 时画面会整体偏暗，所以要记 warn，不能静默退回
         let srgb_alias = match surface_format.format {
             vk::Format::B8G8R8A8_UNORM => {
                 Self::srgb_alias_if_supported(ctx, vk::Format::B8G8R8A8_SRGB)
@@ -136,8 +118,8 @@ impl Swapchain {
         } else {
             bevy::log::warn!("输出编码缺位：swapchain {:?} 无 SRGB view 别名（扩展/格式支持不足），受光几何中间调将偏暗——输出编码定案未生效", surface_format.format);
         }
-        // 格式清单必须含 swapchain 自身格式（VUID-VkSwapchainCreateInfoKHR-pNext-07781
-        // 族的声明要求：viewFormats 覆盖创建格式）；pNext 结构须活到 create 返回
+        // 坑：格式清单必须包含 swapchain 自身格式（VUID-VkSwapchainCreateInfoKHR-pNext-07781）；
+        // format_list 和 format_list_info 必须活到 create_swapchain 返回（pNext 只存指针）
         let format_list: Vec<vk::Format> = match srgb_alias {
             Some(srgb) => vec![surface_format.format, srgb],
             None => vec![surface_format.format],
@@ -147,10 +129,8 @@ impl Swapchain {
         if caps.current_extent.width == u32::MAX {
             return Err(VulkanError::Init("current_extent 未定义（窗口尚未定型），不做显式尺寸回退".into()));
         }
-        // present mode：MAILBOX 优先。FIFO 的
-        // acquire 会在显示队列满/表面失配时阻塞（最小化死锁、拖拽冻结的根源）；
-        // MAILBOX 的 present 直接替换未上屏的帧、acquire 永不排队——拖拽中帧循环
-        // 持续流动。MAILBOX 不保证恒可用，FIFO 兜底（规范唯一保证）。
+        // MAILBOX 优先：新帧直接替换还没上屏的帧，acquire 不排队。
+        // 坑：FIFO 的 acquire 在显示队列满时会阻塞，造成最小化死锁和拖拽窗口冻结；FIFO 只作必有的兜底
         let present_modes = unsafe {
             ctx.surface_fns
                 .get_physical_device_surface_present_modes(ctx.physical_device, ctx.surface)
@@ -160,8 +140,7 @@ impl Swapchain {
         } else {
             vk::PresentModeKHR::FIFO
         };
-        // MAILBOX 的语义要 ≥3 张 image 才成立（呈现中 + 被替换的入队帧 + 可 acquire），
-        // min+1 通常恰为 3；不足则加到 3（仍尊重 max_image_count）。
+        // MAILBOX 至少要 3 张 image：一张在显示、一张排队待替换、一张给下一帧画；同时不超过驱动上限
         let mut image_count = caps.min_image_count + 1;
         if present_mode == vk::PresentModeKHR::MAILBOX && image_count < 3 {
             image_count = 3;
@@ -185,9 +164,7 @@ impl Swapchain {
                     .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
                     .present_mode(present_mode)
                     .clipped(true)
-                    // 双格式清单必须配本旗标：swapchain image 由此按 MUTABLE_FORMAT
-                    // 形态创建，SRGB view 别名才合法（VUID-VkSwapchainCreateInfoKHR-
-                    // flags-01977；验证层实抓）
+                    // 坑：有 SRGB view 时必须带这个旗标，否则验证层报 VUID-VkSwapchainCreateInfoKHR-flags-01977
                     .flags(if srgb_alias.is_some() {
                         vk::SwapchainCreateFlagsKHR::MUTABLE_FORMAT
                     } else {
@@ -224,7 +201,6 @@ impl Swapchain {
             }?);
         }
 
-        // Present-wait semaphore 按 image 分配，生命周期与 swapchain 一致。
         guard.semaphores.reserve(images.len());
         for _ in &images {
             guard.semaphores.push(unsafe {
@@ -259,46 +235,39 @@ impl Swapchain {
         })
     }
 
-    /// resize 后重建。两个幂等出口：
-    /// - 最小化时 current_extent=0，建 0 尺寸 swapchain 非法——保留旧的，恢复后靠下一次 resize 消息重建；
-    /// - 尺寸没变且 swapchain 句柄非 null 就不动（空壳无论尺寸都重建）。
+    /// 窗口尺寸变化后重建。窗口最小化（尺寸为 0）或尺寸没变时什么都不做。
     ///
-    /// 单次真重建 ≈ 60ms（wait_idle+destroy+create）——调用方必须
-    /// 去抖（host::draw_frame 的 `ResizeGate`），不要在拖拽的每个尺寸步进上调用。
+    /// 坑：一次真重建约 60ms，调用方必须去抖（`driver/host/frame.rs` 的 `ResizeGate`），不要拖拽中每步都调。
     pub fn rebuild(&mut self, ctx: &Context) -> Result<()> {
         let caps = unsafe {
             ctx.surface_fns
                 .get_physical_device_surface_capabilities(ctx.physical_device, ctx.surface)
         }?;
+        // 0 尺寸不能建 swapchain：保留旧的，窗口恢复后会再收到 resize
         if caps.current_extent.width == 0 || caps.current_extent.height == 0 {
             info!("窗口最小化（extent=0），swapchain 暂不重建");
             return Ok(());
         }
-        // 尺寸相等只在 swapchain 仍在时可跳过：上次重建失败留下空壳（句柄
-        // null、extent 仍是旧值），窗口回到原尺寸若在此早退，之后每帧都拿
-        // null 句柄 acquire
+        // 坑：上次重建失败会留下空壳（句柄 null、extent 是旧值），尺寸相等也必须重建，否则之后每帧都拿 null 去 acquire
         if caps.current_extent == self.extent && self.swapchain != vk::SwapchainKHR::null() {
             return Ok(());
         }
-        // 在飞帧还在引用旧 image，必须先等全部完成再拆。WSI 边界：
-        // wait_idle 只保证队列操作完成，不担保 presentation engine 消费完
-        // render_finished；Win32 同一 hwnd 只容一个 swapchain，"先拆旧再建新"是
-        // 强制时序，旧件延迟回收在本平台不可行。
+        // 在飞帧还在用旧 image，先等 GPU 全部做完再拆。
+        // 坑：wait_idle 只保证队列做完，不保证显示端已用完 render_finished；但 Win32 同一窗口只能挂一个
+        // swapchain，只能先拆旧再建新，没法把旧的留到以后再回收
         unsafe { ctx.device.device_wait_idle() }?;
-        // Win32 的 WSI 限制：同一个 hwnd 同时只能挂一个 swapchain——
-        // 必须先拆旧再建新（`*self = Self::new(ctx)` 的 RHS 先求值，是"先建后拆"，必炸）
+        // 坑：不能直接写 `*self = Self::new(ctx)?`——右边先求值，会变成先建新再拆旧
         self.destroy();
-        *self = Self::new(ctx)?; // 失败时 self 已是空壳（句柄为 null），下次调用不论尺寸都重试
+        *self = Self::new(ctx)?; // 失败时 self 是空壳，下次调用不论尺寸都会重试
         Ok(())
     }
 
-    /// 销毁 views + render_finished + swapchain（幂等：句柄清 null 后重复调用是空操作）。
+    /// 销毁 views、信号量和 swapchain。可重复调用：拆完句柄清空，再调是空操作。
+    /// 不等 GPU，调用方要先保证没有在用的帧（见 `rebuild`）。
     fn destroy(&mut self) {
         for view in self.views.drain(..) {
             unsafe { self.device.destroy_image_view(view, None) };
         }
-        // 信号量先于 swapchain（创建的逆序）：present 引用的是两者，销毁顺序本身
-        // 不解除 present 在途的引用，安全边际由调用方的 wait_idle 时序承担（见 rebuild）
         for sem in self.render_finished.drain(..) {
             unsafe { self.device.destroy_semaphore(sem, None) };
         }
@@ -308,8 +277,8 @@ impl Swapchain {
         }
     }
 
-    /// 取下一张可绘 image（信号量在 present engine 拿到图时置位）。
-    /// `ERROR_OUT_OF_DATE_KHR` 折叠成 [`VulkanError::SwapchainOutOfDate`]。
+    /// 取下一张可画的 image；这张图真正可写时 `semaphore` 被置位。
+    /// OUT_OF_DATE 返回 [`VulkanError::SwapchainOutOfDate`]。
     pub fn acquire(&self, semaphore: vk::Semaphore) -> Result<AcquireOutcome> {
         match unsafe {
             self.fns
@@ -325,7 +294,8 @@ impl Swapchain {
         }
     }
 
-    /// 呈现：等渲染提交的 render_finished 信号量。
+    /// 等 `wait_semaphore`（该 image 的 render_finished）后把 image 交给显示。
+    /// OUT_OF_DATE 返回 [`VulkanError::SwapchainOutOfDate`]。
     pub fn present(
         &self,
         queue: vk::Queue,
@@ -357,9 +327,8 @@ impl Swapchain {
 
 impl Drop for Swapchain {
     fn drop(&mut self) {
-        // view 先于 swapchain。Device/Instance 的存活由拆除顺序保证：
-        // 正常退出走 driver::host 的 teardown_vulkan（FramePool → 本结构 → … → Context）；
-        // panic 时 Resource drop 顺序不定，进程本就注定终止。
+        // 依赖 Device 还活着：正常退出由 teardown_vulkan 保证先拆本结构、最后拆 Context；
+        // panic 时拆除顺序不定，不作保证
         self.destroy();
     }
 }
