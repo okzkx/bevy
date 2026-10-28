@@ -20,7 +20,7 @@
 | 4 | `render/core/barrier.rs` | ~100 | 不持有资源 | 图像布局屏障助手。体量最小杠杆最大：吃透"谁等谁、谁对谁可见"的屏障语义，后面读任何 pass 都能顺手校验屏障对不对。目前只有帧录制（`pipeline/frames.rs`）在用它；uploader、Hi-Z、回读仍直接调 `cmd_pipeline_barrier`，compute 侧另有 `Handoff` 助手，读到时用同一套语义校验。 |
 | 5 | `render/assets/`（descriptors、pool、instance_table、mesh_convert、uploader） | ~3910 | ③（+ ② Uploader） | **bindless 的心脏**，学习目标第一核心：GPU 常驻资源、描述符堆、实例表、上传票据。工作量最大，值得拆两次讲。 |
 | 6 | `render/gpu/`（compute + cull、hiz、occlusion、lod、shadow_build） | ~2380 | ⑤ compute（+ ④ HizPyramid） | **GPU-driven 核心**，学习目标第二核心。六处 compute 骨架下沉的 `compute.rs` 是总钥匙，先读它再逐个环节。 |
-| 7 | `render/pipeline/` + `render/shading/` | ~6720 | ④ + ⑤ 图形/全屏 | 图形管线族：pipeline_handle（建管线 + 绑定与 viewport 录制助手）、fullscreen_pipeline（全屏管线 + 全屏 pass 录制）、graphics_pipeline、shadow、gbuffer、post、smaa、cluster、light_table。"装备库"性质，建议先读前两个，其余按想先看的效果挑顺序。 |
+| 7 | `render/pipeline/` + `render/shading/` | ~6720 | ④ + ⑤ 图形/全屏 | 管线目录按帧内阶段分组：`base/`（pipeline_handle 建管线 + 绑定与 viewport 录制助手、fullscreen_pipeline 全屏管线骨架 + 全屏 pass 录制、颜色/深度目标、storage 描述符集）、`geometry/`（gbuffer、gbuffer_pipeline、transparent）、`lighting/`（cluster、shadow、composite_pipeline）、`post/`（bloom、present_tonemap_pipeline、smaa）、`overlay/`，外加 shading 的 light_table。"装备库"性质，建议先读 `base/`，其余按想先看的效果挑顺序。 |
 | 8 | `scene/content/` + `scene/mechanism/`（ledger、residency、collect_report 优先） | ~5730（优先三件 ~1810） | CPU 侧账本（驱动 ③ 增删） | Bevy 侧账本：一份资产两份真身（CPU 容器 + GPU 显存）、两层索引账（Ledger 行按实体粒度 / residency 按资产粒度）。大世界流送第三核心。 |
 | 9 | `driver/host/frame.rs`（draw_frame）+ `frame_sync.rs` + `render/pipeline/frames.rs`（record_frame） | ~2750 | 五类全部（消费方） | 终点验收考场：质量复盘把 draw_frame 从 1065 行拆到 350 行、record_frame 从 1958 行拆到 1109 行（提交 bd48cb0a2 口径）。前八站读完后，这里的每一行都能对上前面的某个标准件——读它就是全库复盘。 |
 
