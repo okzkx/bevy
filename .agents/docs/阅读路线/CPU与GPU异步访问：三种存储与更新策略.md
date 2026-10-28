@@ -55,7 +55,7 @@
 
 **这不是普通光源/材质逐帧改值的方法**：全设备等待会阻断并行，`swapchain.rs` 的源码注释给单次真重建约 60 ms 的量级（现场估值，不是通用基准）；适合低频结构变化。若只影响某帧槽且能证明它的 fence 已完成，方式二用较小粒度的等待，不必 `device_wait_idle`。也可针对相关提交做精确等待；“等待”是消除竞态的策略，`device_wait_idle` 只是本项目冷路径采取的一个较粗实例。
 
-**WSI 边界不能混同**：`device_wait_idle` 保证队列里的工作完成，**不自动证明呈现引擎已经消费了交换链相关的 `render_finished` 信号量**；不能把本图解释成所有 WSI 对象都可仅凭 idle 安全复用。具体交换链重建和呈现同步另按 `render/core/swapchain.rs` 与帧提交路径校验。
+**WSI 边界不能混同**：`device_wait_idle` 保证队列里的工作完成，**不自动证明呈现引擎已经消费了交换链相关的 `render_finished` 信号量**；不能把本图解释成所有 WSI 对象都可仅凭 idle 安全复用。具体交换链重建和呈现同步另按 `render/core/device/swapchain.rs` 与帧提交路径校验。
 
 ## 横向选择：份数和同步位置在哪里
 
@@ -81,5 +81,5 @@
 - [第 1 站：入口与初始化链](第1站：入口与初始化链.md#四lighttable-为什么每帧槽一份)：最初提出三种做法的阅读笔记；本文为详细机制正本。
 - `ash_renderer/src/render/resident/instance_table.rs`：对象表单 buffer、每槽描述符与旧槽 graveyard；`ash_renderer/src/driver/upload.rs`：换槽、staging 上传与回收节拍；`ash_renderer/src/render/resident/uploader.rs`：上传票据。
 - `ash_renderer/src/render/resident/light_table.rs`：光源双份环与脏行写次数；`ash_renderer/src/scene/mechanism/ledger.rs`：模型/LOD 各槽脏账；`ash_renderer/src/driver/host/drawlist.rs`：材质环全写。
-- `ash_renderer/src/driver/host/frame.rs`、`ash_renderer/src/render/frame/frame_pool.rs` 与 `ash_renderer/src/render/frame/frame_draw.rs`：当前帧槽等待、写环与提交；`ash_renderer/src/render/core/resources.rs`：HOST_VISIBLE、coherent 偏好及非 coherent flush/invalidate。
-- `ash_renderer/src/render/core/swapchain.rs`：冷路径排空、重建与 WSI 边界。本文只描述代码现状，不以文字代替 Vulkan 验证层及运行测试。
+- `ash_renderer/src/driver/host/frame.rs`、`ash_renderer/src/render/frame/frame_pool.rs` 与 `ash_renderer/src/render/frame/frame_draw.rs`：当前帧槽等待、写环与提交；`ash_renderer/src/render/core/device/memory.rs`：HOST_VISIBLE、coherent 偏好及非 coherent flush/invalidate。
+- `ash_renderer/src/render/core/device/swapchain.rs`：冷路径排空、重建与 WSI 边界。本文只描述代码现状，不以文字代替 Vulkan 验证层及运行测试。
