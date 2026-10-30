@@ -2,7 +2,7 @@
 
 本文登记 2026-10-27 定下的 ash_renderer 全库阅读顺序：沿一帧数据的生命周期分九站走，逐站按"讲意图与原理 + 随时提问质疑"的方式完成边看边学边校验。本文只管阅读顺序与各站校验要点，不主张任何代码改动；路上发现的问题按性质回填对应步骤或《待修复清单》，不在本路线内施工。
 
-> 进度：第 1～4 站已读完（2026-10-30）；分站笔记目前只有《[第1站：入口与初始化链](第1站：入口与初始化链.md)》，第 2～4 站没有单独沉淀。下一站 = 第 5 站上半（5a）。第 5～9 站的落点按 O1、O2 及其下游六件施工后的源码（main=51884896a）重排过，细读顺序见下文"第 5～9 站细读指引"。
+> 进度：第 1～4 站已读完（2026-10-30）；分站笔记有《[第1站：入口与初始化链](第1站：入口与初始化链.md)》与第 5 站上下两篇讲解正本（2026-10-30 写成，待逐段校验），第 2～4 站没有单独沉淀。下一站 = 第 5 站上半（5a）。第 5～9 站的落点按 O1、O2 及其下游六件施工后的源码（main=51884896a）重排过，细读顺序见下文"第 5～9 站细读指引"。
 
 ## 为什么是这个顺序
 
@@ -20,7 +20,7 @@
 | 2 | ✅ 已读 | `render/core/device/context.rs` | 605 | ① Context | instance/device/queue 创建与 Vulkan 特性开关。全库一切 Vulkan 调用的地基；"支持/启用/使用三件事"纪律的主战场。 |
 | 3 | ✅ 已读 | `render/core/device/swapchain.rs` + `render/frame/frame_sync_settings.rs` | ~390 | ① Swapchain + ② | present 模式、帧槽、UNORM+SRGB view 三件套。看懂"一帧占一槽、fence 管执行序"的节拍——后面所有跨帧问题都挂在这个模型上。 |
 | 4 | ✅ 已读 | `render/core/record/barrier.rs` | ~100 | 不持有资源 | 图像布局屏障助手。体量最小杠杆最大：吃透"谁等谁、谁对谁可见"的屏障语义，后面读任何 pass 都能顺手校验屏障对不对。目前帧录制（`frame/frame_draw.rs`）和全屏 pass 录制（`record/fullscreen.rs`）在用它；uploader、Hi-Z、回读仍直接调 `cmd_pipeline_barrier`，compute 侧另有 `Handoff` 助手（`record/compute.rs`），读到时用同一套语义校验。 |
-| 5 | ⏭ 下一站 | 5a `core/device/memory/` + `resident/` 的 uploader、pool、mesh_convert、images；5b `core/binding/` 的 set_layout、descriptor_writer + `resident/` 的 slot_allocator、bindless_tables、frame_uniforms、instance_table、light_table | ~5320（5a ~2850 / 5b ~2460） | ③（+ ② Uploader） | **bindless 的心脏**，学习目标第一核心。上半讲数据怎么进显存（内存契约、上传票据、mesh 大池、贴图缓存），下半讲 shader 怎么找到它们（set 声明、按声明校验的写入、bindless 表、实例表、光源表）。天然分两次讲。 |
+| 5 | ⏭ 下一站 | 5a `core/device/memory/` + `resident/` 的 uploader、pool、mesh_convert、images；5b `core/binding/` 的 set_layout、descriptor_writer + `resident/` 的 slot_allocator、bindless_texture_table、frame_uniforms、instance_table、light_table | ~5320（5a ~2850 / 5b ~2460） | ③（+ ② Uploader） | **bindless 的心脏**，学习目标第一核心。上半讲数据怎么进显存（内存契约、上传票据、mesh 大池、贴图缓存），下半讲 shader 怎么找到它们（set 声明、按声明校验的写入、bindless 表、实例表、光源表）。天然分两次讲。 |
 | 6 | 待读 | `core/binding/` 的 shader_abi、pipeline_layout + `build.rs` ABI 生成段 + `core/pipeline/compute.rs` + `core/record/compute.rs` + `passes/visibility/`（cull、hiz、occlusion、lod、indirect）+ `core/device/readback.rs` | ~2790 | ⑤ compute（+ ④ HizPyramid） | **GPU-driven 核心**，学习目标第二核心。先读"管线配方 → 与 shader ABI 对账 → 组装"这把总钥匙和 compute 骨架两半，再按录制顺序走可见性链。 |
 | 7 | 待读 | `core/` 的 pipeline（graphics、fullscreen）、record（graphics、fullscreen）、target、`binding/storage_sets.rs` + `passes/`（gbuffer、shadow、lighting、transparent、post、overlay）+ 收尾 `binding/layout_registry.rs` | ~5340 | ④ + ⑤ 图形/全屏 | "装备库"：先读图形/全屏的标准件，再按功能读 pass，功能之间按想先看的效果挑顺序；最后用契约登记表把 22 条管线、13 份 set 声明对一遍总账。 |
 | 8 | 待读 | `scene/content/` + `scene/mechanism/`（ledger、residency、collect_report 优先） | ~5770（优先三件 ~1810） | CPU 侧账本（驱动 ③ 增删） | Bevy 侧账本：一份资产两份真身（CPU 容器 + GPU 显存）、两层索引账（Ledger 行按实体粒度 / residency 按资产粒度）。大世界流送第三核心。 |
@@ -34,10 +34,12 @@
 
 ### 第 5 站：常驻资源与 bindless
 
+讲解正本：《[第5a站：bindless 数据怎么进显存](第5a站：bindless%20数据怎么进显存.md)》《[第5b站：shader 怎么找到它们](第5b站：shader%20怎么找到它们.md)》。
+
 **5a 数据进显存。**
 
 1. `core/device/memory/` 按 `role` → `contract` → `buffer` 读：`role.rs` 的 `BufferRole::spec` 是 8 种角色"usage + 必需属性 + 优先属性"的唯一一份表；`contract.rs` 的 `MemoryContract` 一次冻结设备内存事实，`find_type` 按规格选内存类型；`buffer.rs` 的 `GpuBuffer` 是全库 buffer 的唯一形态（恰量分配、持久映射、非 coherent 时自动 flush/invalidate）。本站所有表和池都只引用它们，不另立规则。
-2. `resident/uploader.rs`：`UploadBatch` 合批、`Ticket`（单调递增的 u64 票据）、staging 回收（`Release`/`ImageRelease`）。
+2. `resident/uploader.rs`：`UploadBatch` 合批、`Ticket`（单调递增的 u64 票据）、staging 两槽轮转（复用前等本槽上一张票据）。`Release`/`ImageRelease` 是队列族所有权让渡屏障，不是 staging 回收；生产路径按 CONCURRENT 共享，这两个列表恒空。
 3. `resident/pool.rs` + `mesh_convert.rs`：`MeshPool` 的 bump 分配、`MeshSlot`/`PoolRange`、维护账与回收账（`MaintenanceLedger`、`RecycleLedger`）；`mesh_convert` 把 Bevy `Mesh` 转成池内顶点格式。
 4. `resident/images.rs`：`ImageCache` 按资产身份驻留贴图，每张图一块 dedicated memory；`SamplerKey` 去重采样器。
 
@@ -47,7 +49,7 @@
 
 1. `core/binding/set_layout.rs`：`SetLayoutDesc` 静态声明（binding 编号/种类/数量/阶段/旗标），`create` 先跑宿主自检再建原生布局；`merged_pool_sizes` 从声明推导 descriptor pool 容量；`DescSet` 是带声明身份的集。
 2. `core/binding/descriptor_writer.rs`：每次写入按声明校验种类与元素界，`submit` 前查完备性——非 `PARTIALLY_BOUND` 的 binding 必须写满。
-3. `resident/bindless_tables.rs`：`BINDLESS_SET`（set0，UPDATE_AFTER_BIND + PARTIALLY_BOUND 的贴图/采样器表）、`BindlessTables`（采样器按参数去重并计引用）、`SlotBinding`；`resident/slot_allocator.rs`：三张表共用的槽位分配器（立即归还 / 延迟回收两种）；`resident/frame_uniforms.rs`：`FRAME_SET`（set1，每帧槽一份 UBO）、`FrameUniforms`、`FrameUniformsData`。
+3. `resident/bindless_texture_table.rs`：`BINDLESS_TEXTURE_SET`（set0，UPDATE_AFTER_BIND + PARTIALLY_BOUND 的贴图/采样器表）、`BindlessTextureTable`（采样器按参数去重并计引用）、`SlotBinding`；`resident/slot_allocator.rs`：三张表共用的槽位分配器（立即归还 / 延迟回收两种）；`resident/frame_uniforms.rs`：`FRAME_SET`（set1，每帧槽一份 UBO）、`FrameUniforms`、`FrameUniformsData`。
 4. `resident/instance_table.rs`：`INSTANCE_SET`（set2）与 `InstanceTables`；模块文档里的 hazard 纪律是第 9 站环写入的依据。
 5. `resident/light_table.rs`：`LightTable`、`LightRecord`；为什么有两份见第 1 站笔记。
 
