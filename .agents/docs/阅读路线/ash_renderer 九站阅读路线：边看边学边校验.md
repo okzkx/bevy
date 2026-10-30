@@ -7,7 +7,7 @@
 ## 为什么是这个顺序
 
 - **沿一帧数据走**：开机 → 地基 → 节拍 → 屏障 → 资产进显存并挂上 bindless → GPU 可见性骨架 → 管线装备 → 场景账本 → 帧录制。一帧数据怎么流，阅读顺序就怎么排。
-- **顺依赖方向**：顶层是 common → render → scene → {overlay∥remote} → driver（步骤 7~8 质量复盘无环化后的分层）；render 内部是 core/device → core/binding（set 声明）→ resident → core/binding（管线配方）+ core/pipeline + core/record → passes → frame。顺着读，每站引用到的"前方内容"都还没读到的困惑最少。O2 之后 `resident/` 直接依赖 `core/binding/` 的 set 声明与写入器，所以绑定契约拆成两半，分别放在第 5、6 站开头，不再整体压到第 7 站。
+- **顺依赖方向**：顶层是 common → render → scene → {overlay∥remote} → driver（步骤 7~8 质量复盘无环化后的分层）；render 内部是 core/device（含 transfer）→ core/binding（set 声明）→ resident → core/binding（管线配方）+ core/pipeline + core/record → passes → frame。顺着读，每站引用到的"前方内容"都还没读到的困惑最少。O2 之后 `resident/` 直接依赖 `core/binding/` 的 set 声明与写入器，所以绑定契约拆成两半，分别放在第 5、6 站开头，不再整体压到第 7 站。
 - **覆盖学习主线三核心**：bindless（第 5 站）、GPU-driven（第 6 站）、大世界流送（第 8 站），正好对应《学习目标实现步骤》的主线。
 
 ## 九站表
@@ -20,7 +20,7 @@
 | 2 | ✅ 已读 | `render/core/device/context.rs` | 605 | ① Context | instance/device/queue 创建与 Vulkan 特性开关。全库一切 Vulkan 调用的地基；"支持/启用/使用三件事"纪律的主战场。 |
 | 3 | ✅ 已读 | `render/core/device/swapchain.rs` + `render/frame/frame_sync_settings.rs` | ~390 | ① Swapchain + ② | present 模式、帧槽、UNORM+SRGB view 三件套。看懂"一帧占一槽、fence 管执行序"的节拍——后面所有跨帧问题都挂在这个模型上。 |
 | 4 | ✅ 已读 | `render/core/record/barrier.rs` | ~100 | 不持有资源 | 图像布局屏障助手。体量最小杠杆最大：吃透"谁等谁、谁对谁可见"的屏障语义，后面读任何 pass 都能顺手校验屏障对不对。目前帧录制（`frame/frame_draw.rs`）和全屏 pass 录制（`record/fullscreen.rs`）在用它；uploader、Hi-Z、回读仍直接调 `cmd_pipeline_barrier`，compute 侧另有 `Handoff` 助手（`record/compute.rs`），读到时用同一套语义校验。 |
-| 5 | ⏭ 下一站 | 5a `core/device/memory/` + `resident/` 的 uploader、pool、mesh_convert、images；5b `core/binding/` 的 set_layout、descriptor_writer + `resident/` 的 slot_allocator、bindless_texture_table、frame_uniform_table、instance_table、light_table | ~5320（5a ~2850 / 5b ~2460） | ③ GPU 表 + ④ 常驻池/缓存（+ ② Uploader） | **常驻资源主线**：表、池和缓存分别归③④；`FrameUniformTable` 职责归③，但在帧级初始化阶段创建。上半讲写入显存，下半讲 shader 如何查表取数；这是 bindless 的心脏、学习目标第一核心。|
+| 5 | ⏭ 下一站 | 5a `core/device/memory/`、`core/device/transfer.rs` + `resident/` 的 pool、mesh_convert、images；5b `core/binding/` 的 set_layout、descriptor_writer + `resident/` 的 slot_allocator、bindless_texture_table、frame_uniform_table、instance_table、light_table | ~5320（5a ~2850 / 5b ~2460） | device transfer + ③ GPU 表 + ④ 常驻池/缓存 | **常驻资源主线**：表、池和缓存分别归③④；`FrameUniformTable` 职责归③，但在帧级初始化阶段创建。上半讲写入显存，下半讲 shader 如何查表取数；这是 bindless 的心脏、学习目标第一核心。|
 | 6 | 待读 | `core/binding/` 的 shader_abi、pipeline_layout + `build.rs` ABI 生成段 + `core/pipeline/compute.rs` + `core/record/compute.rs` + `passes/visibility/`（cull、hiz、occlusion、lod、indirect）+ `core/device/readback.rs` | ~2790 | ⑥ compute（+ ⑤ HizPyramid） | **GPU-driven 核心**，学习目标第二核心。先读"管线配方 → 与 shader ABI 对账 → 组装"这把总钥匙和 compute 骨架两半，再按录制顺序走可见性链。 |
 | 7 | 待读 | `core/` 的 pipeline（graphics、fullscreen）、record（graphics、fullscreen）、target、`binding/storage_sets.rs` + `passes/`（gbuffer、shadow、lighting、transparent、post、overlay）+ 收尾 `binding/layout_registry.rs` | ~5340 | ⑤ + ⑥ 图形/全屏 | "装备库"：先读图形/全屏的标准件，再按功能读 pass，功能之间按想先看的效果挑顺序；最后用契约登记表把 22 条管线、13 份 set 声明对一遍总账。 |
 | 8 | 待读 | `scene/content/` + `scene/mechanism/`（ledger、residency、collect_report 优先） | ~5770（优先三件 ~1810） | CPU 侧账本（驱动 ③ GPU 表与 ④ 常驻池/缓存增删） | Bevy 侧账本：一份资产两份真身（CPU 容器 + GPU 显存）、两层索引账（Ledger 行按实体粒度 / residency 按资产粒度）。大世界流送第三核心。 |
@@ -39,7 +39,7 @@
 **5a 数据进显存。**
 
 1. `core/device/memory/` 按 `role` → `contract` → `buffer` 读：`role.rs` 的 `BufferRole::spec` 是 8 种角色"usage + 必需属性 + 优先属性"的唯一一份表；`contract.rs` 的 `MemoryContract` 一次冻结设备内存事实，`find_type` 按规格选内存类型；`buffer.rs` 的 `GpuBuffer` 是全库 buffer 的唯一形态（恰量分配、持久映射、非 coherent 时自动 flush/invalidate）。本站所有表和池都只引用它们，不另立规则。
-2. `resident/uploader.rs`：`UploadBatch` 合批、`Ticket`（单调递增的 u64 票据）、staging 两槽轮转（复用前等本槽上一张票据）。`Release`/`ImageRelease` 是队列族所有权让渡屏障，不是 staging 回收；生产路径按 CONCURRENT 共享，这两个列表恒空。
+2. `core/device/transfer.rs`：`UploadBatch` 合批、`Ticket`（单调递增的 u64 票据）、staging 两槽轮转（复用前等本槽上一张票据）。`Release`/`ImageRelease` 是队列族所有权让渡屏障，不是 staging 回收；生产路径按 CONCURRENT 共享，这两个列表恒空。
 3. `resident/pool.rs` + `mesh_convert.rs`：`MeshPool` 的 bump 分配、`MeshSlot`/`PoolRange`、维护账与回收账（`MaintenanceLedger`、`RecycleLedger`）；`mesh_convert` 把 Bevy `Mesh` 转成池内顶点格式。
 4. `resident/images.rs`：`ImageCache` 按资产身份驻留贴图，每张图一块 dedicated memory；`SamplerKey` 去重采样器。
 

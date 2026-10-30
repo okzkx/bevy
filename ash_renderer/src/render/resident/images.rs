@@ -3,12 +3,12 @@
 //! 三条机制约束来自显存机制篇判定线（.agents/docs/3-静态取数链路/3.3-贴图与bindless描述符/
 //! 显存机制：Buffer与Image之别、swizzle不透明与访问路径特化.md §0）：
 //! 1. OPTIMAL tiling image 的内容不能按字节读写——上传走 `vkCmdCopyBufferToImage`
-//!    （uploader.rs 的图像拷贝段），读回走 `vkCmdCopyImageToBuffer`；swizzle 重排由
+//!    （[`crate::render::core::device::transfer`] 的图像拷贝段），读回走 `vkCmdCopyImageToBuffer`；swizzle 重排由
 //!    copy 引擎完成，应用永不参与。
 //! 2. image 分配独立于 MeshPool：每张图一块 dedicated `VkDeviceMemory`（贴图张数少，
 //!    `maxMemoryAllocationCount`（本机 4096）余量充足；memory 层子分配等显存压力出现再立）。
 //! 3. layout 转换与 buffer 读写次序是两类问题——图像屏障携带 old/new layout 与子资源
-//!    范围，uploader 里图像段独立录制，不套 buffer barrier 模板。
+//!    范围，transfer 服务里图像段独立录制，不套 buffer barrier 模板。
 //!
 //! 格式与角色：glTF loader 已按 texture 语义决定 sRGB/线性
 //!（bevy_gltf/src/loader/mod.rs:1210 `is_srgb = !linear_textures.contains(..)`），
@@ -37,7 +37,7 @@ use thiserror::Error;
 use wgpu_types::{TextureDimension, TextureFormat};
 
 use crate::render::core::device::memory::contract::MemoryContract;
-use super::uploader::{Ticket, Uploader};
+use crate::render::core::device::transfer::{Ticket, Uploader};
 use crate::common::error::{Result, VulkanError};
 
 /// bevy `Image` → 渲染器规格的映射拒绝。Tier①：不影响帧循环，warn 一次跳过该资产

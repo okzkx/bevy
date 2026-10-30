@@ -46,7 +46,7 @@ DEVICE_LOCAL 目的地：MeshPool 顶点/索引池 · GpuImage · 对象表
 
 ## 二、上传器：staging 环 + 时间线票据
 
-`resident/uploader.rs` 的 `Uploader` 把一批拷贝合成**一次 transfer 提交**，完成后用时间线信号量的单调值（`Ticket`，u64）表达“这批数据什么时候能用”。
+`core/device/transfer.rs` 的 `Uploader` 把一批拷贝合成**一次 transfer 提交**，完成后用时间线信号量的单调值（`Ticket`，u64）表达“这批数据什么时候能用”。
 
 **构成**：2 个轮转槽（init 时定，每槽初始 1 MiB staging，按需整槽扩容），每槽 = 一块 staging + 一条 transfer 命令缓冲 + 一条 graphics 命令缓冲（mip 续批用）+ 本槽最后一张票据。
 
@@ -152,5 +152,5 @@ DEVICE_LOCAL 目的地：MeshPool 顶点/索引池 · GpuImage · 对象表
 ## 相关源码
 
 - `ash_renderer/src/render/core/device/memory/`：`role.rs`、`contract.rs`、`buffer.rs`。
-- `ash_renderer/src/render/resident/`：`uploader.rs`、`pool.rs`、`mesh_convert.rs`、`images.rs`。
+- `ash_renderer/src/render/core/device/transfer.rs`：`Uploader`、上传批次类型与 `Ticket`；`ash_renderer/src/render/resident/`：`pool.rs`、`mesh_convert.rs`、`images.rs`。
 - `ash_renderer/src/driver/upload.rs`：`flush_uploads` 编排（第 9 站细读）；`ash_renderer/src/render/frame/frame_draw.rs`：图形提交挂票据等待。

@@ -180,9 +180,9 @@ fn upload_lut(
         &spec,
         &sharing,
     )?;
-    let ticket = uploader.submit_batch(crate::render::resident::uploader::UploadBatch {
+    let ticket = uploader.submit_batch(crate::render::core::device::transfer::UploadBatch {
         staging: data,
-        image_uploads: vec![crate::render::resident::uploader::StagingImageCopy {
+        image_uploads: vec![crate::render::core::device::transfer::StagingImageCopy {
             image: gpu.image(),
             src_offset: 0,
             width: w,

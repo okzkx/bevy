@@ -23,7 +23,7 @@ use bevy::log::info;
 
 use super::images::{sampler_key, GpuImage, ImageSpec, SamplerKey};
 use super::slot_allocator::SlotAllocator;
-use super::uploader::{StagingImageCopy, UploadBatch, Uploader};
+use crate::render::core::device::transfer::{StagingImageCopy, UploadBatch, Uploader};
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
