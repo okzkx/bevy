@@ -12,19 +12,19 @@
 
 ## 九站表
 
-"对象类别"列用的是第 1 站笔记里的五类划分（①设备根 ②帧级执行件 ③常驻数据表 ④渲染目标 ⑤管线），标出每站主讲哪类 Vulkan 资源对象；逐个对象的归属见《[第1站：入口与初始化链](第1站：入口与初始化链.md)》。
+"对象类别"列用的是第 1 站笔记里的六类划分（①设备根 ②帧级执行件 ③GPU 表 ④常驻池与缓存 ⑤渲染目标 ⑥管线），标出每站主讲哪类 Vulkan 资源对象；逐个对象的归属见《[第1站：入口与初始化链](第1站：入口与初始化链.md)》。
 
 | 站 | 状态 | 落点 | 规模（行） | 对象类别 | 主题与校验要点 |
 |---|---|---|---|---|---|
-| 1 | ✅ 已读 | `main.rs` + `driver/host/init.rs` + `driver/host/mod.rs` | ~555 | 五类总览（创建方） | 入口与插件装配。看清渲染器以 Bevy 为宿主的插件拓扑；init 只当目录和依赖图读，不钻构造函数。量小热身。 |
+| 1 | ✅ 已读 | `main.rs` + `driver/host/init.rs` + `driver/host/mod.rs` | ~555 | 六类总览（创建方） | 入口与插件装配。看清渲染器以 Bevy 为宿主的插件拓扑；init 只当目录和依赖图读，不钻构造函数。量小热身。 |
 | 2 | ✅ 已读 | `render/core/device/context.rs` | 605 | ① Context | instance/device/queue 创建与 Vulkan 特性开关。全库一切 Vulkan 调用的地基；"支持/启用/使用三件事"纪律的主战场。 |
 | 3 | ✅ 已读 | `render/core/device/swapchain.rs` + `render/frame/frame_sync_settings.rs` | ~390 | ① Swapchain + ② | present 模式、帧槽、UNORM+SRGB view 三件套。看懂"一帧占一槽、fence 管执行序"的节拍——后面所有跨帧问题都挂在这个模型上。 |
 | 4 | ✅ 已读 | `render/core/record/barrier.rs` | ~100 | 不持有资源 | 图像布局屏障助手。体量最小杠杆最大：吃透"谁等谁、谁对谁可见"的屏障语义，后面读任何 pass 都能顺手校验屏障对不对。目前帧录制（`frame/frame_draw.rs`）和全屏 pass 录制（`record/fullscreen.rs`）在用它；uploader、Hi-Z、回读仍直接调 `cmd_pipeline_barrier`，compute 侧另有 `Handoff` 助手（`record/compute.rs`），读到时用同一套语义校验。 |
-| 5 | ⏭ 下一站 | 5a `core/device/memory/` + `resident/` 的 uploader、pool、mesh_convert、images；5b `core/binding/` 的 set_layout、descriptor_writer + `resident/` 的 slot_allocator、bindless_texture_table、frame_uniforms、instance_table、light_table | ~5320（5a ~2850 / 5b ~2460） | ③（+ ② Uploader） | **bindless 的心脏**，学习目标第一核心。上半讲数据怎么进显存（内存契约、上传票据、mesh 大池、贴图缓存），下半讲 shader 怎么找到它们（set 声明、按声明校验的写入、bindless 表、实例表、光源表）。天然分两次讲。 |
-| 6 | 待读 | `core/binding/` 的 shader_abi、pipeline_layout + `build.rs` ABI 生成段 + `core/pipeline/compute.rs` + `core/record/compute.rs` + `passes/visibility/`（cull、hiz、occlusion、lod、indirect）+ `core/device/readback.rs` | ~2790 | ⑤ compute（+ ④ HizPyramid） | **GPU-driven 核心**，学习目标第二核心。先读"管线配方 → 与 shader ABI 对账 → 组装"这把总钥匙和 compute 骨架两半，再按录制顺序走可见性链。 |
-| 7 | 待读 | `core/` 的 pipeline（graphics、fullscreen）、record（graphics、fullscreen）、target、`binding/storage_sets.rs` + `passes/`（gbuffer、shadow、lighting、transparent、post、overlay）+ 收尾 `binding/layout_registry.rs` | ~5340 | ④ + ⑤ 图形/全屏 | "装备库"：先读图形/全屏的标准件，再按功能读 pass，功能之间按想先看的效果挑顺序；最后用契约登记表把 22 条管线、13 份 set 声明对一遍总账。 |
-| 8 | 待读 | `scene/content/` + `scene/mechanism/`（ledger、residency、collect_report 优先） | ~5770（优先三件 ~1810） | CPU 侧账本（驱动 ③ 增删） | Bevy 侧账本：一份资产两份真身（CPU 容器 + GPU 显存）、两层索引账（Ledger 行按实体粒度 / residency 按资产粒度）。大世界流送第三核心。 |
-| 9 | 待读 | `driver/upload.rs` + `driver/host/drawlist.rs` + `driver/host/frame.rs`（draw_frame）+ `frame_sync.rs` + `render/frame/`（frame_pool、frame_draw 的 record_frame、render_mode） | ~4000 | 五类全部（消费方） | 终点验收考场：按 `Last` 调度的执行顺序读——上传编排 → DrawList 组装与环写入 → draw_frame → record_frame。前八站读完后，这里的每一行都能对上前面的某个标准件——读它就是全库复盘。 |
+| 5 | ⏭ 下一站 | 5a `core/device/memory/` + `resident/` 的 uploader、pool、mesh_convert、images；5b `core/binding/` 的 set_layout、descriptor_writer + `resident/` 的 slot_allocator、bindless_texture_table、frame_uniform_table、instance_table、light_table | ~5320（5a ~2850 / 5b ~2460） | ③ GPU 表 + ④ 常驻池/缓存（+ ② Uploader） | **常驻资源主线**：表、池和缓存分别归③④；`FrameUniformTable` 职责归③，但在帧级初始化阶段创建。上半讲写入显存，下半讲 shader 如何查表取数；这是 bindless 的心脏、学习目标第一核心。|
+| 6 | 待读 | `core/binding/` 的 shader_abi、pipeline_layout + `build.rs` ABI 生成段 + `core/pipeline/compute.rs` + `core/record/compute.rs` + `passes/visibility/`（cull、hiz、occlusion、lod、indirect）+ `core/device/readback.rs` | ~2790 | ⑥ compute（+ ⑤ HizPyramid） | **GPU-driven 核心**，学习目标第二核心。先读"管线配方 → 与 shader ABI 对账 → 组装"这把总钥匙和 compute 骨架两半，再按录制顺序走可见性链。 |
+| 7 | 待读 | `core/` 的 pipeline（graphics、fullscreen）、record（graphics、fullscreen）、target、`binding/storage_sets.rs` + `passes/`（gbuffer、shadow、lighting、transparent、post、overlay）+ 收尾 `binding/layout_registry.rs` | ~5340 | ⑤ + ⑥ 图形/全屏 | "装备库"：先读图形/全屏的标准件，再按功能读 pass，功能之间按想先看的效果挑顺序；最后用契约登记表把 22 条管线、13 份 set 声明对一遍总账。 |
+| 8 | 待读 | `scene/content/` + `scene/mechanism/`（ledger、residency、collect_report 优先） | ~5770（优先三件 ~1810） | CPU 侧账本（驱动 ③ GPU 表与 ④ 常驻池/缓存增删） | Bevy 侧账本：一份资产两份真身（CPU 容器 + GPU 显存）、两层索引账（Ledger 行按实体粒度 / residency 按资产粒度）。大世界流送第三核心。 |
+| 9 | 待读 | `driver/upload.rs` + `driver/host/drawlist.rs` + `driver/host/frame.rs`（draw_frame）+ `frame_sync.rs` + `render/frame/`（frame_pool、frame_draw 的 record_frame、render_mode） | ~4000 | 六类全部（消费方） | 终点验收考场：按 `Last` 调度的执行顺序读——上传编排 → DrawList 组装与环写入 → draw_frame → record_frame。前八站读完后，这里的每一行都能对上前面的某个标准件——读它就是全库复盘。 |
 
 第 1～4 站行数为 2026-10-28 实测 `wc -l` 快照（main=fb74ff2cc）；第 5～9 站为 2026-10-30 重测（main=51884896a，`build.rs` 只计 ABI 生成段，第 7 站含 283 行契约测试）。仅供量力安排，不作为长期口径。
 
@@ -49,8 +49,8 @@
 
 1. `core/binding/set_layout.rs`：`SetLayoutDesc` 静态声明（binding 编号/种类/数量/阶段/旗标），`create` 先跑宿主自检再建原生布局；`merged_pool_sizes` 从声明推导 descriptor pool 容量；`DescSet` 是带声明身份的集。
 2. `core/binding/descriptor_writer.rs`：每次写入按声明校验种类与元素界，`submit` 前查完备性——非 `PARTIALLY_BOUND` 的 binding 必须写满。
-3. `resident/bindless_texture_table.rs`：`BINDLESS_TEXTURE_SET`（set0，UPDATE_AFTER_BIND + PARTIALLY_BOUND 的贴图/采样器表）、`BindlessTextureTable`（采样器按参数去重并计引用）、`SlotBinding`；`resident/slot_allocator.rs`：三张表共用的槽位分配器（立即归还 / 延迟回收两种）；`resident/frame_uniforms.rs`：`FRAME_SET`（set1，每帧槽一份 UBO）、`FrameUniforms`、`FrameUniformsData`。
-4. `resident/instance_table.rs`：`INSTANCE_SET`（set2）与 `InstanceTables`；模块文档里的 hazard 纪律是第 9 站环写入的依据。
+3. `resident/bindless_texture_table.rs`：`BINDLESS_TEXTURE_SET_DESC`（set0，UPDATE_AFTER_BIND + PARTIALLY_BOUND 的贴图/采样器表）、`BindlessTextureTable`（采样器按参数去重并计引用）、`SlotBinding`；`resident/slot_allocator.rs`：三张表共用的槽位分配器（立即归还 / 延迟回收两种）；`resident/frame_uniform_table.rs`：`FRAME_UNIFORM_SET_DESC`（set1，每帧槽一份 UBO）、`FrameUniformTable`、`FrameUniformsData`。
+4. `resident/instance_table.rs`：`INSTANCE_SET_DESC`（set2）与 `InstanceTables`；模块文档里的 hazard 纪律是第 9 站环写入的依据。
 5. `resident/light_table.rs`：`LightTable`、`LightRecord`；为什么有两份见第 1 站笔记。
 
 校验要点：bindless 槽位"按槽发布、从不写满"如何同时满足 `PARTIALLY_BOUND` 与写入器的完备性检查；UAB 只开在 sampled image / sampler 上的理由（对照第 2 站启用的特性）；set1 的帧槽 UBO 何时可写（第 3 站 `wait_for_slot` 之后）。可用 BRP 只读方法 `ash_renderer/layout_contract` 现场查看声明表。

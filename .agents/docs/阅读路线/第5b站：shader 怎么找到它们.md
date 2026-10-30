@@ -2,7 +2,7 @@
 
 本篇讲第 5 站下半：数据进了显存之后，shader 怎样按下标一路找到网格引脚、模型矩阵、材质参数、贴图和光源。数据怎么进显存见《[第5a站：bindless 数据怎么进显存](第5a站：bindless%20数据怎么进显存.md)》。
 
-> 进度：讲解正本已写好（2026-10-30），待用户逐段阅读校验。依据同第5a站（main=51884896a 加工作区未提交的 `bindless_texture_table.rs` 改名、`slot_allocator.rs` 与 `frame_uniforms.rs` 拆出）。代码引用写符号名不写行号。
+> 进度：讲解正本已写好（2026-10-30），待用户逐段阅读校验。依据同第5a站（main=51884896a 加工作区未提交的 `bindless_texture_table.rs` 改名、`slot_allocator.rs` 与 `frame_uniform_table.rs` 拆出）。代码引用写符号名不写行号。
 
 ## 总图：一次不透明绘制的取数链
 
@@ -65,16 +65,16 @@ set1 帧 UBO        frame.view_proj 等全局量
 - 描述符类型以声明为准，不从写入形状猜。
 - 任何一条不过，整批拒写，报错里带声明名和 binding 号，而不是等验证层报 VUID。
 
-**bindless 表怎样同时满足完备性和“从不写满”**：它的两个 binding 带 `PARTIALLY_BOUND`，完备性检查直接跳过；但每次 `publish` 写单个槽时，种类和元素上界照查。`storage_sets::create_sets`（光源分簇、透明层共用）、`FrameUniforms::new`、`InstanceTables::new` 都走同一个写入器，且都要求写满。
+**bindless 表怎样同时满足完备性和“从不写满”**：它的两个 binding 带 `PARTIALLY_BOUND`，完备性检查直接跳过；但每次 `publish` 写单个槽时，种类和元素上界照查。`storage_sets::create_sets`（光源分簇、透明层共用）、`FrameUniformTable::new`、`InstanceTables::new` 都走同一个写入器，且都要求写满。
 
 ## 三、四张表各管什么
 
 | 表 | 声明 | 描述符写几次 | 内容怎么更新 | shader 侧名字 |
 |---|---|---|---|---|
-| bindless 表 | `BINDLESS_TEXTURE_SET`：b0 贴图 ×1024、b1 采样器 ×1024，UAB + PARTIALLY_BOUND | **运行中按槽写**：每次 `publish` 写一个新槽 | 不改已发布槽，换内容 = 发布新槽 + 旧槽延迟回收 | `textures`、`samplers`（`binding_array`） |
-| 帧 UBO | `FRAME_SET`：b0 UBO 208 B | 每帧槽 init 写一次 | `draw_frame` 每帧整块重写当前帧槽的 UBO | `frame: FrameUniforms` |
-| 实例表 | `INSTANCE_SET`：b0..b9 storage | 每帧槽 init 写一次，**永不更新** | 对象表走上传批次；各环按帧槽写或由 compute 写 | `objects`、`models`、`materials` 等 |
-| 光源表 | 不自带集；挂在 `LIGHT_CLUSTER_SET` 的 b1 | 随光源分簇集建立，resize 时重建 | 脏行写到当前帧槽的环 | `lights: array<LightRecord>` |
+| bindless 表 | `BINDLESS_TEXTURE_SET_DESC`：b0 贴图 ×1024、b1 采样器 ×1024，UAB + PARTIALLY_BOUND | **运行中按槽写**：每次 `publish` 写一个新槽 | 不改已发布槽，换内容 = 发布新槽 + 旧槽延迟回收 | `textures`、`samplers`（`binding_array`） |
+| 帧 UBO | `FRAME_UNIFORM_SET_DESC`：b0 UBO 208 B | 每帧槽 init 写一次 | `draw_frame` 每帧整块重写当前帧槽的 UBO | `frame: FrameUniforms`（WGSL 数据结构） |
+| 实例表 | `INSTANCE_SET_DESC`：b0..b9 storage | 每帧槽 init 写一次，**永不更新** | 对象表走上传批次；各环按帧槽写或由 compute 写 | `objects`、`models`、`materials` 等 |
+| 光源表 | 不自带集；挂在 `LIGHT_CLUSTER_SET_DESC` 的 b1 | 随光源分簇集建立，resize 时重建 | 脏行写到当前帧槽的环 | `lights: array<LightRecord>` |
 
 ### bindless 表（`resident/bindless_texture_table.rs`）
 
@@ -92,9 +92,9 @@ set1 帧 UBO        frame.view_proj 等全局量
 - `release`：立即可复用。用于从未发布给 GPU 的槽，或每个帧槽各有一份数据的表（光源表）。
 - `retire` + `drain_retired`：先进待回收账，调用方等 GPU 用完再归还。bindless 表和对象表用这个。
 
-### 帧 UBO（`resident/frame_uniforms.rs`）
+### 帧 UBO 表（`resident/frame_uniform_table.rs`）
 
-每帧槽一个 208 B 的 UBO 和一个集，init 时把 UBO 写进集后描述符不再动。`draw_frame` 在 `wait_for_slot` 之后调 `write_frame_ubo` 整块重写当前帧槽：`view_proj`、`dir_to_light`、环境光、方向光颜色、`mode`、`inv_view_proj`、`camera_pos`。**方向光走这里，不进光源表**。字节偏移由 `FrameUniformsLayout` 的 `offset_of!` 静态断言钉住。
+每帧槽一个 208 B 的 UBO 和一个集，init 时把 UBO 写进集后描述符不再动。`draw_frame` 在 `wait_for_slot` 之后调 `write_frame_ubo` 整块重写当前帧槽：`view_proj`、`dir_to_light`、环境光、方向光颜色、`mode`、`inv_view_proj`、`camera_pos`。**方向光走这里，不进光源表**。字节偏移由 `FrameUniformTableLayout` 的 `offset_of!` 静态断言钉住。
 
 ### 实例表（`resident/instance_table.rs`）
 
@@ -120,7 +120,7 @@ set1 帧 UBO        frame.view_proj 等全局量
 
 ### 光源表（`resident/light_table.rs`）
 
-256 槽 × 64 B × 2 帧槽，`HOST_VISIBLE` 的 `Storage` 角色。它**没有自己的描述符集**：`LightClusters` 建集时把 `LightTable::ring_buffer(slot)` 写进 `LIGHT_CLUSTER_SET` 的 b1，b0 是 cluster 参数、b2 每格列表、b3 每格计数。
+256 槽 × 64 B × 2 帧槽，`HOST_VISIBLE` 的 `Storage` 角色。它**没有自己的描述符集**：`LightClusters` 建集时把 `LightTable::ring_buffer(slot)` 写进 `LIGHT_CLUSTER_SET_DESC` 的 b1，b0 是 cluster 参数、b2 每格列表、b3 每格计数。
 
 - 记录 64 B：`pos_radius`（w = 半径，0 = 死灯）、`color_intensity`、`flags`（bit0 阴影、bits 8..15 类型）。
 - `spawn`/`update`/`remove` 改 CPU 镜像并记脏，`draw_frame` 在 `wait_for_slot` 之后调 `write_dirty(slot)` 写当前帧槽的环。
@@ -148,8 +148,8 @@ set1 帧 UBO        frame.view_proj 等全局量
 
 **跨端布局三道防线**：
 
-- Rust 侧 `*Layout` 镜像结构 + `offset_of!` 静态断言（`FrameUniformsLayout`、`ObjectRecordLayout`、`MaterialRecordLayout`），打包函数按断言表手工排字节。
-- `build.rs` 的 `HOST_LAYOUT_GATE` 在编译 shader 时检查 WGSL 结构体的 naga span：`MaterialRecord` 64、`ObjectRecord` 48、`LightRecord` 64、`LodEntry` 12、`IndirectCommand` 20，不符直接构建失败。坑：WGSL 垫尾要用标量 `u32`，用 `vec3<u32>` 会因 16 字节对齐把步长撑大，整张表错位。`FrameUniforms`（208 B）不在这张门里，只靠 Rust 侧静态断言和描述符 range。
+- Rust 侧 `*Layout` 镜像结构 + `offset_of!` 静态断言（`FrameUniformTableLayout`、`ObjectRecordLayout`、`MaterialRecordLayout`），打包函数按断言表手工排字节。
+- `build.rs` 的 `HOST_LAYOUT_GATE` 在编译 shader 时检查 WGSL 结构体的 naga span：`MaterialRecord` 64、`ObjectRecord` 48、`LightRecord` 64、`LodEntry` 12、`IndirectCommand` 20，不符直接构建失败。坑：WGSL 垫尾要用标量 `u32`，用 `vec3<u32>` 会因 16 字节对齐把步长撑大，整张表错位。`FrameUniformTable`（208 B）不在这张门里，只靠 Rust 侧静态断言和描述符 range。
 - 管线建立前 `PipelineDesc::problems` 拿 shader 实际用到的 `(set, binding, 种类, 数组形状)` 对账：runtime 长度数组（bindless 表）必须带 `PARTIALLY_BOUND`（第 6 站细读）。
 
 **设备特性**：`Context` 显式启用 `runtime_descriptor_array`、`shader_sampled_image_array_non_uniform_indexing`、`descriptor_binding_sampled_image_update_after_bind`、`descriptor_binding_partially_bound`。naga 输出 runtime 数组时不发射 `RuntimeDescriptorArray` capability，由 `build.rs` 在 spirv-val 拒绝后补丁注入。
@@ -171,7 +171,7 @@ set1 帧 UBO        frame.view_proj 等全局量
 ## 相关源码
 
 - `ash_renderer/src/render/core/binding/`：`set_layout.rs`、`descriptor_writer.rs`、`storage_sets.rs`；`pipeline_layout.rs` 的对账口径归第 6 站。
-- `ash_renderer/src/render/resident/`：`bindless_texture_table.rs`、`slot_allocator.rs`、`frame_uniforms.rs`、`instance_table.rs`、`light_table.rs`。
-- `ash_renderer/src/render/passes/lighting/cluster.rs`：`LIGHT_CLUSTER_SET` 与光源表 b1 的接线。
+- `ash_renderer/src/render/resident/`：`bindless_texture_table.rs`、`slot_allocator.rs`、`frame_uniform_table.rs`、`instance_table.rs`、`light_table.rs`。
+- `ash_renderer/src/render/passes/lighting/cluster.rs`：`LIGHT_CLUSTER_SET_DESC` 与光源表 b1 的接线。
 - `ash_renderer/src/driver/host/drawlist.rs`：`write_material_ring`（第 9 站细读）。
 - `ash_renderer/shaders/`：`common/instance.wgsl`、`common/mesh.wgsl`、`common/frame.wgsl`、`common/cluster_lighting.wgsl`、`gbuffer_write.wgsl`、`build_indirect.wgsl`；`ash_renderer/build.rs` 的 `HOST_LAYOUT_GATE`。

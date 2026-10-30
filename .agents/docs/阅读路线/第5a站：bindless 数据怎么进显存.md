@@ -2,7 +2,7 @@
 
 本篇讲第 5 站上半：网格、贴图和对象记录怎样从 CPU 进到 GPU 显存，以及换下来的旧数据什么时候才能回收。shader 怎么按下标找到这些数据见《[第5b站：shader 怎么找到它们](第5b站：shader%20怎么找到它们.md)》。
 
-> 进度：讲解正本已写好（2026-10-30），待用户逐段阅读校验。依据 = 2026-10-30 工作区源码（main=51884896a 加未提交的 `memory/` 目录拆分、`descriptors.rs` → `bindless_texture_table.rs` 改名、`slot_allocator.rs` 与 `frame_uniforms.rs` 拆出）。代码引用写符号名不写行号。
+> 进度：讲解正本已写好（2026-10-30），待用户逐段阅读校验。依据 = 2026-10-30 工作区源码（main=51884896a 加未提交的 `memory/` 目录拆分、`descriptors.rs` → `bindless_texture_table.rs` 改名、`slot_allocator.rs` 与 `frame_uniform_table.rs` 拆出）。代码引用写符号名不写行号。
 
 ## 总图：一份数据进显存的四步
 
