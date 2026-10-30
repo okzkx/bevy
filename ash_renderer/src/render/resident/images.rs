@@ -142,7 +142,7 @@ pub struct GpuImage {
 impl GpuImage {
     /// 按契约创建:image(usage 按读回条款三用途)→ requirements → 选型(必需
     /// DEVICE_LOCAL)→ 恰量分配 → offset 0 绑定 → view。**采样器不在此建**
-    ///（本体归 [`super::descriptors::BindlessTables`] 按功能键
+    ///（本体归 [`super::bindless_tables::BindlessTables`] 按功能键
     /// 持有——同键贴图共享一个描述符槽,槽内句柄若随某张图生灭,共享方先卸载
     /// "最后发布者"即悬空;键即完整配方,表侧 [`SamplerKey::create_sampler`] 建本体）。
     /// `sharing_families`:≥2 个不同族时按 CONCURRENT 创建(与
@@ -370,7 +370,7 @@ impl Drop for GpuImage {
 /// commit 一并登记。
 #[derive(bevy::prelude::Resource, Default)]
 pub struct ImageCache {
-    resident: HashMap<AssetId<BevyImage>, (GpuImage, Ticket, super::descriptors::SlotBinding)>,
+    resident: HashMap<AssetId<BevyImage>, (GpuImage, Ticket, super::bindless_tables::SlotBinding)>,
     /// 内容替换/卸载的旧图停尸房：旧 `GpuImage`
     /// 移入此处而非就地 Drop——描述符槽改指后，在飞 draw 仍可能经旧描述符或已
     /// 取的引用读旧图，销毁必须等双条件：图形最后使用（帧槽 fence）+ 上传完成
@@ -405,34 +405,22 @@ impl ImageCache {
         self.resident.values().map(|(image, _, _)| image.alloc_bytes()).sum()
     }
 
-    /// 同身份内容替换登记：旧条目
-    /// 原子退场、新条目随即入账。旧图进停尸房（票据随行，双条件排空见
-    /// [`Self::drain_graveyard`]）；旧纹理槽进待回收账（原槽重写对在飞
-    /// draw 不安全——UAB 不授权覆盖仍被未完成命令消费的描述符，改走"新槽
-    /// 发布 + 旧槽延迟回收"）；旧采样器槽仅当新条目不同槽且无其余驻留共享方
-    /// 才请求回收（采样器本体归表，槽退场 = 本体在排空点销毁）。未驻留身份 =
-    /// 纯新登记。**必须在 [`super::descriptors::BindlessTables::publish`] 之后
-    /// 调用**——新槽已定，退场判定才能对照新槽去重（同键共享则新旧同采样器
-    /// 槽，不回收）。
+    /// 同身份内容替换登记：旧条目原子退场、新条目随即入账。旧图进停尸房（票据随行，
+    /// 双条件排空见 [`Self::drain_graveyard`]），旧槽位交回表（原槽重写对在飞 draw
+    /// 不安全，改走"新槽发布 + 旧槽延迟回收"）。未驻留身份 = 纯新登记。
+    /// **必须在 [`super::bindless_tables::BindlessTables::publish`] 之后调用**：
+    /// 先发布再交回，同参数采样器的引用数才不会中途归零。
     pub fn swap_commit(
         &mut self,
         id: AssetId<BevyImage>,
         image: GpuImage,
         ticket: Ticket,
-        slots: super::descriptors::SlotBinding,
-        tables: &mut super::descriptors::BindlessTables,
+        slots: super::bindless_tables::SlotBinding,
+        tables: &mut super::bindless_tables::BindlessTables,
     ) {
         if let Some((old_image, old_ticket, old_slots)) = self.resident.remove(&id) {
             self.graveyard.push((old_image, old_ticket));
-            tables.retire_texture(old_slots.texture);
-            if old_slots.sampler != slots.sampler
-                && !self
-                    .resident
-                    .values()
-                    .any(|(_, _, s)| s.sampler == old_slots.sampler)
-            {
-                tables.retire_sampler_by_slot(old_slots.sampler);
-            }
+            tables.retire(old_slots);
         }
         self.resident.insert(id, (image, ticket, slots));
     }
@@ -466,27 +454,18 @@ impl ImageCache {
         Ok(())
     }
 
-    /// 卸载驻留条目：旧图进停尸房（票据随行）、描述符槽进待回收账
-    /// ——纹理槽直接请求回收；采样器槽仅当同键最后一张退场才请求（共享去重
-    /// 的反向操作，与 publish 的"同键共享"配对）。本条目出账后再查同键，检查
-    /// 针对剩余驻留条目。返回是否发生退场（幂等：未驻留身份 no-op）。
+    /// 卸载驻留条目：旧图进停尸房（票据随行）、槽位交回表（采样器是否回收由表按
+    /// 引用数决定）。返回是否发生退场（幂等：未驻留身份 no-op）。
     pub fn retire(
         &mut self,
         id: AssetId<BevyImage>,
-        tables: &mut super::descriptors::BindlessTables,
+        tables: &mut super::bindless_tables::BindlessTables,
     ) -> bool {
         let Some((image, ticket, slots)) = self.resident.remove(&id) else {
             return false;
         };
         self.graveyard.push((image, ticket));
-        tables.retire_texture(slots.texture);
-        if !self
-            .resident
-            .values()
-            .any(|(_, _, s)| s.sampler == slots.sampler)
-        {
-            tables.retire_sampler_by_slot(slots.sampler);
-        }
+        tables.retire(slots);
         true
     }
 
@@ -497,7 +476,7 @@ impl ImageCache {
         id: AssetId<BevyImage>,
         image: GpuImage,
         ticket: Ticket,
-        slots: super::descriptors::SlotBinding,
+        slots: super::bindless_tables::SlotBinding,
     ) {
         self.resident.insert(id, (image, ticket, slots));
     }
@@ -511,7 +490,7 @@ impl ImageCache {
     /// 按身份取槽位绑定(组装 per-draw 参数的取数口;缺资源时
     /// 消费方走 fallback 槽或暂缓 draw——`BindlessTables::fallback_slots`)。
     #[must_use]
-    pub fn slots(&self, id: AssetId<BevyImage>) -> Option<super::descriptors::SlotBinding> {
+    pub fn slots(&self, id: AssetId<BevyImage>) -> Option<super::bindless_tables::SlotBinding> {
         self.resident.get(&id).map(|(_, _, slots)| *slots)
     }
 }

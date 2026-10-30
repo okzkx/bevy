@@ -42,8 +42,8 @@ pub use passes::visibility::occlusion::{
     aabb_screen_rect, OcclusionDiagnostics, OcclusionDraw, OcclusionFallback, OcclusionPass,
     OcclusionSettings,
 };
-pub use resident::descriptors::{BindlessTables, TABLE_CAPACITY};
-pub(crate) use resident::descriptors::SlotBinding;
+pub use resident::bindless_tables::{BindlessTables, TABLE_CAPACITY};
+pub(crate) use resident::bindless_tables::SlotBinding;
 pub use resident::frame_uniforms::{
     pack_frame_uniforms, FrameUniforms, FrameUniformsData, PLACEHOLDER_DIR_TO_LIGHT,
 };

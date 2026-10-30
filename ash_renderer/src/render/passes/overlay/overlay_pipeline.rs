@@ -34,7 +34,7 @@ use crate::render::core::pipeline::graphics::{create_graphics_pipeline, Pipeline
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{stages, SetLayouts};
 use crate::render::core::binding::shader_abi;
-use crate::render::resident::descriptors::BINDLESS_SET;
+use crate::render::resident::bindless_tables::BINDLESS_SET;
 
 /// push 范围覆盖全 16B、双阶段：screen_size 在 vertex 用，槽位在 fragment 用。
 pub(crate) static OVERLAY_PIPELINE: PipelineDesc = PipelineDesc {

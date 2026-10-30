@@ -46,9 +46,7 @@ impl AtlasGpu {
     }
 
     /// 新代就位：整传提交成功且槽位发布后调用，已传代数推进到 `generation`。
-    /// 旧代退场：本体进停尸房（票据随行，排空点销毁）、纹理槽进待回收账
-    ///（采样器槽不退——图集用 LINEAR 键与真实贴图共享，本体归表后槽内句柄
-    /// 不随旧代消失）。
+    /// 旧代退场：本体进停尸房（票据随行，排空点销毁）、槽位交回表。
     pub(crate) fn install(
         &mut self,
         tables: &mut BindlessTables,
@@ -58,7 +56,7 @@ impl AtlasGpu {
         generation: u64,
     ) {
         if let Some(old) = self.current.replace(AtlasSlot { image, ticket, slots }) {
-            tables.retire_texture(old.slots.texture);
+            tables.retire(old.slots);
             self.graveyard.push((old.image, old.ticket));
         }
         self.uploaded_generation = generation;

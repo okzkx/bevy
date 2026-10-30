@@ -213,7 +213,9 @@ pub(crate) fn flush_uploads(
         .or_fatal("贴图停尸房排空失败(帧侧等待),上传链无法继续")?;
     pool.drain_graveyard(&uploader, &mut || frames.wait_all_inflight())
         .or_fatal("网格回收停尸房排空失败(帧侧等待),上传链无法继续")?;
-    let drained_slots = tables.drain_retired_slots();
+    let drained_slots = tables
+        .drain_retired_slots(&mut || frames.wait_all_inflight())
+        .or_fatal("描述符槽回收排空失败(帧侧等待),上传链无法继续")?;
     // —— 0.4) 对象表停尸房排空 + 槽位交接账消费:行删除/换绑换下的旧实例槽
     // (update_ledger 交接而来)进停尸房,等"图形最后使用"后排空归 free list
     // ——与网格/贴图停尸房同一节拍,共用同一次帧侧等待。排空先于本帧槽位
@@ -263,7 +265,7 @@ pub(crate) fn flush_uploads(
     }
     // —— 0.6) overlay 图集旧代排空:整传换下的旧 GpuImage 走同一
     // 双条件(帧侧等待 + 上传票据);overlay 未装时 atlas = None,空房 no-op。
-    // 旧代纹理槽已在整传帧随退场进待回收账,同帧 drain_retired_slots 归还。
+    // 旧代槽位已在整传帧交回表,由下一轮步骤 0 的 drain_retired_slots 等 GPU 后归还。
     if let Some(atlas) = atlas.as_mut() {
         atlas
             .drain_graveyard(&uploader, &mut || frames.wait_all_inflight())

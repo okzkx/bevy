@@ -19,7 +19,7 @@ use crate::render::core::pipeline::graphics::{PipelineRef, create_graphics_pipel
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
-use crate::render::resident::descriptors::BINDLESS_SET;
+use crate::render::resident::bindless_tables::BINDLESS_SET;
 use crate::render::resident::frame_uniforms::FRAME_SET;
 use crate::render::resident::instance_table::INSTANCE_SET;
 

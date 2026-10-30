@@ -13,6 +13,8 @@
 //!   首次提交完成之后改写纹理槽 3，二次 dispatch 读回新内容，验证 UAB layout/pool
 //!   配置及已提交集合的后续观察。此操作不声称验证“命令仍在飞时更新”的同步行为。
 //!   全程 VUID 收账；验证层缺席时结果降级为观察。
+//! - 组 D（交回与排空）：和 fallback 同参数的发布交回后，采样器槽 0 必须保留；
+//!   独占采样器的发布交回后，纹理槽和采样器槽一起回收，排空后被复用。
 //!
 //! 自含 Entry→Instance→Device 最小链（不碰窗口），验证层 + 同步验证常开；
 //! SPIR-V 走 build.rs 正式编译路径（`OUT_DIR/descriptor_probe.spv`，含 capability
@@ -31,7 +33,7 @@ use ash_renderer::render::{
     sampler_key, BindlessTables, BufferRole, FrameUniforms, GpuBuffer, GpuImage, ImageSpec, MemoryContract,
     SamplerKey, StagingImageCopy, UploadBatch, Uploader, TABLE_CAPACITY,
 };
-use bevy::image::{ImageFilterMode, ImageSamplerDescriptor};
+use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSamplerDescriptor};
 use bevy::math::Mat4;
 
 const VALIDATION_LAYER: &std::ffi::CStr = c"VK_LAYER_KHRONOS_validation";
@@ -200,6 +202,9 @@ fn main() {
 
     // ============ 组 C：生产表采样读回 + update-after-bind ============
     run_sampling(&device, &contract, &queue, &mut tables, &textures);
+
+    // ============ 组 D：交回与排空（采样器引用数）============
+    run_retire(&device, &instance, pd, &contract, &mut tables, &lin);
 
     // 收场：排空后按"表先于贴图本体"反序拆（槽内 view/sampler 是贴图句柄的借用）
     unsafe { device.device_wait_idle() }.expect("探针收场 wait_idle");
@@ -490,7 +495,7 @@ fn run_sampling(
     let pipeline_layout = unsafe {
         device.create_pipeline_layout(
             &vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(&[tables.bindless_layout().raw(), frame_uniforms.set_layout().raw(), set2_layout])
+                .set_layouts(&[tables.set_layout().raw(), frame_uniforms.set_layout().raw(), set2_layout])
                 .push_constant_ranges(&push_ranges),
             None,
         )
@@ -555,7 +560,7 @@ fn run_sampling(
                 vk::PipelineBindPoint::COMPUTE,
                 pipeline_layout,
                 0,
-                &[tables.resident_set().raw(), frame_uniforms.frame_set(0).raw(), set2],
+                &[tables.descriptor_set().raw(), frame_uniforms.frame_set(0).raw(), set2],
                 &[],
             );
             device.cmd_push_constants(
@@ -607,7 +612,7 @@ fn run_sampling(
     unsafe {
         device.update_descriptor_sets(
             &[vk::WriteDescriptorSet::default()
-                .dst_set(tables.resident_set().raw())
+                .dst_set(tables.descriptor_set().raw())
                 .dst_binding(0)
                 .dst_array_element(3)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
@@ -657,4 +662,56 @@ unsafe extern "system" fn probe_callback(
         .unwrap_or_else(|p| p.into_inner())
         .push(format!("[{severity:?}] {msg}"));
     vk::FALSE
+}
+
+/// 组 D：交回与排空。
+///
+/// 前提（组 B/C 定下的账）：采样器槽 0 被 fallback + 红 + 绿三方共用，纹理槽 0..=3 已占。
+fn run_retire(
+    device: &Device,
+    instance: &ash::Instance,
+    pd: vk::PhysicalDevice,
+    contract: &MemoryContract,
+    tables: &mut BindlessTables,
+    lin: &SamplerKey,
+) {
+    println!("\n== 组 D(交回与排空)==");
+    let spec = ImageSpec {
+        width: 1,
+        height: 1,
+        format: vk::Format::R8G8B8A8_UNORM,
+        mip_levels: 1,
+        sampler: ImageSamplerDescriptor::linear(),
+    };
+    // 只发布不采样，内容无关
+    let img = GpuImage::create(device, instance, pd, contract, &spec, &[]).expect("组 D 贴图");
+    let mut wait_idle = || unsafe { device.device_wait_idle() }.map_err(Into::into);
+
+    // 和 fallback 同参数：交回后采样器槽 0 仍有别的用户，只回收纹理槽
+    let shared = tables.publish(img.view(), lin).expect("同参数发布");
+    assert_eq!(shared.sampler, 0, "linear 参数应复用 fallback 的采样器槽");
+    tables.retire(shared);
+    assert_eq!(tables.retired_slot_count(), 1, "采样器槽 0 还有用户，只该回收纹理槽");
+    assert_eq!(tables.drain_retired_slots(&mut wait_idle).expect("排空"), 1);
+    println!("[交回] 同参数发布交回 → 只回收纹理槽 {}，采样器槽 0 保留", shared.texture);
+
+    // 新参数：新采样器槽；交回后槽和句柄一起回收，再发布同参数复用同一槽
+    let mut repeat_desc = ImageSamplerDescriptor::linear();
+    repeat_desc.address_mode_u = ImageAddressMode::Repeat;
+    let repeat = sampler_key(&repeat_desc);
+    let own = tables.publish(img.view(), &repeat).expect("新参数发布");
+    assert_eq!(own.texture, shared.texture, "排空后的纹理槽应被复用");
+    assert_ne!(own.sampler, 0, "新参数不能拿到仍在用的采样器槽 0");
+    tables.retire(own);
+    assert_eq!(tables.retired_slot_count(), 2, "唯一用户交回，纹理槽 + 采样器槽都进待回收账");
+    assert_eq!(tables.drain_retired_slots(&mut wait_idle).expect("排空"), 2);
+    let again = tables.publish(img.view(), &repeat).expect("再次发布");
+    assert_eq!(again, own, "排空后同参数应复用同一对槽");
+    tables.retire(again);
+    tables.drain_retired_slots(&mut wait_idle).expect("排空");
+    println!(
+        "[交回] 独占采样器交回 → 纹理槽 {} + 采样器槽 {} 一起回收并复用",
+        own.texture, own.sampler
+    );
+    drop(img);
 }

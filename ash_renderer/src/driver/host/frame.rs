@@ -576,7 +576,7 @@ pub(crate) fn draw_frame(
     let (smaa_edge_blend, smaa_nb) = smaa_draws(post, slot);
     let frame_draw = FrameDraw {
         pipeline: core.gbuffer_pipeline.rec(),
-        set0: core.tables.resident_set(),
+        set0: core.tables.descriptor_set(),
         set1: core.frame_uniforms.frame_set(slot),
         set2: instances.frame_set2(slot),
         vertex_buffer: scene.pool.vertex_buffer(),

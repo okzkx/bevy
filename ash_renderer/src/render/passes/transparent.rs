@@ -24,7 +24,7 @@ use crate::render::core::binding::set_layout::{BindingDesc, DescKind, DescSet, S
 use crate::render::core::binding::shader_abi;
 use crate::render::core::binding::storage_sets;
 use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET;
-use crate::render::resident::descriptors::BINDLESS_SET;
+use crate::render::resident::bindless_tables::BINDLESS_SET;
 use crate::render::resident::frame_uniforms::FRAME_SET;
 use crate::render::resident::instance_table::INSTANCE_SET;
 

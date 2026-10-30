@@ -115,7 +115,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
     // 各管线按自己的布局配方取用并与 shader ABI 对账。声明的附件格式必须和实际
     // 渲染用的附件完全一致，否则验证层报 VUID-08914 ----
     let layouts = SetLayouts::new([
-        tables.bindless_layout(),
+        tables.set_layout(),
         frame_uniforms.set_layout(),
         instance_tables.set_layout(),
         gbuffer.sampled_layout(),
