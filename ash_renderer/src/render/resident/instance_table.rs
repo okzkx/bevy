@@ -26,7 +26,7 @@
 //! 标记 read_write / b4 在场环 / b5 indirect 命令环 / b6 遮挡标记 read_write /
 //! b7 LOD 变体表 / b8 LOD 档位环 read_write / b9 缺口标记 read_write），按帧槽
 //! 各一套，**描述符 init 一次写入永不更新**（buffer 固定容量不重建——槽位用尽报
-//! `Capacity` 出局，与 TABLE_CAPACITY 同纪律）。自建 pool 不占 BindlessTables
+//! `Capacity` 出局，与 TABLE_CAPACITY 同纪律）。自建 pool 不占 BindlessTextureTable
 //! 的 UAB pool——生命周期与消费面都不同，分开建。layout 的 b0/b1/b2 声明
 //! `VERTEX|FRAGMENT|COMPUTE` 超集，b3..b9 收窄到 COMPUTE（b5 的另一读者是
 //! cmd_draw_indexed_indirect，走命令参数不进描述符 stage）。Hi-Z 金字塔采样视图

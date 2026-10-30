@@ -78,7 +78,7 @@ impl Drop for PipelineHandle {
     fn drop(&mut self) {
         // 契约边界：不等 GPU，退出排空由 teardown 的 device_wait_idle 先行；
         // pipeline 先于 layout（引用方向），layout 先于它借用的 set layouts
-        //（归 BindlessTables/FrameUniforms/InstanceTables/GBufferTargets/ShadowTargets 等，
+        //（归 BindlessTextureTable/FrameUniforms/InstanceTables/GBufferTargets/ShadowTargets 等，
         // 拆除序由 host 的 remove_resource 顺序保证）
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);

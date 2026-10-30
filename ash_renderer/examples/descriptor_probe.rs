@@ -1,9 +1,9 @@
 //! 3.3.3/3.3.4 描述符链路探针：**生产表全链实证**。与前置闸门 bindless_probe 的
 //! 分工——闸门验证的是"接口能不能编译、能不能过 val、能不能在临时布局上采样"，
-//! 本探针验证的是 **`BindlessTables`（生产 CPU 侧真身）**：
+//! 本探针验证的是 **`BindlessTextureTable`（生产 CPU 侧真身）**：
 //!
 //! - 组 A（设备与限额对账）：生产五位特性集建设备；UAB 轨五项限额实测值落账；
-//!   `BindlessTables::new` 以 `TABLE_CAPACITY`(1024) 建表——限额对账在表内执行
+//!   `BindlessTextureTable::new` 以 `TABLE_CAPACITY`(1024) 建表——限额对账在表内执行
 //!   并落日志（3.3.2 判定线：对账不过 = 显式报错，不静默截断）。
 //! - 组 B（发布与去重 + 耗尽负例）：生产表上发布三张测试贴图（红/绿/蓝，两张
 //!   线性一张 NEAREST 采样器）——纹理槽 1/2/3 顺位、采样器按功能键去重（两张
@@ -30,7 +30,7 @@ use ash::ext::debug_utils;
 use ash::vk;
 use ash::{Device, Entry};
 use ash_renderer::render::{
-    sampler_key, BindlessTables, BufferRole, FrameUniforms, GpuBuffer, GpuImage, ImageSpec, MemoryContract,
+    sampler_key, BindlessTextureTable, BufferRole, FrameUniforms, GpuBuffer, GpuImage, ImageSpec, MemoryContract,
     SamplerKey, StagingImageCopy, UploadBatch, Uploader, TABLE_CAPACITY,
 };
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSamplerDescriptor};
@@ -114,7 +114,7 @@ fn main() {
     let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut di_props);
     unsafe { instance.get_physical_device_properties2(pd, &mut props2) };
     println!(
-        "[UAB 限额] 每阶段 sampledImages={} / 每 set {} | 每阶段 samplers={} / 每 set {} | 全池总额={}（对账在 BindlessTables::new 内执行并落账）",
+        "[UAB 限额] 每阶段 sampledImages={} / 每 set {} | 每阶段 samplers={} / 每 set {} | 全池总额={}（对账在 BindlessTextureTable::new 内执行并落账）",
         di_props.max_per_stage_descriptor_update_after_bind_sampled_images,
         di_props.max_descriptor_set_update_after_bind_sampled_images,
         di_props.max_per_stage_descriptor_update_after_bind_samplers,
@@ -127,7 +127,7 @@ fn main() {
     let contract = unsafe { MemoryContract::new(&instance, pd) };
     let mut uploader = Uploader::new(&device, &contract, 0, queue, 0, queue, 1024, 2).expect("探针 Uploader");
     // 生产表：容量 TABLE_CAPACITY，限额对账在 new 内落日志
-    let mut tables = BindlessTables::new(&device, &instance, pd, &contract, &mut uploader, 0, TABLE_CAPACITY)
+    let mut tables = BindlessTextureTable::new(&device, &instance, pd, &contract, &mut uploader, 0, TABLE_CAPACITY)
         .expect("生产常驻描述符表(容量 1024)");
     println!(
         "[建表] 容量 {} 双表就绪；fallback 白图占槽 0；已用纹理槽 {} / 采样器槽 {}",
@@ -178,7 +178,7 @@ fn main() {
 
     // 耗尽负例：容量 4 的小表——fallback(0) + 三张贴图(1,2,3) 满载，第 4 张必须报错
     let mut small_tables =
-        BindlessTables::new(&device, &instance, pd, &contract, &mut uploader, 0, 4)
+        BindlessTextureTable::new(&device, &instance, pd, &contract, &mut uploader, 0, 4)
             .expect("小容量表(容量 4)");
     upload_and_publish(&mut uploader, &mut small_tables, &textures, &[
         ("red", &lin), ("green", &lin), ("blue", &near),
@@ -322,7 +322,7 @@ fn make_device(instance: &ash::Instance, pd: vk::PhysicalDevice) -> Device {
 /// → 逐张发布并打印槽位。
 fn upload_and_publish(
     uploader: &mut Uploader,
-    tables: &mut BindlessTables,
+    tables: &mut BindlessTextureTable,
     textures: &TexMap,
     batch: &[(&str, &SamplerKey)],
 ) {
@@ -395,7 +395,7 @@ fn run_sampling(
     device: &Device,
     contract: &MemoryContract,
     queue: &vk::Queue,
-    tables: &mut BindlessTables,
+    tables: &mut BindlessTextureTable,
     textures: &TexMap,
 ) {
     println!("\n== 组 C(生产表采样读回 + update-after-bind)==");
@@ -672,7 +672,7 @@ fn run_retire(
     instance: &ash::Instance,
     pd: vk::PhysicalDevice,
     contract: &MemoryContract,
-    tables: &mut BindlessTables,
+    tables: &mut BindlessTextureTable,
     lin: &SamplerKey,
 ) {
     println!("\n== 组 D(交回与排空)==");

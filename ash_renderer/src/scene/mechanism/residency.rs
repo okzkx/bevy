@@ -939,7 +939,7 @@ impl Plugin for AshResidencyPlugin {
                 residency_tick
                     .in_set(ResidencySet)
                     .run_if(resource_exists::<MeshPool>)
-                    .run_if(resource_exists::<crate::render::BindlessTables>)
+                    .run_if(resource_exists::<crate::render::BindlessTextureTable>)
                     .run_if(resource_exists::<AssetRetirements>)
                     .run_if(resource_exists::<Swapchain>)
                     .run_if(resource_exists::<LodSettings>),

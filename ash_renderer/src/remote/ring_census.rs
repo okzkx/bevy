@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use ash_macros::system;
 
 use crate::render::{
-    pack_material_record, pack_model, pack_object_record, readback_buffer, BindlessTables,
+    pack_material_record, pack_model, pack_object_record, readback_buffer, BindlessTextureTable,
     ImageCache, InstanceTables, MeshPool, Context, INDIRECT_COMMAND_SIZE, MARK_SIZE,
     MATERIAL_RECORD_SIZE, MODEL_STRIDE, NO_TEXTURE_INDEX, OBJECT_RECORD_SIZE,
 };
@@ -117,7 +117,7 @@ pub(crate) fn ring_census(In(params): In<Option<Value>>, world: &mut World) -> B
             .base_color_texture
             .as_ref()
             .and_then(|handle| image_cache.slots(handle.id()))
-            .unwrap_or_else(BindlessTables::fallback_slots);
+            .unwrap_or_else(BindlessTextureTable::fallback_slots);
         let optional_slot = |texture: Option<&Handle<bevy::image::Image>>| {
             texture
                 .and_then(|handle| image_cache.slots(handle.id()))

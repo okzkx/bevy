@@ -16,7 +16,7 @@ use crate::{
     common::error::Result,
     common::syntax::ResultTierExt,
     render::{
-        AtlasGpu, BindlessTables, ClusterBuildPass, CompositePipeline, Context, CullPass, FramePool,
+        AtlasGpu, BindlessTextureTable, ClusterBuildPass, CompositePipeline, Context, CullPass, FramePool,
         FrameUniforms,
         GBufferTargets, GBufferPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
         BloomPipelines, BloomTargets, InstanceTables, LodPass, MeshPool, OcclusionPass,
@@ -78,7 +78,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
     let pool = MeshPool::new(&ctx.device, ctx.memory_contract(), &ctx.sharing_families());
     let image_cache = ImageCache::default();
     // 会提交上传（构造内当场等完）：0 号槽的白色兜底贴图
-    let tables = BindlessTables::new(
+    let tables = BindlessTextureTable::new(
         &ctx.device,
         &ctx.instance,
         ctx.physical_device,
@@ -266,7 +266,7 @@ init_chain! {
     Uploader => uploader,
     MeshPool => pool,
     FrameUniforms => frame_uniforms,
-    BindlessTables => tables,
+    BindlessTextureTable => tables,
     ImageCache => image_cache,
     AtlasGpu, // 由 overlay 插入，不归创建链
     GpuTimer => gpu_timer,

@@ -142,7 +142,7 @@ pub struct GpuImage {
 impl GpuImage {
     /// 按契约创建:image(usage 按读回条款三用途)→ requirements → 选型(必需
     /// DEVICE_LOCAL)→ 恰量分配 → offset 0 绑定 → view。**采样器不在此建**
-    ///（本体归 [`super::bindless_tables::BindlessTables`] 按功能键
+    ///（本体归 [`super::bindless_texture_table::BindlessTextureTable`] 按功能键
     /// 持有——同键贴图共享一个描述符槽,槽内句柄若随某张图生灭,共享方先卸载
     /// "最后发布者"即悬空;键即完整配方,表侧 [`SamplerKey::create_sampler`] 建本体）。
     /// `sharing_families`:≥2 个不同族时按 CONCURRENT 创建(与
@@ -355,7 +355,7 @@ impl Drop for GpuImage {
         // 契约边界(与 GpuBuffer/Uploader 同款):不等 GPU;退出排空由 teardown_vulkan
         // 的 device_wait_idle 先于一切资源 Drop。销毁序:view 先于
         // image,memory 最后(image 销毁后再释放其绑定)。采样器本体归
-        // BindlessTables,不在此销毁。
+        // BindlessTextureTable,不在此销毁。
         unsafe {
             self.device.destroy_image_view(self.view, None);
             self.device.destroy_image(self.image, None);
@@ -366,11 +366,11 @@ impl Drop for GpuImage {
 
 /// `bevy::image::Image` 资产身份 → 驻留票据。与 [`crate::render::MeshPool`] 的驻留缓存同责:
 /// 每帧快照带着同一批柄来,只有"查无此身份"的才创建上传(重复快照零重复上传);
-/// 票据记录"这份数据何时可用"。槽位绑定由 [`crate::render::BindlessTables`] 分配、随
+/// 票据记录"这份数据何时可用"。槽位绑定由 [`crate::render::BindlessTextureTable`] 分配、随
 /// commit 一并登记。
 #[derive(bevy::prelude::Resource, Default)]
 pub struct ImageCache {
-    resident: HashMap<AssetId<BevyImage>, (GpuImage, Ticket, super::bindless_tables::SlotBinding)>,
+    resident: HashMap<AssetId<BevyImage>, (GpuImage, Ticket, super::bindless_texture_table::SlotBinding)>,
     /// 内容替换/卸载的旧图停尸房：旧 `GpuImage`
     /// 移入此处而非就地 Drop——描述符槽改指后，在飞 draw 仍可能经旧描述符或已
     /// 取的引用读旧图，销毁必须等双条件：图形最后使用（帧槽 fence）+ 上传完成
@@ -408,15 +408,15 @@ impl ImageCache {
     /// 同身份内容替换登记：旧条目原子退场、新条目随即入账。旧图进停尸房（票据随行，
     /// 双条件排空见 [`Self::drain_graveyard`]），旧槽位交回表（原槽重写对在飞 draw
     /// 不安全，改走"新槽发布 + 旧槽延迟回收"）。未驻留身份 = 纯新登记。
-    /// **必须在 [`super::bindless_tables::BindlessTables::publish`] 之后调用**：
+    /// **必须在 [`super::bindless_texture_table::BindlessTextureTable::publish`] 之后调用**：
     /// 先发布再交回，同参数采样器的引用数才不会中途归零。
     pub fn swap_commit(
         &mut self,
         id: AssetId<BevyImage>,
         image: GpuImage,
         ticket: Ticket,
-        slots: super::bindless_tables::SlotBinding,
-        tables: &mut super::bindless_tables::BindlessTables,
+        slots: super::bindless_texture_table::SlotBinding,
+        tables: &mut super::bindless_texture_table::BindlessTextureTable,
     ) {
         if let Some((old_image, old_ticket, old_slots)) = self.resident.remove(&id) {
             self.graveyard.push((old_image, old_ticket));
@@ -459,7 +459,7 @@ impl ImageCache {
     pub fn retire(
         &mut self,
         id: AssetId<BevyImage>,
-        tables: &mut super::bindless_tables::BindlessTables,
+        tables: &mut super::bindless_texture_table::BindlessTextureTable,
     ) -> bool {
         let Some((image, ticket, slots)) = self.resident.remove(&id) else {
             return false;
@@ -470,13 +470,13 @@ impl ImageCache {
     }
 
     /// 驻留登记:仅在对应批次提交成功后调用(失败路径不留账本行,与 pool.commit 同责)。
-    /// 槽位绑定由 [`crate::render::BindlessTables::publish`] 先行分配。
+    /// 槽位绑定由 [`crate::render::BindlessTextureTable::publish`] 先行分配。
     pub fn commit(
         &mut self,
         id: AssetId<BevyImage>,
         image: GpuImage,
         ticket: Ticket,
-        slots: super::bindless_tables::SlotBinding,
+        slots: super::bindless_texture_table::SlotBinding,
     ) {
         self.resident.insert(id, (image, ticket, slots));
     }
@@ -488,9 +488,9 @@ impl ImageCache {
     }
 
     /// 按身份取槽位绑定(组装 per-draw 参数的取数口;缺资源时
-    /// 消费方走 fallback 槽或暂缓 draw——`BindlessTables::fallback_slots`)。
+    /// 消费方走 fallback 槽或暂缓 draw——`BindlessTextureTable::fallback_slots`)。
     #[must_use]
-    pub fn slots(&self, id: AssetId<BevyImage>) -> Option<super::bindless_tables::SlotBinding> {
+    pub fn slots(&self, id: AssetId<BevyImage>) -> Option<super::bindless_texture_table::SlotBinding> {
         self.resident.get(&id).map(|(_, _, slots)| *slots)
     }
 }

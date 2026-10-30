@@ -24,7 +24,7 @@ use crate::render::core::binding::set_layout::{BindingDesc, DescKind, DescSet, S
 use crate::render::core::binding::shader_abi;
 use crate::render::core::binding::storage_sets;
 use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET;
-use crate::render::resident::bindless_tables::BINDLESS_SET;
+use crate::render::resident::bindless_texture_table::BINDLESS_TEXTURE_SET;
 use crate::render::resident::frame_uniforms::FRAME_SET;
 use crate::render::resident::instance_table::INSTANCE_SET;
 
@@ -75,7 +75,7 @@ pub(crate) static TRANSPARENT_FORWARD_PIPELINE: PipelineDesc = PipelineDesc {
     label: "transparent_forward",
     shader: &shader_abi::TRANSPARENT_FORWARD,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&BINDLESS_SET, &FRAME_SET, &INSTANCE_SET, &LIGHT_CLUSTER_SET],
+    sets: &[&BINDLESS_TEXTURE_SET, &FRAME_SET, &INSTANCE_SET, &LIGHT_CLUSTER_SET],
     push: None,
     color_formats: &[crate::render::HDR_FORMAT],
     depth_format: Some(crate::render::core::target::depth::DEPTH_FORMAT),

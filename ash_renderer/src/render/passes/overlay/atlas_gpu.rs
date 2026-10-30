@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 
 use crate::common::error::Result;
-use crate::render::{BindlessTables, GpuImage, SlotBinding, Ticket, Uploader};
+use crate::render::{BindlessTextureTable, GpuImage, SlotBinding, Ticket, Uploader};
 
 /// 图集 GPU 侧：当前代资源 + 退役代 graveyard（接统一排空点）。
 #[derive(Resource, Default)]
@@ -49,7 +49,7 @@ impl AtlasGpu {
     /// 旧代退场：本体进停尸房（票据随行，排空点销毁）、槽位交回表。
     pub(crate) fn install(
         &mut self,
-        tables: &mut BindlessTables,
+        tables: &mut BindlessTextureTable,
         image: GpuImage,
         ticket: Ticket,
         slots: SlotBinding,

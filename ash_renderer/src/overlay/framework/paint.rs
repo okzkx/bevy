@@ -18,7 +18,7 @@ use bevy::{ecs::system::SystemParam, image::ImageSamplerDescriptor, prelude::*};
 use crate::{
     common::error::{Result, VulkanError},
     render::{
-        sampler_key, AtlasGpu, BindlessTables, Context, GpuImage, ImageSpec, StagingImageCopy,
+        sampler_key, AtlasGpu, BindlessTextureTable, Context, GpuImage, ImageSpec, StagingImageCopy,
         UiDrawCall, UiPaint, UiVertex, UiVertexRing, UploadBatch, Uploader,
     },
 };
@@ -149,7 +149,7 @@ pub(crate) fn paint_overlay(
     mirror: &AtlasMirror,
     gpu: &mut AtlasGpu,
     ring: &mut UiVertexRing,
-    tables: &mut BindlessTables,
+    tables: &mut BindlessTextureTable,
     uploader: &mut Uploader,
     slot: usize,
     screen_px: vk::Extent2D,

@@ -30,7 +30,7 @@ use crate::render::passes::visibility::hiz::{HIZ_DOWNSAMPLE_PIPELINE, HIZ_OCCLUS
 use crate::render::passes::visibility::indirect::BUILD_INDIRECT_PIPELINE;
 use crate::render::passes::visibility::lod::LOD_SELECT_PIPELINE;
 use crate::render::passes::visibility::occlusion::OCCLUSION_PIPELINE;
-use crate::render::resident::bindless_tables::BINDLESS_SET;
+use crate::render::resident::bindless_texture_table::BINDLESS_TEXTURE_SET;
 use crate::render::resident::frame_uniforms::FRAME_SET;
 use crate::render::resident::instance_table::INSTANCE_SET;
 
@@ -62,7 +62,7 @@ pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
 
 /// 宿主声明并建出的全部 set 布局。
 pub(crate) const ALL_SETS: &[&SetLayoutDesc] = &[
-    &BINDLESS_SET,
+    &BINDLESS_TEXTURE_SET,
     &FRAME_SET,
     &INSTANCE_SET,
     &GBUFFER_SAMPLED_SET,

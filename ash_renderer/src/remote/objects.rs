@@ -21,7 +21,7 @@ use crate::{
         replace_handles as apply_handle_swap, spawn_primitive_clone, AssetReadiness,
         AssetRetirements, HandleSwapReadback, InstanceLedger, ObjectOpError,
     },
-    render::{BindlessTables, ImageCache, InstanceTables, MeshPool, OBJECT_TABLE_CAPACITY},
+    render::{BindlessTextureTable, ImageCache, InstanceTables, MeshPool, OBJECT_TABLE_CAPACITY},
 };
 
 use super::{invalid_params, params::parse_params};
@@ -134,7 +134,7 @@ pub(crate) fn increment_stats(
     retirements: Res<AssetRetirements>,
     pool: Res<MeshPool>,
     image_cache: Res<ImageCache>,
-    tables: Res<BindlessTables>,
+    tables: Res<BindlessTextureTable>,
     instance_tables: Res<InstanceTables>,
 ) -> BrpResult {
     let s = ledger.stats;

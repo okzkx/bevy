@@ -48,7 +48,7 @@ use crate::{
     },
     render::{
         conservative_world_aabb, frustum_planes, pack_frame_uniforms, AcquireOutcome,
-        BindlessTables, Context, CullDiagnostics, CullDraw, CullPass, CullSettings, FrameDraw,
+        BindlessTextureTable, Context, CullDiagnostics, CullDraw, CullPass, CullSettings, FrameDraw,
         FramePool, FrameSample, FrameUniforms, FrameUniformsData, GpuBuffer, GBufferPipeline, GpuTimer,
         HizPyramid, ImageCache, IndirectDraw, IndirectPass, IndirectStats, InstanceTables,
         LOD_LEVEL_SIZE, LodDiagnostics, LodDraw, LodPass, LodSettings, MAX_LOD_LEVELS, MeshPool,
@@ -194,7 +194,7 @@ pub(crate) struct FrameCore<'w, 's> {
     ctx: Res<'w, Context>,
     swapchain: ResMut<'w, Swapchain>,
     frames: ResMut<'w, FramePool>,
-    tables: ResMut<'w, BindlessTables>,
+    tables: ResMut<'w, BindlessTextureTable>,
     frame_uniforms: ResMut<'w, FrameUniforms>,
     resized: MessageReader<'w, 's, WindowResized>,
     gbuffer_pipeline: Res<'w, GBufferPipeline>,
