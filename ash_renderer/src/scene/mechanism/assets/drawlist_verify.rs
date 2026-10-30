@@ -10,9 +10,8 @@ use bevy::prelude::*;
 pub struct DrawListVerify {
     /// 对照开关（BRP `drawlist_verify_set` 写）。
     pub enabled: bool,
-    /// 已比对帧数累计。
     pub frames_compared_total: u64,
-    /// 不一致帧数累计（非零 = 增量路径有缺陷）。
+    /// 非零表示增量结果与全量参照不一致。
     pub mismatches_total: u64,
     /// 最近一次不一致的摘要（行数差/首差位/字段名）。
     pub last_mismatch: Option<String>,

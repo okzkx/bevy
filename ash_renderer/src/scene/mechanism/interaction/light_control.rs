@@ -1,21 +1,7 @@
-//! 日光方向控制（机制半边）：中键拖拽旋转方向光——屏幕系"穹顶拖拽"：右拖 =
-//! 太阳向屏幕右转、下拖 = 向屏幕下降，旋转轴取相机右/上轴而非世界 Y，俯视等
-//! 非常规机位下太阳仍跟随光标方向走。零 Vulkan 代码，也不含写死的场景参数。
-//! 与 [`super::camera_control`] 同一套输入形态：跨帧拖拽会话（[`DragSession`]）
-//! + UI 指针仲裁（[`PointerCapture`]，悬在调试面板上让给 UI）。
-//!
-//! 状态真源 = 方向光实体携带的 [`SunOrbit`] 球坐标组件（方位角/仰角），业务
-//! 半边（[`crate::scene::content::lights`]）进场时从初始朝向反解挂上，机制
-//! 半边只在中键拖出增量时写 [`Transform`]——与相机控制同一纪律：拖拽前
-//! 渲染语义零变化，朝向恒由球坐标重导出（look_at，up=Y）。BRP
-//! `sun_get`/`sun_set` 与拖拽共用这一条"球坐标 → 朝向"通路。
-//!
-//! 帧内时序与相机控制同款：Update 改 Transform → PostUpdate 传播 → Last 的
-//! draw_frame 直读 GlobalTransform（方向光沿实体 forward 照射，无位置语义）。
-//!
-//! 局限：与左右键拖拽一样不做指针抓取，光标拖出窗口即无增量（会话保活、
-//! 回窗续拖，防跳变同款）；仰角下限钉在地平线（日光语义 = 太阳在天上）；
-//! 拖拽旋转轴取相机的 GlobalTransform（上一帧传播结果，滞后一帧无感）。
+//! 中键拖动控制方向光；状态由灯光实体上的 [`SunOrbit`] 保存，BRP 与拖拽共用写回路径。
+//! Update 写 Transform，传播后由 Last 的帧循环读取；输入仲裁由 PointerCapture 提供。
+//! 坑：旋转轴取相机右/上轴；绕世界 Y 会使俯视时的拖动接近无效。
+//! 不抓取指针；拖出窗口时没有增量，光标重新进入时可能产生较大位移。
 
 use bevy::{
     light::DirectionalLight,
@@ -30,19 +16,16 @@ use super::pointer_capture::{PointerCapture, PointerCaptureSet};
 
 use ash_macros::system;
 
-/// 仰角限位：下限 = 地平线（日光不照地下）；上限距天顶留 1° 余量，
-/// `sun_dir()` 与 Y 不平行，look_at 的 up=Y 才不退化。BRP `sun_set` 同一限位。
+/// 仰角限制为地平线至距天顶 1°；避免 `look_at` 的 up=Y 退化。
 const MIN_SUN_ELEVATION: f32 = 0.0;
 const MAX_SUN_ELEVATION: f32 = 89.0f32.to_radians();
 
-/// 仰角限位（BRP 写入与拖拽共用）：地平线到天顶余量。
+/// 将仰角限制在地平线与天顶余量之间。
 pub fn clamp_elevation(elevation: f32) -> f32 {
     elevation.clamp(MIN_SUN_ELEVATION, MAX_SUN_ELEVATION)
 }
 
-/// 日光方向状态：太阳方位角/仰角（球坐标，世界系）。方向光实体携带，机制
-/// 半边中键驱动写 Transform；初始值由业务半边从进场朝向反解（[`from_dir`]），
-/// 拖拽前前向零跳变。
+/// 方向光实体携带的太阳方位角与仰角状态。
 #[derive(Component, Debug, Clone, Copy)]
 pub struct SunOrbit {
     /// 太阳方位角（rad，绕 +Y）：0 = 太阳在 +Z 侧，增加 = +Z 向 +X（俯视顺时针）。
@@ -52,8 +35,7 @@ pub struct SunOrbit {
 }
 
 impl SunOrbit {
-    /// 从太阳方向（场景指向太阳，= 灯光 forward 的反向）反解球坐标；
-    /// 非归一方向就地归一，零向量回落到正东地平线。
+    /// 从场景指向太阳的方向反解球坐标；零向量回落为 +Z 侧地平线。
     pub fn from_dir(sun_dir: Vec3) -> Self {
         let d = sun_dir.normalize_or_zero();
         Self {
@@ -62,7 +44,6 @@ impl SunOrbit {
         }
     }
 
-    /// 当前参数下的太阳方向（场景指向太阳）。
     pub(crate) fn sun_dir(&self) -> Vec3 {
         let (sin_az, cos_az) = ops::sin_cos(self.azimuth);
         let (sin_el, cos_el) = ops::sin_cos(self.elevation);
@@ -70,10 +51,7 @@ impl SunOrbit {
     }
 }
 
-/// 中键拖拽的一帧增量（屏幕系穹顶拖拽）：太阳方向绕相机右轴/上轴旋转，像
-/// 被光标按在穹顶上拖——右拖向屏右、下拖向屏下。轴用相机基：俯视等非常规
-/// 机位下太阳跟随光标方向（绕世界 Y 在俯视时会原地打转，天顶附近方位角无感）。
-/// 增量回写球坐标并夹仰角限位（贴地平线后继续拖只动方位，语义同旧版）。
+/// 按相机右轴和上轴旋转太阳方向，再回写球坐标并限制仰角。
 fn light_rotate(orbit: &mut SunOrbit, delta: Vec2, turn: f32, cam_right: Vec3, cam_up: Vec3) {
     let d = orbit.sun_dir();
     let d = Quat::from_axis_angle(cam_up, delta.x * turn) * d;
@@ -82,14 +60,12 @@ fn light_rotate(orbit: &mut SunOrbit, delta: Vec2, turn: f32, cam_right: Vec3, c
     orbit.elevation = orbit.elevation.clamp(MIN_SUN_ELEVATION, MAX_SUN_ELEVATION);
 }
 
-/// 球坐标写回灯光朝向：方向光沿实体 forward 照射，forward 钉在
-/// 太阳方向的反向（`look_at`，up = 世界 Y）。BRP `sun_set` 与拖拽共用。
+/// 方向光沿实体 forward 照射，因此朝向设为太阳方向的反向。
 pub fn apply_sun_rotation(orbit: &SunOrbit, transform: &mut Transform) {
     transform.look_at(-orbit.sun_dir(), Vec3::Y);
 }
 
-/// 日光控制插件：Update 里读中键拖拽改写方向光朝向，接线收在本插件内，
-/// main 只 `add_plugins`。作用对象 = 携带 [`SunOrbit`] 的方向光实体。
+/// 注册日光控制系统及指针仲裁资源。
 pub struct AshLightControlPlugin;
 
 impl Plugin for AshLightControlPlugin {
@@ -99,9 +75,7 @@ impl Plugin for AshLightControlPlugin {
     }
 }
 
-/// 日光方向控制（Update）：中键按下且指针不在 UI 上 → 开拖拽会话，按住期间
-/// 逐帧位移换算方位/仰角。写 Transform 只在参数变化时——进场朝向（与官方
-/// 对照进程同源）在首次中键拖拽前原样保留。
+/// Update 中处理日光拖动并将方向写回 Transform；只有按下中键时检查 UI 悬停。
 #[system]
 fn light_control(
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -112,7 +86,7 @@ fn light_control(
     mut session: Local<DragSession>,
     mut engaged: Local<bool>,
 ) {
-    // 主窗未建/最小化：无指针域，拖拽会话就地作废（等还原后重新按下）。
+    // 主窗口缺席或最小化时，取消拖拽会话。
     let Ok(window) = windows.single() else {
         *session = DragSession::default();
         return;
@@ -132,9 +106,7 @@ fn light_control(
         session.last_cursor = None;
     }
 
-    // 中键拖拽旋转：屏幕位移 → 屏幕系旋转，转速与相机拖拽同款（拖满一屏高 =
-    // 转一圈）。旋转轴取相机基（无相机退化为世界 Y 系——语义同旧版）；相机
-    // 基是上一帧传播结果，滞后一帧对"跟随光标"的手感无感。
+    // 中键拖动按窗口高度归一；旋转轴使用上一帧传播的相机右轴和上轴。
     if session.dragging
         && mouse.pressed(MouseButton::Middle)
         && let Some(pos) = cursor
@@ -156,7 +128,6 @@ fn light_control(
         session.last_cursor = Some(pos);
     }
 
-    // 首次接管报一次即歇（控制链路活了的收账，参数随拖拽持续变化）。
     if !*engaged
         && mouse.pressed(MouseButton::Middle)
         && let Ok((_, orbit)) = lights.single()
@@ -186,8 +157,7 @@ mod tests {
         );
     }
 
-    /// 平视相机（右=+X、上=+Y）下拖右：太阳向屏右（+X）转、仰角不变——
-    /// 与旧版世界 Y 方位角在水平机位下的行为一致。
+    /// 平视相机下向右拖动，太阳沿屏幕右侧移动且仰角不变。
     #[test]
     fn drag_right_moves_sun_screen_right_level_camera() {
         let mut orbit = SunOrbit { azimuth: 0.0, elevation: 0.5 };
@@ -208,8 +178,7 @@ mod tests {
         assert_eq!(orbit.elevation, MIN_SUN_ELEVATION, "仰角应夹在地平线");
     }
 
-    /// 俯视相机（右=+X、上=−Z）右拖：天顶附近的太阳应向屏右（+X）移——
-    /// 旧版绕世界 Y 在此机位下太阳原地打转（天顶是 Y 轴旋转不动点）。
+    /// 俯视相机右拖时，天顶附近的太阳仍应向屏幕右侧移动。
     #[test]
     fn drag_right_moves_sun_screen_right_topdown_camera() {
         let mut orbit = SunOrbit { azimuth: 0.0, elevation: 1.4 };

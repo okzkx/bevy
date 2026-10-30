@@ -77,7 +77,7 @@
 
 ### 第 8 站：场景账本
 
-先读优先三件：`scene/mechanism/ledger.rs`（实体粒度的行账）→ `residency.rs`（资产粒度的驻留账）→ `scene/content/collect_report.rs`；其余 mechanism 文件按需展开，资产到货链可顺带看 `asset_events`、`asset_ops`、`asset_readiness`。
+先读优先三件：`scene/mechanism/assets/ledger.rs`（实体粒度的行账）→ `residency.rs`（资产粒度的驻留账）→ `scene/content/collect_report.rs`；其余 mechanism 文件按需展开，资产到货链可顺带看 `asset_events`、`asset_ops`、`asset_readiness`。
 
 校验要点：一份资产的两份真身（CPU 容器 + GPU 显存）各由谁持有；行账的待盘点增量怎样交给第 9 站的上传编排；回收方向在哪里断开、谁负责。
 

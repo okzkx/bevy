@@ -18,9 +18,9 @@
 
 ## 2. 新文件与改动分工（一层一句话）
 
-- `scene/mechanism/asset_readiness.rs`（新增）——就绪账面本体：pending/failed 两本账 + 失败读侧系统 + ReadinessStats 计量。
+- `scene/mechanism/assets/asset_readiness.rs`（新增）——就绪账面本体：pending/failed 两本账 + 失败读侧系统 + ReadinessStats 计量。
 - `driver/upload.rs`——盘点段从"驻留与否"二态改"完成/失败/pending"三态；转换段 mark_pending、commit 段 arrive、帧末 reconcile（含空批早退路径）。
-- `scene/mechanism/object_ops.rs`——加载操作本体三件（换柄加载/克隆加载/贴图换槽），可复用层。
+- `scene/mechanism/editing/object_ops.rs`——加载操作本体三件（换柄加载/克隆加载/贴图换槽），可复用层。
 - `remote/assets.rs` + `remote/mod.rs`——BRP 薄壳 `load_mesh`/`load_image` 与注册。
 - `remote/objects.rs`——`increment_stats` 扩 readiness 读数段。
 - `main.rs`——`AshReadinessPlugin` 插入插件清单（资产事件读侧之后）。
@@ -58,11 +58,11 @@
 ## 5. 代码改动简要解析（git show --stat 实数，feat 07325dc87，10 文件 +639/−34）
 
 **新增**：
-- `scene/mechanism/asset_readiness.rs`（+292）——`AssetReadiness` 资源（pending 两 map + failed 三 set + ReadinessStats 十项）、mark/arrive/expel/revive/reconcile 六个写口、失败读侧系统 `track_asset_failures`（三类 `AssetLoadFailedEvent` + 三类 `AssetEvent` 复活口）与 `AshReadinessPlugin`。取舍：失败读侧只记账不裁决，行出队归 flush 整行状态判定——避免读侧各自为政清行（失败腿+pending 腿并存的行不能出队）。
+- `scene/mechanism/assets/asset_readiness.rs`（+292）——`AssetReadiness` 资源（pending 两 map + failed 三 set + ReadinessStats 十项）、mark/arrive/expel/revive/reconcile 六个写口、失败读侧系统 `track_asset_failures`（三类 `AssetLoadFailedEvent` + 三类 `AssetEvent` 复活口）与 `AshReadinessPlugin`。取舍：失败读侧只记账不裁决，行出队归 flush 整行状态判定——避免读侧各自为政清行（失败腿+pending 腿并存的行不能出队）。
 
 **扩展**：
 - `driver/upload.rs`（+85/−34 中的主体）——盘点段三态判定（完成/失败/pending 逐腿）；转换段查无 `mark_pending`、拒绝 `expel`；commit 段 `arrive`；帧末 `reconcile`（空批早退路径也走，等待帧数照常累计）；日志补"失败出队行"计数。取舍：reconcile 放收尾统一做而非逐事件做——marked 集是"当帧仍有引用"的唯一事实，逐事件做会在跨帧时序上误判取消。
-- `scene/mechanism/object_ops.rs`（+98）——`load_mesh_rebind`/`spawn_with_loaded_mesh`/`load_image_slot` 三件加载本体 + `MaterialAssetMissing` 错误变体；`load` 收 `AssetPath<'static>`，`&str` 须转 owned。
+- `scene/mechanism/editing/object_ops.rs`（+98）——`load_mesh_rebind`/`spawn_with_loaded_mesh`/`load_image_slot` 三件加载本体 + `MaterialAssetMissing` 错误变体；`load` 收 `AssetPath<'static>`，`&str` 须转 owned。
 - `remote_assets.rs`（+94）——`load_mesh_cmd`（entity|source 二选一）/`load_image_cmd` 薄壳；复用 remote_objects 的 `object_op_error`（升 pub(crate)，加新变体映射）。
 - `remote_objects.rs`（+36）——`increment_stats` 加 readiness 段（pending/等待/到货/失败/取消十项分列）。
 - `remote.rs`（+11）、`main.rs`（+5）、`scene/{mod.rs,mechanism/mod.rs}`（+11）——注册与重出口。

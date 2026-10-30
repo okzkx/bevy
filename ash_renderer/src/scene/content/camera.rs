@@ -1,7 +1,7 @@
 //! 相机组（业务半边）：裸 Camera 三件套的 spawn 与就位核验，取景参数与官方
 //! 对照进程同源，零 Vulkan 代码。
 //!
-//! 宽高比补位是通用机制，住 [`crate::scene::mechanism::camera_aspect`]；
+//! 宽高比补位由机制层的 [`crate::scene::mechanism::AshCameraAspectPlugin`] 提供；
 //! "为什么裸 `Camera` 不用 `Camera3d`"的机制见
 //! `.agents/docs/3-静态取数链路/3.1-ECS侧取数/3.1.3-相机与灯光：引擎层自建与宽高比第四补位.md`。
 
@@ -37,7 +37,7 @@ pub(super) fn spawn_camera(
 ) {
     // 宽高比初值：官方由 camera_system（bevy_render/src/camera.rs:354，渲染族已禁）
     // 随窗口建/改维护，禁后归我们——Startup 先按主窗口写一次，后续 resize 由
-    // 机制侧宽高比补位（crate::scene::mechanism::camera_aspect）接管。宽高比错了，
+    // 机制侧宽高比补位接管。宽高比错了，
     // 建 VP 矩阵时横向视野就错。
     let mut projection = Projection::default();
     let mut aspect_note = "默认 1.0，交 Update 修正";

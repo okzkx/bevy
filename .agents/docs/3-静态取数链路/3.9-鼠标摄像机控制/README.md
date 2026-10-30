@@ -24,7 +24,7 @@
 
 ## 产物
 
-- 代码：`ash_renderer/src/scene/mechanism/camera_control.rs`（新，[`CameraOrbit`] + [`AshCameraControlPlugin`]）；`scene/content/camera.rs`（spawn 时挂轨道组件）；`scene/mechanism/mod.rs`、`scene/mod.rs`（出口）；`main.rs`（一行 add_plugins）。
+- 代码：`ash_renderer/src/scene/mechanism/interaction/camera_control.rs`（新，[`CameraOrbit`] + [`AshCameraControlPlugin`]）；`scene/content/camera.rs`（spawn 时挂轨道组件）；`scene/mechanism/mod.rs`、`scene/mod.rs`（出口）；`main.rs`（一行 add_plugins）。
 - 工具：`tools/capture_window.py` / `tools/inject_mouse.py` / `tools/focus_window.py`（截图取证、输入注入、置前台，后续段的窗口回归直接复用）。
 - 施工记录：[3.9.1-3.9.2-鼠标摄像机控制施工记录：左键环绕、滚轮推拉与egui层仲裁门](3.9.1-3.9.2-鼠标摄像机控制施工记录：左键环绕、滚轮推拉与egui层仲裁门.md)——含 egui 0.36 `is_pointer_over_egui()` 在 `begin_pass` 形状下恒真的源码级根因、PrintWindow 连拍亮度爬升伪影、winit 滚轮合并、窗口层叠漂移四枚钉子。
 

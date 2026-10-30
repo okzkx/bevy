@@ -46,7 +46,7 @@ LOD 档位本质上回答"这个物体在屏幕上占多大"。距离判据（di
 
 **"换 LOD 资产"的本质**：顶点缓冲是同一个 MeshPool，不同档的 mesh 只是池中不同区段——所以换档不需要重绑任何 buffer、不需要 CPU 知情，indirect 命令三字段一改，GPU 执行时就画了另一份索引区间。`instanceCount` 语义不变（仍取剔除标记），`firstInstance = 槽号`（VS 按 instance_index 读 set2，5.3 定案）。
 
-CPU 侧的配套只有两件，都在账面层：[`LodGroups`](../../../../ash_renderer/src/scene/mechanism/lod_registry.rs) 登记"基准 mesh 身份 → 各档变体柄"（level 0 复用实体自己的 mesh，零新资产；细分阶梯是程序化网格，同参共享缓存）；flush 上传链按它把档位资产一并盘点上传，draw_frame 把各档引脚写进 b7 表。
+CPU 侧的配套只有两件，都在账面层：[`LodGroups`](../../../../ash_renderer/src/scene/mechanism/assets/lod_registry.rs) 登记"基准 mesh 身份 → 各档变体柄"（level 0 复用实体自己的 mesh，零新资产；细分阶梯是程序化网格，同参共享缓存）；flush 上传链按它把档位资产一并盘点上传，draw_frame 把各档引脚写进 b7 表。
 
 ## 四、与 Hi-Z 的关系：复用模式，不共享产物
 

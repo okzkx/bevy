@@ -1,19 +1,9 @@
-//! 变更形态注入：压测矩阵的三种变更形态（零变化/少量变化/全动态）
-//! 需要一个确定性的"每帧改 Transform"工作源——BRP 逐请求驱动撑不起全动态
-//!（10 万行逐帧 HTTP 请求不可行），本模块用 BRP 开关控制的常驻 system 承担：
-//! 每帧对确定子集（迭代序前 `rows` 个可渲染 primitive）做小幅旋转，走
-//! Changed<Transform> → 账本增量 → 模型环重写的既有链路，零新通道。
-//!
-//! 边界（只测量不主张）：这是压测工作负载不是业务功能——旋转角速度、
-//! 子集大小都是矩阵参数（BRP `workload` 方法写），不承载任何渲染语义；
-//! 读数只进计量。子集选取用查询迭代序（archetype 序，同帧内稳定）：同一
-//! 配置逐帧命中同一批实体，保证"少量变化"读数可复现。
+//! 每帧按查询迭代顺序修改指定数量 primitive 的 Transform，用于测量不同变更规模。
+//! 子集是当前查询顺序的前缀，不保证跨帧实体集合固定。
 
 use bevy::prelude::*;
 
-/// 变更形态开关（BRP `workload` 方法写；`rows = 0` 或 `enabled = false` =
-/// 零变化形态）。
-/// 缺省 = 关（enabled=false, rows=0）——零变化形态是默认世界状态。
+/// 每帧变更设置；默认关闭，`enabled = false` 或 `rows = 0` 时不修改实体。
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct WorkloadSettings {
     pub enabled: bool,
@@ -21,7 +11,7 @@ pub struct WorkloadSettings {
     pub rows: usize,
 }
 
-/// 变更注入插件：开关资源 + Update 每帧改写系统。
+/// 注册设置资源和每帧 Transform 更新系统。
 pub struct AshWorkloadPlugin;
 
 impl Plugin for AshWorkloadPlugin {

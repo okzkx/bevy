@@ -84,7 +84,7 @@ Blender 导入器把归一化数组的索引引用翻译回"所有物"层级，�
 - 场景根实体：`Transform + Visibility + Name`，scene 无 name 时兜底 `"Scene{i}"`（`loader/mod.rs:1056-1066`）——"Scene0" 的来源。
 - `load_node` 递归：node 实体挂 `Transform + Visibility + Name`（`loader/mod.rs:1560-1563`）；node 带相机则把 `Camera3d + Projection` 组件**插在 node 实体上**（`loader/mod.rs:1623`），带灯则 spawn **node 的子实体**挂 `DirectionalLight` 等（`loader/mod.rs:1781`）——两者落点不同。
 - 每个 primitive 一个 node 子实体：`Mesh3d` + `Aabb`（`loader/mod.rs:1690-1695`），`Name = "{mesh 名}.{材质名}"`（`loader/mod.rs:1754`）。
-- 材质挂接：官方干这事的 `GltfExtensionHandlerPbr` 是 `pub(crate)` 且随 PbrPlugin 被本项目禁用，故由自写 `AshMaterialHook::on_spawn_mesh_and_material` 按标签取柄插 `MeshMaterial3d`（`ash_renderer/src/scene/mechanism/material_hook.rs:106`）。
+- 材质挂接：官方干这事的 `GltfExtensionHandlerPbr` 是 `pub(crate)` 且随 PbrPlugin 被本项目禁用，故由自写 `AshMaterialHook::on_spawn_mesh_and_material` 按标签取柄插 `MeshMaterial3d`（`ash_renderer/src/scene/mechanism/host/material_hook.rs:106`）。
 - 收口：`WorldAsset::new(world)` 把整棵草稿树打包成资产，以 `"Scene0"` 标签挂进 Gltf 资产（`loader/mod.rs:1149`）。
 
 ### 段 2：进场——反射展开进主 World

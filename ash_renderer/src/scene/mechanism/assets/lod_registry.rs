@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use super::{ObjectOpError, TestShape, spawn_test_shape};
+use crate::scene::mechanism::{spawn_test_shape, ObjectOpError, TestShape};
 use crate::render::MAX_LOD_LEVELS;
 
 /// LOD 组登记处：基准 mesh 身份 → 各档变体柄（level 0 = 基准自身），加
@@ -135,7 +135,6 @@ pub fn spawn_lod_ladder(
     name: Option<&str>,
     unique: bool,
 ) -> Result<LodLadderReadback, ObjectOpError> {
-    // 阶梯仅 sphere（四形状无细分参数面，形状口径见模块注释）
     if shape != TestShape::Sphere {
         return Err(ObjectOpError::InvalidParams(
             "LOD 阶梯仅支持 sphere（ico 细分参数面 4/3/2/1）".into(),

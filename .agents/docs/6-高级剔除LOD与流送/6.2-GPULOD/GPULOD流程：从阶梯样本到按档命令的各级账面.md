@@ -10,7 +10,7 @@ BRP `spawn_lod` 造一个四档阶梯实体并登记 `LodGroups`；上传链把�
 
 | 文件 | 一层职责 |
 |---|---|
-| [scene/mechanism/lod_registry.rs](../../../../ash_renderer/src/scene/mechanism/lod_registry.rs) | LOD 组登记处：基准身份→各档变体柄（flush 盘点/表写/census 共用）+ 阶梯 spawn 本体（形状 × 档位缓存） |
+| [scene/mechanism/assets/lod_registry.rs](../../../../ash_renderer/src/scene/mechanism/assets/lod_registry.rs) | LOD 组登记处：基准身份→各档变体柄（flush 盘点/表写/census 共用）+ 阶梯 spawn 本体（形状 × 档位缓存） |
 | [vulkan/lod.rs](../../../../ash_renderer/src/vulkan/lod.rs) | 选档 compute 半边：LodPass 管线 + 96B push + 判据/迟滞纯函数（CPU 参照）+ 开关/诊断资源 |
 | [shaders/lod_select.wgsl](../../../../ash_renderer/shaders/lod_select.wgsl) | 选档 shader：8 角点投屏 → floor 分带 + 迟滞 → 写 b8 |
 | [remote/lod.rs](../../../../ash_renderer/src/remote/lod.rs) | BRP 方法族薄壳：lod_census（逐实例对照）/lod_set_enabled/lod_set_params |
@@ -46,7 +46,7 @@ BRP `spawn_lod` 造一个四档阶梯实体并登记 `LodGroups`；上传链把�
  lod_select.wgsl                | 110 行（新）
  vulkan/lod.rs                  | 379 行（新：LodPass + 纯函数 + 开关/诊断）
  remote/lod.rs                  | 228 行（新：BRP 三方法）
- scene/mechanism/lod_registry.rs| 203 行（新：登记处 + 阶梯 spawn）
+ scene/mechanism/assets/lod_registry.rs| 203 行（新：登记处 + 阶梯 spawn）
  drawlist/frame/upload/init     | LOD 半边接线（64/77/52/19 行级）
  ledger/shapes/scene mods       | LOD 脏集 + 薄壳 + 导出
  overlay ui/debug_window        | LOD 面板行（8/19 行）

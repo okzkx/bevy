@@ -10,7 +10,7 @@
 | `shaders/occlusion.wgsl` | 遮挡判定：8 角点投屏 → 选 mip → 4 tap MIN → `obj_max < occluder` 判剔除，合并写 b3、独立写 b6 |
 | `src/vulkan/hiz.rs` | HizPyramid：×2 帧槽 R32F mip 链本体 + 归约管线 + 遮挡测试描述符 + 读回通道 + reverse-Z 纯函数三件（单测） |
 | `src/vulkan/occlusion.rs` | OcclusionPass：遮挡 compute 管线 + 80B push 打包 + 投屏参照 + OcclusionSettings/Diagnostics |
-| `src/scene/mechanism/test_entities.rs` | 测试实体本体：五形状 + 颜色 → 按形状/颜色缓存的 mesh/材质（遮挡样本载具） |
+| `src/scene/mechanism/generation/test_entities.rs` | 测试实体本体：五形状 + 颜色 → 按形状/颜色缓存的 mesh/材质（遮挡样本载具） |
 | `src/remote/shapes.rs` | `ash_renderer/spawn_shape` 协议薄壳（本体在 mechanism 层） |
 
 改动沉淀的既有文件（要点）：`depth.rs`（usage 扩 SAMPLED + 能力查询）、`frames.rs`（storeOp STORE + 深度屏障 + 遮挡/归约录制位 + depth_image 访问器）、`instance_table.rs`（遮挡标记环第六族 b6）、`perf.rs`（4→5 位 timestamp、`gpu_hiz_ms`）、`driver/host/frame.rs`（遮挡半边编排 + OcclusionGate + resize 同批重建 + warmup 走账）、`driver/host/init.rs`（hiz/occlusion_pass 进创建链与拆除链——**拆除序：OcclusionPass → HizPyramid → FramePool**，视图先于深度 image 销毁）、`remote/cull.rs`（occlusion_set_enabled/hiz_census/occlusion_probe 三方法 + cull_stats 遮挡分列）、`overlay/windows/debug_window.rs` + `overlay/framework/ui.rs`（遮挡开关与状态行）。

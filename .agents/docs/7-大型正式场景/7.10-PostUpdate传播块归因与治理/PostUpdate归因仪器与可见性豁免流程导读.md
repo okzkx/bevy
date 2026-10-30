@@ -35,7 +35,7 @@ PostUpdate（每帧）:
 
 | 文件 | 一层职责 |
 |---|---|
-| scene/mechanism/visibility_exempt.rs | 三件套移除系统 + 插件 + 计量（本段新文件） |
-| scene/mechanism/ledger.rs（update_ledger） | scan_candidates 改账本行数（候选集 == 行集恒等，去掉每帧 O(N) count 走访） |
+| scene/mechanism/host/visibility_exempt.rs | 三件套移除系统 + 插件 + 计量（本段新文件） |
+| scene/mechanism/assets/ledger.rs（update_ledger） | scan_candidates 改账本行数（候选集 == 行集恒等，去掉每帧 O(N) count 走访） |
 | scene/mod.rs、mechanism/mod.rs、main.rs | 插件再导出与装配 |
 | .temp/7.10/aggregate.py（不进仓） | chrome JSON 流式聚合器，7.11 复用 |

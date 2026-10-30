@@ -15,7 +15,7 @@
 //!   `removed_components`），每个 primitive 各发一次，**整树清账免费拿到**；
 //!   ② 新增/换绑：`Or<(Changed<Mesh3d>, Changed<MeshMaterial3d>)>`（插入也置
 //!   changed tick，故新增不需要 Added）；③ 矩阵：`Changed<GlobalTransform>`——
-//!   传播用 `set_if_neq`（bevy_transform/src/systems.rs:719），静态场景恒不触发。
+//!   传播只在矩阵变化时更新终值，静态场景不触发。
 //!
 //! 计量（判定线证据口径）：**扫描数**（tick 比较的候选实体数 = 三样俱全实体
 //! 总数，O(匹配实体) 是 Changed 语义的已知成本）与**处理数**（真实动手的行）
@@ -41,7 +41,7 @@ use bevy::{
 use ash_macros::system;
 
 use super::assembly_cache::AssemblyEval;
-// 对外路径保持 `ledger::{AssemblyCache, AssemblyView}`（mechanism 出口与 BRP 读数面引用）
+// 保持调用方现有的 AssemblyCache 和 AssemblyView 路径。
 pub(crate) use super::assembly_cache::{AssemblyCache, AssemblyView};
 
 /// 账本一行：一个可渲染 primitive 的跨帧实例数据。柄去资产容器取内容，
@@ -119,9 +119,7 @@ pub struct InstanceLedger {
     rows: BTreeMap<Entity, InstanceRow>,
     /// 新增/换柄置位，flush_uploads 盘点（驻留或登记重试）后清。
     dirty: BTreeSet<Entity>,
-    /// 行删除/换绑换下的实例槽（纯 ECS 侧事实的整数账）：flush_uploads
-    /// 消费进对象表停尸房（排空后才复用）。update_ledger 不能触 Vulkan，
-    /// 以此账交接——桥接纪律与停尸房同款（旧内容多活一帧，无悬空）。
+    /// 删除或换绑的实例槽交给 flush；排空前不复用，避免旧引用指向已复用槽。
     pub(crate) freed_slots: Vec<u32>,
     /// 模型环待写标记，按帧槽奇偶两套：改动行的 model 要写进**两个帧槽**
     /// 各自的环（draw_frame 只消费本帧奇偶的那套，另一套下帧消费）——
@@ -223,9 +221,7 @@ impl InstanceLedger {
         out
     }
 
-    /// 标记一行 LOD 变体表待写：进**两套**奇偶集（两个帧槽的环都要
-    /// 补写——模型环同款纪律）。触发点 = 行换槽（flush_uploads）与 LOD 组
-    /// 档位资产到货（同处）。
+    /// 将一行加入两套奇偶集，确保两个帧槽的 LOD 表都更新。
     pub(crate) fn mark_lod_dirty(&mut self, entity: Entity) {
         self.lod_dirty[0].insert(entity);
         self.lod_dirty[1].insert(entity);

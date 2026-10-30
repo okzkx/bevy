@@ -1,19 +1,11 @@
-//! Transform 编辑操作封装（机制层）：egui 拖值与 BRP `set_transform`
-//! 共用的唯一实现，不养两份逻辑。
-//!
-//! 两条写入口：UI 侧走 [`TransformEditQueue`]——egui pass 里组好编辑，
-//! [`apply_transform_edits`] 在 Update 内紧随 pass 清账（overlay 链式排程），
-//! PostUpdate 传播 → 账本对账（update_ledger 增量维护）→ Last 绘制，画面当帧
-//! 跟随；BRP 侧持 &mut World 直调 [`apply_transform_edit`]。写值直接改
-//! `Transform` 组件，不走反射。
+//! Transform 编辑由 egui 与 BRP 共用。
+//! UI 在 egui pass 后、Transform 传播前应用队列；BRP 直接调用 [`apply_transform_edit`]。
 
 use bevy::{math::EulerRot, prelude::*};
 
 use ash_macros::system;
 
-/// 一次 Transform 编辑：逐分量可选（None = 不动该组）。欧拉角用度数（与属性
-/// 区展示、编辑控件一致），内部换弧度；旋转分解/合成固定 YXZ 序，与属性区
-/// 展示同口径。
+/// 一次 Transform 修改；旋转以度数输入，并按 YXZ 顺序转换。
 #[derive(Clone, Debug, Default)]
 pub struct TransformEdit {
     pub translation: Option<Vec3>,
@@ -28,12 +20,11 @@ pub enum TransformEditError {
     TransformMissing,
 }
 
-/// 编辑排队资源：egui pass 产，[`apply_transform_edits`] 消费。BRP
-/// 写方法不排队——持 &mut World 直接调 [`apply_transform_edit`]，同款实现。
+/// egui pass 生成、[`apply_transform_edits`] 消费的编辑队列。
 #[derive(Resource, Default)]
 pub struct TransformEditQueue(pub Vec<(Entity, TransformEdit)>);
 
-/// 应用一次编辑：实体存在且带 `Transform` 才生效，逐组覆盖。
+/// 仅覆盖 Some 指定的字段；目标须存在且包含 `Transform`。
 pub fn apply_transform_edit(
     world: &mut World,
     entity: Entity,
@@ -62,8 +53,7 @@ pub fn apply_transform_edit(
     Ok(())
 }
 
-/// Update 清账：把队列里的编辑逐条写进 World，链在 egui pass 之后、传播之前。
-/// 单条失败 warn 丢弃继续（Tier①：调试编辑不影响帧循环）。
+/// 单条编辑失败时记录警告并丢弃该项，继续处理后续编辑。
 #[system]
 pub(crate) fn apply_transform_edits(world: &mut World) {
     let edits = std::mem::take(&mut world.resource_mut::<TransformEditQueue>().0);

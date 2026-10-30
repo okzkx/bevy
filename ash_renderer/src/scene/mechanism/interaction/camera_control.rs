@@ -1,31 +1,6 @@
-//! 相机控制（机制半边）：左键拖动绕目标点环绕、滚轮沿视线推拉缩放；另有
-//! Unity Scene 式漫游——右键拖拽环视 + WASD 沿视线平移 + Q/E 世界升降。
-//! 零 Vulkan 代码，也不含写死的场景参数——环绕目标由组件携带，进场时由
-//! 业务半边（[`crate::scene::content::camera`]）按取景参数给出。
-//! 输入源有两个：鼠标（左键 + 滚轮，逐帧增量）与 CLI 给值（BRP
-//! `set_camera`，[`apply_camera_command`] 绝对值/系数覆盖，共用同一套球坐标
-//! 状态与 Transform 写路径）。
-//!
-//! 取舍：官方 0.21 新增的 `bevy_camera_controller::pan_orbit_camera` 是完整版
-//!（bevy_picking 命中测试决定旋转中心、动量/平滑可调、bevy_render 不可选依赖），
-//! 禁渲染宿主挂不上也用不着——我们只要"固定中心点的检视轨道"这一档，球坐标
-//! 参数化（yaw/pitch/radius）自写：拖动按
-//! 窗口高度归一（拖满一屏高 = 转一整圈）、滚轮每格 ×0.95 指数缩放。
-//!
-//! 漫游与轨道共用一套球坐标状态（单一机位真源，BRP 给值照常生效）：右键
-//! 环视 = 相机位置钉住、yaw/pitch 随拖拽旋转、环绕中心搬到新视线正前方
-//!（pivot 跟随，松开右键后左键轨道绕新中心继续——Unity Scene 同款）；
-//! WASD 沿相机视线系平移（W = 视线方向），Q/E 世界升降；速度 = radius·系数
-//! 每秒（缩放档位即速度档位，头盔近景与大场景俯瞰同一手感）。局限：环视不做
-//! 指针抓取，光标拖出窗口即无增量（会话保活、回窗续拖，与左键会话同款防跳变）。
-//!
-//! 帧内时序：Update 改 [`Transform`] → PostUpdate 传播（TransformSystems::Propagate）
-//! → Last 的 draw_frame 直读 `GlobalTransform` 建 VP（driver/host/frame.rs
-//! `FrameInput.cameras`）——同帧生效，无跨帧滞后。
-//!
-//! 与调试 UI 的仲裁：只读 [`PointerCapture`]（排在 [`PointerCaptureSet`] 之后，
-//! 同帧写后读）——`over_ui` 时鼠标按下/滚轮让给 UI，`wants_keyboard` 时漫游键
-//! 让给 UI；判定逻辑归写方（overlay），未装 UI 时恒不让。
+//! 相机输入控制：左键轨道、右键环视、滚轮缩放、WASDQE 漫游；BRP 命令共用球坐标状态。
+//! Update 写 Transform，传播后由 Last 的帧循环读取；系统排在 PointerCaptureSet 之后。
+//! 不抓取指针；UI 仲裁由 PointerCapture 提供。右键拖动未检查 UI 悬停状态。
 
 use bevy::{
     camera::Camera,
@@ -43,22 +18,17 @@ use super::pointer_capture::{PointerCapture, PointerCaptureSet};
 
 use ash_macros::system;
 
-/// 环绕转速：拖满一个窗口高度 = 转一整圈（`2π·Δ/height` 归一，窗口 resize
-/// 后手感不漂移；位移用 points 域，DPI 无关）。机制半边拖拽控制（相机 /
-/// 日光）共用同一转速。
+/// 拖满一个窗口高度转一周；位移使用 points 域，与 DPI 无关。相机和日光控制共用。
 pub(crate) const FULL_TURN_PER_HEIGHT: f32 = std::f32::consts::TAU;
 
 /// 每格滚轮的缩放系数：滚近 ×0.95、滚远 ×1/0.95，
 /// 指数缩放保证远近手感一致。
 const ZOOM_PER_LINE: f32 = 0.95;
 
-/// 漫游速度系数：每秒平移 radius·系数。缩放档位即速度档位——radius 300
-/// 的俯瞰档跑得快、radius 3 的检视档走得慢，同一手感覆盖头盔与大场景。
+/// 每秒平移速度为 radius × 系数，缩放半径同时改变漫游速度。
 const FLY_SPEED_FACTOR: f32 = 0.5;
 
-/// 环绕半径限位：下限防穿模（头盔半身尺 ~0.3，0.5 时贴脸近裁剪面也安全）；
-/// 上限 2000 覆盖常驻大场景（4096 实例铺 ~256 单位，及更大压测档）的俯瞰
-/// 全程——远平面同步放宽，见 content/camera。
+/// 环绕距离限制；上限应与场景相机的远平面设置匹配。
 const MIN_ORBIT_RADIUS: f32 = 0.5;
 const MAX_ORBIT_RADIUS: f32 = 2000.0;
 
@@ -66,8 +36,7 @@ const MAX_ORBIT_RADIUS: f32 = 2000.0;
 /// look_at 的 up=Y 才不退化。
 const PITCH_LIMIT: f32 = 89.0f32.to_radians();
 
-/// 轨道控制状态：球坐标（yaw 绕 Y、pitch 仰角）+ 半径 + 环绕目标。
-/// 目标点属于场景内容（看哪件东西），由业务半边在 spawn 时按取景参数写入。
+/// 轨道控制状态；目标点由场景内容在 spawn 时提供。
 #[derive(Component, Debug, Clone, Copy)]
 pub struct CameraOrbit {
     /// 环绕中心（世界系）。
@@ -81,8 +50,7 @@ pub struct CameraOrbit {
 }
 
 impl CameraOrbit {
-    /// 从现役机位反解轨道参数：位置/注视点已有的相机（如业务半边 spawn 的
-    /// 初始机位）零跳变接管。
+/// 从现有相机位置和注视点反解轨道参数。
     pub fn from_pose(position: Vec3, target: Vec3) -> Self {
         let offset = position - target;
         Self {
@@ -107,12 +75,12 @@ impl CameraOrbit {
 #[derive(Default)]
 pub(crate) struct DragSession {
     pub(crate) dragging: bool,
-    /// None = 指针离窗/未入场：不产生增量，重入时重新取基准（防跳变）。
+    /// None 表示没有记录的上一帧光标位置。
     pub(crate) last_cursor: Option<Vec2>,
 }
 
 /// CLI 相机给值命令：逐项可选（None = 不动该量）。角度用度数（与
-/// [`super::transform_edit::TransformEdit`] 的欧拉口径一致），zoom
+/// [`TransformEdit`] 的欧拉口径一致），zoom
 /// 与滚轮的指数缩放同语义（<1 推近、>1 拉远）。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CameraOrbitCommand {
@@ -157,7 +125,7 @@ pub fn apply_camera_command(
     }
 }
 
-/// 单相机命中后的命令落盘（原内联体摘出，多/无相机分流在上层）。
+/// 应用命令到已选中的相机。
 fn apply_orbit_command(
     transform: &mut Transform,
     orbit: &mut CameraOrbit,
@@ -219,8 +187,7 @@ fn fly_vector(forward: Vec3, keys: &ButtonInput<KeyCode>) -> Vec3 {
     v
 }
 
-/// 相机控制插件：Update 里读鼠标/键盘输入改写相机位姿，接线收在本插件内，
-/// main 只 `add_plugins`。作用对象 = 带 [`CameraOrbit`] 的相机。
+/// 注册相机控制系统及指针仲裁资源。
 pub struct AshCameraControlPlugin;
 
 impl Plugin for AshCameraControlPlugin {
@@ -230,11 +197,7 @@ impl Plugin for AshCameraControlPlugin {
     }
 }
 
-/// 相机控制（Update）：左键按下且指针不在 UI 上 → 开启轨道拖拽会话，按住
-/// 期间逐帧位移换算 yaw/pitch；右键同款会话做环视（位置钉住、pivot 跟随）；
-/// 滚轮按格缩放半径；WASDQE 漫游平移。写 Transform 只在参数变化时，朝向恒
-/// 用 look_at 对准环绕中心（与业务半边进场的 looking_at 同语义，相机就位
-/// 核验的 0° 判定线在拖拽后仍成立）。
+/// Update 中处理轨道、环视、滚轮缩放和漫游输入，并将相机朝向对准环绕中心。
 #[expect(
     clippy::too_many_arguments,
     reason = "bevy 系统的参数表即依赖注入清单：窗口/鼠标/键盘/滚轮/换算率/时间/UI 仲裁/相机组/双拖拽会话/首接管收账，逐项声明是框架惯例"
@@ -253,7 +216,7 @@ fn camera_control(
     mut look: Local<DragSession>,
     mut engaged: Local<bool>,
 ) {
-    // 主窗未建/最小化：无指针域，拖拽会话就地作废（等还原后重新按下）。
+    // 主窗口缺席或最小化时，取消左键拖拽会话。
     let Ok(window) = windows.single() else {
         *session = DragSession::default();
         return;
@@ -263,7 +226,7 @@ fn camera_control(
         return;
     }
     let cursor = window.cursor_position();
-    // UI 仲裁（语义见模块文档）：写方已按本帧光标算好
+    // UI 仲裁由 overlay 在本帧发布。
     let ui_wants = capture.over_ui;
 
     if mouse.just_pressed(MouseButton::Left) && !ui_wants {
@@ -284,8 +247,7 @@ fn camera_control(
     }
 
     let mut dirty = false;
-    // 滚轮推拉：悬在 egui 区上滚轮让给调试窗口（该帧半径不动，扫出
-    // 后恢复）；拖拽中指针扫过面板同理，推拉与环绕正交。
+    // 指针位于 UI 上时，滚轮输入留给调试窗口。
     let lines = scroll.to_lines(&pixels_per_line).delta.y;
     if lines != 0.0 && !ui_wants {
         for (_, mut orbit) in &mut cameras {
@@ -294,7 +256,7 @@ fn camera_control(
             dirty = true;
         }
     }
-    // 左键拖拽环绕：屏幕位移 → 球角。方向取"拖动世界"约定：右拖 = 相机绕左、物体呈顺时针转；下拖 = 相机升、露头顶。
+    // 左键拖动屏幕位移转换为方位角和仰角变化。
     if session.dragging
         && mouse.pressed(MouseButton::Left)
         && let Some(pos) = cursor
@@ -314,8 +276,7 @@ fn camera_control(
             session.last_cursor = Some(pos);
         }
     }
-    // 右键拖拽环视：位置钉住、yaw/pitch 旋转、pivot 搬到新视线正前方
-    //（[`look_rotate`]，Unity Scene 同款）；egui 门与左键同款。
+    // 右键拖动旋转视线并移动环绕中心；此路径不检查 UI 悬停状态。
     if look.dragging
         && mouse.pressed(MouseButton::Right)
         && let Some(pos) = cursor
@@ -351,7 +312,6 @@ fn camera_control(
         transform.translation = orbit.target + orbit.offset();
         transform.look_at(orbit.target, Vec3::Y);
     }
-    // 首次接管报一次即歇（控制链路活了的收账，参数随拖拽/滚轮持续变化）。
     if !*engaged
         && let Ok((_, orbit)) = cameras.single()
     {
@@ -380,7 +340,7 @@ mod tests {
         assert!(forward.x > 0.9, "右拖后视线应转向 +X，实际 {forward:?}");
     }
 
-    /// 鼠标下拖 = 视线下俯（Unity Scene 同款，与左键"下拖相机升"同号）。
+    /// 下拖使视线向下俯。
     #[test]
     fn look_mouse_down_pitches_view_down() {
         let mut orbit =
