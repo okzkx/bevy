@@ -30,7 +30,7 @@ use ash::ext::debug_utils;
 use ash::vk;
 use ash::{Device, Entry};
 use ash_renderer::render::{
-    sampler_key, BindlessTextureTable, BufferRole, FrameUniforms, GpuBuffer, GpuImage, ImageSpec, MemoryContract,
+    sampler_key, BindlessTextureTable, BufferRole, FrameUniformTable, GpuBuffer, GpuImage, ImageSpec, MemoryContract,
     SamplerKey, StagingImageCopy, UploadBatch, Uploader, TABLE_CAPACITY,
 };
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSamplerDescriptor};
@@ -406,7 +406,7 @@ fn run_sampling(
         .map(|c| u32::from_le_bytes(*c))
         .collect();
 
-    let frame_uniforms = FrameUniforms::new(device, contract).expect("生产每帧 UBO");
+    let frame_uniform_table = FrameUniformTable::new(device, contract).expect("生产每帧 UBO");
     // 探针专用 I/O：set2 = storage 索引(读) + 输出(写)；与生产表无关
     let set2_layout = unsafe {
         device.create_descriptor_set_layout(
@@ -495,7 +495,7 @@ fn run_sampling(
     let pipeline_layout = unsafe {
         device.create_pipeline_layout(
             &vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(&[tables.set_layout().raw(), frame_uniforms.set_layout().raw(), set2_layout])
+                .set_layouts(&[tables.set_layout().raw(), frame_uniform_table.set_layout().raw(), set2_layout])
                 .push_constant_ranges(&push_ranges),
             None,
         )
@@ -560,7 +560,7 @@ fn run_sampling(
                 vk::PipelineBindPoint::COMPUTE,
                 pipeline_layout,
                 0,
-                &[tables.descriptor_set().raw(), frame_uniforms.frame_set(0).raw(), set2],
+                &[tables.descriptor_set().raw(), frame_uniform_table.frame_set(0).raw(), set2],
                 &[],
             );
             device.cmd_push_constants(

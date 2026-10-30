@@ -8,9 +8,9 @@ use crate::render::core::pipeline::graphics::PipelineRef;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
-use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET;
-use crate::render::passes::post::bloom::BLOOM_UP_SET;
-use crate::render::resident::frame_uniforms::FRAME_SET;
+use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
+use crate::render::passes::post::bloom::BLOOM_UP_SET_DESC;
+use crate::render::resident::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
 use crate::render::Context;
 
 /// set 依次为帧 UBO（调试模式旁路用）、G-buffer 采样集（取 HDR）、Bloom 升采样集
@@ -19,7 +19,7 @@ pub(crate) static PRESENT_TONEMAP_PIPELINE: PipelineDesc = PipelineDesc {
     label: "present_tonemap",
     shader: &shader_abi::PRESENT_TONEMAP,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&FRAME_SET, &GBUFFER_SAMPLED_SET, &BLOOM_UP_SET],
+    sets: &[&FRAME_UNIFORM_SET_DESC, &GBUFFER_SAMPLED_SET_DESC, &BLOOM_UP_SET_DESC],
     push: None,
     color_formats: &[vk::Format::R8G8B8A8_UNORM],
     depth_format: None,

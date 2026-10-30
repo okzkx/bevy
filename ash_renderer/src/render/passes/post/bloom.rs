@@ -28,7 +28,7 @@ use crate::render::core::pipeline::graphics::PipelineRef;
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{merged_pool_sizes, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
-use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET;
+use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
 
 /// 降/升采样级数（半分辨率逐级）。
 pub const BLOOM_LEVELS: usize = 5;
@@ -41,7 +41,7 @@ pub const BLOOM_BINDING_PARAMS: u32 = 3;
 const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
 
 /// 降采样集：b0 源纹理 + b2 采样器。
-pub(crate) static BLOOM_TEX_SET: SetLayoutDesc = SetLayoutDesc::new(
+pub(crate) static BLOOM_TEX_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "bloom_tex",
     &[
         BindingDesc::new(BLOOM_BINDING_TEX0, DescKind::SampledImage, FS),
@@ -50,7 +50,7 @@ pub(crate) static BLOOM_TEX_SET: SetLayoutDesc = SetLayoutDesc::new(
 );
 
 /// 升采样集（也是 tonemap 的 bloom 输入集）：b0/b1 两张纹理 + b2 采样器 + b3 参数 UBO。
-pub(crate) static BLOOM_UP_SET: SetLayoutDesc = SetLayoutDesc::new(
+pub(crate) static BLOOM_UP_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "bloom_up",
     &[
         BindingDesc::new(BLOOM_BINDING_TEX0, DescKind::SampledImage, FS),
@@ -64,7 +64,7 @@ pub(crate) static BLOOM_PREFILTER_PIPELINE: PipelineDesc = PipelineDesc {
     label: "bloom_prefilter",
     shader: &shader_abi::BLOOM_PREFILTER,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&GBUFFER_SAMPLED_SET],
+    sets: &[&GBUFFER_SAMPLED_SET_DESC],
     push: None,
     color_formats: &[crate::render::HDR_FORMAT],
     depth_format: None,
@@ -74,7 +74,7 @@ pub(crate) static BLOOM_DOWN_PIPELINE: PipelineDesc = PipelineDesc {
     label: "bloom_down",
     shader: &shader_abi::BLOOM_DOWN,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&BLOOM_TEX_SET],
+    sets: &[&BLOOM_TEX_SET_DESC],
     push: None,
     color_formats: &[crate::render::HDR_FORMAT],
     depth_format: None,
@@ -84,7 +84,7 @@ pub(crate) static BLOOM_UP_PIPELINE: PipelineDesc = PipelineDesc {
     label: "bloom_up",
     shader: &shader_abi::BLOOM_UP,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&BLOOM_UP_SET],
+    sets: &[&BLOOM_UP_SET_DESC],
     push: None,
     color_formats: &[crate::render::HDR_FORMAT],
     depth_format: None,
@@ -295,8 +295,8 @@ impl BloomTargets {
     unsafe fn build_static(&mut self) -> Result<()> {
         unsafe {
         let device = &self.device;
-        self.set_layout_tex = BLOOM_TEX_SET.create(device)?;
-        self.set_layout_up = BLOOM_UP_SET.create(device)?;
+        self.set_layout_tex = BLOOM_TEX_SET_DESC.create(device)?;
+        self.set_layout_up = BLOOM_UP_SET_DESC.create(device)?;
         // Bloom 链自有采样器（线性 + CLAMP_TO_EDGE；本体随本资源 Drop 销毁
         // ——不走描述符表去重账，账本采样器槽留给贴图面）
         self.sampler = crate::render::resident::images::sampler_key(
@@ -309,7 +309,7 @@ impl BloomTargets {
         let slots = MAX_FRAMES_IN_FLIGHT as u32;
         let sets_total = 2 * (n - 1) * slots + slots;
         let pool_sizes =
-            merged_pool_sizes(&[(&BLOOM_TEX_SET, (n - 1) * slots), (&BLOOM_UP_SET, (n - 1) * slots + slots)]);
+            merged_pool_sizes(&[(&BLOOM_TEX_SET_DESC, (n - 1) * slots), (&BLOOM_UP_SET_DESC, (n - 1) * slots + slots)]);
         self.pool = device.create_descriptor_pool(
             &vk::DescriptorPoolCreateInfo::default()
                 .max_sets(sets_total)
@@ -342,12 +342,12 @@ impl BloomTargets {
         self.sets_up = alloc(self.set_layout_up, (n - 1) * slots)?;
         self.sets_params = alloc(self.set_layout_up, slots)?;
         // 写入过声明校验：down/up/params 三段各自收集、写满提交（种类按
-        // BLOOM_TEX_SET / BLOOM_UP_SET 核对）
+        // BLOOM_TEX_SET_DESC / BLOOM_UP_SET_DESC 核对）
         let ro = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
         for i in 1..n {
             for slot in 0..slots {
                 let set_i = (i - 1) * slots + slot;
-                let mut writer = DescriptorWriter::new(&BLOOM_TEX_SET, self.sets_down[set_i]);
+                let mut writer = DescriptorWriter::new(&BLOOM_TEX_SET_DESC, self.sets_down[set_i]);
                 writer.image(BLOOM_BINDING_TEX0, self.down[i - 1].view(), ro);
                 writer.sampler(BLOOM_BINDING_SAMPLER, sampler);
                 writer.submit(device)?;
@@ -357,7 +357,7 @@ impl BloomTargets {
             for slot in 0..slots {
                 let set_i = i * slots + slot;
                 let up_src = if i + 1 == n - 1 { self.down[n - 1].view() } else { self.up[i + 1].view() };
-                let mut writer = DescriptorWriter::new(&BLOOM_UP_SET, self.sets_up[set_i]);
+                let mut writer = DescriptorWriter::new(&BLOOM_UP_SET_DESC, self.sets_up[set_i]);
                 writer
                     .image(BLOOM_BINDING_TEX0, up_src, ro)
                     .image(BLOOM_BINDING_TEX1, self.down[i].view(), ro)
@@ -367,7 +367,7 @@ impl BloomTargets {
             }
         }
         for slot in 0..slots {
-            let mut writer = DescriptorWriter::new(&BLOOM_UP_SET, self.sets_params[slot]);
+            let mut writer = DescriptorWriter::new(&BLOOM_UP_SET_DESC, self.sets_params[slot]);
             writer
                 .image(BLOOM_BINDING_TEX0, self.up[0].view(), ro)
                 .image(BLOOM_BINDING_TEX1, self.up[0].view(), ro)
@@ -382,31 +382,31 @@ impl BloomTargets {
     /// 升采样集布局（up 管线与 tonemap 的 bloom 输入集共用）。
     #[must_use]
     pub fn up_layout(&self) -> SetLayout {
-        SetLayout::new(&BLOOM_UP_SET, self.set_layout_up)
+        SetLayout::new(&BLOOM_UP_SET_DESC, self.set_layout_up)
     }
 
     /// 降采样集布局（down 管线用）。
     #[must_use]
     pub fn tex_layout(&self) -> SetLayout {
-        SetLayout::new(&BLOOM_TEX_SET, self.set_layout_tex)
+        SetLayout::new(&BLOOM_TEX_SET_DESC, self.set_layout_tex)
     }
 
     /// 本帧槽 tonemap 参数集（up0 + 采样器 + 参数 UBO）。
     #[must_use]
     pub fn params_set(&self, slot: usize) -> DescSet {
-        DescSet::new(&BLOOM_UP_SET, self.sets_params[slot])
+        DescSet::new(&BLOOM_UP_SET_DESC, self.sets_params[slot])
     }
 
     /// 本帧槽 down 链源集（i=1..N-1 → 下标 (i-1)*slots+slot）。
     #[must_use]
     pub fn set_down(&self, level: usize, slot: usize) -> DescSet {
-        DescSet::new(&BLOOM_TEX_SET, self.sets_down[(level - 1) * MAX_FRAMES_IN_FLIGHT + slot])
+        DescSet::new(&BLOOM_TEX_SET_DESC, self.sets_down[(level - 1) * MAX_FRAMES_IN_FLIGHT + slot])
     }
 
     /// 本帧槽 up 链源集（i=0..N-2 → 下标 (N-1)*slots + i*slots + slot）。
     #[must_use]
     pub fn set_up(&self, level: usize, slot: usize) -> DescSet {
-        DescSet::new(&BLOOM_UP_SET, self.sets_up[level * MAX_FRAMES_IN_FLIGHT + slot])
+        DescSet::new(&BLOOM_UP_SET_DESC, self.sets_up[level * MAX_FRAMES_IN_FLIGHT + slot])
     }
 
     /// 参数 UBO（宿主写入口，fence 纪律内）。

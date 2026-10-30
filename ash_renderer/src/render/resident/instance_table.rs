@@ -64,7 +64,7 @@ const SHARED: vk::ShaderStageFlags =
 const COMPUTE: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
 
 /// set2 实例表（binding 含义见模块注释）：b0/b1/b2 图形与 compute 共读，b3..b9 compute 专属。
-pub(crate) static INSTANCE_SET: SetLayoutDesc = SetLayoutDesc::new(
+pub(crate) static INSTANCE_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "instance",
     &[
         BindingDesc::new(0, DescKind::StorageBuffer, SHARED),
@@ -446,8 +446,8 @@ impl InstanceTables {
         gap_mark_rings: &[GpuBuffer],
     ) -> Result<(vk::DescriptorSetLayout, Vec<vk::DescriptorSet>, vk::DescriptorPool)> {
         unsafe {
-            let set2_layout = INSTANCE_SET.create(device)?;
-            let instance_pool_sizes = INSTANCE_SET.pool_sizes_vec(MAX_FRAMES_IN_FLIGHT as u32);
+            let set2_layout = INSTANCE_SET_DESC.create(device)?;
+            let instance_pool_sizes = INSTANCE_SET_DESC.pool_sizes_vec(MAX_FRAMES_IN_FLIGHT as u32);
             let pool = match device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(MAX_FRAMES_IN_FLIGHT as u32)
@@ -476,7 +476,7 @@ impl InstanceTables {
             // info 先收齐再构造 write——write 持有 info 的引用,infos 之后不再变
             // 写入过声明校验：b0..b9 全部 STORAGE_BUFFER，每份集写满才提交
             for (frame, set) in sets.iter().enumerate() {
-                let mut writer = DescriptorWriter::new(&INSTANCE_SET, *set);
+                let mut writer = DescriptorWriter::new(&INSTANCE_SET_DESC, *set);
                 writer.buffer(0, object_buffer.buffer(), 0, OBJECT_TABLE_CAPACITY as u64 * OBJECT_RECORD_SIZE);
                 for (binding, buffer, range) in [
                     (1u32, &model_rings[frame], OBJECT_TABLE_CAPACITY as u64 * MODEL_STRIDE),
@@ -500,13 +500,13 @@ impl InstanceTables {
     /// set2 实例表的布局（登记给管线组装；集与布局同源）。
     #[must_use]
     pub fn set_layout(&self) -> SetLayout {
-        SetLayout::new(&INSTANCE_SET, self.set2_layout)
+        SetLayout::new(&INSTANCE_SET_DESC, self.set2_layout)
     }
 
     /// 第 `frame` 帧槽的 set2（表集,按帧槽绑定）。
     #[must_use]
     pub fn frame_set2(&self, frame: usize) -> DescSet {
-        DescSet::new(&INSTANCE_SET, self.frame_sets[frame])
+        DescSet::new(&INSTANCE_SET_DESC, self.frame_sets[frame])
     }
 
     /// 对象表 buffer 句柄（staging 批次拷贝目标）。

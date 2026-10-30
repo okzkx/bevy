@@ -44,7 +44,7 @@ use crate::render::Context;
 const CS: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
 
 /// 归约一级：b0 上一级（采样）/ b1 本级（存储写）。
-pub(crate) static HIZ_REDUCE_SET: SetLayoutDesc = SetLayoutDesc::new(
+pub(crate) static HIZ_REDUCE_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "hiz_reduce",
     &[
         BindingDesc::new(0, DescKind::SampledImage, CS),
@@ -53,14 +53,14 @@ pub(crate) static HIZ_REDUCE_SET: SetLayoutDesc = SetLayoutDesc::new(
 );
 
 /// 遮挡测试读整条金字塔：b0 全 mip 采样视图。
-pub(crate) static HIZ_OCCLUSION_SET: SetLayoutDesc =
+pub(crate) static HIZ_OCCLUSION_SET_DESC: SetLayoutDesc =
     SetLayoutDesc::new("hiz_occlusion", &[BindingDesc::new(0, DescKind::SampledImage, CS)]);
 
 pub(crate) static HIZ_DOWNSAMPLE_PIPELINE: PipelineDesc = PipelineDesc {
     label: "hiz_downsample",
     shader: &shader_abi::HIZ_DOWNSAMPLE,
     entries: &[c"cs_main"],
-    sets: &[&HIZ_REDUCE_SET],
+    sets: &[&HIZ_REDUCE_SET_DESC],
     push: None,
     color_formats: &[],
     depth_format: None,
@@ -418,13 +418,13 @@ impl HizPyramid {
     /// 第 `slot` 帧槽的遮挡测试描述符集（b0 = 全链采样视图）。
     #[must_use]
     pub fn occlusion_set(&self, slot: usize) -> DescSet {
-        DescSet::new(&HIZ_OCCLUSION_SET, self.occlusion_sets[slot])
+        DescSet::new(&HIZ_OCCLUSION_SET_DESC, self.occlusion_sets[slot])
     }
 
     /// 遮挡测试的描述符集布局（建遮挡管线 layout 的素材）。
     #[must_use]
     pub fn occlusion_layout(&self) -> SetLayout {
-        SetLayout::new(&HIZ_OCCLUSION_SET, self.occlusion_layout)
+        SetLayout::new(&HIZ_OCCLUSION_SET_DESC, self.occlusion_layout)
     }
 
     /// 一次归约链录制完成后的走账：warmup 递减（ready 判据）。
@@ -524,7 +524,7 @@ impl HizPyramid {
             // 1 起（2px tile）"为代价省掉它，occlusion 侧 mip 选择下限 1。
             for level in 1..self.levels.max(1) {
                 let set = self.reduction.sets[slot * self.levels as usize + level as usize];
-                reduction.bind(device, cb, &[DescSet::new(&HIZ_REDUCE_SET, set)]);
+                reduction.bind(device, cb, &[DescSet::new(&HIZ_REDUCE_SET_DESC, set)]);
                 let (w, h) = self.level_dims(level);
                 device.cmd_dispatch(cb, w.div_ceil(8), h.div_ceil(8), 1);
                 // 级间屏障：本级写 → 下级读（下一 dispatch 的 textureLoad）
@@ -645,13 +645,13 @@ impl HizPyramid {
     /// 合法 extent 的级数都装得下，rebuild 只 reset 不重建。
     fn build_reduction_pipeline(&mut self, ctx: &Context) -> Result<()> {
         let device = &ctx.device;
-        self.reduction.set_layout = HIZ_REDUCE_SET.create(device)?;
-        let layouts = SetLayouts::new([SetLayout::new(&HIZ_REDUCE_SET, self.reduction.set_layout)])?;
+        self.reduction.set_layout = HIZ_REDUCE_SET_DESC.create(device)?;
+        let layouts = SetLayouts::new([SetLayout::new(&HIZ_REDUCE_SET_DESC, self.reduction.set_layout)])?;
         self.reduction.pipeline = Some(ComputePipeline::new(ctx, &HIZ_DOWNSAMPLE_PIPELINE, &layouts)?);
         let max_dim = ctx.limits().max_image_dimension2_d;
         self.reduction.pool_levels = full_mip_chain(max_dim, max_dim);
         let max_sets = crate::render::MAX_FRAMES_IN_FLIGHT as u32 * self.reduction.pool_levels;
-        let pool_sizes = HIZ_REDUCE_SET.pool_sizes_vec(max_sets);
+        let pool_sizes = HIZ_REDUCE_SET_DESC.pool_sizes_vec(max_sets);
         self.reduction.pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
@@ -690,14 +690,14 @@ impl HizPyramid {
         // 逐源对应（VUID-00344：描述符声明的 layout 须与 image 实际布局一致）
         // ——level 0/1 源 = 深度附件（DEPTH_READ_ONLY，frame_draw.rs 帧尾屏障落位；
         // [0] 槽位不派发），其余 = 金字塔（恒 GENERAL）
-        // 写入过声明校验：b0 sampled / b1 storage（种类按 HIZ_REDUCE_SET 核对，
+        // 写入过声明校验：b0 sampled / b1 storage（种类按 HIZ_REDUCE_SET_DESC 核对，
         // 写满才提交）；布局声明逐源对应（VUID-00344）——level 0/1 源 = 深度附件
         //（DEPTH_READ_ONLY，frame_draw.rs 帧尾屏障落位；[0] 槽位不派发），
         // 其余 = 金字塔（恒 GENERAL）
         for slot in 0..crate::render::MAX_FRAMES_IN_FLIGHT {
             for level in 0..self.levels as usize {
                 let set = sets[slot * self.levels as usize + level];
-                let mut writer = DescriptorWriter::new(&HIZ_REDUCE_SET, set);
+                let mut writer = DescriptorWriter::new(&HIZ_REDUCE_SET_DESC, set);
                 writer
                     .image(
                         0,
@@ -722,9 +722,9 @@ impl HizPyramid {
         // pool 首建/重建分流：重建路径先 reset（释放旧 2 套再分——否则
         // OUT_OF_POOL_MEMORY，resize 负例实抓）
         if self.occlusion_pool == vk::DescriptorPool::null() {
-            self.occlusion_layout = HIZ_OCCLUSION_SET.create(device)?;
+            self.occlusion_layout = HIZ_OCCLUSION_SET_DESC.create(device)?;
             let occlusion_pool_sizes =
-                HIZ_OCCLUSION_SET.pool_sizes_vec(crate::render::MAX_FRAMES_IN_FLIGHT as u32);
+                HIZ_OCCLUSION_SET_DESC.pool_sizes_vec(crate::render::MAX_FRAMES_IN_FLIGHT as u32);
             self.occlusion_pool = unsafe {
                 device.create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
@@ -751,7 +751,7 @@ impl HizPyramid {
         }
         .map_err(VulkanError::from)?;
         for (set, views) in self.occlusion_sets.iter().zip(&self.views) {
-            let mut writer = DescriptorWriter::new(&HIZ_OCCLUSION_SET, *set);
+            let mut writer = DescriptorWriter::new(&HIZ_OCCLUSION_SET_DESC, *set);
             writer.image(0, views.occlusion, vk::ImageLayout::GENERAL);
             writer.submit(device)?;
         }

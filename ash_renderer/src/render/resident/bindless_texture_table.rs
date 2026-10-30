@@ -1,6 +1,6 @@
 //! set0 bindless 常驻表：全部贴图和采样器各放进一个 [`TABLE_CAPACITY`] 长的描述符数组，
 //! shader 按 per-draw 参数里的下标（[`SlotBinding`]）取用。set1 归
-//! [`super::frame_uniforms`]，set2 归 [`super::instance_table`]。
+//! [`super::frame_uniform_table`]，set2 归 [`super::instance_table`]。
 //!
 //! - **建表先核对限额**：设备的 UPDATE_AFTER_BIND 限额是单独一套（不看普通的
 //!   `maxPerStageDescriptorSampledImages`），不够 [`TABLE_CAPACITY`] 就报错，不缩容量。
@@ -40,7 +40,7 @@ const UAB_PARTIALLY: vk::DescriptorBindingFlags = vk::DescriptorBindingFlags::fr
 );
 
 /// set0：b0 贴图数组、b1 采样器数组。
-pub(crate) static BINDLESS_TEXTURE_SET: SetLayoutDesc = SetLayoutDesc {
+pub(crate) static BINDLESS_TEXTURE_SET_DESC: SetLayoutDesc = SetLayoutDesc {
     name: "bindless",
     bindings: &[
         BindingDesc::new(0, DescKind::SampledImage, ALL_STAGES).array(TABLE_CAPACITY, UAB_PARTIALLY),
@@ -109,7 +109,7 @@ impl BindlessTextureTable {
         let fallback = upload_fallback(device, instance, physical_device, contract, uploader, graphics_family)?;
         let mut tables = Self {
             device: device.clone(),
-            layout: BINDLESS_TEXTURE_SET.create(device)?,
+            layout: BINDLESS_TEXTURE_SET_DESC.create(device)?,
             pool: vk::DescriptorPool::null(),
             set: vk::DescriptorSet::null(),
             texture_slots: SlotAllocator::new(capacity),
@@ -119,7 +119,7 @@ impl BindlessTextureTable {
             retired_samplers: Vec::new(),
             fallback,
         };
-        let pool_flags = if BINDLESS_TEXTURE_SET.needs_uab_pool() {
+        let pool_flags = if BINDLESS_TEXTURE_SET_DESC.needs_uab_pool() {
             vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND
         } else {
             vk::DescriptorPoolCreateFlags::empty()
@@ -129,7 +129,7 @@ impl BindlessTextureTable {
                 &vk::DescriptorPoolCreateInfo::default()
                     .flags(pool_flags)
                     .max_sets(1)
-                    .pool_sizes(&BINDLESS_TEXTURE_SET.pool_sizes_vec(1)),
+                    .pool_sizes(&BINDLESS_TEXTURE_SET_DESC.pool_sizes_vec(1)),
                 None,
             )
         }?;
@@ -152,13 +152,13 @@ impl BindlessTextureTable {
     /// set0 布局（登记给管线组装；集与布局同源，不可另建）。
     #[must_use]
     pub fn set_layout(&self) -> SetLayout {
-        SetLayout::new(&BINDLESS_TEXTURE_SET, self.layout)
+        SetLayout::new(&BINDLESS_TEXTURE_SET_DESC, self.layout)
     }
 
     /// set0 描述符集（帧录制绑定）。
     #[must_use]
     pub fn descriptor_set(&self) -> DescSet {
-        DescSet::new(&BINDLESS_TEXTURE_SET, self.set)
+        DescSet::new(&BINDLESS_TEXTURE_SET_DESC, self.set)
     }
 
     /// 缺贴图时 per-draw 参数用的槽位。
@@ -211,7 +211,7 @@ impl BindlessTextureTable {
             }
         };
         // 写入和声明对不上才会失败，属于代码错误，不回滚槽位
-        let mut writer = DescriptorWriter::new(&BINDLESS_TEXTURE_SET, self.set);
+        let mut writer = DescriptorWriter::new(&BINDLESS_TEXTURE_SET_DESC, self.set);
         writer.image_at(0, texture, view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         writer.sampler_at(1, sampler, handle);
         writer.submit(&self.device)?;

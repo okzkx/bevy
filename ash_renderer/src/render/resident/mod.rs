@@ -2,7 +2,7 @@
 //! 上传器、bindless 描述符表、每帧 UBO、实例表、光源表。各 pass 只读这些表。
 
 pub(crate) mod bindless_texture_table;
-pub(crate) mod frame_uniforms;
+pub(crate) mod frame_uniform_table;
 pub(crate) mod images;
 pub(crate) mod instance_table;
 pub(crate) mod light_table;

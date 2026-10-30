@@ -1,7 +1,7 @@
 //! G-buffer 写入管线：不透明物体写 albedo / normal / matparam 三个颜色附件和深度。
 //!
 //! - 布局配方 [`GBUFFER_WRITE_PIPELINE`]：set0 是 [`crate::render::BindlessTextureTable`] 的常驻集，
-//!   set1 是 [`crate::render::FrameUniforms`] 的每帧集，set2 是 [`crate::render::InstanceTables`] 的实例表，不另建。没有 push：
+//!   set1 是 [`crate::render::FrameUniformTable`] 的每帧集，set2 是 [`crate::render::InstanceTables`] 的实例表，不另建。没有 push：
 //!   实例槽号走 firstInstance，VS 用 `instance_index` 读。
 //! - 顶点 32B 交错（位置 12 + 法线 12 + UV 8），与 mesh_convert 同一格式。
 //! - reverse-Z：深度清 0、比较用 `GREATER`。
@@ -19,15 +19,15 @@ use crate::render::core::pipeline::graphics::{PipelineRef, create_graphics_pipel
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
-use crate::render::resident::bindless_texture_table::BINDLESS_TEXTURE_SET;
-use crate::render::resident::frame_uniforms::FRAME_SET;
-use crate::render::resident::instance_table::INSTANCE_SET;
+use crate::render::resident::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
+use crate::render::resident::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
+use crate::render::resident::instance_table::INSTANCE_SET_DESC;
 
 pub(crate) static GBUFFER_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
     label: "gbuffer_write",
     shader: &shader_abi::GBUFFER_WRITE,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&BINDLESS_TEXTURE_SET, &FRAME_SET, &INSTANCE_SET],
+    sets: &[&BINDLESS_TEXTURE_SET_DESC, &FRAME_UNIFORM_SET_DESC, &INSTANCE_SET_DESC],
     push: None,
     color_formats: &[crate::render::ALBEDO_FORMAT, crate::render::NORMAL_FORMAT, crate::render::MATPARAM_FORMAT],
     depth_format: Some(crate::render::core::target::depth::DEPTH_FORMAT),

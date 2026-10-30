@@ -44,10 +44,10 @@ pub use passes::visibility::occlusion::{
 };
 pub use resident::bindless_texture_table::{BindlessTextureTable, TABLE_CAPACITY};
 pub(crate) use resident::bindless_texture_table::SlotBinding;
-pub use resident::frame_uniforms::{
-    pack_frame_uniforms, FrameUniforms, FrameUniformsData, PLACEHOLDER_DIR_TO_LIGHT,
+pub use resident::frame_uniform_table::{
+    pack_frame_uniforms, FrameUniformTable, FrameUniformsData, PLACEHOLDER_DIR_TO_LIGHT,
 };
-pub(crate) use resident::frame_uniforms::{
+pub(crate) use resident::frame_uniform_table::{
     FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC,
     FRAME_MODE_NORMAL, FRAME_MODE_POSITION, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS,
     FRAME_MODE_UNLIT,

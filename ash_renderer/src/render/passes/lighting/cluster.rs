@@ -25,7 +25,7 @@ use crate::render::core::binding::storage_sets;
 const CS_FS: vk::ShaderStageFlags = stages(&[vk::ShaderStageFlags::COMPUTE, vk::ShaderStageFlags::FRAGMENT]);
 
 /// 光源分簇集：b0 均匀数据 / b1 光源常驻表 / b2 每格列表 / b3 每格计数。
-pub(crate) static LIGHT_CLUSTER_SET: SetLayoutDesc = SetLayoutDesc::new(
+pub(crate) static LIGHT_CLUSTER_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "light_clusters",
     &[
         BindingDesc::new(0, DescKind::StorageBuffer, CS_FS),
@@ -39,7 +39,7 @@ pub(crate) static CLUSTER_BUILD_PIPELINE: PipelineDesc = PipelineDesc {
     label: "cluster_build",
     shader: &shader_abi::CLUSTER_BUILD,
     entries: &[c"cs_main"],
-    sets: &[&LIGHT_CLUSTER_SET],
+    sets: &[&LIGHT_CLUSTER_SET_DESC],
     push: None,
     color_formats: &[],
     depth_format: None,
@@ -242,7 +242,7 @@ impl LightClusters {
             lists: Vec::new(),
             counts: Vec::new(),
         };
-        this.set_layout = LIGHT_CLUSTER_SET.create(&ctx.device)?;
+        this.set_layout = LIGHT_CLUSTER_SET_DESC.create(&ctx.device)?;
         this.build(ctx, light_buffers)?;
         this.extent = extent;
         info!(
@@ -280,7 +280,7 @@ impl LightClusters {
                 self.counts[slot].buffer(),
             ]);
         }
-        (self.pool, self.sets) = unsafe { storage_sets::create_sets(&ctx.device, &LIGHT_CLUSTER_SET, self.set_layout, &slots) }?;
+        (self.pool, self.sets) = unsafe { storage_sets::create_sets(&ctx.device, &LIGHT_CLUSTER_SET_DESC, self.set_layout, &slots) }?;
         Ok(())
     }
 
@@ -296,12 +296,12 @@ impl LightClusters {
 
     #[must_use]
     pub fn set_layout(&self) -> SetLayout {
-        SetLayout::new(&LIGHT_CLUSTER_SET, self.set_layout)
+        SetLayout::new(&LIGHT_CLUSTER_SET_DESC, self.set_layout)
     }
 
     #[must_use]
     pub fn frame_set(&self, slot: usize) -> DescSet {
-        DescSet::new(&LIGHT_CLUSTER_SET, self.sets[slot % self.sets.len()])
+        DescSet::new(&LIGHT_CLUSTER_SET_DESC, self.sets[slot % self.sets.len()])
     }
 
     /// 第 `slot` 帧槽的均匀数据，CPU 每帧写。
