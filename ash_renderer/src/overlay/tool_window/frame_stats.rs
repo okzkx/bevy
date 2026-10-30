@@ -4,7 +4,7 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use super::mib;
-use crate::render::{AtlasGpu, BindlessTables, ImageCache, MeshPool, PerfLedger, Uploader};
+use crate::render::{AtlasGpu, BindlessTextureTable, ImageCache, MeshPool, PerfLedger, Uploader};
 use crate::scene::mechanism::scene_gen::SceneChunk;
 use crate::scene::mechanism::WorkloadSettings;
 
@@ -12,7 +12,7 @@ use crate::scene::mechanism::WorkloadSettings;
 /// 参数上限 16 个（FrameInput/UiDrawData 同款式样）。
 #[derive(SystemParam)]
 pub(in crate::overlay) struct RendererStats<'w> {
-    tables: Res<'w, BindlessTables>,
+    tables: Res<'w, BindlessTextureTable>,
     uploader: Res<'w, Uploader>,
     gpu: Res<'w, AtlasGpu>,
 }

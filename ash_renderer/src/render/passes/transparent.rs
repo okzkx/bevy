@@ -23,15 +23,15 @@ use crate::render::core::pipeline::graphics::PipelineRef;
 use crate::render::core::binding::set_layout::{BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::core::binding::storage_sets;
-use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET;
-use crate::render::resident::bindless_tables::BINDLESS_SET;
-use crate::render::resident::frame_uniforms::FRAME_SET;
-use crate::render::resident::instance_table::INSTANCE_SET;
+use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET_DESC;
+use crate::render::resident::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
+use crate::render::resident::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
+use crate::render::resident::instance_table::INSTANCE_SET_DESC;
 
 const CS: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
 
 /// 透明命令集：b0 索引列表 / b1 深度键 / b2 命令环 / b3 计数，只给 compute。
-pub(crate) static TRANSPARENT_SET: SetLayoutDesc = SetLayoutDesc::new(
+pub(crate) static TRANSPARENT_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "transparent",
     &[
         BindingDesc::new(0, DescKind::StorageBuffer, CS),
@@ -45,7 +45,7 @@ pub(crate) static TRANSPARENT_COLLECT_PIPELINE: PipelineDesc = PipelineDesc {
     label: "transparent_collect",
     shader: &shader_abi::TRANSPARENT_COLLECT,
     entries: &[c"cs_main"],
-    sets: &[&INSTANCE_SET, &LIGHT_CLUSTER_SET, &TRANSPARENT_SET],
+    sets: &[&INSTANCE_SET_DESC, &LIGHT_CLUSTER_SET_DESC, &TRANSPARENT_SET_DESC],
     push: Some(PushRange { stages: CS, size: TRANSPARENT_PUSH_SIZE }),
     color_formats: &[],
     depth_format: None,
@@ -55,7 +55,7 @@ pub(crate) static TRANSPARENT_SORT_PIPELINE: PipelineDesc = PipelineDesc {
     label: "transparent_sort",
     shader: &shader_abi::TRANSPARENT_SORT,
     entries: &[c"cs_main"],
-    sets: &[&TRANSPARENT_SET],
+    sets: &[&TRANSPARENT_SET_DESC],
     push: Some(PushRange { stages: CS, size: TRANSPARENT_SORT_PUSH }),
     color_formats: &[],
     depth_format: None,
@@ -65,7 +65,7 @@ pub(crate) static TRANSPARENT_GATHER_PIPELINE: PipelineDesc = PipelineDesc {
     label: "transparent_gather",
     shader: &shader_abi::TRANSPARENT_GATHER,
     entries: &[c"cs_main"],
-    sets: &[&INSTANCE_SET, &TRANSPARENT_SET],
+    sets: &[&INSTANCE_SET_DESC, &TRANSPARENT_SET_DESC],
     push: Some(PushRange { stages: CS, size: TRANSPARENT_PUSH_SIZE }),
     color_formats: &[],
     depth_format: None,
@@ -75,7 +75,7 @@ pub(crate) static TRANSPARENT_FORWARD_PIPELINE: PipelineDesc = PipelineDesc {
     label: "transparent_forward",
     shader: &shader_abi::TRANSPARENT_FORWARD,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&BINDLESS_SET, &FRAME_SET, &INSTANCE_SET, &LIGHT_CLUSTER_SET],
+    sets: &[&BINDLESS_TEXTURE_SET_DESC, &FRAME_UNIFORM_SET_DESC, &INSTANCE_SET_DESC, &LIGHT_CLUSTER_SET_DESC],
     push: None,
     color_formats: &[crate::render::HDR_FORMAT],
     depth_format: Some(crate::render::core::target::depth::DEPTH_FORMAT),
@@ -137,8 +137,8 @@ impl TransparentTargets {
                 this.counts[slot].buffer(),
             ]);
         }
-        this.set_layout = TRANSPARENT_SET.create(&ctx.device)?;
-        (this.pool, this.sets) = unsafe { storage_sets::create_sets(&ctx.device, &TRANSPARENT_SET, this.set_layout, &slots) }?;
+        this.set_layout = TRANSPARENT_SET_DESC.create(&ctx.device)?;
+        (this.pool, this.sets) = unsafe { storage_sets::create_sets(&ctx.device, &TRANSPARENT_SET_DESC, this.set_layout, &slots) }?;
         info!(
             "透明命令链就绪: 透明行容量 {TRANSPARENT_CAPACITY}（索引/键列表 + 命令环 + 计数）× {} 帧槽",
             this.sets.len(),
@@ -148,12 +148,12 @@ impl TransparentTargets {
 
     #[must_use]
     pub fn set_layout(&self) -> SetLayout {
-        SetLayout::new(&TRANSPARENT_SET, self.set_layout)
+        SetLayout::new(&TRANSPARENT_SET_DESC, self.set_layout)
     }
 
     #[must_use]
     pub fn frame_set(&self, slot: usize) -> DescSet {
-        DescSet::new(&TRANSPARENT_SET, self.sets[slot % self.sets.len()])
+        DescSet::new(&TRANSPARENT_SET_DESC, self.sets[slot % self.sets.len()])
     }
 
     #[must_use]

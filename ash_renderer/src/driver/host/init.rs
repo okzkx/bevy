@@ -16,8 +16,8 @@ use crate::{
     common::error::Result,
     common::syntax::ResultTierExt,
     render::{
-        AtlasGpu, BindlessTables, ClusterBuildPass, CompositePipeline, Context, CullPass, FramePool,
-        FrameUniforms,
+        AtlasGpu, BindlessTextureTable, ClusterBuildPass, CompositePipeline, Context, CullPass, FramePool,
+        FrameUniformTable,
         GBufferTargets, GBufferPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
         BloomPipelines, BloomTargets, InstanceTables, LodPass, MeshPool, OcclusionPass,
         SmaaPipelines, SmaaTargets,
@@ -50,10 +50,10 @@ pub(super) fn init_vulkan(
     Ok(())
 }
 
-/// 创建链按五类分段：①设备根 → ②帧级执行件 → ③常驻数据表 → ④渲染目标 → ⑤管线。
-/// 段内与跨段都保持依赖序：后建的会用到先建的（layout、视图等），跨段的顺序不能调。
+/// 创建链按构造依赖分段：设备根 → 帧级执行件 → 常驻数据 → 渲染目标 → 管线。
+/// 这不是资源职责分类：FrameUniformTable 在帧级阶段创建，但属于 GPU 表；被借用者必须先于管线创建。
 fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
-    // ---- ① 设备根：全局唯一，其余四类都向它借 Device ----
+    // ---- 设备根：全局唯一，其余资源都向它借 Device ----
     let ctx = Context::new(wrapper)?;
     let swapchain = Swapchain::new(&ctx)?;
 
@@ -70,15 +70,15 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         2,           // 上传槽数
     )?;
     let ui_ring = UiVertexRing::new(&ctx)?;
-    let frame_uniforms = FrameUniforms::new(&ctx.device, ctx.memory_contract())?;
+    let frame_uniform_table = FrameUniformTable::new(&ctx.device, ctx.memory_contract())?;
     // 设备不支持时间戳查询时自动停用，不影响渲染
     let gpu_timer = GpuTimer::new(&ctx)?;
 
-    // ---- ③ 常驻数据表：跨帧常驻的大 buffer + 槽位账，向 ⑤ 出借 set 布局 ----
+    // ---- GPU 常驻资源：先建池/缓存，再建 GPU 表；FrameUniformTable 已在帧级阶段创建 ----
     let pool = MeshPool::new(&ctx.device, ctx.memory_contract(), &ctx.sharing_families());
     let image_cache = ImageCache::default();
     // 会提交上传（构造内当场等完）：0 号槽的白色兜底贴图
-    let tables = BindlessTables::new(
+    let tables = BindlessTextureTable::new(
         &ctx.device,
         &ctx.instance,
         ctx.physical_device,
@@ -94,7 +94,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
     )?;
     let light_table = LightTable::new(&ctx, ctx.memory_contract())?;
 
-    // ---- ④ 渲染目标：各渲染效果自己的资源族，向 ⑤ 出借采样/数据布局 ----
+    // ---- 渲染目标：各渲染效果自己的资源族，向后续管线出借采样/数据布局 ----
     let depth_views: Vec<vk::ImageView> = (0..MAX_FRAMES_IN_FLIGHT)
         .map(|s| frames.depth_view(s))
         .collect();
@@ -111,12 +111,12 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         (0..MAX_FRAMES_IN_FLIGHT).map(|s| frames.depth_image(s)).collect();
     let hiz = HizPyramid::new(&ctx, swapchain.extent, &depth_images)?;
 
-    // ---- ⑤ 管线：无状态，只借 ③④ 的描述符布局。③④ 先把布局登记进 SetLayouts，
-    // 各管线按自己的布局配方取用并与 shader ABI 对账。声明的附件格式必须和实际
+    // ---- 管线：无状态，只借 GPU 表与渲染目标提供的描述符布局。各布局先登记进
+    // SetLayouts，各管线按自己的布局配方取用并与 shader ABI 对账。声明的附件格式必须和实际
     // 渲染用的附件完全一致，否则验证层报 VUID-08914 ----
     let layouts = SetLayouts::new([
         tables.set_layout(),
-        frame_uniforms.set_layout(),
+        frame_uniform_table.set_layout(),
         instance_tables.set_layout(),
         gbuffer.sampled_layout(),
         light_clusters.set_layout(),
@@ -157,7 +157,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         frames,
         uploader,
         ui_ring,
-        frame_uniforms,
+        frame_uniform_table,
         gpu_timer,
         pool,
         image_cache,
@@ -265,8 +265,8 @@ init_chain! {
     InstanceTables => instance_tables,
     Uploader => uploader,
     MeshPool => pool,
-    FrameUniforms => frame_uniforms,
-    BindlessTables => tables,
+    FrameUniformTable => frame_uniform_table,
+    BindlessTextureTable => tables,
     ImageCache => image_cache,
     AtlasGpu, // 由 overlay 插入，不归创建链
     GpuTimer => gpu_timer,

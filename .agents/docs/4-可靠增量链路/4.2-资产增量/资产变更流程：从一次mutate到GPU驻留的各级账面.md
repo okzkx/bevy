@@ -36,8 +36,8 @@ DrawList（frame.rs）：每行按 row.mesh.id() **现查** pool/image_cache
 | 文件 | 层 | 职责 |
 |---|---|---|
 | `remote/assets.rs` | 协议薄壳 | BRP `ash_renderer/mutate_asset` 收 JSON → 调 `mutate_asset`；错误码翻译 |
-| `scene/mechanism/asset_ops.rs` | 写入封装 | 四驱动（材质参数/贴图槽/mesh 顶点/image 像素）落成 `Assets::get_mut`——**get_mut 即触发 Modified，写入方零配合** |
-| `scene/mechanism/asset_events.rs` | 读侧发现 | 收 `AssetEvent` → 失效凭据 + 关联行重挂脏标 + 事件计量；`Removed/Unused` 只计数不动作 |
+| `scene/mechanism/editing/asset_ops.rs` | 写入封装 | 四驱动（材质参数/贴图槽/mesh 顶点/image 像素）落成 `Assets::get_mut`——**get_mut 即触发 Modified，写入方零配合** |
+| `scene/mechanism/assets/asset_events.rs` | 读侧发现 | 收 `AssetEvent` → 失效凭据 + 关联行重挂脏标 + 事件计量；`Removed/Unused` 只计数不动作 |
 | `ledger.rs`（扩展） | 实体账本 | 加 `mark_dirty` 第二发现入口与 `asset_events` 计量字段，行结构不动 |
 | `upload.rs`（扩展） | 写侧编排 | 盘点判定放宽"查无**或失效**才传"；按凭据分流 commit/replace；停尸房排空；凭据销账 |
 | `pool.rs`（扩展） | mesh 驻留 | `MeshPool::replace` 换槽——旧区间孤儿化（不写旧区间，在飞读天然安全；空间归 4.4） |
@@ -70,8 +70,8 @@ image 的差别在第 4 步后半：旧 `GpuImage` 不能随条目覆盖而 Drop
 
 **新增三件（发现侧与协议面，零 Vulkan 代码）**：
 
-- `scene/mechanism/asset_events.rs`（180 行）——本段的"发现"：三个类型化 `MessageReader` 分开读 `AssetEvent`，`Modified` 进失效集、引用行重挂脏标（重扫账本行），其余变体只计数；稳态零事件早退。`AssetInvalidations` 是读侧与写侧之间的全部接口——一个带 mesh/image 两个 HashSet 的凭据资源。
-- `scene/mechanism/asset_ops.rs`（215 行）——写入封装：`mutate_asset` 按实体锚定取柄，四驱动全落成 `Assets::get_mut`（Modified 由容器自动发出）；格式不支持/资产查无明确拒绝不硬做。
+- `scene/mechanism/assets/asset_events.rs`（180 行）——本段的"发现"：三个类型化 `MessageReader` 分开读 `AssetEvent`，`Modified` 进失效集、引用行重挂脏标（重扫账本行），其余变体只计数；稳态零事件早退。`AssetInvalidations` 是读侧与写侧之间的全部接口——一个带 mesh/image 两个 HashSet 的凭据资源。
+- `scene/mechanism/editing/asset_ops.rs`（215 行）——写入封装：`mutate_asset` 按实体锚定取柄，四驱动全落成 `Assets::get_mut`（Modified 由容器自动发出）；格式不支持/资产查无明确拒绝不硬做。
 - `remote_assets.rs`（105 行）——BRP 薄壳：JSON → `MutateAsset` 结构 → 调本体；错误翻译到协议码。协议与实现分层，将来 egui 面板直调 `mutate_asset` 不经这里。
 
 **既有五件扩展（写侧与 GPU 执行，每处都是"一小块"）**：
@@ -80,6 +80,6 @@ image 的差别在第 4 步后半：旧 `GpuImage` 不能随条目覆盖而 Drop
 - `vulkan/pool.rs`（+25）——`MeshPool::replace`：换条目返回旧槽。旧区间孤儿化是关键取舍——不写旧区间，在飞读天然安全，零新增同步。
 - `vulkan/images.rs`（+40）——`ImageCache::take`（旧图进停尸房而非 Drop）+ `drain_graveyard`（等帧侧后销毁）。旧图在飞被采样的唯一风险点就地封死。
 - `vulkan/descriptors.rs`（+57）——`BindlessTables::rebind`：既有纹理槽重写描述符（UAB 在飞可写），槽位占用不随内容变化增长。
-- `scene/mechanism/ledger.rs`（+14）——`mark_dirty` 第二发现入口 + 事件计量四字段；行结构与 4.1 发现系统不动。
+- `scene/mechanism/assets/ledger.rs`（+14）——`mark_dirty` 第二发现入口 + 事件计量四字段；行结构与 4.1 发现系统不动。
 
 **接线零头**：`main.rs`/`lib.rs`/`remote.rs`/`scene/mod.rs` 插件与模块注册（~20 行）；`remote_objects.rs` 的 stats 读数补 `asset_events` 块；`tools/brp.py` +25 行 `mutate` 子命令。

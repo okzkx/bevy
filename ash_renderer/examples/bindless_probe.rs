@@ -687,7 +687,7 @@ fn push_bytes(tex_index: u32, sampler_index: u32) -> [u8; 96] {
     b
 }
 
-/// 每帧 UBO 字节:view_proj = identity,64B(与 WGSL FrameUniforms span 一致)。
+/// 每帧 UBO 字节:view_proj = identity,64B(与 WGSL FrameUniformTable span 一致)。
 fn ubo_bytes() -> [u8; 64] {
     push_bytes(0, 0)[..64].try_into().expect("取前 64 字节")
 }

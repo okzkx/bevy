@@ -26,7 +26,7 @@
 
 "零实体侧动作"能成立的机制锚点有两处（0.20.0-dev checkout，本仓库 ash_renderer）：
 
-- `InstanceRow` 存柄不存槽位（`scene/mechanism/ledger.rs:41`：`pub mesh: Handle<Mesh>`）——行是 AssetId 锚定的，不是区间锚定的；
+- `InstanceRow` 存柄不存槽位（`scene/mechanism/assets/ledger.rs:41`：`pub mesh: Handle<Mesh>`）——行是 AssetId 锚定的，不是区间锚定的；
 - 绘制侧**每帧现查**，不缓存槽位（`driver/host/frame.rs:232`：`pool.resident(row.mesh.id())`）——重传 publish 完成后，下一帧所有引用者现查拿到的就是新内容。
 
 ## 2. 为什么 Id 锚身份不锚内容
@@ -86,6 +86,6 @@
 
 - `AssetEvent<A>` 五变体 `Added`/`Modified`/`Removed`/`Unused`/`LoadedWithDependencies`，`#[derive(Message, Reflect)]`：`crates/bevy_asset/src/event.rs:49-61`。
 - `Assets::get_mut` 触发 `Modified`、`insert` 触发 `Added`、`remove` 触发 `Removed`：`crates/bevy_asset/src/assets.rs:376/379/391/394/474`。
-- 实体行存柄：`ash_renderer/src/scene/mechanism/ledger.rs:41`；绘制侧每帧现查驻留：`ash_renderer/src/driver/host/frame.rs:232`。
+- 实体行存柄：`ash_renderer/src/scene/mechanism/assets/ledger.rs:41`；绘制侧每帧现查驻留：`ash_renderer/src/driver/host/frame.rs:232`。
 - 上传链"查无才传"：`ash_renderer/src/driver/upload.rs`（`seen`/`img_seen` 去重 + `pool.resident`/`image_cache.resident`）；材质参数每帧 UBO：`frame.rs:235-243`。
 - 驻留缓存键控：`ash_renderer/src/vulkan/pool.rs:140`、`ash_renderer/src/vulkan/images.rs:383`；帧侧等待闸门：`ash_renderer/src/vulkan/pool.rs`（4.1.1）。

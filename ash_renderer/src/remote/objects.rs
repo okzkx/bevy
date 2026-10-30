@@ -10,7 +10,7 @@
 //!
 //! 机制与边界：handler 是 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍
 //! 执行——写操作下一帧生效（spawn/despawn 在次帧画面可见）；操作
-//! 本体在 [`crate::scene::mechanism::object_ops`]（可供 egui 面板复用的实现），
+//! 本体在 [`crate::scene::mechanism::spawn_primitive_clone`]（可供 egui 面板复用的实现），
 //! 本模块只是协议薄壳。安全边界：默认只绑 loopback、无鉴权，仅限本机。
 
 use bevy::{pbr::StandardMaterial, prelude::*, remote::{BrpError, BrpResult}};
@@ -21,7 +21,7 @@ use crate::{
         replace_handles as apply_handle_swap, spawn_primitive_clone, AssetReadiness,
         AssetRetirements, HandleSwapReadback, InstanceLedger, ObjectOpError,
     },
-    render::{BindlessTables, ImageCache, InstanceTables, MeshPool, OBJECT_TABLE_CAPACITY},
+    render::{BindlessTextureTable, ImageCache, InstanceTables, MeshPool, OBJECT_TABLE_CAPACITY},
 };
 
 use super::{invalid_params, params::parse_params};
@@ -134,7 +134,7 @@ pub(crate) fn increment_stats(
     retirements: Res<AssetRetirements>,
     pool: Res<MeshPool>,
     image_cache: Res<ImageCache>,
-    tables: Res<BindlessTables>,
+    tables: Res<BindlessTextureTable>,
     instance_tables: Res<InstanceTables>,
 ) -> BrpResult {
     let s = ledger.stats;

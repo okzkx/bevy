@@ -3,7 +3,7 @@
 //! 按帧槽各一份 UBO + 一个 set，每帧整块重写；写之前帧槽 fence 已确认上一轮
 //! 提交执行完，所以同槽重写不会撞上在飞的 draw。
 //!
-//! 字节布局由 [`FrameUniformsLayout`] 的 `offset_of!` 静态断言钉住，WGSL、描述符
+//! 字节布局由 [`FrameUniformTableLayout`] 的 `offset_of!` 静态断言钉住，WGSL、描述符
 //! range、CPU 打包三方必须一致；改字段要三处一起改。
 
 use ash::{vk, Device};
@@ -19,7 +19,7 @@ use crate::render::MAX_FRAMES_IN_FLIGHT;
 
 /// set1 每帧 UBO（b0，[`FRAME_UBO_SIZE`]）。stage 取 `COMPUTE|VERTEX|FRAGMENT` 超集，
 /// 只影响驱动优化，不影响合法性。
-pub(crate) static FRAME_SET: SetLayoutDesc = SetLayoutDesc::new(
+pub(crate) static FRAME_UNIFORM_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "frame",
     &[BindingDesc::new(
         0,
@@ -29,7 +29,7 @@ pub(crate) static FRAME_SET: SetLayoutDesc = SetLayoutDesc::new(
 );
 
 /// 每帧 UBO 字节数（set1 b0）。208B（mat4 view_proj + 灯光参数 + mode + mat4
-/// inv_view_proj + vec4 camera_pos，偏移见 `FrameUniformsLayout` 静态断言表）；
+/// inv_view_proj + vec4 camera_pos，偏移见 `FrameUniformTableLayout` 静态断言表）；
 /// binding 形状（b0 UNIFORM_BUFFER）与 pipeline layout 不随尺寸变，range 在写入
 /// 时的 `DescriptorBufferInfo`，扩容不动 ABI。
 pub const FRAME_UBO_SIZE: u64 = 208;
@@ -81,7 +81,7 @@ pub struct FrameUniformsData {
 /// 运行时（字节由 [`pack_frame_uniforms`] 按偏移手工排布），`offset_of!` 静态断言
 /// 把 WGSL/描述符 range/CPU 三方钉在一起。uniform 对齐 16：mode 后垫到 128。
 #[repr(C)]
-struct FrameUniformsLayout {
+struct FrameUniformTableLayout {
     view_proj: [f32; 16],
     dir_to_light: [f32; 4],
     ambient_color: [f32; 4],
@@ -93,18 +93,18 @@ struct FrameUniformsLayout {
 }
 
 const _: () = {
-    assert!(std::mem::offset_of!(FrameUniformsLayout, view_proj) == 0);
-    assert!(std::mem::offset_of!(FrameUniformsLayout, dir_to_light) == 64);
-    assert!(std::mem::offset_of!(FrameUniformsLayout, ambient_color) == 80);
-    assert!(std::mem::offset_of!(FrameUniformsLayout, light_color) == 96);
-    assert!(std::mem::offset_of!(FrameUniformsLayout, mode) == 112);
-    assert!(std::mem::offset_of!(FrameUniformsLayout, inv_view_proj) == 128);
-    assert!(std::mem::offset_of!(FrameUniformsLayout, camera_pos) == 192);
-    assert!(std::mem::size_of::<FrameUniformsLayout>() == 208);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, view_proj) == 0);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, dir_to_light) == 64);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, ambient_color) == 80);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, light_color) == 96);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, mode) == 112);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, inv_view_proj) == 128);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, camera_pos) == 192);
+    assert!(std::mem::size_of::<FrameUniformTableLayout>() == 208);
     assert!(FRAME_UBO_SIZE == 208);
 };
 
-/// [`FrameUniformsData`] → 208B uniform 字节（偏移按 `FrameUniformsLayout` 的
+/// [`FrameUniformsData`] → 208B uniform 字节（偏移按 `FrameUniformTableLayout` 的
 /// 静态断言表手工排布）。
 #[must_use]
 pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usize] {
@@ -137,7 +137,7 @@ fn identity_frame_uniforms() -> FrameUniformsData {
 
 /// set1 每帧 UBO 与描述符集，按帧槽各一份。
 #[derive(bevy::prelude::Resource)]
-pub struct FrameUniforms {
+pub struct FrameUniformTable {
     device: Device,
     layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
@@ -145,7 +145,7 @@ pub struct FrameUniforms {
     ubos: Vec<GpuBuffer>,
 }
 
-impl FrameUniforms {
+impl FrameUniformTable {
     /// 每帧槽建一份 UBO（写入 identity 初值）和一个 set，并把 UBO 写进 set。
     /// 失败时已建的部分由 Drop 回收。
     ///
@@ -165,9 +165,9 @@ impl FrameUniforms {
             ubo.write(0, &initial)?;
             this.ubos.push(ubo);
         }
-        this.layout = FRAME_SET.create(device)?;
+        this.layout = FRAME_UNIFORM_SET_DESC.create(device)?;
         let slots = MAX_FRAMES_IN_FLIGHT as u32;
-        let pool_sizes = FRAME_SET.pool_sizes_vec(slots);
+        let pool_sizes = FRAME_UNIFORM_SET_DESC.pool_sizes_vec(slots);
         this.pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default().max_sets(slots).pool_sizes(&pool_sizes),
@@ -181,9 +181,9 @@ impl FrameUniforms {
             )
         }
         .map_err(VulkanError::from)?;
-        // 写入过声明校验（FRAME_SET b0 = UBO，写满才提交）
+        // 写入过声明校验（FRAME_UNIFORM_SET_DESC b0 = UBO，写满才提交）
         for (set, ubo) in this.sets.iter().zip(&this.ubos) {
-            let mut writer = DescriptorWriter::new(&FRAME_SET, *set);
+            let mut writer = DescriptorWriter::new(&FRAME_UNIFORM_SET_DESC, *set);
             writer.buffer(0, ubo.buffer(), 0, FRAME_UBO_SIZE);
             writer.submit(device)?;
         }
@@ -193,13 +193,13 @@ impl FrameUniforms {
     /// set1 布局（登记给管线组装；集与布局同源，不可另建）。
     #[must_use]
     pub fn set_layout(&self) -> SetLayout {
-        SetLayout::new(&FRAME_SET, self.layout)
+        SetLayout::new(&FRAME_UNIFORM_SET_DESC, self.layout)
     }
 
     /// 第 `frame` 帧槽的 set1（按帧槽绑定）。
     #[must_use]
     pub fn frame_set(&self, frame: usize) -> DescSet {
-        DescSet::new(&FRAME_SET, self.sets[frame])
+        DescSet::new(&FRAME_UNIFORM_SET_DESC, self.sets[frame])
     }
 
     /// 第 `frame` 帧槽的 UBO 本体（写相机/灯光数据的入口，帧槽 fence 纪律内）。
@@ -208,7 +208,7 @@ impl FrameUniforms {
     }
 }
 
-impl Drop for FrameUniforms {
+impl Drop for FrameUniformTable {
     fn drop(&mut self) {
         // 不等 GPU：退出排空由 teardown_vulkan 的 device_wait_idle 先于一切资源 Drop。
         // set 随 pool 一起释放；半建状态下的空句柄跳过。

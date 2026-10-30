@@ -6,7 +6,7 @@
 
 ## 任务清单（4.2.1~4.2.5）
 
-- [x] **4.2.1 资产事件读侧**：`scene/mechanism/asset_events.rs`——三类资产 `MessageReader<AssetEvent<A>>`（PostUpdate，账本对账之后），`Modified` 进失效集，`Added/Removed/Unused/LoadedWithDependencies` 只计数不动作；事件计量（按变体）接入 `IncrementStats` 与 `increment_stats` 读数。
+- [x] **4.2.1 资产事件读侧**：`scene/mechanism/assets/asset_events.rs`——三类资产 `MessageReader<AssetEvent<A>>`（PostUpdate，账本对账之后），`Modified` 进失效集，`Added/Removed/Unused/LoadedWithDependencies` 只计数不动作；事件计量（按变体）接入 `IncrementStats` 与 `increment_stats` 读数。
 - [x] **4.2.2 失效与联动**：`Modified` → `AssetInvalidations`（mesh/image 身份集）+ 关联实体重挂脏标（重扫账本行定案：O(行数) 零维护）；材质贴图槽变化 → 关联 Image 失效传播。
 - [x] **4.2.3 内容重传**：mesh = 失效凭据进 flush 判定（"查无**或失效**才传"）→ 新区间重传 → `MeshPool::replace` 原子换槽（旧区间孤儿化，回收归 4.4）；image = 旧 `GpuImage` 移入 graveyard（在飞安全）→ 新图建好 → `BindlessTables::rebind` 原槽重写描述符 → 换条目；graveyard 排空 = 帧侧等待后销毁（4.1.1 闸门第二次兑现）。
 - [x] **4.2.4 BRP 改内容方法族**：`ash_renderer/mutate_asset`（材质参数 / 贴图槽 / mesh 顶点 / image 像素四驱动，操作本体 `asset_ops.rs` 可复用层）+ `tools/brp.py` 子命令。

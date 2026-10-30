@@ -8,31 +8,31 @@ use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayoutDesc;
 use crate::render::core::binding::shader_abi::{self, Shader};
 use crate::render::passes::gbuffer::gbuffer_pipeline::GBUFFER_WRITE_PIPELINE;
-use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET;
-use crate::render::passes::lighting::cluster::{CLUSTER_BUILD_PIPELINE, LIGHT_CLUSTER_SET};
+use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
+use crate::render::passes::lighting::cluster::{CLUSTER_BUILD_PIPELINE, LIGHT_CLUSTER_SET_DESC};
 use crate::render::passes::lighting::composite_pipeline::GBUFFER_COMPOSITE_PIPELINE;
 use crate::render::passes::overlay::overlay_pipeline::OVERLAY_PIPELINE;
 use crate::render::passes::post::bloom::{
-    BLOOM_DOWN_PIPELINE, BLOOM_PREFILTER_PIPELINE, BLOOM_TEX_SET, BLOOM_UP_PIPELINE, BLOOM_UP_SET,
+    BLOOM_DOWN_PIPELINE, BLOOM_PREFILTER_PIPELINE, BLOOM_TEX_SET_DESC, BLOOM_UP_PIPELINE, BLOOM_UP_SET_DESC,
 };
 use crate::render::passes::post::present_tonemap_pipeline::PRESENT_TONEMAP_PIPELINE;
 use crate::render::passes::post::smaa::{
-    SMAA_A_SET, SMAA_BLEND_PIPELINE, SMAA_B_SET, SMAA_EDGE_PIPELINE, SMAA_NEIGHBORHOOD_PIPELINE,
+    SMAA_A_SET_DESC, SMAA_BLEND_PIPELINE, SMAA_B_SET_DESC, SMAA_EDGE_PIPELINE, SMAA_NEIGHBORHOOD_PIPELINE,
 };
 use crate::render::passes::shadow::shadow_build::SHADOW_BUILD_PIPELINE;
-use crate::render::passes::shadow::shadow_map::{SHADOW_SET, SHADOW_WRITE_PIPELINE};
+use crate::render::passes::shadow::shadow_map::{SHADOW_SET_DESC, SHADOW_WRITE_PIPELINE};
 use crate::render::passes::transparent::{
     TRANSPARENT_COLLECT_PIPELINE, TRANSPARENT_FORWARD_PIPELINE, TRANSPARENT_GATHER_PIPELINE,
-    TRANSPARENT_SET, TRANSPARENT_SORT_PIPELINE,
+    TRANSPARENT_SET_DESC, TRANSPARENT_SORT_PIPELINE,
 };
 use crate::render::passes::visibility::cull::CULL_PIPELINE;
-use crate::render::passes::visibility::hiz::{HIZ_DOWNSAMPLE_PIPELINE, HIZ_OCCLUSION_SET, HIZ_REDUCE_SET};
+use crate::render::passes::visibility::hiz::{HIZ_DOWNSAMPLE_PIPELINE, HIZ_OCCLUSION_SET_DESC, HIZ_REDUCE_SET_DESC};
 use crate::render::passes::visibility::indirect::BUILD_INDIRECT_PIPELINE;
 use crate::render::passes::visibility::lod::LOD_SELECT_PIPELINE;
 use crate::render::passes::visibility::occlusion::OCCLUSION_PIPELINE;
-use crate::render::resident::bindless_tables::BINDLESS_SET;
-use crate::render::resident::frame_uniforms::FRAME_SET;
-use crate::render::resident::instance_table::INSTANCE_SET;
+use crate::render::resident::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
+use crate::render::resident::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
+use crate::render::resident::instance_table::INSTANCE_SET_DESC;
 
 /// 宿主建的全部管线。
 pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
@@ -62,19 +62,19 @@ pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
 
 /// 宿主声明并建出的全部 set 布局。
 pub(crate) const ALL_SETS: &[&SetLayoutDesc] = &[
-    &BINDLESS_SET,
-    &FRAME_SET,
-    &INSTANCE_SET,
-    &GBUFFER_SAMPLED_SET,
-    &LIGHT_CLUSTER_SET,
-    &TRANSPARENT_SET,
-    &SHADOW_SET,
-    &BLOOM_TEX_SET,
-    &BLOOM_UP_SET,
-    &SMAA_A_SET,
-    &SMAA_B_SET,
-    &HIZ_REDUCE_SET,
-    &HIZ_OCCLUSION_SET,
+    &BINDLESS_TEXTURE_SET_DESC,
+    &FRAME_UNIFORM_SET_DESC,
+    &INSTANCE_SET_DESC,
+    &GBUFFER_SAMPLED_SET_DESC,
+    &LIGHT_CLUSTER_SET_DESC,
+    &TRANSPARENT_SET_DESC,
+    &SHADOW_SET_DESC,
+    &BLOOM_TEX_SET_DESC,
+    &BLOOM_UP_SET_DESC,
+    &SMAA_A_SET_DESC,
+    &SMAA_B_SET_DESC,
+    &HIZ_REDUCE_SET_DESC,
+    &HIZ_OCCLUSION_SET_DESC,
 ];
 
 /// 只给 examples 用、不归宿主管线的 shader（仅契约测试引用）。

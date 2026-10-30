@@ -74,7 +74,7 @@ impl Plugin for AshUploadPlugin {
             flush_uploads
                 .run_if(resource_exists::<MeshPool>)
                 .run_if(resource_exists::<ImageCache>)
-                .run_if(resource_exists::<crate::render::BindlessTables>)
+                .run_if(resource_exists::<crate::render::BindlessTextureTable>)
                 .run_if(resource_exists::<AssetInvalidations>)
                 .run_if(resource_exists::<AssetReadiness>)
                 .run_if(resource_exists::<AssetRetirements>)
@@ -184,7 +184,7 @@ pub(crate) fn flush_uploads(
     data: UploadData,
     mut pool: ResMut<MeshPool>,
     mut image_cache: ResMut<ImageCache>,
-    mut tables: ResMut<crate::render::BindlessTables>,
+    mut tables: ResMut<crate::render::BindlessTextureTable>,
     mut uploader: ResMut<Uploader>,
     mut state: Local<UploadState>,
 ) -> Result<(), BevyError> {

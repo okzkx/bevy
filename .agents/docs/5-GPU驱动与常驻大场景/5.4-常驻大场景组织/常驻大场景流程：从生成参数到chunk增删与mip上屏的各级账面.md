@@ -8,7 +8,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `scene/mechanism/scene_gen.rs` | 生成器机制层：批量克隆铺实例（扁平/chunk 化两形态）、SceneChunk 组件、chunk 盘点与整块删除——BRP 与将来 egui 面板共用的可复用实现 |
+| `scene/mechanism/generation/scene_gen.rs` | 生成器机制层：批量克隆铺实例（扁平/chunk 化两形态）、SceneChunk 组件、chunk 盘点与整块删除——BRP 与将来 egui 面板共用的可复用实现 |
 | `remote/generate.rs` | BRP 协议薄壳：generate_scene / generate_chunks / chunk_census / chunk_despawn 四方法的参数解析与 JSON 读回 |
 | `vulkan/images.rs` | ImageSpec 携带全链级数（full_mip_chain）、GpuImage 按格式 blit 能力建图（缺支持降级单级）、采样端 max_lod 放开 |
 | `vulkan/uploader.rs` | 上传编排扩形：transfer 批只拷 level 0；**mip 生成续批**（graphics 队列、等票据 → blit → signal 票据 +1） |

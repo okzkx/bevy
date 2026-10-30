@@ -48,7 +48,7 @@ const VS_FS: vk::ShaderStageFlags = stages(&[vk::ShaderStageFlags::VERTEX, FS]);
 /// edge/blend 共用：b0 主纹理 / b1 参数 UBO（VS 也读）/ b2 采样器 / b3、b4 两张辅助纹理。
 /// b3/b4 只有 blend 集写（search/area 查找表），edge 集不写不读——标 PARTIALLY_BOUND
 /// 免除写满要求，shader 侧也只有 blend 声明并访问它们。
-pub(crate) static SMAA_A_SET: SetLayoutDesc = SetLayoutDesc::new(
+pub(crate) static SMAA_A_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "smaa_a",
     &[
         BindingDesc::new(SMAA_BINDING_TEX0, DescKind::SampledImage, FS),
@@ -62,7 +62,7 @@ pub(crate) static SMAA_A_SET: SetLayoutDesc = SetLayoutDesc::new(
 );
 
 /// neighborhood：同 A，但 b4 换成第二个采样器。
-pub(crate) static SMAA_B_SET: SetLayoutDesc = SetLayoutDesc::new(
+pub(crate) static SMAA_B_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "smaa_b",
     &[
         BindingDesc::new(SMAA_BINDING_TEX0, DescKind::SampledImage, FS),
@@ -77,7 +77,7 @@ pub(crate) static SMAA_EDGE_PIPELINE: PipelineDesc = PipelineDesc {
     label: "smaa_edge",
     shader: &shader_abi::SMAA_EDGE,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&SMAA_A_SET],
+    sets: &[&SMAA_A_SET_DESC],
     push: None,
     color_formats: &[vk::Format::R8G8B8A8_UNORM],
     depth_format: None,
@@ -87,7 +87,7 @@ pub(crate) static SMAA_BLEND_PIPELINE: PipelineDesc = PipelineDesc {
     label: "smaa_blend",
     shader: &shader_abi::SMAA_BLEND,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&SMAA_A_SET],
+    sets: &[&SMAA_A_SET_DESC],
     push: None,
     color_formats: &[vk::Format::R8G8B8A8_UNORM],
     depth_format: None,
@@ -97,7 +97,7 @@ pub(crate) static SMAA_NEIGHBORHOOD_PIPELINE: PipelineDesc = PipelineDesc {
     label: "smaa_neighborhood",
     shader: &shader_abi::SMAA_NEIGHBORHOOD,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&SMAA_B_SET],
+    sets: &[&SMAA_B_SET_DESC],
     push: None,
     color_formats: &[crate::render::SWAPCHAIN_COLOR_FORMAT],
     depth_format: None,
@@ -180,9 +180,9 @@ fn upload_lut(
         &spec,
         &sharing,
     )?;
-    let ticket = uploader.submit_batch(crate::render::resident::uploader::UploadBatch {
+    let ticket = uploader.submit_batch(crate::render::core::device::transfer::UploadBatch {
         staging: data,
-        image_uploads: vec![crate::render::resident::uploader::StagingImageCopy {
+        image_uploads: vec![crate::render::core::device::transfer::StagingImageCopy {
             image: gpu.image(),
             src_offset: 0,
             width: w,
@@ -266,8 +266,8 @@ impl SmaaTargets {
     unsafe fn build_static(&mut self) -> Result<()> {
         unsafe {
         let device = &self.device;
-        self.set_layout_a = SMAA_A_SET.create(device)?;
-        self.set_layout_b = SMAA_B_SET.create(device)?;
+        self.set_layout_a = SMAA_A_SET_DESC.create(device)?;
+        self.set_layout_b = SMAA_B_SET_DESC.create(device)?;
         let slots = MAX_FRAMES_IN_FLIGHT;
         self.sampler = crate::render::resident::images::sampler_key(
             &bevy::image::ImageSamplerDescriptor::linear(),
@@ -275,7 +275,7 @@ impl SmaaTargets {
         .create_sampler(device)?;
         // 池容量从布局声明推导：每槽 edge/blend 两张 L_a + nb 一张 L_b
         let pool_sizes =
-            merged_pool_sizes(&[(&SMAA_A_SET, 2 * slots as u32), (&SMAA_B_SET, slots as u32)]);
+            merged_pool_sizes(&[(&SMAA_A_SET_DESC, 2 * slots as u32), (&SMAA_B_SET_DESC, slots as u32)]);
         self.pool = device.create_descriptor_pool(
             &vk::DescriptorPoolCreateInfo::default()
                 .max_sets((3 * slots) as u32)
@@ -309,18 +309,18 @@ impl SmaaTargets {
                 .descriptor_pool(self.pool)
                 .set_layouts(&std::iter::repeat_n(self.set_layout_b, slots).collect::<Vec<_>>()),
         )?;
-        // 三组集逐槽写，写入过声明校验（种类按 SMAA_A_SET / SMAA_B_SET 核对）
+        // 三组集逐槽写，写入过声明校验（种类按 SMAA_A_SET_DESC / SMAA_B_SET_DESC 核对）
         let ro = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
         let info_buf = |slot: usize| self.infos[slot % MAX_FRAMES_IN_FLIGHT].buffer();
         for slot in 0..slots {
             // edge set：b0 ldr + b1 参数 + b2 采样器
-            let mut edge = DescriptorWriter::new(&SMAA_A_SET, self.sets_edge[slot]);
+            let mut edge = DescriptorWriter::new(&SMAA_A_SET_DESC, self.sets_edge[slot]);
             edge.image(SMAA_BINDING_TEX0, self.ldrs[slot].view(), ro)
                 .sampler(SMAA_BINDING_SAMPLER, self.sampler)
                 .buffer(SMAA_BINDING_INFO, info_buf(slot), 0, vk::WHOLE_SIZE);
             edge.submit(device)?;
             // blend set：b0 edges + b3 search + b4 area
-            let mut blend = DescriptorWriter::new(&SMAA_A_SET, self.sets_blend[slot]);
+            let mut blend = DescriptorWriter::new(&SMAA_A_SET_DESC, self.sets_blend[slot]);
             blend
                 .image(SMAA_BINDING_TEX0, self.edges[slot].view(), ro)
                 .sampler(SMAA_BINDING_SAMPLER, self.sampler)
@@ -329,7 +329,7 @@ impl SmaaTargets {
                 .buffer(SMAA_BINDING_INFO, info_buf(slot), 0, vk::WHOLE_SIZE);
             blend.submit(device)?;
             // nb set：b0 ldr + b3 blend + b4 blend 采样器
-            let mut nb = DescriptorWriter::new(&SMAA_B_SET, self.sets_nb[slot]);
+            let mut nb = DescriptorWriter::new(&SMAA_B_SET_DESC, self.sets_nb[slot]);
             nb.image(SMAA_BINDING_TEX0, self.ldrs[slot].view(), ro)
                 .sampler(SMAA_BINDING_SAMPLER, self.sampler)
                 .image(SMAA_BINDING_TEX1, self.blends[slot].view(), ro)
@@ -372,26 +372,26 @@ impl SmaaTargets {
     /// edge/blend 集布局。
     #[must_use]
     pub fn layout_a(&self) -> SetLayout {
-        SetLayout::new(&SMAA_A_SET, self.set_layout_a)
+        SetLayout::new(&SMAA_A_SET_DESC, self.set_layout_a)
     }
 
     /// neighborhood 集布局。
     #[must_use]
     pub fn layout_b(&self) -> SetLayout {
-        SetLayout::new(&SMAA_B_SET, self.set_layout_b)
+        SetLayout::new(&SMAA_B_SET_DESC, self.set_layout_b)
     }
 
     #[must_use]
     pub fn set_edge(&self, slot: usize) -> DescSet {
-        DescSet::new(&SMAA_A_SET, self.sets_edge[slot])
+        DescSet::new(&SMAA_A_SET_DESC, self.sets_edge[slot])
     }
     #[must_use]
     pub fn set_blend(&self, slot: usize) -> DescSet {
-        DescSet::new(&SMAA_A_SET, self.sets_blend[slot])
+        DescSet::new(&SMAA_A_SET_DESC, self.sets_blend[slot])
     }
     #[must_use]
     pub fn set_nb(&self, slot: usize) -> DescSet {
-        DescSet::new(&SMAA_B_SET, self.sets_nb[slot])
+        DescSet::new(&SMAA_B_SET_DESC, self.sets_nb[slot])
     }
     #[must_use]
     pub fn info(&self, slot: usize) -> &GpuBuffer {

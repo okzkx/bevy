@@ -27,20 +27,20 @@ use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
-use crate::render::resident::instance_table::INSTANCE_SET;
+use crate::render::resident::instance_table::INSTANCE_SET_DESC;
 
 pub const SHADOW_BINDING_UNIFORM: u32 = 0;
 pub const SHADOW_BINDING_MAP0: u32 = 1;
 pub const SHADOW_BINDING_MARK0: u32 = 5;
 pub const SHADOW_BINDING_CMD0: u32 = 6;
 
-const _: () = assert!(SHADOW_CASCADES == 4, "SHADOW_SET 按 4 级 cascade 逐个列 binding");
+const _: () = assert!(SHADOW_CASCADES == 4, "SHADOW_SET_DESC 按 4 级 cascade 逐个列 binding");
 const CS: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
 const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
 
 /// shadow 集：b0 均匀数据（绘制/合成/剔除都读）/ b1..b4 各级阴影图（合成采样）/
 /// b5 剔除标记 / b6..b9 各级命令环（后两类只给 compute）。
-pub(crate) static SHADOW_SET: SetLayoutDesc = SetLayoutDesc::new(
+pub(crate) static SHADOW_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "shadow",
     &[
         BindingDesc::new(
@@ -154,8 +154,8 @@ impl ShadowTargets {
         }
         unsafe {
             let device = &ctx.device;
-            self.set_layout = SHADOW_SET.create(device).inspect_err(|_| self.destroy_buffers())?;
-            let shadow_pool_sizes = SHADOW_SET.pool_sizes_vec(slots as u32);
+            self.set_layout = SHADOW_SET_DESC.create(device).inspect_err(|_| self.destroy_buffers())?;
+            let shadow_pool_sizes = SHADOW_SET_DESC.pool_sizes_vec(slots as u32);
             self.pool = device
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
@@ -181,9 +181,9 @@ impl ShadowTargets {
                 })?;
             // 描述符写入：b0 UBO（逐槽）、b1..4 深度图 sampled view（全槽同源
             // ——固定尺寸图不随帧变）、b5 标记 / b6..9 命令环（逐槽）。
-            // 写入过声明校验（种类按 SHADOW_SET 核对，写满才提交）。
+            // 写入过声明校验（种类按 SHADOW_SET_DESC 核对，写满才提交）。
             for slot in 0..slots {
-                let mut writer = DescriptorWriter::new(&SHADOW_SET, self.sets[slot]);
+                let mut writer = DescriptorWriter::new(&SHADOW_SET_DESC, self.sets[slot]);
                 writer.buffer(SHADOW_BINDING_UNIFORM, self.ubos[slot].buffer(), 0, vk::WHOLE_SIZE);
                 for (c, map) in self.maps.iter().enumerate() {
                     writer.image(SHADOW_BINDING_MAP0 + c as u32, map.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
@@ -228,13 +228,13 @@ impl ShadowTargets {
     /// shadow set 布局句柄（管线/录制借源，拆除序先于本资源）。
     #[must_use]
     pub fn set_layout(&self) -> SetLayout {
-        SetLayout::new(&SHADOW_SET, self.set_layout)
+        SetLayout::new(&SHADOW_SET_DESC, self.set_layout)
     }
 
     /// 本帧槽 shadow set。
     #[must_use]
     pub fn frame_set(&self, slot: usize) -> DescSet {
-        DescSet::new(&SHADOW_SET, self.sets[slot])
+        DescSet::new(&SHADOW_SET_DESC, self.sets[slot])
     }
 
     /// 本帧槽 shadow UBO（宿主写入口，fence 纪律内）。
@@ -302,7 +302,7 @@ pub(crate) static SHADOW_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
     label: "shadow_write",
     shader: &shader_abi::SHADOW_WRITE,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&INSTANCE_SET, &SHADOW_SET],
+    sets: &[&INSTANCE_SET_DESC, &SHADOW_SET_DESC],
     push: Some(PushRange { stages: vk::ShaderStageFlags::VERTEX, size: SHADOW_PUSH_SIZE }),
     color_formats: &[],
     depth_format: Some(crate::render::core::target::depth::DEPTH_FORMAT),

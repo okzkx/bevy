@@ -1,16 +1,10 @@
-//! 对象写操作封装：spawn 克隆/换柄两类实体级变更的可复用实现——
-//! BRP 方法族（remote 的 objects 薄壳）与其他写入方共用这一层，
-//! 不养两份逻辑（apply_transform_edit 同款惯例）。despawn/摘组件
-//! 不在此层：官方 BRP 内置 `world.despawn_entity`/`world.remove_components`
-//! 已覆盖该通道，无其他消费者——不预写零调用代码。
-//!
-//! 边界：本模块只做 ECS 写路径，**不碰账本**——变更进账走
-//! [`crate::scene::mechanism::update_ledger`] 的 Changed/Removed 通道，任何
-//! 写入方（BRP/UI/代码）自动被账本看见，这是"发现与写入解耦"的验收面。
+//! 对象写操作，为 BRP 与其他写入方提供共享实现。
+//! 本模块不维护账本；组件变化由 Changed/Removed 通道发现。
+//! despawn 和摘组件由 Bevy 的 World 操作处理。
 
 use bevy::{asset::AssetPath, asset::AssetServer, pbr::StandardMaterial, prelude::*};
 
-/// 对象操作被拒的原因（Tier②外泄给调用方分级：BRP 映射协议错误码）。
+/// 对象操作被拒绝的原因。
 #[derive(Debug)]
 pub enum ObjectOpError {
     /// 目标实体不在 World。
@@ -31,10 +25,7 @@ pub enum ObjectOpError {
     ChunkMissing(u32),
 }
 
-/// 路径预校验：`AssetServer::load/reload` 收 `impl Into<AssetPath>`，而
-/// `String → AssetPath` 的 From 实现走 panic 解析器（bevy_asset path.rs
-/// `parse`），非法标签在进异步链之前就 panic、绕过失败事件与 BRP 错误通道。
-/// 全部动态加载入口统一先过 `try_parse`，非法输入回协议错误。
+/// 先用 `try_parse` 校验动态路径，避免非法输入在转换时 panic；失败作为操作错误返回。
 ///
 /// # Errors
 /// 路径解析失败（含空标签、坏 source 段）。
@@ -44,9 +35,7 @@ pub fn parse_asset_path(path: &str) -> Result<AssetPath<'static>, ObjectOpError>
         .map_err(|e| ObjectOpError::InvalidAssetPath(format!("{path}: {e}")))
 }
 
-/// 克隆一个可渲染 primitive：复制源的 Mesh3d/MeshMaterial3d 柄与 Transform
-///（平移加 `offset`），Name 加后缀便于树内辨认。柄复制意味着**共享资产**——
-/// 不产生新上传（驻留缓存按 AssetId 去重），账本只见新行。无父独立成树。
+/// 复制源实体的 mesh/material 句柄和 Transform，并按 offset 平移；新实体与源共享资产。
 ///
 /// # Errors
 /// 源实体缺席或缺 Mesh3d/MeshMaterial3d/Transform。
@@ -76,16 +65,13 @@ pub fn spawn_primitive_clone(
     Ok(spawned.id())
 }
 
-/// 换柄读回：换绑后目标实体的资产身份。
 #[derive(Debug)]
 pub struct HandleSwapReadback {
     pub mesh: Option<AssetId<Mesh>>,
     pub material: Option<AssetId<StandardMaterial>>,
 }
 
-/// 换柄：把 `mesh_from`/`material_from`（源实体）身上的柄拷到 `target`。柄是
-/// 引用语义——目标与源共享同一资产身份；账本行换绑走 Changed 通道，GPU 侧
-/// 旧资产是否回收归资产卸载回收账。至少一项给值，两项都缺 = [`ObjectOpError::NothingToDo`]。
+/// 将源实体的 mesh/material 句柄写入目标；目标与源共享资产。至少提供一个来源实体。
 ///
 /// # Errors
 /// 目标/源实体缺席、源非 primitive、目标缺对应组件。
@@ -131,20 +117,14 @@ pub fn replace_handles(
     Ok(readback)
 }
 
-/// 动态加载换柄读回：受理的资产身份（加载中柄的 id，到货前后不变
-/// ——AssetId 锚身份非内容，pending 期间即定型）。
+/// 加载中句柄的资产 ID；加载完成前后保持不变。
 #[derive(Debug)]
 pub struct LoadedMeshReadback {
     pub entity: Entity,
     pub mesh: AssetId<Mesh>,
 }
 
-/// 异步加载 mesh 并换到既有实体上：`server.load(path)` 立即返回
-/// **加载中柄**，换绑走 [`Mesh3d`] 组件改写（Changed 通道账本自动换行）。
-/// 资产未到货期间行保持脏标（pending 账面），到货帧 flush 转换上传、画面
-/// 换上新内容；路径失败的失败读侧收账（出重试队列，行出队）。路径先过
-/// [`parse_asset_path`] 预校验（panic 解析器不外泄），加载是异步链，
-/// 本函数只负责"发请求 + 换柄"。
+/// 异步加载 mesh 并换绑到既有实体；立即写入加载中句柄，路径先经 [`parse_asset_path`] 校验。
 ///
 /// # Errors
 /// 目标实体缺席、路径非法或缺 `Mesh3d`。
@@ -157,7 +137,6 @@ pub fn load_mesh_rebind(
         return Err(ObjectOpError::EntityMissing(target));
     }
     let path = parse_asset_path(path)?;
-    // load 收 AssetPath<'static>（柄内保存），&str 须转 owned
     let handle = world.resource::<AssetServer>().load(path);
     let Some(mut slot) = world.get_mut::<Mesh3d>(target) else {
         return Err(ObjectOpError::ComponentMissing("Mesh3d", target));
@@ -185,7 +164,6 @@ pub fn spawn_with_loaded_mesh(
 ) -> Result<LoadedMeshReadback, ObjectOpError> {
     let path = parse_asset_path(path)?;
     let entity = spawn_primitive_clone(world, source, offset, name_suffix)?;
-    // load 收 AssetPath<'static>（柄内保存）
     let handle = world.resource::<AssetServer>().load(path);
     let Some(mut slot) = world.get_mut::<Mesh3d>(entity) else {
         return Err(ObjectOpError::ComponentMissing("Mesh3d", entity));
@@ -197,11 +175,8 @@ pub fn spawn_with_loaded_mesh(
     })
 }
 
-/// 异步加载贴图并换到目标实体的材质 base_color 槽上：加载中柄直接
-/// 写进 `Assets<StandardMaterial>` 的槽字段（`Modified` 事件 → 资产失效联动
-/// 把引用行重挂脏标），贴图本体未到货期间槽腿 pending，到货帧重传换指。
-/// **共享材质语义**：目标实体的材质被原位改写，全部引用者同变（与
-/// mutate 贴图槽同语义）。
+/// 异步加载贴图并写入目标材质的 base_color_texture 槽；资产事件通知读侧。
+/// 坑：材质是原位修改，共享该材质的实体都会受影响。
 ///
 /// # Errors
 /// 目标实体缺席、路径非法、非 primitive、缺 `MeshMaterial3d`，或材质资产不在容器。

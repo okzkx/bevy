@@ -1,16 +1,7 @@
-//! 常驻大场景生成器：程序化铺大量实例——共享既有资产的柄、规模参数化、
-//! 随机种子固定可复现，走账本链路（批量 spawn 后 Changed 通道自动入行，
-//! 驻留资产零重传）；chunk 身份（空间网格）与整块增删。
-//!
-//! 形态：运行期 spawn——不生成 glTF 走加载链，spawn 克隆与
-//! [`crate::scene::mechanism::spawn_primitive_clone`] 同语义（柄复制 = 共享
-//! 资产），账本/上传/GPU 表零新通道；BRP 薄壳在 remote 的 generate 方法族。
-//!
-//! 复现纪律：位置抖动是纯函数——`f(seed, index)`（splitmix64 终态散列），
-//! 不持顺序状态，同参数重跑逐实例同位。生成器本身规模无关：count/spacing
-//! 只是参数，10 万档压测与 4096 验证档同一代码路径。
+//! 运行期场景生成：共享资产句柄批量生成实例，或按空间块生成并管理实例。
+//! 生成位置由 seed 和实例索引确定；相同参数可重现相同位置。
 
-use super::ObjectOpError;
+use crate::scene::mechanism::ObjectOpError;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
 
@@ -29,7 +20,7 @@ pub struct SceneGenParams {
     pub spacing: f32,
     /// 随机种子：抖动位置的散列基。
     pub seed: u64,
-    /// 位置抖动幅度（世界单位，[0, jitter) 均匀偏移 x/z）；0 = 整齐网格。
+    /// 位置抖动幅度（世界单位；x/z 分别偏移 [-jitter, jitter)；0 = 整齐网格）。
     pub jitter: f32,
 }
 
@@ -45,9 +36,7 @@ pub struct SceneGenReadback {
     pub material: AssetId<StandardMaterial>,
 }
 
-/// 批量克隆铺实例：网格 + 种子抖动定位，Name 编号便于树内辨认。
-/// 柄复制 = 共享资产（驻留缓存按 AssetId 去重 → 存量资产零上传），
-/// 无父独立成树（chunk 组织见 [`generate_chunks`]，本函数不管）。
+/// 生成网格实例并按索引编号；实体共享源资产且不带父实体。
 ///
 /// # Errors
 /// 源实体缺席/非 primitive/缺 Transform；参数为 0（count/columns）或
@@ -57,8 +46,7 @@ pub fn generate_instances(
     p: SceneGenParams,
 ) -> Result<SceneGenReadback, ObjectOpError> {
     if p.count == 0 || p.columns == 0 {
-        // 不走 NothingToDo——它的协议文案是 replace_handles 专属（"至少一项
-        // 变更"），数值域问题按参数非法报
+        // 规模参数无效属于参数错误，不是空操作。
         return Err(ObjectOpError::InvalidParams(
             "count/columns 须 > 0（空场景直接不生成，删除走 chunk_despawn）".into(),
         ));
@@ -110,7 +98,7 @@ fn spawn_one(
     i: u32,
     p: &SceneGenParams,
 ) -> Result<Entity, ObjectOpError> {
-    // u32→f32 用 as 转换（u32 精度上界 2^24 内无损，生成器网格坐标远低于）
+    // 索引很大时转换为 f32 可能失去整数精度。
     let col = (i % p.columns) as f32;
     let row = (i / p.columns) as f32;
     let mut translation = base.translation + Vec3::new(col * p.spacing, 0.0, row * p.spacing);
@@ -127,8 +115,7 @@ fn spawn_one(
     Ok(entity)
 }
 
-/// 纯函数位置散列：splitmix64 终态，输出 [0,1)。`channel` 区分 x/z 两条流
-///——同 (seed,i) 不同 channel 独立。无顺序状态 = 同参数重跑同位。
+/// 按 seed、实例索引和通道生成 [0,1) 的确定性散列值。
 fn hash01(seed: u64, index: u32, channel: u64) -> f32 {
     let mut z = seed
         ^ u64::from(index).wrapping_mul(0x9E37_79B9_7F4A_7C15)
@@ -137,29 +124,19 @@ fn hash01(seed: u64, index: u32, channel: u64) -> f32 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^= z >> 31;
-    // 取高 24 位归一化（低位的乘法痕迹更重，高 24 位即浮点均匀性的常用口径）
+    // 取高 24 位并缩放到 [0,1)。
     (z >> 40) as f32 / (1u64 << 24) as f32
 }
 
-// ===== chunk 身份与整块增删 =====
-
-/// chunk 身份组件：生成期空间归属，挂在 chunk 根实体上、实例为其子实体。
-///
-/// 两个设计约束：
-/// - **身份落在实体组件**：Bevy 侧可查（census/despawn 按 id 寻址）、整块
-///   despawn 复用 despawn 树递归语义（整树清账的批量形态）；
-/// - **chunk 不进 GPU 侧**：GPU 不知道 chunk（不进对象表/标记环/命令环），
-///   本段剔除仍逐槽；chunk 是 CPU 侧组织与增删粒度。
-///
-/// 归属不随运行期更新：对象被 set_transform 移出块边界仍是生成块的成员
-///（chunk = 生成期组织，运行期归属更新语义另立账）。
+/// 生成期空间归属；chunk 根标识一块，实例作为其子实体。
+/// 成员关系不随实体移动更新；chunk 用于 CPU 侧盘点与整块增删。
 #[derive(Component, Debug, Clone, Copy)]
 pub struct SceneChunk {
     /// 生成期编号（cz × 每轴块数 + cx）；census/despawn 按 id 寻址。
     pub id: u32,
     /// 块原点（世界坐标，根实体的 translation）。
     pub origin: Vec3,
-    /// 块边长（成员网格边数 × spacing；相邻块原点相距 extent，块间不重叠）。
+    /// 块边长（列数 × spacing；相邻根实体原点相距 extent）。
     pub extent: f32,
 }
 
@@ -176,7 +153,7 @@ pub struct ChunkGenParams {
     pub spacing: f32,
     /// 随机种子：抖动位置的散列基。
     pub seed: u64,
-    /// 位置抖动幅度；0 = 整齐网格。
+    /// 位置抖动幅度（世界单位；x/z 分别偏移 [-jitter, jitter)；0 = 整齐网格）。
     pub jitter: f32,
 }
 
@@ -191,12 +168,11 @@ pub struct ChunkGenReadback {
     pub material: AssetId<StandardMaterial>,
 }
 
-/// chunk 化批量生成：空间网格分块（块边界即空间边界，可观察），块内
-/// 小网格铺实例，整块 = 一个根实体 + 子树。
-/// 抖动散列用跨块平坦 index——同参数重跑逐实例同位。
+/// 按网格位置生成 chunk，每块包含网格实例，并可通过根实体整块增删。
+/// 抖动散列使用跨块的平坦索引，同参数重跑得到相同位置。
 ///
 /// # Errors
-/// 源实体缺席/非 primitive/缺 Transform；参数为 0 或 spacing 非正。
+/// 参数为 0、spacing 非正、jitter 为负或生成总量溢出时拒绝。
 pub fn generate_chunks(
     world: &mut World,
     p: ChunkGenParams,
@@ -224,7 +200,7 @@ pub fn generate_chunks(
     let Some(base) = world.get::<Transform>(p.source).cloned() else {
         return Err(ObjectOpError::ComponentMissing("Transform", p.source));
     };
-    // 块内实例网格：列数 = ceil(sqrt(ipc))，块边长 = 列数 × spacing
+        // 块内按近似方阵排列。
     let cols = (p.instances_per_chunk as f32).sqrt().ceil() as u32;
     let extent = cols as f32 * p.spacing;
     // 总量溢出 u32 = 参数非法（spawn 前拒绝，不产出半批实体）
@@ -268,7 +244,7 @@ pub fn generate_chunks(
                 }
                 flat += 1;
                 let mut transform = base;
-                // 实例位置由生成器定（块原点经父链传播，局部坐标不含它）
+                // 坑：块原点由父级传播，子实体 translation 必须保持块内坐标。
                 transform.translation = local;
                 let child = world
                     .spawn((
@@ -282,7 +258,7 @@ pub fn generate_chunks(
             }
         }
     }
-    // chunk_grid > 0 已校验，至少铺一块——缺席即不变式破坏，按协议错误报出
+    // chunk_grid 已校验为正，至少会生成一个根实体。
     let (Some(first_root), Some(last_root)) = (first_root, last_root) else {
         return Err(ObjectOpError::InvalidParams("chunk 生成未产出任何块".into()));
     };
@@ -296,19 +272,18 @@ pub fn generate_chunks(
     })
 }
 
-/// chunk 盘点行：census 的逐块读数（块边界读数口）。
+/// 单个 chunk 的盘点结果。
 #[derive(Debug)]
 pub struct ChunkCensusRow {
     pub id: u32,
     pub entity: Entity,
     pub origin: Vec3,
     pub extent: f32,
-    /// 子树内可渲染 primitive 数（chunk 成员；非 primitive 子实体不计入）。
+    /// 直接子实体中带 `Mesh3d` 的数量。
     pub members: usize,
 }
 
-/// chunk 盘点：在场块清单（id/实体/原点/边长/成员数）。**归属读数 =
-/// 生成期账**（SceneChunk 组件原样报出，不按当前位置重算）。
+/// 返回在场 chunk 清单；归属按 `SceneChunk` 记录值读取，不按当前位置重算。
 #[must_use]
 pub fn chunk_census(world: &mut World) -> Vec<ChunkCensusRow> {
     let mut q = world.query::<(Entity, &SceneChunk, Option<&Children>)>();
@@ -328,9 +303,7 @@ pub fn chunk_census(world: &mut World) -> Vec<ChunkCensusRow> {
     rows
 }
 
-/// 整块删除：按 id 找根 → 根连子树递归 despawn（官方递归语义）。每个
-/// primitive 子实体的组件移除各自发 Removed 事件，账本逐行清账——
-/// 整树清账的批量形态，增量链路天然覆盖。
+/// 删除指定 chunk 根及其子树。
 ///
 /// # Errors
 /// chunk id 不在场（`ChunkMissing`）。

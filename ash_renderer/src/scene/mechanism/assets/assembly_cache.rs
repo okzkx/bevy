@@ -1,8 +1,4 @@
-//! DrawList 组装增量账（[`AssemblyCache`]）：可绘行集合的增量缓存，随
-//! [`super::InstanceLedger`] 同体维护——可绘判定（实例槽 ∧ 锚驻留 ∧ 材质在
-//! 容器）的全部输入变化都经过账本的行增删/换绑/置脏/槽位交接路径，各变更点
-//! 顺带标记重估（不做第二套变更发现）。行宇宙不变帧的组装零走访零产物重建，
-//! 产物经 [`AssemblyView`] 供帧循环全程只读。
+//! 维护 DrawList 可绘行的增量缓存。账本变更点标记待重估行，帧循环只读缓存视图。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -16,9 +12,7 @@ type Drawable = (u32, AssetId<StandardMaterial>, bool);
 /// 组装可绘判定闭包：行 → (槽号, 材质身份, alpha<1)；None = 暂缓。
 pub(crate) type AssemblyEval<'a> = &'a mut dyn FnMut(&InstanceRow) -> Option<Drawable>;
 
-/// DrawList 组装缓存：可绘行集合的增量账——行宇宙不变帧零走访。判定输入
-/// 全部来自账本自身的行状态变化（增删/换绑/置脏/槽位交接），各变更点标记
-/// 重估；全量重建只在首帧播种与换形（锚开关翻转 / LOD 登记换代）发生。
+/// 可绘行集合的增量缓存；首帧、锚开关变化或 LOD 登记换代时全量重建。
 #[derive(Default)]
 pub(crate) struct AssemblyCache {
     /// 首帧全量播种旗（重建后复位重估通道照常）。
@@ -118,8 +112,7 @@ impl AssemblyCache {
         }
     }
 
-    /// 产物只读视图。
-    #[must_use]
+        #[must_use]
     pub(super) fn view(&self) -> AssemblyView<'_> {
         AssemblyView {
             slots: &self.slots,
@@ -128,8 +121,7 @@ impl AssemblyCache {
         }
     }
 
-    /// 可绘行数。
-    #[must_use]
+        #[must_use]
     pub(super) fn drawable_len(&self) -> usize {
         self.drawable.len()
     }

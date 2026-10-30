@@ -10,7 +10,7 @@
 
 | 账面 | 位置 | 内容 | 写者 | 读者 |
 |---|---|---|---|---|
-| `InstanceLedger` 行表 | scene/mechanism/ledger.rs | 每实体一行（柄/矩阵/实例槽/记录身份） | `update_ledger`（发现）、`flush_uploads`（槽位） | 全链 |
+| `InstanceLedger` 行表 | scene/mechanism/assets/ledger.rs | 每实体一行（柄/矩阵/实例槽/记录身份） | `update_ledger`（发现）、`flush_uploads`（槽位） | 全链 |
 | `AssemblyCache`（7.9 新增） | 账本字段 | 可绘行集合（Entity→槽号/材质/alpha）+ 材质引用计数 + 待重估集 + 产物 Vec | `assembly_update`（帧循环触发，判定闭包由 drawlist 注入） | draw_frame 组装段→帧尾 |
 | `lod_dirty`/`model_dirty` | 账本字段 | 模型环/LOD 表环的奇偶待写集 | 换槽/矩阵变化/档位到货/淘汰 | `write_rings` |
 | GPU 在场环 | InstanceTables | 本帧命令宇宙（槽号列表，**每帧照写**——环按帧槽双缓冲，快照语义不可省） | `write_presence_ring` | build_indirect |
@@ -81,13 +81,13 @@ drawlist::write_rings(tables, &ledger, ..., &assembly, ...)
 
 | 文件 | 改动要点 |
 |---|---|
-| scene/mechanism/ledger.rs（+362） | AssemblyCache 结构 + `assembly_update`（重建/重估/产物重建）+ `AssemblyView` + 变更点钩子（行增删/换绑/mark_dirty/set_instance_slot）+ `rows_with_material` + 单测 5 条 |
+| scene/mechanism/assets/ledger.rs（+362） | AssemblyCache 结构 + `assembly_update`（重建/重估/产物重建）+ `AssemblyView` + 变更点钩子（行增删/换绑/mark_dirty/set_instance_slot）+ `rows_with_material` + 单测 5 条 |
 | driver/host/drawlist.rs（+236 改） | `assemble` 全量走访退役 → `drawability_eval` 闭包 + `assemble_update` 包装 + `assemble_reference`（对照真值面）+ `verify_assembly` + `DrawListVerify` 账面 + `write_rings` 共享借用签名 |
 | driver/host/frame.rs（+47） | 步骤 3 改增量维护 + verify 钩子 + 奇偶集先取 + `FrameInput.verify` 束 |
-| scene/mechanism/residency.rs（+109） | 全静闸门（TickGateKey 键 + 五条件 + 冷却表空放行规则）+ `TickResources` 参数束（16 上限对策）|
+| scene/mechanism/assets/residency.rs（+109） | 全静闸门（TickGateKey 键 + 五条件 + 冷却表空放行规则）+ `TickResources` 参数束（16 上限对策）|
 | driver/upload.rs（+20） | 脏行循环逐行标记 + 驻留出账反查标记（基准 + 保底档两候选集）|
-| scene/mechanism/asset_events.rs（+10） | 材质 Removed → 引用行组装标记（7.9 新增联动）|
-| scene/mechanism/asset_ops.rs（+16） | mutate 写入点直标（RemoteLast 内容写入不绕隔帧事件链）|
-| scene/mechanism/lod_registry.rs（+12） | register 换代号（组装缓存换形触发键）|
+| scene/mechanism/assets/asset_events.rs（+10） | 材质 Removed → 引用行组装标记（7.9 新增联动）|
+| scene/mechanism/editing/asset_ops.rs（+16） | mutate 写入点直标（RemoteLast 内容写入不绕隔帧事件链）|
+| scene/mechanism/assets/lod_registry.rs（+12） | register 换代号（组装缓存换形触发键）|
 | scene/mechanism/mod.rs、driver/host/mod.rs（+8） | AssemblyView 再导出 + DrawListVerify 资源注册 |
 | remote/draw.rs、remote/mod.rs（+60） | draw_stats 组装/verify 块 + `drawlist_verify_set` 方法注册 |

@@ -9,7 +9,7 @@
 ## 1. 各级账面全景（谁记什么、谁在何时写）
 
 ```
-ECS 侧（跨帧账本 InstanceLedger，scene/mechanism/ledger.rs）
+ECS 侧（跨帧账本 InstanceLedger，scene/mechanism/assets/ledger.rs）
   rows: Entity → InstanceRow{mesh柄, material柄, model终值,
                              instance_slot(对象表下标), bound(记录身份)}
   dirty: 待盘点行集（发现侧入口，4.1 语义不变）
@@ -107,7 +107,7 @@ BRP `increment_stats` 的 `gpu_tables` 段：object_slots/object_capacity/object
 **扩展（8 件）**
 
 - `driver/upload.rs`（+127/−21）——停尸房段接管 freed_slots、行扫描内记录身份比对与换槽、staging 排布记录段、计量与日志分列。
-- `scene/mechanism/ledger.rs`（+80/−18）——行扩展（slot/bound）、freed_slots 交接账、model_dirty 双奇偶集、update_ledger 三入口适配。
+- `scene/mechanism/assets/ledger.rs`（+80/−18）——行扩展（slot/bound）、freed_slots 交接账、model_dirty 双奇偶集、update_ledger 三入口适配。
 - `driver/host/frame.rs`（+93/−68）——DrawList 组装外迁 drawlist、双环写入插入点、set2 接线；闸门/acquire/UBO 编排原样。
 - `vulkan/resources.rs`（+14/−2）——`BufferRole::DeviceStorage`（usage/必需属性/优先属性三表各一行）。
 - `vulkan/pool.rs`（+14/−8）——MeshSlot.local_aabb、commit/replace 增参（too_many_arguments 显式豁免）。

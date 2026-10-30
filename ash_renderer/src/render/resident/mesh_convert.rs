@@ -1,6 +1,5 @@
 //! 网格转换:`bevy::mesh::Mesh` → 交错 32B vertex-input 布局 +
-//! 统一 U32 索引。纯 CPU 侧字节整形,零 Vulkan 调用——Vulkan 只在 [`super::pool`] /
-//! [`super::uploader`] 消费产出的字节。
+//! 统一 U32 索引。纯 CPU 侧字节整形,零 Vulkan 调用——Vulkan 只在 [`super::pool`] 与 `core::device::transfer` 消费产出的字节。
 //!
 //! **定案**(这是我们的布局选择,不是 Vulkan 禁止 SoA):
 //!

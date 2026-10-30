@@ -10,7 +10,7 @@
 
 ## 任务面板
 
-- [x] 6.1.1 测试实体方法族（前置施工）：BRP `spawn_shape` 五形状（球/圆柱/胶囊/圆锥/立方体）+ 颜色 → 自动应用/按色复用 Lambert 材质；薄壳进 `remote/`、本体落 `scene/mechanism/test_entities.rs`；brp.py 子命令同步
+- [x] 6.1.1 测试实体方法族（前置施工）：BRP `spawn_shape` 五形状（球/圆柱/胶囊/圆锥/立方体）+ 颜色 → 自动应用/按色复用 Lambert 材质；薄壳进 `remote/`、本体落 `scene/mechanism/generation/test_entities.rs`；brp.py 子命令同步
 - [x] 6.1.2 深度金字塔底座：格式能力实测留痕、深度 usage 扩 SAMPLED + storeOp STORE、金字塔图创建（R32F ×2 帧槽）、归约 pass（level 1 起步逐级 MIN——级序施工订正）、reverse-Z 保守方向单测
 - [x] 6.1.3 遮挡测试接入剔除链：AABB 投屏四角 + 按像素尺寸选 mip + 保守比较；b6 独立标记 + b3 合并（build_indirect 零触碰）；Hi-Z 独立小布局
 - [x] 6.1.4 历史深度与边界情形：2 帧滞后（同槽 fence 免费）、四判据 fallback（含 OcclusionGate 两帧窗累计单测）、resize 随 swapchain 重建（负例实测过）

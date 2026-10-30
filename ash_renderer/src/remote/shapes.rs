@@ -1,6 +1,6 @@
 //! BRP 测试实体方法族：五形状 + 颜色 → 自动应用/按色复用 Lambert 材质的
 //! 单个测试体——遮挡剔除（Hi-Z）的遮挡对/墙体样本载具与通用测试能力。
-//! 协议薄壳：操作本体在 [`crate::scene::mechanism::test_entities`]（与场景
+//! 协议薄壳：操作本体在 [`crate::scene::mechanism::spawn_test_shape`]（与场景
 //! 生成器同区同构的机制层），本模块只做参数解析与协议错误映射。
 
 use bevy::{prelude::*, remote::BrpResult};

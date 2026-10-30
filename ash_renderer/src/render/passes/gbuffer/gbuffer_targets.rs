@@ -57,7 +57,7 @@ pub const SAMPLED_BINDING_MATPARAM: u32 = 5;
 const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
 
 /// G-buffer 采样集：五张附件视图 + 一个共享采样器，片元阶段读。
-pub(crate) static GBUFFER_SAMPLED_SET: SetLayoutDesc = SetLayoutDesc::new(
+pub(crate) static GBUFFER_SAMPLED_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "gbuffer_sampled",
     &[
         BindingDesc::new(SAMPLED_BINDING_ALBEDO, DescKind::SampledImage, FS),
@@ -125,13 +125,13 @@ impl GBufferTargets {
     /// 采样集布局（登记给管线组装；集与布局同源纪律）。
     #[must_use]
     pub fn sampled_layout(&self) -> SetLayout {
-        SetLayout::new(&GBUFFER_SAMPLED_SET, self.set_layout)
+        SetLayout::new(&GBUFFER_SAMPLED_SET_DESC, self.set_layout)
     }
 
     /// 第 `slot` 帧槽的采样集（合成 pass 与 present tonemap 绑定）。
     #[must_use]
     pub fn sampled_set(&self, slot: usize) -> DescSet {
-        DescSet::new(&GBUFFER_SAMPLED_SET, self.sets[slot])
+        DescSet::new(&GBUFFER_SAMPLED_SET_DESC, self.sets[slot])
     }
 
     /// 第 `slot` 帧槽的 albedo 附件视图（G-buffer pass attachment 0）。
@@ -287,7 +287,7 @@ fn build_sampling(
     vk::Sampler,
 )> {
     let device = &ctx.device;
-    let set_layout = GBUFFER_SAMPLED_SET.create(device)?;
+    let set_layout = GBUFFER_SAMPLED_SET_DESC.create(device)?;
     let result = unsafe { build_sampling_inner(ctx, extent, slots, depth_views, set_layout) };
     if result.is_err() {
         unsafe { device.destroy_descriptor_set_layout(set_layout, None) };
@@ -313,7 +313,7 @@ unsafe fn build_sampling_inner(
 )> {
     unsafe {
         let device = &ctx.device;
-        let pool_sizes = GBUFFER_SAMPLED_SET.pool_sizes_vec(depth_views.len() as u32);
+        let pool_sizes = GBUFFER_SAMPLED_SET_DESC.pool_sizes_vec(depth_views.len() as u32);
         let pool = device.create_descriptor_pool(
             &vk::DescriptorPoolCreateInfo::default()
                 .max_sets(depth_views.len() as u32)
@@ -350,9 +350,9 @@ unsafe fn build_sampling_inner(
                 return Err(VulkanError::from(e));
             }
         };
-        // 写入过声明校验：种类按 GBUFFER_SAMPLED_SET 核对，写满才提交
+        // 写入过声明校验：种类按 GBUFFER_SAMPLED_SET_DESC 核对，写满才提交
         for ((set, slot), depth_view) in sets.iter().zip(slots).zip(depth_views) {
-            let mut writer = DescriptorWriter::new(&GBUFFER_SAMPLED_SET, *set);
+            let mut writer = DescriptorWriter::new(&GBUFFER_SAMPLED_SET_DESC, *set);
             writer
                 .image(SAMPLED_BINDING_ALBEDO, slot.albedo.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .image(SAMPLED_BINDING_NORMAL, slot.normal.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)

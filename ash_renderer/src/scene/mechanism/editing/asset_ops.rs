@@ -1,25 +1,6 @@
-//! 资产写操作封装："改资产内容"四类驱动的可复用实现——BRP 方法族
-//! （remote 的 assets 薄壳）与其他写入方共用这一层，不养两份逻辑
-//! （apply_transform_edit / object_ops 同款惯例）。
-//!
-//! 定位锚定实体（与换柄同口径）：BRP 参数给 entity，取它身上的
-//! `Mesh3d`/`MeshMaterial3d` 柄再去资产容器 `get_mut`——**get_mut 即触发
-//! `AssetEvent::Modified`**（bevy_asset/src/assets.rs:376/391），读侧
-//! （asset_events）自动收到，下游失效→重传全链不用任何写入方配合。这是
-//! "发现与写入解耦"的验收面：任何路径（BRP/egui/游戏代码）改资产内容，
-//! 走的都是同一个 `Assets` 容器语义。
-//!
-//! 四驱动与判定线的对应：
-//! | 驱动 | 参数 | 验证面 |
-//! |---|---|---|
-//! | 改材质参数 | `base_color` | Modified 收到（材质参数每帧 UBO 自动生效，作事件读侧观测锚） |
-//! | 换材质贴图槽 | `slot_base_color_from` | 关联 Image 失效传播 |
-//! | 改 Mesh 内容 | `mesh_vertex_scale` | 同柄重传恰一份（共享去重） |
-//! | 改 Image 内容 | `image_tint` | graveyard + 原槽重写 |
-//!
-//! 边界：本模块只做 `Assets` 容器写路径，**不碰账本与失效集**——变更经
-//! AssetEvent 通道进读侧，与"发现与写入解耦"同一验收面。像素级 tint
-//! 只收 4 字节 RGBA 族格式（逐字节乘系数），其余格式明确拒绝不硬做。
+//! 资产写操作，供 BRP 与其他写入方共用。
+//! 通过实体持有的资产句柄修改资产；`Assets::get_mut` 会发出修改事件。
+//! 像素 tint 仅支持 4 字节 RGBA 格式。
 
 use bevy::{
     image::Image,
@@ -29,9 +10,9 @@ use bevy::{
 };
 use wgpu_types::TextureFormat;
 
-use super::ledger::InstanceLedger;
+use crate::scene::mechanism::InstanceLedger;
 
-/// 资产操作被拒的原因（Tier②外泄给调用方分级：BRP 映射协议错误码）。
+/// 资产操作被拒的原因。
 #[derive(Debug)]
 pub enum AssetOpError {
     /// 目标实体不在 World。
@@ -55,18 +36,17 @@ pub enum AssetOpError {
 /// mutate 请求（与 BRP 参数同形，egui 面板直接复用）：逐项可选，至少一项。
 #[derive(Debug, Default)]
 pub struct MutateAsset {
-    /// 改材质参数：base_color（线性域 RGBA）。
+    /// 写入材质 base_color 的线性 RGBA 值。
     pub base_color: Option<[f32; 4]>,
     /// 改材质参数：metallic（[0,1]，PBR 面）。
     pub metallic: Option<f32>,
     /// 改材质参数：perceptual_roughness（[0,1]，PBR 面）。
     pub perceptual_roughness: Option<f32>,
-    /// 换材质贴图槽：把源实体的 base_color_texture 柄拷过来（None 源 = 清槽）。
+    /// 复制源实体的 base_color_texture 槽；源材质无贴图时清空目标槽。
     pub slot_base_color_from: Option<Entity>,
     /// 改 Mesh 内容：POSITION 顶点绕原点均匀缩放系数。
     pub mesh_vertex_scale: Option<f32>,
-    /// 改 Image 内容：该实体材质 base_color_texture 像素按通道乘的色调
-    ///（线性域 RGB，1.0 = 不变）。
+    /// 改 Image 内容：base_color_texture 的 RGB 字节乘数（1.0 = 不变；不做色彩空间换算）。
     pub image_tint: Option<[f32; 3]>,
 }
 
@@ -78,11 +58,8 @@ pub struct AssetOpReadback {
     pub image: Option<AssetId<Image>>,
 }
 
-/// mutate 总入口：**先全量预校验、再逐项执行**——边校验边修改会让组合
-/// 请求单项失败时前面的项已落改，与"整体拒绝，不留半完成"的
-/// 承诺不符。校验段只读（`Assets::get`），不触发 `Modified` 事件——被拒
-/// 请求零副作用；执行段全部校验通过后才 `get_mut` 落改。**每项动用
-/// `Assets::get_mut`，Modified 事件由容器自动发出**。
+/// 先只读预校验所有操作，再逐项写入，避免组合请求失败时留下部分修改。
+/// 实际写入通过 `Assets::get_mut` 发出修改事件。
 ///
 /// # Errors
 /// 实体缺席/非 primitive、资产容器查无、格式不支持、空请求。
@@ -120,8 +97,7 @@ pub fn mutate_asset(
         ));
     }
 
-    // —— 预校验段（只读）：逐项检查可动性，执行段需要的解析结果就地收集。
-    // 换槽源槽柄与 tint 目标贴图柄都在这里定案。
+    // 预校验并解析换槽和 tint 的目标柄。
     let new_slot: Option<Option<Handle<Image>>> = match p.slot_base_color_from {
         None => None,
         Some(source) => {
@@ -187,7 +163,7 @@ pub fn mutate_asset(
         }
     }
 
-    // —— 执行段：全部校验通过，逐项 get_mut 落改（此段起才触发 Modified 事件）
+    // 全部校验通过后才写入资产并触发修改事件。
     let mut readback = AssetOpReadback::default();
 
     if let Some(color) = p.base_color {
@@ -248,9 +224,7 @@ pub fn mutate_asset(
     }
 
     if let Some(tint) = p.image_tint {
-        // 目标贴图 = 该实体材质的 base_color 槽（校验段已解析柄；image_tint 与
-        // 贴图槽参数是同一驱动的两面:先换槽再 tint 时 tint 作用于新槽——
-        // 执行序即参数序）
+        // 同时换槽与 tint 时，对新槽贴图着色。
         let texture_handle = tint_target.ok_or(AssetOpError::AssetMissing(
             "该实体材质没有 base_color_texture,无处 tint",
         ))?;
@@ -264,10 +238,7 @@ pub fn mutate_asset(
         readback.image = Some(texture_handle.id());
     }
 
-    // 组装联动：BRP 内容写入落在 RemoteLast——资产事件读侧隔帧才可读，
-    // 等事件链标记重估会让组装缓存对全量路径晚一帧（对照模式可见）。写入点
-    // 直接标记材质引用行重估，同帧 draw_frame 即收敛（材质内容进组装判定
-    // 的是 alpha 计数；贴图槽/mesh 内容不进元组，重估幂等无害）。
+    // BRP 写入发生在 RemoteLast；直接标记材质引用行重估，避免等待资产事件导致组装晚一帧。
     if (p.base_color.is_some() || new_slot.is_some())
         && let Some(mut ledger) = world.get_resource_mut::<InstanceLedger>()
     {
@@ -279,10 +250,7 @@ pub fn mutate_asset(
     Ok(readback)
 }
 
-/// tint 前置校验（mutate 预校验段用）：格式与像素数据在场判定，零副作用。
-///
-/// # Errors
-/// 格式不在 4 字节 RGBA 族，或像素数据缺席。
+/// 校验 tint 支持的像素格式及数据是否存在。
 fn check_tint_rgba8(image: &Image) -> Result<(), AssetOpError> {
     let format = image.texture_descriptor.format;
     if !tint_format_supported(format) {
@@ -294,7 +262,7 @@ fn check_tint_rgba8(image: &Image) -> Result<(), AssetOpError> {
     Ok(())
 }
 
-/// 4 字节 RGBA 族判定（tint 可动格式的唯一清单）。
+/// tint 支持的像素格式。
 fn tint_format_supported(format: TextureFormat) -> bool {
     matches!(
         format,
@@ -306,12 +274,7 @@ fn tint_format_supported(format: TextureFormat) -> bool {
     )
 }
 
-/// RGBA 4 字节族逐像素乘色调（线性域系数直接乘字节值——验证观测以画面
-/// 变化为准，不做色彩管理换算）。只收 4B RGBA 族，其余格式明确拒绝。
-/// 预校验段已过 [`check_tint_rgba8`]，此处防御性复查同清单。
-///
-/// # Errors
-/// 格式不在 4 字节 RGBA 族。
+/// 对 RGBA8 像素的 RGB 字节直接乘以系数，不做色彩空间转换。格式或数据缺失时返回错误。
 fn tint_rgba8(image: &mut Image, tint: [f32; 3]) -> Result<(), AssetOpError> {
     let format = image.texture_descriptor.format;
     if !tint_format_supported(format) {

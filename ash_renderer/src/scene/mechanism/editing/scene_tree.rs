@@ -1,11 +1,6 @@
-//! 场景层级树索引：实体按 [`Children`]/[`ChildOf`] 组织的"相关实体"表，egui
-//! 层级树页与 BRP `scene_tree` 共用——两侧看到同一棵树、同一套"相关"语义
-//! 与节点命名，不养两份逻辑。
-//!
-//! 相关性：至少带一个被关注组件（名字/层级/相机/灯/mesh/材质/变换）才进树；
-//! DefaultPlugins 注册的数百个 observer 等内部裸实体被滤掉，`total` 如实报出
-//! 全量。根 = 相关且无父的实体（按实体号排序）；消费方递归子实体时跳过不在
-//! 表内的整枝。
+//! 层级树索引供 egui 与 BRP 共用。
+//! 只收录带 Name、层级、相机、灯、mesh、材质、WorldAssetRoot 或 Transform 的实体；total 统计全部查询实体。
+//! 根按实体号排序；递归时跳过未收录子实体所在的整枝。
 
 use std::collections::HashMap;
 
@@ -17,9 +12,7 @@ use bevy::{
     world_serialization::WorldAssetRoot,
 };
 
-/// 层级树一行的查询数据（11 项组合体抽型，免 clippy type_complexity）：
-/// 层级关系（Children/ChildOf）+ 角色标记（相机/光/资产根）+ 呈现要素
-/// （Name/Mesh/Material/两 Transform），逐项可缺。
+/// 层级树索引使用的查询字段。
 pub(crate) type EntityRow = (
     Entity,
     Option<&'static Name>,
@@ -34,24 +27,18 @@ pub(crate) type EntityRow = (
     Option<&'static GlobalTransform>,
 );
 
-/// 递归深度上限：病态深树在栈溢出前显式停走——栈溢出走 abort 是"禁 panic"
-/// 规则下唯一不可兜底路径。上限 1024 远超真实场景层级，同时远低于典型线程栈
-/// 的溢出深度。消费方递归时自行检查。
+/// 消费方递归时使用的深度上限，避免病态层级触发栈溢出。
 pub(crate) const TREE_MAX_DEPTH: usize = 1024;
 
-/// 相关实体的一个节点。
 pub(crate) struct SceneTreeNode {
-    /// 节点行文本（[`node_label`]）。
     pub(crate) label: String,
     /// 子实体清单（含不相关者，消费方按表过滤）。
     pub(crate) children: Vec<Entity>,
-    /// 带 ChildOf（非根）。
+    /// 是否有父实体。
     has_parent: bool,
 }
 
-/// 一次全量走访产出的层级树索引。
 pub(crate) struct SceneTreeIndex {
-    /// 相关实体表。
     pub(crate) nodes: HashMap<Entity, SceneTreeNode>,
     /// 根（相关且无父），按实体号升序。
     pub(crate) roots: Vec<Entity>,
@@ -60,7 +47,6 @@ pub(crate) struct SceneTreeIndex {
 }
 
 impl SceneTreeIndex {
-    /// 全量走访查询建索引。
     pub(crate) fn build(rows: &Query<EntityRow>) -> Self {
         let mut nodes: HashMap<Entity, SceneTreeNode> = HashMap::new();
         let mut total = 0usize;
@@ -97,10 +83,9 @@ impl SceneTreeIndex {
     }
 }
 
-/// 相关性过滤：至少带一个被关注组件才进树（见模块文档）。
 #[expect(
     clippy::too_many_arguments,
-    reason = "过滤谓词逐项对应 EntityRow 查询元组的字段，收拢成结构体只是换个地方数数"
+    reason = "过滤参数与查询字段一一对应，保留参数表便于核对筛选条件"
 )]
 fn is_relevant(
     name: Option<&Name>,
@@ -126,8 +111,7 @@ fn is_relevant(
         || global.is_some()
 }
 
-/// 节点行文本：Name 优先，无名按组件角色命名（相机/方向光/资产根），实体号
-/// 恒显（glTF 同名节点可区分），尾缀组件标签。
+/// 优先使用 Name；否则按实体角色命名，并显示实体号和组件标签。
 fn node_label(
     entity: Entity,
     name: Option<&Name>,

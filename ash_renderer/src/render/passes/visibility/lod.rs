@@ -35,7 +35,7 @@ use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
-use crate::render::resident::instance_table::INSTANCE_SET;
+use crate::render::resident::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 use crate::render::MAX_LOD_LEVELS;
 
@@ -44,7 +44,7 @@ pub(crate) static LOD_SELECT_PIPELINE: PipelineDesc = PipelineDesc {
     label: "lod_select",
     shader: &shader_abi::LOD_SELECT,
     entries: &[c"cs_main"],
-    sets: &[&INSTANCE_SET],
+    sets: &[&INSTANCE_SET_DESC],
     push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: LOD_PUSH_SIZE }),
     color_formats: &[],
     depth_format: None,

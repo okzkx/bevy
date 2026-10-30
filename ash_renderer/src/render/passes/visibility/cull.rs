@@ -41,8 +41,8 @@ use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
-use crate::render::passes::shadow::shadow_map::SHADOW_SET;
-use crate::render::resident::instance_table::INSTANCE_SET;
+use crate::render::passes::shadow::shadow_map::SHADOW_SET_DESC;
+use crate::render::resident::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 
 /// shader 模块字节（build.rs 产物，OUT_DIR 之下；compute 编译链与图形同一闸门）。
@@ -50,7 +50,7 @@ pub(crate) static CULL_PIPELINE: PipelineDesc = PipelineDesc {
     label: "cull",
     shader: &shader_abi::CULL,
     entries: &[c"cs_main"],
-    sets: &[&INSTANCE_SET, &SHADOW_SET],
+    sets: &[&INSTANCE_SET_DESC, &SHADOW_SET_DESC],
     push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: CULL_PUSH_SIZE }),
     color_formats: &[],
     depth_format: None,

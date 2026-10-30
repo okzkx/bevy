@@ -29,7 +29,7 @@ flush_uploads（同帧）
 | 缺口标记环（b9） | `vulkan/instance_table.rs` | HOST_VISIBLE ×2 帧奇偶，逐槽 u32 位图；hazard 表新增一行 |
 | `gap_marks` 清零 | `shaders/cull.wgsl` | dispatch 覆盖全部槽，清零段 |
 | `gap_marks` 置位 | `shaders/build_indirect.wgsl` | 选中档哨兵 → `1<<level`，回退绘制照旧 |
-| `GapSnapshot` | `scene/mechanism/residency.rs` | 帧起采样的缺口快照——tick/BRP 的统一消费口 |
+| `GapSnapshot` | `scene/mechanism/assets/residency.rs` | 帧起采样的缺口快照——tick/BRP 的统一消费口 |
 | `gap_mode` 三态 | 同上（ResidencySettings） | Off/GpuOnly/Merged——A/B 开关 |
 | `gap_asset_ids()` | 同上（pub 导出） | 位图→资产身份纯函数（越界位忽略） |
 | merged 归并点 | residency_tick fine 块 | 需求位图与淘汰口径升级为 merged |
@@ -55,7 +55,7 @@ flush_uploads（同帧）
 **feat 2ff40d647**（10 文件，+426/−40）：
 - `vulkan/instance_table.rs`：缺口环家族 + b9 描述符接线 + hazard 表行（照 b7/b8 扩法，解冻清单=布局加一条 binding）。
 - `shaders/cull.wgsl` / `build_indirect.wgsl`：清零段与置位点——GPU 侧总共两条语句级改动。
-- `scene/mechanism/residency.rs`：GapMode/GapSnapshot/gap_asset_ids + tick 缺口聚合/merged 归并/三态闸门（本段逻辑主体）。
+- `scene/mechanism/assets/residency.rs`：GapMode/GapSnapshot/gap_asset_ids + tick 缺口聚合/merged 归并/三态闸门（本段逻辑主体）。
 - `driver/host/frame.rs`：GapSnapshot 采样 + cull 关闭补零。
 - `remote/gap.rs` + `remote/mod.rs`：BRP 三方法。
 - `scene/{mechanism/,}mod.rs`、`vulkan/mod.rs`：导出。

@@ -1,65 +1,16 @@
-//! 驻留管理器：显存预算账 + 相机驱动的资产请求/淘汰——"放不下的世界"的
-//! 搬运工。纯 CPU 侧资源层账，不新增 Vulkan 形状：请求 = 引用行重挂脏标
-//!（复用 flush 重传链：容器内资产查无 → 转换 → 上传 → commit，就绪才发布），
-//! 淘汰 = 卸载回收账进账（[`AssetRetirements`]，与资产 Removed 同入口），
-//! hazard 全由既有链闭合。
+//! 根据相机、预算与 LOD 需求请求或淘汰资产；请求和回收由既有上传与回收流程处理。
+//! residency_tick 在 Last、flush 之前运行，使本 tick 的动作进入同帧上传账。
 //!
-//! 调度：[`residency_tick`] 挂 Last 的 [`ResidencySet`]，driver 声明上传编排
-//!（`flush_uploads`）排在该 set 之后——本 tick 的请求/淘汰与 [`LodDemand`]
-//! 位图同帧进上传账。
+//! 坑：
+//! - 淘汰后需经过冷却期，否则预算边界会在淘汰与重请求间反复切换。
+//! - 关闭管理器或切换保底锚时必须重挂受影响行；否则已淘汰的资产可能一直不再请求。
+//! - 淘汰 LOD 档位时必须重挂引用行的 LOD 脏标，避免表中保留指向已回收区间的槽号。
+//! - 基准档缺席时仍需以保底档计算期望档并检查全部需求档，否则高档无法回流。
+//! - 预算为 0 表示不限制；淘汰只在对应预算非零时执行。
+//! - 贴图淘汰要跳过本 tick 已置脏的行，避免同帧重传与淘汰互相拉扯。
+//! - 冷却表未清空时不能走全静早退；冷却到期可能触发重新请求。
 //!
-//! 决策粒度：按 mesh 资产身份聚合——共享同一 mesh 的行同进同出，位置 = 引用行
-//! 世界位置的最近距离；unique 独立资产场景下退化为行级。视锥判定复用 cull 的
-//! CPU 参照件（frustum_planes + conservative_world_aabb + aabb_visible，宁多留
-//! 不错杀）。预算两列：mesh 驻留字节（顶点+索引，recycle_ledger 现读）与贴图
-//! 驻留字节（resident_bytes 现读）；staging 环是瞬态，不计入。
-//!
-//! 全量 tick 的段序：
-//! 1. 身份聚合 → 冷却走账；
-//! 2. GPU 缺口合并（`gap_mode != Off`）：[`GapSnapshot`] 逐槽位图经账本反查
-//!    聚合到基准身份，仍缺且不在冷却的组进请求行集；
-//! 3. 半径请求：非驻留 ∧ 最近距离 ≤ request_radius ∧ 冷却已过 → 引用行进
-//!    请求行集（floor_anchor 下 LOD 组资产归需求位图供给，不走半径请求）；
-//! 4. mesh 预算淘汰：used > budget_mesh_bytes 时按"视锥外优先、距离远优先"
-//!    逐个出账，直到 ≤ 预算或候选耗尽（over_budget 如实报出）；
-//! 5. LOD 档位段：组内期望档（选档公式 CPU 参照，同 threshold 同 screen，
-//!    无迟滞——请求半径与冷却即迟滞）∪ 锚档 ∪ 缺口档 = 需求集；`fine_grained ∨
-//!    floor_anchor` 时需求档缺席 → 请求、非需求档驻留 → 淘汰；floor_anchor 下
-//!    需求集发布为 [`LodDemand`] 位图供 flush 过滤盘点；
-//! 6. 请求行集统一 mark_dirty（行已在脏集 = 幂等无成本）；
-//! 7. 贴图预算段：贴图按引用行最近距离聚合，超支远优先整资产淘汰（缺席档由
-//!    永驻 0 号槽的 fallback 白图兜底），预算内则半径内缺席贴图照常请求。
-//!
-//! 锚语义（[`anchor_level`]）：floor_anchor 开且组尾档（最粗变体）在账 → 可绘
-//! 锚 = 保底档（恒需求、恒不淘汰，基准降为按需高档）；否则锚 = 基准。"淘汰
-//! 永不触保底"由需求集结构性保证：mesh 预算淘汰只按基准身份聚合，档位淘汰
-//! 只淘汰非需求档。
-//!
-//! 缺口模式（[`GapMode`]）：GPU 出意见、CPU 拍板——缺口只进需求位图与请求
-//! 行集，预算/冷却/淘汰裁决不变；缺口请求豁免请求半径（缺口 = 本帧已命中可见
-//! 的证据，半径是相机预测口径）但保留冷却窗。
-//!
-//! B 面：enabled=false 或两项预算皆 0 = 全常驻基线——管理器零动作、需求位图
-//! 清空（flush 盘点不过滤）。
-//!
-//! 坑点：
-//! - **淘汰冷却**：刚淘汰的身份进冷却表（默认 60 帧），否则预算边界上
-//!   "淘汰→重请求→再淘汰"逐帧 thrash。
-//! - **关闭下降沿必须全行置脏**：被淘汰资产没有请求者会永远缺席（关闭后
-//!   used 停在被淘汰水平）；floor_anchor 翻转同理全行置脏 + LOD 脏。
-//! - **档位淘汰必须重挂行 LOD 脏标**：b7 表残留已回收区间的引脚，free list
-//!   复用后画错几何。
-//! - **基准缺席时期望档退锚槽位计算、档位请求全档检查（含 level 0）**：基准
-//!   在 floor_anchor 下可被淘汰，跳过会让期望档永远算不出、高档永不回流。
-//! - **预算 0 = 不设限**：淘汰只在预算非零时执法，否则 mesh 预算 0 + 贴图预算
-//!   激活时全场 mesh 无限拉锯（行永在置脏集），贴图淘汰被排除法饿死。
-//! - **贴图淘汰跳过本 tick 已置脏行的贴图**：置脏行的材质腿同帧重传贴图，对其
-//!   eject = 空转拉锯；被淘汰贴图当帧也不排重请求。
-//! - **全静闸门不在冷却表非空时早退**：冷却到期→重请求是时间驱动的状态转移，
-//!   静态相机下基准回流依赖它。
-//!
-//! 深原理与验收证据：`.agents/docs/6-高级剔除LOD与流送/`（粗/细粒度流送、
-//! 低保真常驻、GPU 需求驱动各专题）。
+//! 驻留策略与验收见 `.agents/docs/6-高级剔除LOD与流送/` 下的流送专题。
 
 use std::collections::{HashMap, HashSet};
 
@@ -81,9 +32,8 @@ use crate::{
 
 use super::asset_events::AssetRetirements;
 
-/// LOD 档位数（数组长度口径）。
 const LEVELS: usize = MAX_LOD_LEVELS as usize;
-/// 保底档下标（组尾档 = 最粗变体）。
+/// 保底档位（组尾档，即最粗变体）。
 const FLOOR_LEVEL: usize = LEVELS - 1;
 
 /// 可绘锚档位（纯函数）：`floor_anchor` 开且保底档（最粗变体）在账 →
@@ -102,9 +52,9 @@ pub fn anchor_level(floor_anchor: bool, floor_present: bool) -> u32 {
 /// 驻留管理器设置（BRP `residency_set` 写，residency_tick 读）。
 #[derive(Resource)]
 pub struct ResidencySettings {
-    /// 管理器开关（false = 全常驻基线，A/B 的 B 面）。
+    /// 管理器开关（false = 全常驻，不筛选上传盘点）。
     pub enabled: bool,
-    /// mesh 驻留预算（字节；0 = 不设预算 = 全常驻，同样进 B 面口径）。
+    /// mesh 驻留预算（字节；0 = 不设限）。
     pub budget_mesh_bytes: u64,
     /// 请求半径（世界单位）：引用行最近距离 ≤ 此值的身份必须驻留（尽力）。
     pub request_radius: f32,
@@ -115,9 +65,7 @@ pub struct ResidencySettings {
     /// 细粒度开关：true = LOD 档逐档驻留/淘汰（GPU 表内回退被真实驱动）；
     /// false = 整资产粒度（档位全驻留）。
     pub fine_grained: bool,
-    /// 低保真保底锚：true = 组内行的可绘锚迁到最粗变体档（保底恒驻留、基准
-    /// 按需）；false = 基准锚。隐含细粒度语义——请求/淘汰/盘点过滤按
-    /// `fine_grained ∨ floor_anchor` 放行。
+    /// 低保真保底锚：true = 可绘锚使用最粗变体，基准档按需；并启用逐档驻留。
     pub floor_anchor: bool,
     /// GPU 缺口请求模式：Off = CPU 预测独走；GpuOnly = CPU 期望档预测请求
     /// 让位（锚/缺口仍供需求）；Merged = 双源合并。
@@ -127,7 +75,7 @@ pub struct ResidencySettings {
 /// GPU 缺口请求模式——见 [`ResidencySettings::gap_mode`]。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GapMode {
-    /// CPU 预测独走（A/B 的对照面）。
+    /// 只按 CPU 预测请求。
     #[default]
     Off,
     /// GPU 缺口独走：CPU 期望档预测请求关闭，缺口 + 锚供需求。
@@ -248,9 +196,8 @@ impl ResidencyStats {
     }
 }
 
-/// 需求档位图：residency_tick 每帧发布、flush_uploads 同帧盘点过滤消费
-///（tick 挂 Last 先于 flush——发布即同帧生效）。键缺席 = 该帧不过滤（管理器
-/// 关闭/B 面——全常驻语义，盘点整组不过滤）。
+/// 需求档位图：residency_tick 在 Last 发布，flush 同帧盘点时消费。
+/// 键缺席表示该组不过滤；管理器关闭时全常驻。
 #[derive(Resource, Default)]
 pub struct LodDemand {
     /// 过滤激活（floor_anchor ∧ 管理器 active）——false 时 levels 清空。
@@ -308,8 +255,7 @@ pub(crate) struct TickGateKey {
     gap_mode: GapMode,
 }
 
-/// 管理器内部状态（冷却表：mesh/贴图身份 → 剩余冷却帧——两张表，键型
-/// 不同分列，防抖语义同源）。
+/// 按 mesh 与贴图身份分别记录剩余冷却帧数。
 #[derive(Resource, Default)]
 pub(crate) struct EjectCooldown {
     meshes: HashMap<AssetId<Mesh>, u32>,
@@ -317,7 +263,7 @@ pub(crate) struct EjectCooldown {
 }
 
 impl EjectCooldown {
-    /// 冷却走账：剩余帧递减，归零出表（mesh/贴图两表同款）。
+    /// 递减剩余帧数，并移除已到期的冷却项。
     fn tick(&mut self) {
         self.meshes.retain(|_, frames| {
             *frames = frames.saturating_sub(1);
@@ -330,8 +276,7 @@ impl EjectCooldown {
     }
 }
 
-/// tick 的只读资源束（SystemParam）：成排只读 Res 收进一束，系统参数表不
-/// 越 16 项上限——与 upload.rs 的 UploadData / frame.rs 的 FrameInput 同款惯例。
+/// tick 使用的只读资源束。
 #[derive(SystemParam)]
 pub(crate) struct TickResources<'w> {
     pool: Res<'w, MeshPool>,
@@ -341,9 +286,7 @@ pub(crate) struct TickResources<'w> {
     snapshot: Res<'w, GapSnapshot>,
 }
 
-/// 驻留管理器 tick（Last，先于 flush_uploads——请求/淘汰动作要进同一帧的
-/// 上传账）：读数刷新 → 锚切换沿 → B 面早退（含下降沿恢复）→ 全静闸门 →
-/// 全量段序（见模块文档）。相机缺席 = 整帧让路（场景装配问题，不动作）。
+/// 驻留 tick 在 Last、flush 之前运行。管理器关闭时恢复全常驻；缺少唯一相机时不执行驻留决策。
 #[expect(
     clippy::too_many_arguments,
     reason = "bevy 系统的参数表即依赖注入清单（设置/读数/冷却/账本/回收账/相机），逐项声明是框架惯例"
@@ -381,11 +324,7 @@ pub(crate) fn residency_tick(
     stats.floor_anchor = settings.floor_anchor;
     stats.rows = ledger.len();
     stats.gap_mode = settings.gap_mode.as_str();
-    // 动作字段不在此清零：早退路径（B 面/全静闸门）沿用语义化清零或上 tick
-    // 值，全量路径在闸门后统一清零（floor_groups_resident 等累计字段靠它）。
-    // 锚切换沿：全行置脏 + LOD 脏（记录引脚基准↔保底换写、b7 表重写、盘点
-    // 按新位图过滤）。不受 active 闸门约束——B 面下全常驻，重标只多一次收敛
-    // 盘点（bound 未变的行免换槽）。
+    // 保底锚切换会改变所有组的锚腿和需求位图，即使管理器关闭也要重挂全行。
     if *prev_floor != settings.floor_anchor && !ledger.is_empty() {
         let count = mark_all_dirty(&mut ledger, true);
         info!("保底锚切换为 {}：全行 {count} 行置脏 + LOD 脏（锚腿/需求位图换形）", settings.floor_anchor);
@@ -414,10 +353,10 @@ pub(crate) fn residency_tick(
         stats.floor_groups_resident = 0;
         stats.over_budget = false;
         stats.over_budget_image = false;
-        // B 面：需求位图清空 = flush 盘点回到不过滤的全常驻语义
+            // 管理器关闭时不筛选 flush 盘点，并清空需求位图。
         lod_demand.active = false;
         lod_demand.levels.clear();
-        return; // B 面（全常驻基线）或空场：沿处理外零动作，读数照刷
+        return; // 管理器关闭或场景为空时不执行驻留决策。
     }
     let was_active = *prev_active;
     *prev_active = true;
@@ -450,7 +389,7 @@ pub(crate) fn residency_tick(
     {
         stats.requested = 0;
         stats.reset_tick_counters();
-        return; // 全静：O(rows) 走访整段早退（读数/位图沿用上 tick）
+        return; // 输入与账本均未变化，沿用上 tick 的读数和需求位图。
     }
     *prev_cam_key = cam_key;
     stats.reset_tick_counters();
@@ -646,7 +585,6 @@ impl FullPass<'_> {
                 .iter()
                 .filter(|(_, g)| g.resident)
                 .filter_map(|(id, g)| {
-                    // resident 标记与此处同一 pool 查询，恒命中
                     let slot = self.pool.resident(*id)?;
                     Some((*id, g.min_dist, slot.vertex.size + slot.index.size))
                 })
@@ -692,8 +630,7 @@ impl FullPass<'_> {
         let mut lod_levels_resident = 0usize;
         for (base_id, g) in groups {
             let Some(group_levels) = lod_groups.levels_of(*base_id) else { continue }; // 非阶梯 mesh 无档位账
-            // 锚档恒需求：floor_anchor = 保底档常驻、基准降为按需高档；组尾档
-            // 缺席（登记不完整）锚退回基准
+            // 保底锚启用时保底档为必需档；保底档未登记则退回基准档。
             let mut needed = [false; LEVELS];
             needed[anchor_level(settings.floor_anchor, group_levels[FLOOR_LEVEL].is_some())
                 as usize] = true;
@@ -776,10 +713,7 @@ impl FullPass<'_> {
         }
     }
 
-    /// 非需求档淘汰（冷却窗同源）：以 merged 为"需求"口径——缺口点名的档位
-    /// 不进淘汰候选。floor_anchor 下从 level 0 起步（基准降为可淘汰高档；保底
-    /// 恒需求恒不淘汰）。淘汰同步重挂引用行 LOD 脏标（b7 表条目清账：变体区间
-    /// 将进 free list，残留引脚 = 画错几何）。
+    /// 淘汰非需求档；淘汰后重挂引用行的 LOD 脏标，避免 GPU 表保留指向已回收区间的槽号。
     fn eject_unneeded_levels(
         &mut self,
         merged: &[bool; LEVELS],
@@ -842,7 +776,7 @@ impl FullPass<'_> {
                     Some((*id, *dist, bytes))
                 })
                 .collect();
-            candidates.sort_by(|a, b| b.1.total_cmp(&a.1)); // 距离远优先
+            candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
             for (id, _dist, bytes) in candidates {
                 if used_image <= budget {
                     break;
@@ -922,9 +856,7 @@ fn image_groups(
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResidencySet;
 
-/// 驻留管理器插件：设置/读数/冷却三资源 + tick 挂 Last 的 [`ResidencySet`]
-///（上传编排在其后——动作进同一帧上传账）。默认关（全常驻语义不变），
-/// BRP `residency_set` 或场景脚本显式开启。
+/// 初始化驻留设置与读数，并在 Last、上传编排之前运行驻留 tick。默认不筛选上传盘点。
 pub struct AshResidencyPlugin;
 
 impl Plugin for AshResidencyPlugin {
@@ -939,7 +871,7 @@ impl Plugin for AshResidencyPlugin {
                 residency_tick
                     .in_set(ResidencySet)
                     .run_if(resource_exists::<MeshPool>)
-                    .run_if(resource_exists::<crate::render::BindlessTables>)
+                    .run_if(resource_exists::<crate::render::BindlessTextureTable>)
                     .run_if(resource_exists::<AssetRetirements>)
                     .run_if(resource_exists::<Swapchain>)
                     .run_if(resource_exists::<LodSettings>),

@@ -1,6 +1,6 @@
 //! set0 bindless 常驻表：全部贴图和采样器各放进一个 [`TABLE_CAPACITY`] 长的描述符数组，
 //! shader 按 per-draw 参数里的下标（[`SlotBinding`]）取用。set1 归
-//! [`super::frame_uniforms`]，set2 归 [`super::instance_table`]。
+//! [`super::frame_uniform_table`]，set2 归 [`super::instance_table`]。
 //!
 //! - **建表先核对限额**：设备的 UPDATE_AFTER_BIND 限额是单独一套（不看普通的
 //!   `maxPerStageDescriptorSampledImages`），不够 [`TABLE_CAPACITY`] 就报错，不缩容量。
@@ -23,7 +23,7 @@ use bevy::log::info;
 
 use super::images::{sampler_key, GpuImage, ImageSpec, SamplerKey};
 use super::slot_allocator::SlotAllocator;
-use super::uploader::{StagingImageCopy, UploadBatch, Uploader};
+use crate::render::core::device::transfer::{StagingImageCopy, UploadBatch, Uploader};
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
@@ -40,7 +40,7 @@ const UAB_PARTIALLY: vk::DescriptorBindingFlags = vk::DescriptorBindingFlags::fr
 );
 
 /// set0：b0 贴图数组、b1 采样器数组。
-pub(crate) static BINDLESS_SET: SetLayoutDesc = SetLayoutDesc {
+pub(crate) static BINDLESS_TEXTURE_SET_DESC: SetLayoutDesc = SetLayoutDesc {
     name: "bindless",
     bindings: &[
         BindingDesc::new(0, DescKind::SampledImage, ALL_STAGES).array(TABLE_CAPACITY, UAB_PARTIALLY),
@@ -68,7 +68,7 @@ struct SharedSampler {
 
 /// set0 常驻表与它的槽位账。
 #[derive(bevy::prelude::Resource)]
-pub struct BindlessTables {
+pub struct BindlessTextureTable {
     device: Device,
     layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
@@ -84,7 +84,7 @@ pub struct BindlessTables {
     fallback: GpuImage,
 }
 
-impl BindlessTables {
+impl BindlessTextureTable {
     /// 建表：核对限额 → 上传 fallback 白图 → 建 layout / pool / set → 发布 fallback 占槽 0。
     /// 任一步失败，已建的对象由表的 Drop 回收。
     ///
@@ -109,7 +109,7 @@ impl BindlessTables {
         let fallback = upload_fallback(device, instance, physical_device, contract, uploader, graphics_family)?;
         let mut tables = Self {
             device: device.clone(),
-            layout: BINDLESS_SET.create(device)?,
+            layout: BINDLESS_TEXTURE_SET_DESC.create(device)?,
             pool: vk::DescriptorPool::null(),
             set: vk::DescriptorSet::null(),
             texture_slots: SlotAllocator::new(capacity),
@@ -119,7 +119,7 @@ impl BindlessTables {
             retired_samplers: Vec::new(),
             fallback,
         };
-        let pool_flags = if BINDLESS_SET.needs_uab_pool() {
+        let pool_flags = if BINDLESS_TEXTURE_SET_DESC.needs_uab_pool() {
             vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND
         } else {
             vk::DescriptorPoolCreateFlags::empty()
@@ -129,7 +129,7 @@ impl BindlessTables {
                 &vk::DescriptorPoolCreateInfo::default()
                     .flags(pool_flags)
                     .max_sets(1)
-                    .pool_sizes(&BINDLESS_SET.pool_sizes_vec(1)),
+                    .pool_sizes(&BINDLESS_TEXTURE_SET_DESC.pool_sizes_vec(1)),
                 None,
             )
         }?;
@@ -152,13 +152,13 @@ impl BindlessTables {
     /// set0 布局（登记给管线组装；集与布局同源，不可另建）。
     #[must_use]
     pub fn set_layout(&self) -> SetLayout {
-        SetLayout::new(&BINDLESS_SET, self.layout)
+        SetLayout::new(&BINDLESS_TEXTURE_SET_DESC, self.layout)
     }
 
     /// set0 描述符集（帧录制绑定）。
     #[must_use]
     pub fn descriptor_set(&self) -> DescSet {
-        DescSet::new(&BINDLESS_SET, self.set)
+        DescSet::new(&BINDLESS_TEXTURE_SET_DESC, self.set)
     }
 
     /// 缺贴图时 per-draw 参数用的槽位。
@@ -211,7 +211,7 @@ impl BindlessTables {
             }
         };
         // 写入和声明对不上才会失败，属于代码错误，不回滚槽位
-        let mut writer = DescriptorWriter::new(&BINDLESS_SET, self.set);
+        let mut writer = DescriptorWriter::new(&BINDLESS_TEXTURE_SET_DESC, self.set);
         writer.image_at(0, texture, view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         writer.sampler_at(1, sampler, handle);
         writer.submit(&self.device)?;
@@ -273,7 +273,7 @@ impl BindlessTables {
     }
 }
 
-impl Drop for BindlessTables {
+impl Drop for BindlessTextureTable {
     fn drop(&mut self) {
         // 不等 GPU：退出时 teardown_vulkan 已先 device_wait_idle。
         // 建表中途失败时 pool / layout 可能是空句柄，销毁空句柄是合法的空操作。

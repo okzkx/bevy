@@ -6,7 +6,7 @@
 
 | 账面 | 位置 | 4.5 改动 |
 |---|---|---|
-| `InstanceLedger`（实体行账） | `scene/mechanism/ledger.rs` | 统计口径订正：帧字段每帧刷新、`asset_invalidations_total` 累计只增、`asset_invalidations_current` 存量另列 |
+| `InstanceLedger`（实体行账） | `scene/mechanism/assets/ledger.rs` | 统计口径订正：帧字段每帧刷新、`asset_invalidations_total` 累计只增、`asset_invalidations_current` 存量另列 |
 | `AssetReadiness`（pending/failed 身份账） | `asset_readiness.rs` | **失败记账写入点统一**：note_failure/revive/clear 全部并入事件读侧单系统，本模块只剩结构定义 |
 | `AssetInvalidations` / `AssetRetirements` | `asset_events.rs` | 事件纪律扩容：`Unused` 出清失败账（F8）、`Added` 无条件复活重挂（F9）、失败记账同系统先入（F4） |
 | `BindlessTables.sampler_bodies`（**新账**） | `vulkan/descriptors.rs` | 采样器本体归表：槽号 → 表自建自持的 `VkSampler`（F2） |

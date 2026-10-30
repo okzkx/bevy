@@ -29,7 +29,7 @@ use crate::scene::{
     anchor_level, DrawListVerify, InstanceLedger, InstanceRow, LodGroups,
 };
 use crate::render::{
-    pack_lod_entry, pack_material_record, pack_model, BindlessTables, ImageCache, InstanceTables,
+    pack_lod_entry, pack_material_record, pack_model, BindlessTextureTable, ImageCache, InstanceTables,
     LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS,
     MODEL_STRIDE, MeshPool, NO_TEXTURE_INDEX,
 };
@@ -223,7 +223,7 @@ fn write_material_ring(
             .base_color_texture
             .as_ref()
             .and_then(|handle| image_cache.slots(handle.id()))
-            .unwrap_or_else(BindlessTables::fallback_slots);
+            .unwrap_or_else(BindlessTextureTable::fallback_slots);
         // PBR 三贴图槽缺席写 NO_TEXTURE_INDEX 哨兵（shader 端分支跳过采样），
         // 标量域语义 = Filament gltfio 同款（roughness 记 perceptual 域、
         // reflectance 原值，clamp 换算归 shader 端）

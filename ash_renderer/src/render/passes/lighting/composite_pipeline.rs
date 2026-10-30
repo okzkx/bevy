@@ -8,10 +8,10 @@ use crate::render::core::pipeline::graphics::PipelineRef;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
-use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET;
-use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET;
-use crate::render::passes::shadow::shadow_map::SHADOW_SET;
-use crate::render::resident::frame_uniforms::FRAME_SET;
+use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
+use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET_DESC;
+use crate::render::passes::shadow::shadow_map::SHADOW_SET_DESC;
+use crate::render::resident::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
 use crate::render::Context;
 
 /// set 依次为帧 UBO、G-buffer 采样集、光源分簇集、阴影集。
@@ -19,7 +19,7 @@ pub(crate) static GBUFFER_COMPOSITE_PIPELINE: PipelineDesc = PipelineDesc {
     label: "gbuffer_composite",
     shader: &shader_abi::GBUFFER_COMPOSITE,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&FRAME_SET, &GBUFFER_SAMPLED_SET, &LIGHT_CLUSTER_SET, &SHADOW_SET],
+    sets: &[&FRAME_UNIFORM_SET_DESC, &GBUFFER_SAMPLED_SET_DESC, &LIGHT_CLUSTER_SET_DESC, &SHADOW_SET_DESC],
     push: None,
     color_formats: &[crate::render::HDR_FORMAT],
     depth_format: None,

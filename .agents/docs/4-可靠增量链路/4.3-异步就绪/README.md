@@ -6,7 +6,7 @@
 
 ## 任务清单（4.3.1~4.3.4）
 
-- [x] **4.3.1 pending 账面与就绪门**：`scene/mechanism/asset_readiness.rs` 的 `AssetReadiness`（pending 身份 → 等待帧数，独立资源不进账本行）；就绪判定=`Assets::get` 命中逐腿递归（材质依赖经五槽逐槽判，`LoadedWithDependencies` 容器级语义不消费）；等待帧数/到货计量入 `ReadinessStats`。
+- [x] **4.3.1 pending 账面与就绪门**：`scene/mechanism/assets/asset_readiness.rs` 的 `AssetReadiness`（pending 身份 → 等待帧数，独立资源不进账本行）；就绪判定=`Assets::get` 命中逐腿递归（材质依赖经五槽逐槽判，`LoadedWithDependencies` 容器级语义不消费）；等待帧数/到货计量入 `ReadinessStats`。
 - [x] **4.3.2 失败与取消读侧**：`AssetLoadFailedEvent` 三类读侧（立案时全仓零读侧的缺口收口）——失败 ∪ 转换拒绝进 failed 集不再重试；失败读侧只记账不裁决，行出队由 flush 盘点整行状态判定（失败腿 + 无 pending 腿才清脏标）；取消=pending 身份失去全部引用行即出账（despawn/换柄后到货零上传零复活）；`Added`/`Modified` 事件复活身份（自动恢复上限归 4.4）。
 - [x] **4.3.3 BRP 动态加载方法族**：`ash_renderer/load_mesh`（entity=换柄 / source=克隆挂新实体）与 `load_image`（换 base_color 槽，共享材质全引用者同变）——运行期 `AssetServer.load` 驱动（3.11 范围修订"动态加载新资产"的落点）；`increment_stats` 扩 readiness 段十项分列；`tools/brp.py` 两子命令。
 - [x] **4.3.4 验收回归**：判定线五条全过（延迟到货 120 帧实测/失败三连收账且零僵尸重试/重型资产 pending 期间 despawn 零上传零复活/稳态零盘点零上传/三模式+零 VUID+exit 0+clippy 全净+4.1/4.2 零回退）。
