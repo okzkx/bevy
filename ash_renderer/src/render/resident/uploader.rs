@@ -39,7 +39,9 @@ use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
 
-use crate::render::core::device::memory::{BufferRole, GpuBuffer, MemoryContract};
+use crate::render::core::device::memory::buffer::GpuBuffer;
+use crate::render::core::device::memory::contract::MemoryContract;
+use crate::render::core::device::memory::role::BufferRole;
 
 /// 上传完成票据:timeline 信号量的单调值。0 专表"空批"(永不 signal)。
 pub type Ticket = u64;

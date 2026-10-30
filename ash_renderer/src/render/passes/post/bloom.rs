@@ -17,7 +17,8 @@ use bevy::log::info;
 
 use crate::common::bytes::put_f32;
 use crate::common::error::Result;
-use crate::render::core::device::memory::{BufferRole, GpuBuffer};
+use crate::render::core::device::memory::buffer::GpuBuffer;
+use crate::render::core::device::memory::role::BufferRole;
 use crate::render::{Context, HDR_FORMAT, MAX_FRAMES_IN_FLIGHT};
 
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;

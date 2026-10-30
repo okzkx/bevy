@@ -37,7 +37,9 @@ use crate::common::bytes::{put_mat4, put_u32, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
 use super::images::{sampler_key, GpuImage, ImageSpec};
-use crate::render::core::device::memory::{BufferRole, GpuBuffer, MemoryContract};
+use crate::render::core::device::memory::buffer::GpuBuffer;
+use crate::render::core::device::memory::contract::MemoryContract;
+use crate::render::core::device::memory::role::BufferRole;
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
 use super::uploader::{StagingImageCopy, UploadBatch, Uploader};

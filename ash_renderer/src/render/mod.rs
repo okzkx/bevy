@@ -107,5 +107,7 @@ pub use passes::shadow::cascades::{
     ShadowCascades, ShadowDiagnostics, ShadowSettings, ShadowUniformsData, SHADOW_CASCADES,
     SHADOW_MAP_SIZE, SHADOW_UBO_SIZE,
 };
-pub use self::core::device::memory::{align_up, BufferRole, GpuBuffer, MemoryContract};
+pub use self::core::device::memory::buffer::GpuBuffer;
+pub use self::core::device::memory::contract::{align_up, MemoryContract};
+pub use self::core::device::memory::role::BufferRole;
 pub use self::core::device::swapchain::{AcquireOutcome, Swapchain, SWAPCHAIN_COLOR_FORMAT};

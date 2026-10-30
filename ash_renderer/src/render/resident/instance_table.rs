@@ -47,7 +47,9 @@ use bevy::pbr::StandardMaterial;
 use crate::common::bytes::{put_f32s, put_mat4, put_u32, put_u32s, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
-use crate::render::core::device::memory::{align_up, BufferRole, GpuBuffer, MemoryContract};
+use crate::render::core::device::memory::buffer::GpuBuffer;
+use crate::render::core::device::memory::contract::{align_up, MemoryContract};
+use crate::render::core::device::memory::role::BufferRole;
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
 use crate::render::MAX_FRAMES_IN_FLIGHT;

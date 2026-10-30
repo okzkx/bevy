@@ -42,7 +42,9 @@ use bevy::mesh::Mesh;
 
 use crate::common::error::{Result, VulkanError};
 
-use crate::render::core::device::memory::{align_up, BufferRole, GpuBuffer, MemoryContract};
+use crate::render::core::device::memory::buffer::GpuBuffer;
+use crate::render::core::device::memory::contract::{align_up, MemoryContract};
+use crate::render::core::device::memory::role::BufferRole;
 use super::uploader::{CopyRegion, UploadBatch, Uploader};
 use crate::render::VERTEX_STRIDE;
 
