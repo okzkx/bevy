@@ -8,4 +8,5 @@ pub(crate) mod instance_table;
 pub(crate) mod light_table;
 pub(crate) mod mesh_convert;
 pub(crate) mod pool;
+pub(crate) mod slot_allocator;
 pub(crate) mod uploader;

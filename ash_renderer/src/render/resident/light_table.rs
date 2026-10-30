@@ -8,7 +8,7 @@
 //!   零上传；变更帧只写脏行，且同一脏行要写到两个帧槽都覆盖才出账（环切
 //!   后另一槽还留着旧内容）。
 //! - **槽位稳定性**：cluster 逐 tile 光源列表存的是表槽号（跨帧稳定身份），
-//!   分配 = free list 优先 + bump 兜底；回收槽**立即清零**（radius=0 的死灯
+//!   分配用 [`SlotAllocator`]；回收槽**立即清零**（radius=0 的死灯
 //!   语义：cluster 求交与着色双侧按 `r > 0` 门卫跳过），停尸房不设——1 帧
 //!   内旧列表引用已换内容的槽最坏产生一次视觉闪变，无悬空读（内容恒有效），
 //!   灯量级（百以内）不值得对象表级 graveyard 机器。
@@ -22,6 +22,7 @@ use bevy::log::info;
 
 use crate::common::bytes::{put_u32, put_vec4};
 use crate::common::error::{Result, VulkanError};
+use super::slot_allocator::SlotAllocator;
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::contract::MemoryContract;
 use crate::render::core::device::memory::role::BufferRole;
@@ -87,9 +88,8 @@ pub struct LightTable {
     rings: Vec<GpuBuffer>,
     /// 槽位镜像（None = 空槽；census CPU 参照与 BRP 读数共用）。
     records: Vec<Option<LightRecord>>,
-    /// 在场灯数上界（high-water；cluster_build 遍历域 = 0..本值）。
-    used_cursor: u32,
-    free: Vec<u32>,
+    /// 回收即复用（不走延迟回收，理由见模块注释）；游标 = cluster_build 遍历上界。
+    slots: SlotAllocator,
     /// 脏行账：(槽号, 剩余帧槽写次数)。新脏 = 2（两个帧槽都要覆盖），
     /// 每帧槽写一次减一，归零出账。
     dirty: Vec<(u32, u8)>,
@@ -119,30 +119,21 @@ impl LightTable {
         Ok(Self {
             rings,
             records: Vec::new(),
-            used_cursor: 0,
-            free: Vec::new(),
+            slots: SlotAllocator::new(LIGHT_TABLE_CAPACITY),
             dirty: Vec::new(),
             dirty_writes_total: 0,
         })
     }
 
-    /// 分配槽位并写记录（free list 优先，bump 兜底；容量用尽报错不截断）。
+    /// 分配槽位并写记录（容量用尽报错不截断）。
     ///
     /// # Errors
     /// 容量耗尽。
     pub fn spawn(&mut self, record: LightRecord) -> Result<u32> {
-        let slot = if let Some(slot) = self.free.pop() {
-            slot
-        } else if self.used_cursor < LIGHT_TABLE_CAPACITY {
-            let slot = self.used_cursor;
-            self.used_cursor += 1;
-            slot
-        } else {
-            return Err(VulkanError::Capacity(format!(
-                "光源表容量耗尽:{LIGHT_TABLE_CAPACITY} 槽——显式报错,不静默截断"
-            )));
-        };
-        self.records.resize(self.used_cursor as usize, None);
+        let slot = self.slots.alloc().ok_or_else(|| {
+            VulkanError::Capacity(format!("光源表容量耗尽:{LIGHT_TABLE_CAPACITY} 槽——显式报错,不静默截断"))
+        })?;
+        self.records.resize(self.slots.high_water() as usize, None);
         self.records[slot as usize] = Some(record);
         self.mark_dirty(slot);
         Ok(slot)
@@ -165,7 +156,7 @@ impl LightTable {
         Ok(())
     }
 
-    /// 回收槽位：记录清零（死灯语义）+ 入 free list。槽内容随后续 spawn
+    /// 回收槽位：记录清零（死灯语义）+ 立即归还。槽内容随后续 spawn
     /// 复用；两个帧槽的旧内容由脏行账覆盖。
     ///
     /// # Errors
@@ -181,7 +172,7 @@ impl LightTable {
                 )));
             }
         }
-        self.free.push(slot);
+        self.slots.release(slot);
         self.mark_dirty(slot);
         Ok(())
     }
@@ -189,7 +180,7 @@ impl LightTable {
     /// 在场灯数（cluster uniform 的 light_count 域 = 表遍历上界 high-water）。
     #[must_use]
     pub fn light_count(&self) -> u32 {
-        self.used_cursor
+        self.slots.high_water()
     }
 
     /// 第 `slot` 帧槽环的 buffer 句柄（cluster 描述符绑定取数口——表本体
@@ -260,38 +251,32 @@ impl LightTable {
 
 #[cfg(test)]
 mod tests {
-    use super::{LightRecord, LightTable, LIGHT_RECORD_SIZE};
+    use super::{LightRecord, LightTable, LIGHT_RECORD_SIZE, LIGHT_TABLE_CAPACITY};
+    use crate::render::resident::slot_allocator::SlotAllocator;
     use crate::render::Context;
 
     /// 账本状态机（无 Vulkan 环境的纯账面部分）：spawn/update/remove/
     /// 脏行剩余写的语义。buffer 写路径归冒烟（构造需要 Context）。
     struct AccountHarness {
         records: Vec<Option<LightRecord>>,
-        used_cursor: u32,
-        free: Vec<u32>,
+        slots: SlotAllocator,
         dirty: Vec<(u32, u8)>,
     }
 
     impl AccountHarness {
         fn new() -> Self {
-            Self { records: Vec::new(), used_cursor: 0, free: Vec::new(), dirty: Vec::new() }
+            Self { records: Vec::new(), slots: SlotAllocator::new(LIGHT_TABLE_CAPACITY), dirty: Vec::new() }
         }
         fn spawn(&mut self, record: LightRecord) -> u32 {
-            let slot = if let Some(slot) = self.free.pop() {
-                slot
-            } else {
-                let slot = self.used_cursor;
-                self.used_cursor += 1;
-                slot
-            };
-            self.records.resize(self.used_cursor as usize, None);
+            let slot = self.slots.alloc().expect("测试规模远小于容量");
+            self.records.resize(self.slots.high_water() as usize, None);
             self.records[slot as usize] = Some(record);
             self.mark_dirty(slot);
             slot
         }
         fn remove(&mut self, slot: u32) {
             self.records[slot as usize] = None;
-            self.free.push(slot);
+            self.slots.release(slot);
             self.mark_dirty(slot);
         }
         fn mark_dirty(&mut self, slot: u32) {
@@ -329,7 +314,7 @@ mod tests {
         assert_eq!(h.write_tick(), 0, "稳态零写");
         h.remove(slot);
         assert_eq!(h.dirty.len(), 1, "回收槽复活脏行(死灯清零要写两个帧槽)");
-        assert!(h.free.contains(&slot));
+        assert_eq!(h.slots.alloc(), Some(slot), "回收槽立即可复用");
     }
 
     /// 复用槽重新 spawn 后,同一槽的脏行剩余写重置回 2（换内容必须再次

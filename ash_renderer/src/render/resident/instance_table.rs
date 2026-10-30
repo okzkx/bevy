@@ -16,7 +16,7 @@
 //! | LOD 档位环 | 同上 | **选档 compute 每帧重写**（本帧档位 u32/槽，迟滞状态载体）；LOD 关闭时 host 填 0 = 最细档 | 选档 compute 读写（b8），build_indirect 读 |
 //! | 缺口标记环 | 同上 | **cull 清零（dispatch 覆盖全部槽）+ build_indirect 置位**（选中档未驻留的在场槽写 `1<<level` 位图）——标记环同款两帧奇偶纪律 | 宿主诊断读数/BRP census/驻留管理器缺口合并（fence 纪律内读本帧槽 = 两帧前输出） |
 //!
-//! 槽位纪律：实例槽（对象表下标）first-fit free list + bump，回收经停尸房
+//! 槽位纪律：实例槽（对象表下标）用 [`SlotAllocator`]，回收经停尸房
 //! （等"图形最后使用"——在飞 draw 可能还在读旧记录，排空后才能复用）；
 //! 材质槽 bump-only 不回收（量级 = 唯一材质数，泄漏有界，材质 Removed 无
 //! 驻留内容不进回收账）。
@@ -47,6 +47,7 @@ use bevy::pbr::StandardMaterial;
 use crate::common::bytes::{put_f32s, put_mat4, put_u32, put_u32s, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
+use super::slot_allocator::SlotAllocator;
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::contract::{align_up, MemoryContract};
 use crate::render::core::device::memory::role::BufferRole;
@@ -287,14 +288,10 @@ pub struct InstanceTables {
     /// 缺口标记环 ×`MAX_FRAMES_IN_FLIGHT`（HOST_VISIBLE：cull 清零 +
     /// build_indirect 置位 / 宿主诊断读两帧前快照）。
     gap_mark_rings: Vec<GpuBuffer>,
-    capacity_objects: u32,
     capacity_materials: u32,
-    /// 实例槽：bump 游标 + free list（排空点归还后复用）。
-    used_objects: u32,
-    free_objects: Vec<u32>,
-    /// 回收停尸房：行删除/换绑换下的旧槽，在飞 draw 可能还在读——排空
-    /// （等全部帧槽 fence）前不得复用。
-    graveyard: Vec<u32>,
+    /// 实例槽。行删除/换绑换下的旧槽走延迟回收：在飞 draw 可能还在读，
+    /// 等全部帧槽 fence 后才复用。
+    object_slots: SlotAllocator,
     /// 材质槽（bump-only，不回收——量级 = 唯一材质数）。
     material_slots: HashMap<AssetId<StandardMaterial>, u32>,
     used_materials: u32,
@@ -391,11 +388,8 @@ impl InstanceTables {
             lod_table_rings,
             lod_level_rings,
             gap_mark_rings,
-            capacity_objects: OBJECT_TABLE_CAPACITY,
             capacity_materials: MATERIAL_TABLE_CAPACITY,
-            used_objects: 0,
-            free_objects: Vec::new(),
-            graveyard: Vec::new(),
+            object_slots: SlotAllocator::new(OBJECT_TABLE_CAPACITY),
             material_slots: HashMap::new(),
             used_materials: 0,
             set2_layout,
@@ -582,31 +576,24 @@ impl InstanceTables {
         &mut self.gap_mark_rings[frame]
     }
 
-    /// 分配一个实例槽（free list 优先,bump 兜底;容量用尽报错不越界）。
+    /// 分配一个实例槽（容量用尽报错不越界）。
     ///
     /// # Errors
     /// 实例槽容量耗尽。
     pub fn alloc_object_slot(&mut self) -> Result<u32> {
-        if let Some(slot) = self.free_objects.pop() {
-            return Ok(slot);
-        }
-        if self.used_objects < self.capacity_objects {
-            let slot = self.used_objects;
-            self.used_objects += 1;
-            Ok(slot)
-        } else {
-            Err(VulkanError::Capacity(format!(
+        self.object_slots.alloc().ok_or_else(|| {
+            VulkanError::Capacity(format!(
                 "对象表容量耗尽:已用 {}/{OBJECT_TABLE_CAPACITY}——超过压测口径的实例规模,\
                  显式报错,不静默截断",
-                self.used_objects
-            )))
-        }
+                self.object_slots.high_water()
+            ))
+        })
     }
 
     /// 回收一个实例槽（行删除/换绑换下）：进停尸房**不进 free list**——
     /// 在飞 draw 可能还在读旧记录，排空（"图形最后使用"）后才可复用。
     pub fn retire_object_slot(&mut self, slot: u32) {
-        self.graveyard.push(slot);
+        self.object_slots.retire(slot);
     }
 
     /// 排空停尸房：等"图形最后使用"（帧侧等待回调）通过后旧槽归还 free list。
@@ -616,12 +603,11 @@ impl InstanceTables {
     /// # Errors
     /// 帧侧等待失败（停尸房保留,下帧重试,槽多活一帧无悬空）。
     pub fn drain_graveyard(&mut self, wait_draws: &mut dyn FnMut() -> Result<()>) -> Result<()> {
-        if self.graveyard.is_empty() {
+        if self.object_slots.retired_count() == 0 {
             return Ok(());
         }
         wait_draws()?;
-        let count = self.graveyard.len();
-        self.free_objects.append(&mut self.graveyard);
+        let count = self.object_slots.drain_retired();
         self.slots_retired_total += count as u64;
         info!("对象表停尸房排空:归还 {count} 个实例槽(图形最后使用已过,可复用)");
         Ok(())
@@ -659,13 +645,13 @@ impl InstanceTables {
     /// 与 MeshPool 的 used 游标一致,复用不推进游标）。
     #[must_use]
     pub fn used_object_slots(&self) -> u32 {
-        self.used_objects
+        self.object_slots.high_water()
     }
 
     /// 实例槽容量（验收读数口）。
     #[must_use]
     pub fn capacity_objects(&self) -> u32 {
-        self.capacity_objects
+        self.object_slots.capacity()
     }
 
     /// 已分配材质槽数（验收统计口）。
@@ -683,7 +669,7 @@ impl InstanceTables {
     /// 停尸房在房槽数（排空判定读数）。
     #[must_use]
     pub fn graveyard_count(&self) -> usize {
-        self.graveyard.len()
+        self.object_slots.retired_count()
     }
 
     /// 实例槽停尸房排空累计。
