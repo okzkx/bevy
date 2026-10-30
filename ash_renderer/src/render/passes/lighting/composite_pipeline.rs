@@ -11,7 +11,7 @@ use crate::render::core::binding::shader_abi;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET;
 use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET;
 use crate::render::passes::shadow::shadow_map::SHADOW_SET;
-use crate::render::resident::descriptors::FRAME_SET;
+use crate::render::resident::frame_uniforms::FRAME_SET;
 use crate::render::Context;
 
 /// set 依次为帧 UBO、G-buffer 采样集、光源分簇集、阴影集。

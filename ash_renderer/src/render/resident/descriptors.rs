@@ -1,20 +1,20 @@
-//! 描述符对象与槽位发布。
+//! set0 bindless 常驻表与槽位发布。
 //!
 //! 职责三件：
 //! 1. **限额对账**：UAB 轨五项限额与候选容量 [`TABLE_CAPACITY`] 的显式对账。UAB 轨与
 //!    普通轨分开记账，普通轨素材（maxPerStageDescriptorSampledImages）不作数；
 //!    容量不够 = `Init` 冒泡出局，不静默截断、不写越界。
 //! 2. **描述符对象**：set0 常驻双表（b0 SAMPLED_IMAGE×容量 / b1
-//!    SAMPLER×容量，UAB+PARTIALLY_BOUND）+ set1 每帧 UBO。UAB 三层配套
+//!    SAMPLER×容量，UAB+PARTIALLY_BOUND）。UAB 三层配套
 //!    在此收齐后两层：binding 旗标 + layout 创建旗标（`UPDATE_AFTER_BIND_POOL`，
 //!    VUID-03000）+ pool 旗标（`UPDATE_AFTER_BIND`）；feature 位第一层在
 //!    [`crate::render::Context`]。
 //! 3. **槽位分配与发布**：free list 分槽、采样器按 [`sampler_key`]
 //!    功能参数去重、fallback 槽 0（白 1×1 + 线性采样器）、发布接上传票据。
 //!
-//! set/binding 表（本模块是 CPU 侧真身，声明见 [`BINDLESS_SET`] / [`FRAME_SET`]）：
-//! set0 b0 = `texture_2d` 数组（runtime，无长度）、b1 = sampler 数组；set1 b0 = 每帧
-//! UBO（[`FRAME_UBO_SIZE`]）；set2 归 [`super::instance_table`]。场景 pipeline layout
+//! set/binding 表（本模块是 set0 的 CPU 侧真身，声明见 [`BINDLESS_SET`]）：
+//! set0 b0 = `texture_2d` 数组（runtime，无长度）、b1 = sampler 数组；set1 每帧 UBO
+//! 归 [`super::frame_uniforms`]；set2 归 [`super::instance_table`]。场景 pipeline layout
 //! 无 push range。
 //!
 //! stage flags 取 `COMPUTE|VERTEX|FRAGMENT` 超集：探针走 compute、主渲染走
@@ -33,17 +33,13 @@ use ash::{vk, Device, Instance};
 use bevy::image::ImageSamplerDescriptor;
 use bevy::log::info;
 
-use crate::common::bytes::{put_mat4, put_u32, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
 use super::images::{sampler_key, GpuImage, ImageSpec};
-use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::contract::MemoryContract;
-use crate::render::core::device::memory::role::BufferRole;
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
+use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
 use super::uploader::{StagingImageCopy, UploadBatch, Uploader};
-use crate::render::MAX_FRAMES_IN_FLIGHT;
 
 /// 常驻表容量（set0 两个 binding 的描述符数）。`BindlessTables::new` 按设备 UAB 轨
 /// 五项限额核对，不够即报错——不静默降容量。纹理表与采样器表同容量（双数组布局下
@@ -65,98 +61,6 @@ pub(crate) static BINDLESS_SET: SetLayoutDesc = SetLayoutDesc {
     ],
     flags: vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL,
 };
-
-/// set1 每帧 UBO（b0，[`FRAME_UBO_SIZE`]）。
-pub(crate) static FRAME_SET: SetLayoutDesc =
-    SetLayoutDesc::new("frame", &[BindingDesc::new(0, DescKind::UniformBuffer, ALL_STAGES)]);
-
-/// 每帧 UBO 字节数（set1 b0）。208B（mat4 view_proj + 灯光参数 + mode + mat4
-/// inv_view_proj + vec4 camera_pos，偏移见 `FrameUniformsLayout` 静态断言表）；
-/// binding 形状（b0 UNIFORM_BUFFER）与 pipeline layout 不随尺寸变，range 在写入
-/// 时的 `DescriptorBufferInfo`，扩容不动 ABI。
-pub const FRAME_UBO_SIZE: u64 = 208;
-
-/// 帧数据打包模式（UBO `mode` 字段；4 起为合成 pass 专属的 G-buffer 通道仪器；
-/// 语义见 `gbuffer_composite.wgsl` 与 host 侧材质模式说明）。
-pub const FRAME_MODE_LAMBERT: u32 = 0;
-pub const FRAME_MODE_UNLIT: u32 = 1;
-pub const FRAME_MODE_NORMAL: u32 = 2;
-/// 世界位置可视化：G-buffer 深度反投影重建的世界坐标编码直出——
-/// 深度重建机制的验收仪器（仅合成 pass 消费）。
-pub const FRAME_MODE_POSITION: u32 = 3;
-/// G-buffer 调试仪器：matparam 单通道灰度直出——mutate 材质热改
-///（metallic/roughness）的写后读验收口。
-pub const FRAME_MODE_METALLIC: u32 = 4;
-pub const FRAME_MODE_ROUGHNESS: u32 = 5;
-pub const FRAME_MODE_AO: u32 = 6;
-pub const FRAME_MODE_REFLECTANCE: u32 = 7;
-/// reverse-Z 深度线性化灰度（clip.w / far——透视 w = 视空间深度）。
-pub const FRAME_MODE_DEPTH: u32 = 8;
-
-/// 每帧 UBO 的宿主侧取数产物（`draw_frame` 组装，[`pack_frame_uniforms`] 排布）。
-pub struct FrameUniformsData {
-    /// view × projection（列主序展平约定同 push 的 model）。
-    pub view_proj: bevy::math::Mat4,
-    /// inv(view_proj)：clip→world 反投影——G-buffer 深度重建世界
-    /// 位置的常量面；相机缺席帧 identity 兜底（与 view_proj 同源同帧）。
-    pub inv_view_proj: bevy::math::Mat4,
-    /// 表面到光方向（xyz 单位向量，w=0 占位）。**bevy GPU 同款语义**：
-    /// `prepare_lights` 写 `dir_to_light = transform.back()`（forward 取负，
-    /// "N·L 就绪"），Lambert 直接 `dot(n, dir_to_light)`，符号混淆在此斩断。
-    pub dir_to_light: [f32; 4],
-    /// 环境光（rgb = LinearRgba × brightness，bevy 同款；w 未用）。
-    pub ambient_color: [f32; 4],
-    /// 方向光（rgb = LinearRgba × illuminance，bevy 同款；w 未用）。
-    pub light_color: [f32; 4],
-    /// 材质模式（`FRAME_MODE_*`）。
-    pub mode: u32,
-    /// 相机世界位置（xyz：光照累积的 V = normalize(camera_pos − world)
-    /// 取数面；w 未用）。相机缺席帧 zeros 兜底（与 view_proj 同源同帧）。
-    pub camera_pos: [f32; 4],
-}
-
-/// [`FrameUniformsData`] 的 WGSL 布局镜像（uniform address space）：本类型不参与
-/// 运行时（字节由 [`pack_frame_uniforms`] 按偏移手工排布），`offset_of!` 静态断言
-/// 把 WGSL/描述符 range/CPU 三方钉在一起。uniform 对齐 16：mode 后垫到 128。
-#[repr(C)]
-struct FrameUniformsLayout {
-    view_proj: [f32; 16],
-    dir_to_light: [f32; 4],
-    ambient_color: [f32; 4],
-    light_color: [f32; 4],
-    mode: u32,
-    _pad: [u32; 3],
-    inv_view_proj: [f32; 16],
-    camera_pos: [f32; 4],
-}
-
-const _: () = {
-    assert!(std::mem::offset_of!(FrameUniformsLayout, view_proj) == 0);
-    assert!(std::mem::offset_of!(FrameUniformsLayout, dir_to_light) == 64);
-    assert!(std::mem::offset_of!(FrameUniformsLayout, ambient_color) == 80);
-    assert!(std::mem::offset_of!(FrameUniformsLayout, light_color) == 96);
-    assert!(std::mem::offset_of!(FrameUniformsLayout, mode) == 112);
-    assert!(std::mem::offset_of!(FrameUniformsLayout, inv_view_proj) == 128);
-    assert!(std::mem::offset_of!(FrameUniformsLayout, camera_pos) == 192);
-    assert!(std::mem::size_of::<FrameUniformsLayout>() == 208);
-    assert!(FRAME_UBO_SIZE == 208);
-};
-
-/// [`FrameUniformsData`] → 208B uniform 字节（偏移按 `FrameUniformsLayout` 的
-/// 静态断言表手工排布）。
-#[must_use]
-pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usize] {
-    let mut out = [0u8; FRAME_UBO_SIZE as usize];
-    put_mat4(&mut out, 0, &d.view_proj);
-    put_vec4(&mut out, 64, &d.dir_to_light);
-    put_vec4(&mut out, 80, &d.ambient_color);
-    put_vec4(&mut out, 96, &d.light_color);
-    put_u32(&mut out, 112, d.mode);
-    // 116..128 对齐垫保持 0
-    put_mat4(&mut out, 128, &d.inv_view_proj);
-    put_vec4(&mut out, 192, &d.camera_pos);
-    out
-}
 
 /// 一张贴图的描述符槽位绑定（per-draw 参数 `tex_index/sampler_index` 的取值）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,8 +118,7 @@ impl SlotAllocator {
 
 struct BindlessBuildGuard<'a> {
     device: &'a Device,
-    set0_layout: vk::DescriptorSetLayout,
-    set1_layout: vk::DescriptorSetLayout,
+    layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     committed: bool,
 }
@@ -229,31 +132,20 @@ impl Drop for BindlessBuildGuard<'_> {
             if self.pool != vk::DescriptorPool::null() {
                 self.device.destroy_descriptor_pool(self.pool, None);
             }
-            if self.set1_layout != vk::DescriptorSetLayout::null() {
-                self.device.destroy_descriptor_set_layout(self.set1_layout, None);
-            }
-            if self.set0_layout != vk::DescriptorSetLayout::null() {
-                self.device.destroy_descriptor_set_layout(self.set0_layout, None);
-            }
+            self.device.destroy_descriptor_set_layout(self.layout, None);
         }
     }
 }
 
-/// 常驻描述符表（set0 双表 + set1 每帧 UBO）与槽位账本。
+/// set0 常驻双表与槽位账本。
 #[derive(bevy::prelude::Resource)]
 pub struct BindlessTables {
     device: Device,
-    set0_layout: vk::DescriptorSetLayout,
-    set1_layout: vk::DescriptorSetLayout,
-    /// UAB pool：set0（UAB binding）与 set1（普通 binding）同池分配——pool 旗标
-    /// 只是"允许"UAB，不强制。
+    layout: vk::DescriptorSetLayout,
+    /// UAB pool，只分配 set0 这一个集。
     pool: vk::DescriptorPool,
     /// set0 常驻集：全期绑定一次，槽位运行中更新（UAB 的存在意义）。
     resident_set: vk::DescriptorSet,
-    /// set1 每帧集：按帧槽各一套，按帧槽绑定。
-    frame_sets: Vec<vk::DescriptorSet>,
-    /// 每帧 UBO 本体（与 frame_sets 一一对应；写相机/灯光数据的载体）。
-    frame_ubos: Vec<GpuBuffer>,
     /// 建表容量(对账定案的冻结值)。
     capacity: u32,
     /// 纹理槽分配器（fallback 占 0 号）。
@@ -281,9 +173,9 @@ pub struct BindlessTables {
 }
 
 impl BindlessTables {
-    /// 建表链：限额对账 → 双 layout（三层配套的后两层）→ UAB pool → 分配
-    /// 1+MAX_FRAMES_IN_FLIGHT 个 set → 每帧 UBO 与 set1 写入 → fallback 贴图
-    /// 上传并占 0 号双槽。任何失败回收已建对象（全有或全无）。
+    /// 建表链：限额对账 → layout（三层配套的后两层）→ UAB pool → 分配 set0 →
+    /// fallback 贴图上传并占 0 号双槽。任何失败回收已建对象（全有或全无）：
+    /// 表构造前由 `BindlessBuildGuard` 回收，构造后由表自己的 Drop 回收。
     ///
     /// `capacity` 是槽位预算，不超过布局里声明的 [`TABLE_CAPACITY`]（小于它只为测试
     /// 耗尽路径）；限额对账和 pool 按布局声明的数量算。
@@ -320,8 +212,8 @@ impl BindlessTables {
             "UAB 轨限额对账(布局容量 {layout_count}): 每阶段 sampledImages {per_stage_smp} / 每 set {per_set_smp} \
              | 每阶段 samplers {per_stage_sam} / 每 set {per_set_sam} | 全池总额 {all_pools}",
         );
-        // 每阶段与每 set 是两道独立闸;全池总额按双表满载 + 每帧 UBO 计
-        let pool_total = u64::from(layout_count) * 2 + MAX_FRAMES_IN_FLIGHT as u64;
+        // 每阶段与每 set 是两道独立闸;全池总额按双表满载计
+        let pool_total = u64::from(layout_count) * 2;
         let checks = [
             ("每阶段 sampledImages", u64::from(per_stage_smp), u64::from(layout_count)),
             ("每 set sampledImages", u64::from(per_set_smp), u64::from(layout_count)),
@@ -335,69 +227,18 @@ impl BindlessTables {
                  显式报错,不静默截断;调容量须回 set/binding 表文档对账"
             )));
         }
-        info!(
-            "限额对账通过:容量 {layout_count}×2 张表 + {MAX_FRAMES_IN_FLIGHT} 帧 UBO = {pool_total} 描述符,五项限额全满足"
-        );
+        info!("限额对账通过:容量 {layout_count}×2 张表 = {pool_total} 描述符,五项限额全满足");
 
-        // ---- 2) 双 layout:按 BINDLESS_SET / FRAME_SET 声明建(binding 旗标 +
-        // layout 的 UPDATE_AFTER_BIND_POOL 是 VUID-03000 三层配套的前两层) ----
-        let set0_layout = BINDLESS_SET.create(device)?;
+        // ---- 2) layout:按 BINDLESS_SET 声明建(binding 旗标 + layout 的
+        // UPDATE_AFTER_BIND_POOL 是 VUID-03000 三层配套的前两层) ----
         let mut guard = BindlessBuildGuard {
             device,
-            set0_layout,
-            set1_layout: vk::DescriptorSetLayout::null(),
+            layout: BINDLESS_SET.create(device)?,
             pool: vk::DescriptorPool::null(),
             committed: false,
         };
-        guard.set1_layout = FRAME_SET.create(device)?;
-        let result = unsafe {
-            Self::new_inner(
-                device,
-                instance,
-                physical_device,
-                contract,
-                uploader,
-                graphics_family,
-                capacity,
-                set0_layout,
-                guard.set1_layout,
-                &mut guard,
-            )
-        };
-        if result.is_ok() {
-            guard.committed = true;
-        }
-        result
-    }
-
-    /// 建表链后半段(layout 已建);UBO/fallback 半成品随局部变量 Drop。
-    ///
-    /// 坑:失败路径回收不全——只有 set 分配失败回收 pool;UBO/fallback 段失败
-    /// pool 不回收;fallback 发布失败时 `tables` 的 Drop 已拆两个 layout,外层
-    /// [`Self::new`] 会再拆一次。均只在 init 失败(随即 Tier② 退出)时触发。
-    ///
-    /// # Safety
-    /// 两个 layout 须刚创建成功且未销毁;`uploader` 须可用(fallback 上传走它)。
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Vulkan 创建链的参数表即依赖清单:设备/实例/物理设备/契约/上传器/族号/槽位预算/两个 layout,逐项显式"
-    )]
-    unsafe fn new_inner(
-        device: &Device,
-        instance: &Instance,
-        physical_device: vk::PhysicalDevice,
-        contract: &MemoryContract,
-        uploader: &mut Uploader,
-        graphics_family: u32,
-        capacity: u32,
-        set0_layout: vk::DescriptorSetLayout,
-        set1_layout: vk::DescriptorSetLayout,
-        guard: &mut BindlessBuildGuard<'_>,
-    ) -> Result<Self> {
-        // ---- 3) UAB pool(三层配套的第三层;pool 尺寸与旗标都从 BINDLESS_SET/FRAME_SET
-        // 声明推导,覆盖双表满载 + 每帧 UBO)----
-        let pool_sizes =
-            merged_pool_sizes(&[(&BINDLESS_SET, 1), (&FRAME_SET, MAX_FRAMES_IN_FLIGHT as u32)]);
+        // ---- 3) UAB pool(三层配套的第三层;尺寸与旗标从 BINDLESS_SET 声明推导)----
+        let pool_sizes = BINDLESS_SET.pool_sizes_vec(1);
         let pool_flags = if BINDLESS_SET.needs_uab_pool() {
             vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND
         } else {
@@ -407,41 +248,21 @@ impl BindlessTables {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .flags(pool_flags)
-                    .max_sets(1 + MAX_FRAMES_IN_FLIGHT as u32)
+                    .max_sets(1)
                     .pool_sizes(&pool_sizes),
                 None,
             )
         }?;
-        let pool = guard.pool;
-        // ---- 4) 分配 set0×1 + set1×MAX_FRAMES(一次 allocate,普通 set 与 UAB set 同池合法)----
-        let mut layouts = vec![set0_layout];
-        layouts.extend(std::iter::repeat_n(set1_layout, MAX_FRAMES_IN_FLIGHT));
-        let sets = unsafe {
+        // ---- 4) 分配 set0 ----
+        let resident_set = unsafe {
             device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(pool)
-                    .set_layouts(&layouts),
+                    .descriptor_pool(guard.pool)
+                    .set_layouts(&[guard.layout]),
             )
-        };
-        let sets = sets.map_err(VulkanError::from)?;
-        let mut frame_sets = sets;
-        let resident_set = frame_sets.remove(0);
-        // ---- 5) 每帧 UBO(帧槽一一对应)+ set1 描述符写入(初值 = identity view_proj
-        // + 灯光占位(方向留非零防 NaN,直射/环境/灯色全零) + Lambert 模式;
-        // 运行期每帧重写)----
-        let mut frame_ubos = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let mut ubo = GpuBuffer::create(device, contract, FRAME_UBO_SIZE, BufferRole::FrameUniform)?;
-            ubo.write(0, &pack_frame_uniforms(&identity_frame_uniforms()))?;
-            frame_ubos.push(ubo);
         }
-        // 写入过声明校验（FRAME_SET b0 = UBO，写满才提交）
-        for (set, ubo) in frame_sets.iter().zip(&frame_ubos) {
-            let mut writer = DescriptorWriter::new(&FRAME_SET, *set);
-            writer.buffer(0, ubo.buffer(), 0, FRAME_UBO_SIZE);
-            writer.submit(device)?;
-        }
-        // ---- 6) fallback:白 1×1(UNORM 线性白 = 任意色彩域的安全缺省)走普通
+        .map_err(VulkanError::from)?[0];
+        // ---- 5) fallback:白 1×1(UNORM 线性白 = 任意色彩域的安全缺省)走普通
         // 上传链进 GPU,占 0 号双槽;真实贴图从 1 号起分槽。跨族设备 CONCURRENT
         // 双族(与生产贴图同款) ----
         let fallback_sharing: Vec<u32> = if uploader.queue_family() != graphics_family {
@@ -483,12 +304,9 @@ impl BindlessTables {
         uploader.wait_until(fallback_ticket)?;
         let mut tables = Self {
             device: device.clone(),
-            set0_layout,
-            set1_layout,
-            pool,
+            layout: guard.layout,
+            pool: guard.pool,
             resident_set,
-            frame_sets,
-            frame_ubos,
             capacity,
             textures: SlotAllocator::new(capacity),
             samplers: SlotAllocator::new(capacity),
@@ -499,9 +317,6 @@ impl BindlessTables {
             retired_sampler_bodies: Vec::new(),
             fallback,
         };
-        guard.pool = vk::DescriptorPool::null();
-        guard.set0_layout = vk::DescriptorSetLayout::null();
-        guard.set1_layout = vk::DescriptorSetLayout::null();
         guard.committed = true;
         // fallback 占双表 0 号槽(采样器去重账本同步登记 linear 键;本体
         // 由表按键创建持有,不取 GpuImage 的采样器——GpuImage 不建采样器)
@@ -512,8 +327,7 @@ impl BindlessTables {
         debug_assert_eq!(slots.texture, 0, "fallback 必占纹理槽 0");
         debug_assert_eq!(slots.sampler, 0, "fallback 必占采样器槽 0");
         info!(
-            "常驻描述符表就绪:set0 双表(容量 {capacity}×2,UAB+PARTIALLY_BOUND 三层配套)\
-             + set1 每帧 UBO×{MAX_FRAMES_IN_FLIGHT}({FRAME_UBO_SIZE}B,identity 初值);\
+            "常驻描述符表就绪:set0 双表(容量 {capacity}×2,UAB+PARTIALLY_BOUND 三层配套);\
              fallback 白图占槽 0(texture+ sampler),fallback 票据 #{ticket}",
             ticket = fallback_ticket,
         );
@@ -529,25 +343,7 @@ impl BindlessTables {
     /// set0 常驻双表的布局(登记给管线组装;集与布局同源,不可另建)。
     #[must_use]
     pub fn bindless_layout(&self) -> SetLayout {
-        SetLayout::new(&BINDLESS_SET, self.set0_layout)
-    }
-
-    /// set1 每帧 UBO 的布局(同上)。
-    #[must_use]
-    pub fn frame_layout(&self) -> SetLayout {
-        SetLayout::new(&FRAME_SET, self.set1_layout)
-    }
-
-    /// 第 `frame` 帧槽的 set1(按帧槽绑定)。
-    #[must_use]
-    pub fn frame_set(&self, frame: usize) -> DescSet {
-        DescSet::new(&FRAME_SET, self.frame_sets[frame])
-    }
-
-    /// 第 `frame` 帧槽的 UBO 本体(写相机/灯光数据的入口)。
-    #[must_use]
-    pub fn frame_ubo(&mut self, frame: usize) -> &mut GpuBuffer {
-        &mut self.frame_ubos[frame]
+        SetLayout::new(&BINDLESS_SET, self.layout)
     }
 
     /// fallback 槽位(缺资源时 per-draw 参数的合法缺省——partially bound 的空槽
@@ -584,7 +380,7 @@ impl BindlessTables {
     /// 在结构上不存在；采样器本体由本表按键创建持有（槽内句柄与本槽
     /// 同寿，不随任何一张贴图的卸载悬空）。
     ///
-    /// 句柄寿命契约(与 [`GpuImage::create` 接受裸参数同款纪律]):`view`
+    /// 句柄寿命契约(与 [`GpuImage::create`] 接受裸参数同款纪律):`view`
     /// 须为合法句柄,且其本体寿命覆盖本表——槽位持有的是句柄借用,
     /// 本体先行销毁而槽位仍被采样 = 悬空描述符,由驻留条目/停尸房双账兜住。
     ///
@@ -693,10 +489,7 @@ impl Drop for BindlessTables {
         // teardown_vulkan 的 device_wait_idle 先于一切资源 Drop。
         unsafe {
             self.device.destroy_descriptor_pool(self.pool, None);
-            self.device
-                .destroy_descriptor_set_layout(self.set1_layout, None);
-            self.device
-                .destroy_descriptor_set_layout(self.set0_layout, None);
+            self.device.destroy_descriptor_set_layout(self.layout, None);
             for sampler in self.sampler_bodies.values() {
                 self.device.destroy_sampler(*sampler, None);
             }
@@ -704,24 +497,5 @@ impl Drop for BindlessTables {
                 self.device.destroy_sampler(sampler, None);
             }
         }
-    }
-}
-
-/// 无灯帧的方向光占位（xyz 单位化合法方向，防归一化 NaN；直射/环境/灯色全零）。
-/// descriptors.rs 的 identity 初值与 frame.rs 的无灯分支双点共用此常量。
-pub const PLACEHOLDER_DIR_TO_LIGHT: [f32; 4] = [0.5, 1.0, 0.3, 0.0];
-
-/// identity 初值的帧数据（view_proj = identity、灯光占位、Lambert 模式）：
-/// 表建好到首帧写入之间若被采样（理论不发生，帧循环首帧即重写），画面是
-/// identity 形状而非悬空值。
-fn identity_frame_uniforms() -> FrameUniformsData {
-    FrameUniformsData {
-        view_proj: bevy::math::Mat4::IDENTITY,
-        inv_view_proj: bevy::math::Mat4::IDENTITY,
-        dir_to_light: PLACEHOLDER_DIR_TO_LIGHT,
-        ambient_color: [0.0; 4],
-        light_color: [0.0; 4],
-        mode: FRAME_MODE_LAMBERT,
-        camera_pos: [0.0; 4],
     }
 }

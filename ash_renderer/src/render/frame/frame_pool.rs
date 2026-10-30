@@ -148,7 +148,7 @@ impl FramePool {
         &self.frames[self.current]
     }
 
-    /// 当前帧槽位号（0/1）：set1 每帧 UBO 按它取（`BindlessTables::frame_set/frame_ubo`）。
+    /// 当前帧槽位号（0/1）：set1 每帧 UBO 按它取（`FrameUniforms::frame_set/ubo`）。
     #[must_use]
     pub fn current_index(&self) -> usize {
         self.current

@@ -17,6 +17,7 @@ use crate::{
     common::syntax::ResultTierExt,
     render::{
         AtlasGpu, BindlessTables, ClusterBuildPass, CompositePipeline, Context, CullPass, FramePool,
+        FrameUniforms,
         GBufferTargets, GBufferPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
         BloomPipelines, BloomTargets, InstanceTables, LodPass, MeshPool, OcclusionPass,
         SmaaPipelines, SmaaTargets,
@@ -69,6 +70,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         2,           // 上传槽数
     )?;
     let ui_ring = UiVertexRing::new(&ctx)?;
+    let frame_uniforms = FrameUniforms::new(&ctx.device, ctx.memory_contract())?;
     // 设备不支持时间戳查询时自动停用，不影响渲染
     let gpu_timer = GpuTimer::new(&ctx)?;
 
@@ -114,7 +116,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
     // 渲染用的附件完全一致，否则验证层报 VUID-08914 ----
     let layouts = SetLayouts::new([
         tables.bindless_layout(),
-        tables.frame_layout(),
+        frame_uniforms.set_layout(),
         instance_tables.set_layout(),
         gbuffer.sampled_layout(),
         light_clusters.set_layout(),
@@ -155,6 +157,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         frames,
         uploader,
         ui_ring,
+        frame_uniforms,
         gpu_timer,
         pool,
         image_cache,
@@ -202,7 +205,7 @@ pub(super) fn teardown_vulkan(world: &mut World) {
     // 初始化失败时资源从未插入，这里的移除都是空操作
     InitChain::remove_all(world);
     if had_vulkan {
-        info!("退出拆除完成：排空 → 帧级(帧池/UI 顶点环) → resize 级 → 管线(场景/overlay) → 资产级(池/上传/描述符表/贴图缓存/图集 graveyard) → 进程级");
+        info!("退出拆除完成：排空 → 帧级(帧池/UI 顶点环) → resize 级 → 管线(场景/overlay) → 资产级(池/上传/每帧 UBO/描述符表/贴图缓存/图集 graveyard) → 进程级");
     }
 }
 
@@ -262,6 +265,7 @@ init_chain! {
     InstanceTables => instance_tables,
     Uploader => uploader,
     MeshPool => pool,
+    FrameUniforms => frame_uniforms,
     BindlessTables => tables,
     ImageCache => image_cache,
     AtlasGpu, // 由 overlay 插入，不归创建链

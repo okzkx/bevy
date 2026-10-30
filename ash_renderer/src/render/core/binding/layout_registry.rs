@@ -30,7 +30,8 @@ use crate::render::passes::visibility::hiz::{HIZ_DOWNSAMPLE_PIPELINE, HIZ_OCCLUS
 use crate::render::passes::visibility::indirect::BUILD_INDIRECT_PIPELINE;
 use crate::render::passes::visibility::lod::LOD_SELECT_PIPELINE;
 use crate::render::passes::visibility::occlusion::OCCLUSION_PIPELINE;
-use crate::render::resident::descriptors::{BINDLESS_SET, FRAME_SET};
+use crate::render::resident::descriptors::BINDLESS_SET;
+use crate::render::resident::frame_uniforms::FRAME_SET;
 use crate::render::resident::instance_table::INSTANCE_SET;
 
 /// 宿主建的全部管线。

@@ -28,7 +28,7 @@ use ash::ext::debug_utils;
 use ash::vk;
 use ash::{Device, Entry};
 use ash_renderer::render::{
-    sampler_key, BindlessTables, BufferRole, GpuBuffer, GpuImage, ImageSpec, MemoryContract,
+    sampler_key, BindlessTables, BufferRole, FrameUniforms, GpuBuffer, GpuImage, ImageSpec, MemoryContract,
     SamplerKey, StagingImageCopy, UploadBatch, Uploader, TABLE_CAPACITY,
 };
 use bevy::image::{ImageFilterMode, ImageSamplerDescriptor};
@@ -401,6 +401,7 @@ fn run_sampling(
         .map(|c| u32::from_le_bytes(*c))
         .collect();
 
+    let frame_uniforms = FrameUniforms::new(device, contract).expect("生产每帧 UBO");
     // 探针专用 I/O：set2 = storage 索引(读) + 输出(写)；与生产表无关
     let set2_layout = unsafe {
         device.create_descriptor_set_layout(
@@ -481,7 +482,7 @@ fn run_sampling(
         );
     }
 
-    // pipeline layout：生产 set0/set1（表内同源布局）+ 探针 set2 + push 96B
+    // pipeline layout：生产 set0/set1（各自表内同源布局）+ 探针 set2 + push 96B
     let push_ranges = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::COMPUTE)
         .offset(0)
@@ -489,7 +490,7 @@ fn run_sampling(
     let pipeline_layout = unsafe {
         device.create_pipeline_layout(
             &vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(&[tables.bindless_layout().raw(), tables.frame_layout().raw(), set2_layout])
+                .set_layouts(&[tables.bindless_layout().raw(), frame_uniforms.set_layout().raw(), set2_layout])
                 .push_constant_ranges(&push_ranges),
             None,
         )
@@ -554,7 +555,7 @@ fn run_sampling(
                 vk::PipelineBindPoint::COMPUTE,
                 pipeline_layout,
                 0,
-                &[tables.resident_set().raw(), tables.frame_set(0).raw(), set2],
+                &[tables.resident_set().raw(), frame_uniforms.frame_set(0).raw(), set2],
                 &[],
             );
             device.cmd_push_constants(

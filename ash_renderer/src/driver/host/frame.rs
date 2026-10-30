@@ -49,7 +49,7 @@ use crate::{
     render::{
         conservative_world_aabb, frustum_planes, pack_frame_uniforms, AcquireOutcome,
         BindlessTables, Context, CullDiagnostics, CullDraw, CullPass, CullSettings, FrameDraw,
-        FramePool, FrameSample, FrameUniformsData, GpuBuffer, GBufferPipeline, GpuTimer,
+        FramePool, FrameSample, FrameUniforms, FrameUniformsData, GpuBuffer, GBufferPipeline, GpuTimer,
         HizPyramid, ImageCache, IndirectDraw, IndirectPass, IndirectStats, InstanceTables,
         LOD_LEVEL_SIZE, LodDiagnostics, LodDraw, LodPass, LodSettings, MAX_LOD_LEVELS, MeshPool,
         OcclusionDiagnostics, OcclusionDraw, OcclusionFallback, OcclusionPass,
@@ -195,6 +195,7 @@ pub(crate) struct FrameCore<'w, 's> {
     swapchain: ResMut<'w, Swapchain>,
     frames: ResMut<'w, FramePool>,
     tables: ResMut<'w, BindlessTables>,
+    frame_uniforms: ResMut<'w, FrameUniforms>,
     resized: MessageReader<'w, 's, WindowResized>,
     gbuffer_pipeline: Res<'w, GBufferPipeline>,
     /// overlay 管线：UI 半边绑定用（init 链与场景管线同批创建）。
@@ -470,7 +471,7 @@ pub(crate) fn draw_frame(
         ledger.is_empty(),
         logs,
     );
-    write_frame_ubo(&mut core.tables, slot, &view, &light, render_mode)?;
+    write_frame_ubo(&mut core.frame_uniforms, slot, &view, &light, render_mode)?;
     let scene_aabb = scene_world_aabb(ledger, &scene.pool);
     write_shadow_ubo(shadow, slot, &view, &light, scene_aabb)?;
     write_post_ubos(post, slot)?;
@@ -576,7 +577,7 @@ pub(crate) fn draw_frame(
     let frame_draw = FrameDraw {
         pipeline: core.gbuffer_pipeline.rec(),
         set0: core.tables.resident_set(),
-        set1: core.tables.frame_set(slot),
+        set1: core.frame_uniforms.frame_set(slot),
         set2: instances.frame_set2(slot),
         vertex_buffer: scene.pool.vertex_buffer(),
         index_buffer: scene.pool.index_buffer(),
@@ -839,7 +840,7 @@ impl FrameLight {
                     [r * light.illuminance, g * light.illuminance, b * light.illuminance, a],
                 )
             }
-            // 无灯：直射项归零，方向留合法占位（共享常量见 descriptors.rs）
+            // 无灯：直射项归零，方向留合法占位（共享常量见 frame_uniforms.rs）
             None => (crate::render::PLACEHOLDER_DIR_TO_LIGHT, [0.0; 4]),
         };
         if light_count != 1 && !ledger_empty {
@@ -877,14 +878,14 @@ impl FrameLight {
 
 /// 本帧槽主 UBO：相机矩阵 + 灯光 + 材质模式 + 相机世界位置（光照累积 V 向量）。
 fn write_frame_ubo(
-    tables: &mut BindlessTables,
+    frame_uniforms: &mut FrameUniforms,
     slot: usize,
     view: &FrameView,
     light: &FrameLight,
     render_mode: RenderMode,
 ) -> Result<(), BevyError> {
-    tables
-        .frame_ubo(slot)
+    frame_uniforms
+        .ubo(slot)
         .write(
             0,
             &pack_frame_uniforms(&FrameUniformsData {

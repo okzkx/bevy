@@ -4,7 +4,7 @@
 //! | 目录 | 内容 |
 //! |---|---|
 //! | `core` | `device`：context、swapchain、内存与 buffer、诊断回读；`target`：颜色/深度附件；`binding`：set 布局声明、shader ABI 表、管线布局配方；`pipeline`：图形/compute/全屏管线骨架；`record`：绑定、屏障、dispatch、全屏 pass 的录制助手 |
-//! | `resident` | 常驻 GPU 数据：mesh 大池、贴图缓存、上传器、bindless 描述符表（含每帧 UBO）、实例表、光源表 |
+//! | `resident` | 常驻 GPU 数据：mesh 大池、贴图缓存、上传器、bindless 描述符表、每帧 UBO、实例表、光源表 |
 //! | `passes` | 渲染功能，一个功能一个模块：visibility（剔除/Hi-Z/遮挡/LOD/indirect）、gbuffer、shadow、lighting、transparent、post、overlay |
 //! | `frame` | 帧槽与同步、整帧录制编排、帧率同步设置、着色调试模式 |
 //! | `stats` | GPU 计时、帧样本账、监控历史、egui pass 计时 |
@@ -42,12 +42,13 @@ pub use passes::visibility::occlusion::{
     aabb_screen_rect, OcclusionDiagnostics, OcclusionDraw, OcclusionFallback, OcclusionPass,
     OcclusionSettings,
 };
-pub use resident::descriptors::{
-    pack_frame_uniforms, BindlessTables, FrameUniformsData, TABLE_CAPACITY,
-    PLACEHOLDER_DIR_TO_LIGHT,
+pub use resident::descriptors::{BindlessTables, TABLE_CAPACITY};
+pub(crate) use resident::descriptors::SlotBinding;
+pub use resident::frame_uniforms::{
+    pack_frame_uniforms, FrameUniforms, FrameUniformsData, PLACEHOLDER_DIR_TO_LIGHT,
 };
-pub(crate) use resident::descriptors::{
-    SlotBinding, FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC,
+pub(crate) use resident::frame_uniforms::{
+    FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC,
     FRAME_MODE_NORMAL, FRAME_MODE_POSITION, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS,
     FRAME_MODE_UNLIT,
 };
