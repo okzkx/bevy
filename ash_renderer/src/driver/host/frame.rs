@@ -376,6 +376,7 @@ pub(crate) fn draw_frame(
         Err(VulkanError::SwapchainOutOfDate) => {
             // 本帧作废（没拿到图）。重建失败让路，下帧 acquire 再过时就地重试；重建后
             // 置 pending，帧首按新 extent 重建其余尺寸相关资源
+            core.swapchain.mark_out_of_date();
             core.swapchain.rebuild(&core.ctx).or_warn("acquire 过时后重建失败")?;
             gate.pending = true;
             return Ok(());
@@ -602,6 +603,7 @@ pub(crate) fn draw_frame(
     ) {
         Ok(_) => None,
         Err(VulkanError::SwapchainOutOfDate) => {
+            core.swapchain.mark_out_of_date();
             gate.pending = true;
             None
         }
