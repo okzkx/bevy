@@ -71,6 +71,8 @@ handler 能力上限：**可独占 `&mut World`**——内置的 `process_remote
 
 细节：方法名任意字符串（内置点分风格，自定如 `ash_renderer/xxx`）；重名静默替换旧 handler；未知方法 `-32601`；`with_method_render` 注册进渲染子世界注册表——宿主无 RenderApp，用不上。
 
+**错误路径是两套机制，勿混（3.12 §4.1 实测收账）**："system 返回 Result 须 `Result<T, BevyError>` 否则 Err 走错误处理器静默吞"这条内存钉说的是**调度内系统**（Update 等走错误处理器那一层）；BRP handler 不是——它经 `world.run_system_with(id, params)`（lib.rs:1705）运行，返回的 `Ok(result)` 直接就是 handler 的 `BrpResult`，`Err(BrpError)` **原样 force_send 给客户端、原码穿透**（负例实抓 -23401 原码回传为证）。即：handler 的错误不进调度错误处理器，写 `BrpError` 直接当响应协议用。
+
 ## 6. Web Console 落点（未开工，先记结论）
 
 1. **BRP 就是现成后端**：网页 `fetch` POST JSON-RPC 即可读写 ECS，不用自建任何服务器。

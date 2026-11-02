@@ -4,6 +4,8 @@
 
 出处锚点：本地检出 `F:\okzkx\filament` @ `373190d49`（rc/1.78.1-cut 开发线，2026-10-22 登记，与 8.2 BRDF 参考篇同一检出）。本篇产出于 2026-10-23，起因 = Sponza 同机位 unlit（饱和）与 shaded（发灰）对照实测后，用户拍板"还原 Filament"。
 
+**状态追记（2026-11-02）**：8.6 段已按本篇施工收官——`present_tonemap.wgsl` 已换完整版 aces::ACES 十步管线（Narkowicz 拟合降级为 curve=0 对照项保留），亮度增益位外露（1.667 = ACES_LEGACY 观感），曝光锚点重校为 `EXPOSURE = 0.00016`（现挂 `shaders/common/brdf.wgsl`）。下节"现状定位"保留的是 8.6 开工前的取证基线，不再描述现行链。
+
 ## 一句话结论
 
 Filament 保住颜色靠三层：**①曲线本身**（完整版 ACES 拟合，AP0/AP1 色域内工作 + glow 模块 + 红色修正 + 受控两级去饱和——viewer 默认的 ACES_LEGACY 也走这套，只是加 1.667 亮度增益）、**②EVILS 亮度缩放**（可选开关：只对亮度做 tone map，色度比例原样保留）、**③整条 color grading 烘 32³ 3D LUT**（白平衡/CDL/对比度/vibrance/saturation/曲线全链，saturate 与 OETF 只在最后）。本渲染器现行链只有裸 Narkowicz 逐通道拟合 + 曝光钉在其去饱和最猛的肩部，是"发灰"观感的主源。
@@ -56,6 +58,7 @@ Filament 把整条 grading 预烘焙进 32³ 3D LUT（QualityLevel 控维度）�
 - viewer 默认 `exposure = 0.0`（EV 刻度，2^EV 乘在 grading 链最前，Settings.h:203）——Filament 不用曝光救曲线，场景标定靠光度单位（方向光 lux + IBL）。
 - 对比度锚 `MIDDLE_GRAY_ACEScct`（`ColorGrading.cpp:838` contrastOffset 基准）——ACEScct 域中灰，非我们线性域 0.18 直搬。
 - 我们侧对应物：`EXPOSURE = 0.00032` 常量 + 20000 lx 满日照 + 800 lx ambient。8.6 需重校曝光锚点（典型受光面落线性段 ~0.5–0.8 而非肩部 1.7），并把亮度增益位与 Hill 拟合的量纲分开。
+- **锚点与曲线选型是两个独立旋钮，锚点随曲线口径重标（8.6.3 实测钉）**：完整 ACES Hill 拟合线性段口径下 `EXPOSURE = 0.00016`——直射中灰 ≈0.25 HDR、白墙 ≈0.85 落线性段上沿，肩部压缩留给真高光；旧锚 0.00032 口径下白墙 ≈1.7 深入肩部（斜率 ~0.12），是受光面去饱和主源。曝光量纲牵动链：8.2.4 的 6.3e-4（预曝光口径）→ 8.4.1 的 0.00032（Narkowicz 肩部口径）→ 8.6.3 的 0.00016——每个锚点只对当时曲线口径成立，复跑双渲染器对照须按新锚点重标。
 
 ## 六、PBR_NEUTRAL 形状与决策
 
@@ -77,3 +80,10 @@ Khronos PBR Neutral（`ToneMapper.cpp:446-464`，出处 modelviewer.dev tone-map
 ## 八、发灰问题归因（8.6 判定线的现象基线）
 
 三因子按贡献排序：①曝光锚点把受光面送进曲线肩部（去饱和主源）；②ACES 家族曲线本身的高光压缩（换曲线可显著缓解但不归零）；③暗部只剩灰 ambient 无色相、中间调被 filmic 压缩（归步骤 9）。8.6 消①②，③留步骤 9——判定线须包含"同机位 unlit vs shading 饱和度差"与"高光段饱和色读图"两类对照，防只修曲线不修锚点。
+
+## 九、gltf_viewer 对照配方钉子（复用必读，出处 8.2.4 §1.4 与 8.6.5）
+
+- `shutterSpeed` 单位是 **1/秒**（给 0.1935 = 实际曝光 5.17 s，过曝白屏）；`toneMapping` 在 `view.colorGrading` 下且取**字符串字面量**（`"LINEAR"` 非 0）；light `type` 大写（`"SUN"`）；默认 IBL `assets/ibl/lightroom_14b` 在 `--ibl` 空串时兜底加载，须给无效路径压掉。
+- **加载有效 IBL 时，viewer 用 IBL 球谐估计覆盖设置里的太阳**——均匀 IBL 下太阳近乎消失；要太阳须给无效 `--ibl` 路径。
+- `--screenshot` 须配 `--frames`：截图在 N 帧后落盘，glTF 异步加载未完会截到空场（40 帧不够，300 帧稳）。
+- 机位/曝光配方：`-s`（actual size，Sponza 节点自带 0.008 缩放即与宿主同米制）；`camera.enabled=true` + center/lookAt + focalLength 28.97（≈垂直 45°）；曝光 aperture 16 / ISO 100 / shutterSpeed 20.345 = 0.00016；`--window-size 1600x900 --frames 600 --screenshot` 出图不含 UI。
