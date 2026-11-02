@@ -22,7 +22,7 @@
 | 4 | ✅ 已读 | `render/core/record/barrier.rs` | ~100 | 不持有资源 | 图像布局屏障助手。体量最小杠杆最大：吃透"谁等谁、谁对谁可见"的屏障语义，后面读任何 pass 都能顺手校验屏障对不对。目前帧录制（`frame/frame_draw.rs`）和全屏 pass 录制（`record/fullscreen.rs`）在用它；uploader、Hi-Z、回读仍直接调 `cmd_pipeline_barrier`，compute 侧另有 `Handoff` 助手（`record/compute.rs`），读到时用同一套语义校验。 |
 | 5 | ⏭ 下一站 | 5a `core/device/memory/`、`core/device/transfer.rs` + `resident/` 的 pool、mesh_convert、images；5b `core/binding/` 的 set_layout、descriptor_writer + `resident/` 的 slot_allocator、bindless_texture_table、frame_uniform_table、instance_table、light_table | ~5320（5a ~2850 / 5b ~2460） | device transfer + ③ GPU 表 + ④ 常驻池/缓存 | **常驻资源主线**：表、池和缓存分别归③④；`FrameUniformTable` 职责归③，但在帧级初始化阶段创建。上半讲写入显存，下半讲 shader 如何查表取数；这是 bindless 的心脏、学习目标第一核心。|
 | 6 | 待读 | `core/binding/` 的 shader_abi、pipeline_layout + `build.rs` ABI 生成段 + `core/pipeline/compute.rs` + `core/record/compute.rs` + `passes/visibility/`（cull、hiz、occlusion、lod、indirect）+ `core/device/readback.rs` | ~2790 | ⑥ compute（+ ⑤ HizPyramid） | **GPU-driven 核心**，学习目标第二核心。先读"管线配方 → 与 shader ABI 对账 → 组装"这把总钥匙和 compute 骨架两半，再按录制顺序走可见性链。 |
-| 7 | 待读 | `core/` 的 pipeline（graphics、fullscreen）、record（graphics、fullscreen）、target、`binding/storage_sets.rs` + `passes/`（gbuffer、shadow、lighting、transparent、post、overlay）+ 收尾 `binding/layout_registry.rs` | ~5340 | ⑤ + ⑥ 图形/全屏 | "装备库"：先读图形/全屏的标准件，再按功能读 pass，功能之间按想先看的效果挑顺序；最后用契约登记表把 22 条管线、13 份 set 声明对一遍总账。 |
+| 7 | 待读 | `core/` 的 pipeline（graphics、fullscreen）、record（graphics、fullscreen）、target、`binding/storage_sets.rs` + `passes/`（gbuffer、shadow、lighting、transparent、post、overlay）+ 收尾 `render/layout_registry.rs` | ~5340 | ⑤ + ⑥ 图形/全屏 | "装备库"：先读图形/全屏的标准件，再按功能读 pass，功能之间按想先看的效果挑顺序；最后用契约登记表把 22 条管线、13 份 set 声明对一遍总账。 |
 | 8 | 待读 | `scene/content/` + `scene/mechanism/`（ledger、residency、collect_report 优先） | ~5770（优先三件 ~1810） | CPU 侧账本（驱动 ③ GPU 表与 ④ 常驻池/缓存增删） | Bevy 侧账本：一份资产两份真身（CPU 容器 + GPU 显存）、两层索引账（Ledger 行按实体粒度 / residency 按资产粒度）。大世界流送第三核心。 |
 | 9 | 待读 | `driver/upload.rs` + `driver/host/drawlist.rs` + `driver/host/frame.rs`（draw_frame）+ `frame_sync.rs` + `render/frame/`（frame_pool、frame_draw 的 record_frame、render_mode） | ~4000 | 六类全部（消费方） | 终点验收考场：按 `Last` 调度的执行顺序读——上传编排 → DrawList 组装与环写入 → draw_frame → record_frame。前八站读完后，这里的每一行都能对上前面的某个标准件——读它就是全库复盘。 |
 
@@ -71,7 +71,7 @@
 1. 图形/全屏标准件：`core/pipeline/graphics.rs`（`PipelineRef`）、`core/pipeline/fullscreen.rs`（全屏管线骨架）、`core/record/graphics.rs`（绑定、顶点/索引、viewport/scissor）、`core/record/fullscreen.rs`（全屏 pass 录制，入口出口用第 4 站的 `image_barrier`）、`core/target/`（color、depth 目标）。
 2. `core/binding/storage_sets.rs`：只有 storage buffer 的"N 个 binding + 每帧槽一集"，光源分簇和透明层共用。
 3. 按功能读 `passes/`：gbuffer（目标 + 写入管线）、shadow（`cascades` 级联矩阵 + `shadow_build` + `shadow_map` 深度图）、lighting（`cluster` 的 `LightClusters`/`ClusterBuildPass` + `composite_pipeline`）、`transparent.rs`（`TransparentTargets` + collect/sort/gather + 前向管线）、post（bloom、present_tonemap_pipeline、smaa）、overlay（egui 的 GPU 侧：图集、管线、UI 顶点环）。功能之间顺序自选。
-4. 收尾：`core/binding/layout_registry.rs` 的 `ALL_PIPELINES` 与全部 set 声明，配合 `layout_contract_tests.rs` 看对账与负例。
+4. 收尾：`render/layout_registry.rs` 的 `ALL_PIPELINES` 与全部 set 声明，配合 `layout_contract_tests.rs` 看对账与负例。
 
 校验要点：附件格式现在写在配方里，与渲染目标、swapchain 的 `SWAPCHAIN_COLOR_FORMAT` 是否一致；resize 时哪些目标和集重建（光源分簇随 resize 重建，透明命令链不重建）；cluster 与透明两套 set 唯一的交叉——`transparent_collect` 读光源分簇集 b0 的 `view_proj`。
 
