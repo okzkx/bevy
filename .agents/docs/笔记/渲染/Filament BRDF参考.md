@@ -1,6 +1,6 @@
 # Filament 源码参考：标准模型 BRDF 与多光源（8.2 对照基准）
 
-> 对应 [8.2 段 README 参考底座](../../开发步骤/8-完整延迟渲染管线/8.2-FilamentBRDF与多光源/README.md)、[Unity PBR 调研](Unity%20PBR%20调研：材质模型、BRDF%20与%20IBL.md)。版本钉：本地检出 `F:\okzkx\filament`，HEAD `373190d49`（`git describe` = rc/1.78.1-cut-31-g373190d49，移动开发线，函数行号会漂移，函数名不会）。全部引用逐行核对于 2026-10-22。
+> 对应 [8.2 段 README 参考底座](../../开发步骤/8-完整延迟渲染管线/8.2-FilamentBRDF与多光源/README.md)、[Unity PBR 调研](Unity%20PBR%20调研.md)。版本钉：本地检出 `F:\okzkx\filament`，HEAD `373190d49`（`git describe` = rc/1.78.1-cut-31-g373190d49，移动开发线，函数行号会漂移，函数名不会）。全部引用逐行核对于 2026-10-22。
 
 ## 0. 判定线
 
@@ -52,6 +52,7 @@ pixel.f0                  = computeF0(baseColor, metallic, reflectance);
 - **换算不可省**（surface_shading_lit.fs:80）：`computeF0` 的第三参是已换算的介电体 F0，不是材质 reflectance 原值。8.2 照抄时漏了这一行，F0 成了 0.5，受光面整片叠白高光发灰，8.6.5 修复。
 
 - roughness 纹理采样后同样进 perceptual 域（`material.roughness` ← roughnessFactor/roughness 贴图）。
+- **normal map 的 TBN 资产现实**：glTF 不保证带 TANGENT 顶点属性、bevy loader 也不自动生成——逐顶点切线不是全资产可用路线。8.2 取屏幕空间派生余切框架（Schüler 2015，`dpdx/dpdy` 现算，见 [8.2.1 施工记录](../../开发步骤/8-完整延迟渲染管线/8.2-FilamentBRDF与多光源/8.2.1-施工记录：材质参数面扩容.md)），配套两钉：导数内建要求 uniform 控制流（TBN 计算须在分支外）、uv 导数零区（平铺 UV 整数缝）退化守卫回落几何法线。
 - NoV 全程用 clamp 后的 `shading_NoV`（≥1e-4），防止掠射除零。
 
 ## 3. 直接光 BRDF 逐项（对照函数清单）

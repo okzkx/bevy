@@ -29,4 +29,4 @@
 - [施工计划：还原Filament完整ACES与曝光锚点重校](施工计划：还原Filament完整ACES与曝光锚点重校.md)——范围边界、开工拍板、任务拆解与判定线。
 - [施工记录：还原Filament完整ACES与曝光重校](8.6-施工记录：还原Filament完整ACES与曝光重校.md)——逐任务实录、四态 A/B 实测数据与判定线证据。
 - [功能流程导读：色调映射三态曲线通道](8.6-功能流程导读：色调映射三态曲线通道.md)——从 BRP 请求到 swapchain 写出的数据流走读。
-- [Filament 源码参考：色调映射与 Color Grading（8.6 对照基准）](../笔记/渲染/Filament%20源码参考：色调映射与%20Color%20Grading（8.6%20对照基准）.md)——开工前置源码参考篇（十步管线/Hill 常量/EVILS 边界/发灰归因基线）。
+- [Filament 源码参考：色调映射与 Color Grading（8.6 对照基准）](../笔记/渲染/Filament%20色调映射参考.md)——开工前置源码参考篇（十步管线/Hill 常量/EVILS 边界/发灰归因基线）。
