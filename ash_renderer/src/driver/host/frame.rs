@@ -64,51 +64,9 @@ use crate::{
 
 use super::drawlist::{self, DrawabilitySources, ParityDirty};
 
-/// resize 状态（`draw_frame` 的 `Local`，跨帧保持）。
-///
-/// 坑：Windows 最小化即发 `Resized(0,0)`，此后对旧 swapchain 的 `acquire` 无限阻塞，
-/// 而阻塞点在 runner 的 `app.update()` 里——消息泵冻死，任务栏"还原"永远点不到。
-/// 对策：最小化整帧让路，不碰 Vulkan。
-/// 坑：FIFO present mode 下 acquire 在显示队列满/表面失配时会阻塞，拖拽中尤甚；
-/// MAILBOX 下 present 直接替换未上屏帧，acquire 不排队。
-///
-/// 尺寸变化只标 pending、帧首按需重建——acquire 永远落在新 swapchain 上，拖拽中帧循环
-/// 持续流动（宁可渲染卡顿，不要冻结）。
-#[derive(Default)]
-struct ResizeGate {
-    /// 最新一条 resize 消息是 (0,0) = 窗口最小化中
-    minimized: bool,
-    /// 尺寸变了 / 驱动报次优，下个帧首按需重建（多设无害，rebuild 幂等）
-    pending: bool,
-    /// 上次日志报告的最小化状态：进入/退出各报一次，不逐帧刷屏
-    logged_minimized: bool,
-}
+mod resize_gate;
 
-impl ResizeGate {
-    /// 吸收本帧 resize 消息，返回"本帧整帧让路"（最小化中）。
-    ///
-    /// 一次 update 可能积压多条消息（拖拽 125Hz 输入 vs 60fps 帧），逐条刷状态，
-    /// 以最新一条为准。
-    fn yield_minimized(&mut self, resized: &mut MessageReader<WindowResized>) -> bool {
-        for msg in resized.read() {
-            if msg.width == 0.0 || msg.height == 0.0 {
-                self.minimized = true;
-            } else {
-                self.minimized = false;
-                self.pending = true;
-            }
-        }
-        if self.minimized != self.logged_minimized {
-            self.logged_minimized = self.minimized;
-            if self.minimized {
-                info!("窗口最小化：帧循环整帧让路（不碰 swapchain），消息泵保持存活");
-            } else {
-                info!("窗口脱离最小化：恢复渲染");
-            }
-        }
-        self.minimized
-    }
-}
+use self::resize_gate::ResizeGate;
 
 /// 遮挡 fallback 的相机历史（`draw_frame` 的 `Local`，跨帧保持）：跳变判定用
 /// "当前 vs 两帧前"——遮挡读的金字塔正是两帧前的深度。阈值见 occlusion 模块文档，
@@ -337,22 +295,14 @@ pub(crate) fn draw_frame(
         occlusion_gate,
         paint_log,
     } = &mut input;
-    if gate.yield_minimized(&mut core.resized) {
-        return Ok(());
-    }
+    gate.yield_minimized(&mut core.resized)?;
     // pending 全部重建成功才清：失败帧让路或退出，下个帧首原样重试
-    if gate.pending {
-        rebuild_size_dependent(core, &mut occlusion.hiz, post, cluster)?;
-        gate.pending = false;
-    }
+    gate.rebuild_if_pending(|| rebuild_size_dependent(core, &mut occlusion.hiz, post, cluster))?;
 
     // —— 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在提交前一刻）。
-    // 失败 = 设备丢失/内存枯竭类，继续只会撞上未知的 fence 状态
     let frame_wall_ms = core.perf.mark_frame_start();
     let frame_clock = Instant::now();
-    core.frames
-        .wait_for_slot()
-        .or_fatal("帧槽等待/重置失败，渲染链无法继续")?;
+    core.frames.wait_for_slot()?;
     let wait_slot_ms = ms_since(frame_clock);
     let slot = core.frames.current_index();
     // —— GPU 帧计时取回：本槽 fence 已等完，timestamp 可读。读数是本槽上轮（两帧前）
@@ -370,7 +320,7 @@ pub(crate) fn draw_frame(
         Ok(AcquireOutcome::Ready(index)) => index,
         Ok(AcquireOutcome::Suboptimal(index)) => {
             // 拿得到图但尺寸不理想：照常画完这帧，下个帧首重建
-            gate.pending = true;
+            gate.request_rebuild();
             index
         }
         Err(VulkanError::SwapchainOutOfDate) => {
@@ -378,7 +328,7 @@ pub(crate) fn draw_frame(
             // 置 pending，帧首按新 extent 重建其余尺寸相关资源
             core.swapchain.mark_out_of_date();
             core.swapchain.rebuild(&core.ctx).or_warn("acquire 过时后重建失败")?;
-            gate.pending = true;
+            gate.request_rebuild();
             return Ok(());
         }
         Err(e) => return Err(fatal("acquire 失败，渲染链无法继续", e)),
@@ -604,7 +554,7 @@ pub(crate) fn draw_frame(
         Ok(_) => None,
         Err(VulkanError::SwapchainOutOfDate) => {
             core.swapchain.mark_out_of_date();
-            gate.pending = true;
+            gate.request_rebuild();
             None
         }
         Err(e) => Some(e),

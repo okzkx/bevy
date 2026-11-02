@@ -16,9 +16,11 @@
 use std::slice;
 
 use ash::{vk, Device};
+use bevy::ecs::error::BevyError;
 use bevy::log::info;
 
 use crate::common::error::Result;
+use crate::common::syntax::ResultTierExt;
 use crate::render::core::target::depth::DepthTarget;
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
@@ -205,7 +207,15 @@ impl FramePool {
     ///
     /// # Errors
     /// fence 等待或命令缓冲重置失败。
-    pub fn wait_for_slot(&self) -> Result<()> {
+    /// 等本帧槽上一轮提交完成 + 重置命令缓冲（fence 的重置在提交前一刻）。
+    /// 失败 = 设备丢失/内存枯竭类，继续只会撞上未知的 fence 状态——按致命错误冒泡，
+    /// 不得 warn 后继续。
+    pub fn wait_for_slot(&self) -> Result<(), BevyError> {
+        self.wait_fenced()
+            .or_fatal("帧槽等待/重置失败，渲染链无法继续")
+    }
+
+    fn wait_fenced(&self) -> Result<()> {
         let frame = &self.frames[self.current];
         unsafe {
             self.device
