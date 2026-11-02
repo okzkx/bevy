@@ -1,37 +1,31 @@
-//! LOD 读数与开关方法族：BRP 侧的验证通道——`lod_census` 做 GPU 档位 vs
-//! CPU 参照的逐实例对照（选档正确性的直接证据 + 档位分布读数），
-//! `lod_set_enabled`/`lod_set_params` 写开关与判据参数（数据层 A/B 的远程
-//! 驱动，egui checkbox 与此同源）。
+//! LOD 读数与开关方法族：`lod_census` 做 GPU 档位 vs CPU 参照的逐实例对照（选档
+//! 正确性的直接证据 + 档位分布读数），`lod_set_enabled`/`lod_set_params` 写开关
+//! 与判据参数（egui checkbox 与此同源）。
 //!
-//! 红线边界（照 cull 族同款）：三个方法都只读档位/只写开关与判据，**不提供
-//! 任何"按档位改场景"的通道**——诊断读数永远不回灌绘制决策。
+//! 边界：只读档位/只写开关与判据，读数不回灌绘制决策。
 //!
-//! 读数陈旧性与对照前提（照 cull_stats 惯例）：GPU 档位是帧槽直读（本帧槽
-//! 两帧前 compute 的输出），CPU 参照按 handler 时刻的相机/账本现算——对照
-//! 前提 = 相机与变换自标记产生以来未变（测试惯例：set_camera/set_transform
-//! 后等 ≥3 帧再查）。迟滞同源：CPU 参照的 prev 取自同一档位环（GPU 用的
-//! 就是它），公式同 [`lod_hysteresis_level`] 逐位同源——静态场景下对照逐
-//! 实例一致，带内微动不构成 mismatch。
+//! 读数陈旧性与对照前提同 cull_stats：GPU 档位读 `marks_frame` 槽（两帧前 compute
+//! 的输出），CPU 参照按 handler 时刻的相机/账本现算，前提 = 相机与变换未变（静止
+//! ≥3 帧）。CPU 参照的迟滞输入 prev 取自同一档位环（GPU 用的就是它），公式同
+//! [`lod_hysteresis_level`]——静态场景下逐实例一致，带内微动不构成 mismatch。
 
-use bevy::prelude::*;
+use bevy::{prelude::*, remote::BrpResult};
 use serde_json::{json, Value};
 
 use ash_macros::system;
 
 use crate::{
-    common::error::VulkanError,
     scene::{InstanceLedger, LodGroups},
     render::{
         aabb_screen_rect, lod_hysteresis_level, lod_raw_level, InstanceTables, LOD_LEVEL_SIZE,
-        LodDiagnostics, LodSettings, MAX_LOD_LEVELS, MeshPool,
+        LodDiagnostics, LodSettings, MAX_LOD_LEVELS, MeshPool, Swapchain,
     },
 };
 
 use super::{
-    invalid_params,
-    params::{brp_view_proj, clamp_rect_to_screen, parse_params},
-    readback::u32_at,
-    BrpError, BrpResult,
+    params::{invalid_params, parse_enabled, parse_params, res, res_mut},
+    readback::{read_buffer, u32_at},
+    reference::{brp_view_proj, clamp_rect_to_screen},
 };
 
 /// `ash_renderer/lod_census`：LOD 档位对照（只读）。返回开关状态、判据参数、
@@ -39,15 +33,14 @@ use super::{
 /// 清单。
 ///
 /// # Errors
-/// 相机缺席 / 档位环读失败（host-visible 契约被打破，Tier② 级）。
+/// 相机缺席 / 档位环读失败。
 #[system]
 pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    // 相机缺席 = 场景装配问题，报错
     let view_proj = brp_view_proj(world, "投屏参照无法计算")?;
     let (marks_frame, bound, enabled, threshold, hysteresis) = {
         let (diag, settings) = (
-            world.resource::<LodDiagnostics>(),
-            world.resource::<LodSettings>(),
+            res::<LodDiagnostics>(world)?,
+            res::<LodSettings>(world)?,
         );
         (
             diag.marks_frame,
@@ -57,20 +50,19 @@ pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> B
             settings.hysteresis,
         )
     };
-    // —— CPU 参照：账本行 × 驻留局部包围盒 → 世界保守盒投屏（clamp 后最大边
-    //    = 尺寸度量，与 shader 同式）→ 自然档位 + 迟滞裁决（prev = GPU 档位
-    //    环本槽值，同源）。行先收拢（账本/pool 只读借用不与档位环写读并存）。
-    let pool = world.resource::<MeshPool>();
-    let lod_groups = world.resource::<LodGroups>();
+    // CPU 参照：账本行 × 驻留局部包围盒 → 世界保守盒投屏（钳进屏后取最大边为尺寸，
+    // 与 shader 同式）→ 自然档位。行先收拢（账本/pool 只读借用不与档位环可变借用并存）
+    let pool = res::<MeshPool>(world)?;
+    let lod_groups = res::<LodGroups>(world)?;
     let swapchain_extent = {
-        let swapchain = world.resource::<crate::render::Swapchain>();
+        let swapchain = res::<Swapchain>(world)?;
         [
             swapchain.extent.width as f32,
             swapchain.extent.height as f32,
         ]
     };
     let mut reference: Vec<(Entity, u32, u32, f32, bool)> = Vec::new();
-    for (entity, row) in world.resource::<InstanceLedger>().rows() {
+    for (entity, row) in res::<InstanceLedger>(world)?.rows() {
         let Some(slot) = row.instance_slot else {
             continue;
         };
@@ -85,7 +77,7 @@ pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> B
             mesh_slot.local_aabb.1,
             swapchain_extent,
         ) else {
-            // 角点投影 w≤0（相机平面背后）——shader 同款恒最细档
+            // 角点投影 w≤0（相机平面背后）：与 shader 一致恒判最细档
             reference.push((entity, slot, 0, 0.0, in_group));
             continue;
         };
@@ -97,14 +89,13 @@ pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> B
         reference.push((entity, slot, raw, size, in_group));
     }
 
-    // —— GPU 档位环：marks_frame 槽直读（fence 纪律内，handler 不等帧）
-    let frame = marks_frame;
-    let mut gpu_bytes = vec![0u8; level_bytes_for_bound(bound)];
-    world
-        .resource_mut::<InstanceTables>()
-        .lod_level_ring(frame)
-        .read(0, &mut gpu_bytes)
-        .map_err(|e: VulkanError| BrpError::internal(format!("档位环读失败: {e}")))?;
+    // GPU 档位环：marks_frame 槽直读（handler 不等帧）；环按槽直址，只读 dispatch
+    // 上界 bound 覆盖的段
+    let gpu_bytes = read_buffer(
+        res_mut::<InstanceTables>(world)?.lod_level_ring(marks_frame),
+        bound as usize * LOD_LEVEL_SIZE as usize,
+        "档位环读失败",
+    )?;
 
     let mut mismatches = Vec::new();
     let mut counts = [0u32; MAX_LOD_LEVELS as usize];
@@ -112,9 +103,7 @@ pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> B
     for (entity, slot, raw, size, in_group) in reference {
         let gpu = u32_at(&gpu_bytes, slot as usize * LOD_LEVEL_SIZE as usize)?.min(MAX_LOD_LEVELS - 1);
         counts[gpu as usize] += 1;
-        // CPU 参照 = 同一公式 + 同一迟滞状态（prev = GPU 档位环本槽值——
-        // 与 GPU 下一次 dispatch 将读的迟滞输入同一来源；静止场景两者
-        // 收敛一致，即对照口径）
+        // 迟滞裁决：prev = GPU 档位环本槽值，与 GPU 下一次 dispatch 读的迟滞输入同源
         let cpu = lod_hysteresis_level(raw, gpu, size, threshold, hysteresis, MAX_LOD_LEVELS);
         if gpu != cpu {
             mismatches.push(json!({
@@ -133,7 +122,7 @@ pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> B
         "threshold_px": threshold,
         "hysteresis": hysteresis,
         "bound": bound,
-        "marks_frame": frame,
+        "marks_frame": marks_frame,
         "staleness_note": "GPU 档位 = marks_frame 槽两帧前 compute 输出；对照前提 = 相机与变换自标记产生以来未变（静止 ≥3 帧）",
         "level_counts": counts,
         "rows_compared": rows.len(),
@@ -142,29 +131,16 @@ pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> B
     }))
 }
 
-/// 档位环读数容量（按 dispatch 上界读 vs 全容量读的折中：诊断读数只关心
-/// 在场行，但环按容量直址——读 bound 覆盖段即可，`bound` 取自诊断快照）。
-fn level_bytes_for_bound(bound: u32) -> usize {
-    bound as usize * LOD_LEVEL_SIZE as usize
-}
-
-/// `ash_renderer/lod_set_enabled` 参数。
-#[derive(serde::Deserialize)]
-struct SetEnabledParams {
-    enabled: bool,
-}
-
 /// `ash_renderer/lod_set_enabled`：写 LOD 开关（true = 选档 dispatch，
-/// false = host 填档位环 0 最细档——数据层 A/B 的远程驱动，egui checkbox
-/// 与此同源）。返回写入后的状态。
+/// false = host 把档位环填成 0 最细档）。返回写入后的状态。
 ///
 /// # Errors
 /// 参数缺失/类型错。
 #[system]
 pub(crate) fn lod_set_enabled(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let p: SetEnabledParams = parse_params(params, "params 缺失：需要 enabled")?;
-    world.resource_mut::<LodSettings>().enabled = p.enabled;
-    Ok(json!({ "enabled": p.enabled }))
+    let enabled = parse_enabled(params)?;
+    res_mut::<LodSettings>(world)?.enabled = enabled;
+    Ok(json!({ "enabled": enabled }))
 }
 
 /// `ash_renderer/lod_set_params` 参数：逐项可选（缺省 = 不动）。
@@ -176,8 +152,8 @@ struct SetParams {
     hysteresis: Option<f32>,
 }
 
-/// `ash_renderer/lod_set_params`：写判据参数（阈值/迟滞，随 96B push 每帧进
-/// compute——A/B 与灵敏度扫描的远程驱动）。返回写入后的状态。
+/// `ash_renderer/lod_set_params`：写判据参数（阈值/迟滞，随 push 常量每帧送进
+/// compute，供 A/B 与灵敏度扫描）。返回写入后的状态。
 ///
 /// # Errors
 /// 参数缺失/类型错/数值非法（threshold ≤ 0 或 hysteresis 出 [0,1)）。
@@ -199,7 +175,7 @@ pub(crate) fn lod_set_params(In(params): In<Option<Value>>, world: &mut World) -
             "hysteresis {hysteresis} 非法（须为有限值且 ∈ [0,1)）"
         )));
     }
-    let mut settings = world.resource_mut::<LodSettings>();
+    let mut settings = res_mut::<LodSettings>(world)?;
     if let Some(threshold) = p.threshold_px {
         settings.threshold_px = threshold;
     }

@@ -1,14 +1,13 @@
-//! 驻留管理器读数与设置方法族：BRP 侧的验证通道——`residency_stats` 做
-//! 预算/实占/请求/淘汰的聚合读数加逐资产清单（驻留态/距离/引用行数），
-//! `residency_set` 写开关/预算/请求半径（数据层 A/B 的远程驱动）。
+//! 驻留管理器读数与设置方法族：`residency_stats` 做预算/实占/请求/淘汰的聚合
+//! 读数加逐资产清单（驻留态/距离/引用行数），`residency_set` 写开关/预算/请求
+//! 半径。只读驻留账/只写设置，读数不回灌绘制决策。
 //!
-//! 红线边界（照 cull/lod 族同款）：两个方法都只读驻留账/只写设置，**不提供
-//! 任何"按驻留账改场景"的通道**——诊断读数永远不回灌绘制决策。
-//!
-//! 读数时点：residency_tick 在 Last（先于上传），BRP handler 在 RemoteLast
-//! ——读数 = 本帧 tick 之后的快照（比 GPU 标记新鲜，无 2 帧滞后问题）。
+//! 读数时点：residency_tick 在 Last（先于上传），handler 在 RemoteLast——读数 =
+//! 本帧 tick 之后的快照（没有 GPU 标记那种两帧滞后）。
 
-use bevy::prelude::*;
+use std::collections::HashMap;
+
+use bevy::{prelude::*, remote::BrpResult};
 use serde_json::{json, Value};
 
 use ash_macros::system;
@@ -19,16 +18,15 @@ use crate::{
 };
 
 use super::{
-    invalid_params,
-    params::{no_camera, parse_params},
-    BrpResult,
+    params::{invalid_params, parse_params, res, res_mut},
+    reference::no_camera,
 };
 
 /// `ash_renderer/residency_stats`：驻留读数（只读）。聚合段 = 预算/实占/
 /// 请求/冷却/淘汰累计；资产段 = 逐 mesh 身份的驻留态与最近引用距离。
 ///
 /// # Errors
-/// 驻留资源缺席（禁渲染宿主）。
+/// 相机缺席（距离读数无法计算）。
 #[system]
 pub(crate) fn residency_stats(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let cam_pos = world
@@ -36,28 +34,24 @@ pub(crate) fn residency_stats(In(_params): In<Option<Value>>, world: &mut World)
         .single(world)
         .map_err(|_| no_camera("距离读数无法计算"))?
         .translation();
-    let stats = world.resource::<ResidencyStats>().clone();
-    let settings = world.resource::<ResidencySettings>();
-    let pool = world.resource::<MeshPool>();
-    let ledger = world.resource::<InstanceLedger>();
-    // 逐身份聚合：驻留态 + 最近引用行距离 + 引用行数 + 待失效标记
-    let mut assets: Vec<(AssetId<Mesh>, f32, usize, bool)> = Vec::new();
-    {
-        let mut seen = std::collections::HashMap::new();
-        for row in ledger.rows().map(|(_, r)| r) {
-            let id = row.mesh.id();
-            let dist = (row.model.w_axis.truncate() - cam_pos).length();
-            let e = seen.entry(id).or_insert((f32::INFINITY, 0usize));
-            e.0 = e.0.min(dist);
-            e.1 += 1;
-        }
-        assets.extend(seen.into_iter().map(|(id, (dist, rows))| (id, dist, rows, false)));
+    let stats = res::<ResidencyStats>(world)?;
+    let settings = res::<ResidencySettings>(world)?;
+    let pool = res::<MeshPool>(world)?;
+    let invalidations = res::<AssetInvalidations>(world)?;
+    // 逐 mesh 身份聚合：最近引用行距离 + 引用行数，按距离升序
+    let mut seen: HashMap<AssetId<Mesh>, (f32, usize)> = HashMap::new();
+    for (_, row) in res::<InstanceLedger>(world)?.rows() {
+        let dist = (row.model.w_axis.truncate() - cam_pos).length();
+        let e = seen.entry(row.mesh.id()).or_insert((f32::INFINITY, 0));
+        e.0 = e.0.min(dist);
+        e.1 += 1;
     }
+    let mut assets: Vec<(AssetId<Mesh>, f32, usize)> =
+        seen.into_iter().map(|(id, (dist, refs))| (id, dist, refs)).collect();
     assets.sort_by(|a, b| a.1.total_cmp(&b.1));
-    let invalidations = world.resource::<AssetInvalidations>();
     let rows: Vec<Value> = assets
         .into_iter()
-        .map(|(id, dist, refs, _)| {
+        .map(|(id, dist, refs)| {
             let resident = pool.resident(id).is_some();
             json!({
                 "mesh": id.to_string(),
@@ -122,11 +116,11 @@ struct ResidencySetParams {
     floor_anchor: Option<bool>,
 }
 
-/// `ash_renderer/residency_set`：写驻留管理器设置（开关/预算/请求半径/
-/// 冷却窗——数据层 A/B 的远程驱动）。返回写入后的状态。
+/// `ash_renderer/residency_set`：写驻留管理器设置（开关/预算/请求半径/冷却窗/
+/// 细粒度/保底锚）。返回写入后的状态。
 ///
 /// # Errors
-/// 参数缺失/类型错/数值非法（预算字节超 u32 位宽的显存口径不截断、半径负值）。
+/// 参数缺失/类型错/request_radius 非有限正数。
 #[system]
 pub(crate) fn residency_set(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: ResidencySetParams = parse_params(params, "params 缺失：需要对象（各项可选）")?;
@@ -135,7 +129,7 @@ pub(crate) fn residency_set(In(params): In<Option<Value>>, world: &mut World) ->
     {
         return Err(invalid_params(format!("request_radius {radius} 非法（须为有限正数）")));
     }
-    let mut settings = world.resource_mut::<ResidencySettings>();
+    let mut settings = res_mut::<ResidencySettings>(world)?;
     if let Some(enabled) = p.enabled {
         settings.enabled = enabled;
     }

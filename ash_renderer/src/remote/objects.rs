@@ -1,30 +1,27 @@
-//! BRP 对象生命周期方法族：测试驱动与 AI 通道的实体级变更入口。
+//! BRP 对象生命周期方法族：实体级变更入口与账本读数。
 //!
-//! 分工（按"不重复造官方已有"的钉子）：**despawn/摘组件走官方内置**
-//! `world.despawn_entity` / `world.remove_components`（反射通道按组件名摘除，
-//! 不需要构造组件值——brp.py 薄壳封装）；**spawn/replace 自研**——官方
-//! `world.spawn_entity` 经反射构造组件值，表达不了"引用既有资产的柄"
-//!（Handle 无法经反射指到现有资产身份），克隆/拷柄是场景语义操作。统计读数
-//! `increment_stats` 自研：账本是普通 Rust 结构（BTreeMap + 柄），反射序列化
-//! 不可读，定制 JSON 才能按验收口径报数。
+//! 分工：despawn/摘组件走官方内置 `world.despawn_entity` / `world.remove_components`
+//!（反射按组件名操作，无需构造组件值；官方 despawn 递归删 `Children` 子树）；
+//! spawn/换柄自研——官方 `world.spawn_entity` 经反射构造组件值，表达不了"引用
+//! 既有资产的柄"。`increment_stats` 自研：账本是普通 Rust 结构，反射不可读，定制
+//! JSON 才能按验收口径报数。
 //!
-//! 机制与边界：handler 是 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍
-//! 执行——写操作下一帧生效（spawn/despawn 在次帧画面可见）；操作
-//! 本体在 [`crate::scene::mechanism::spawn_primitive_clone`]（可供 egui 面板复用的实现），
-//! 本模块只是协议薄壳。安全边界：默认只绑 loopback、无鉴权，仅限本机。
+//! 写操作下一帧生效（handler 跑在 `RemoteLast`）；操作本体在
+//! [`crate::scene::spawn_primitive_clone`] 等封装（egui 面板共用），
+//! 本模块只是协议薄壳。
 
 use bevy::{pbr::StandardMaterial, prelude::*, remote::{BrpError, BrpResult}};
 use serde_json::{json, Value};
 
 use crate::{
-    scene::mechanism::{
+    scene::{
         replace_handles as apply_handle_swap, spawn_primitive_clone, AssetReadiness,
         AssetRetirements, HandleSwapReadback, InstanceLedger, ObjectOpError,
     },
     render::{BindlessTextureTable, ImageCache, InstanceTables, MeshPool, OBJECT_TABLE_CAPACITY},
 };
 
-use super::{invalid_params, params::parse_params};
+use super::params::{invalid_params, parse_params};
 
 use ash_macros::system;
 
@@ -33,7 +30,7 @@ use ash_macros::system;
 struct SpawnPrimitiveParams {
     /// 克隆源（必须是可渲染 primitive）。
     source: Entity,
-    /// 新实体相对源的平移偏移，缺省 [0,0,0]。
+    /// 新实体相对源的平移偏移，缺省 `[0,0,0]`。
     #[serde(default)]
     offset: Option<[f32; 3]>,
     /// Name 后缀，缺省 "（副本）"。
@@ -41,9 +38,8 @@ struct SpawnPrimitiveParams {
     name_suffix: Option<String>,
 }
 
-/// 把操作层错误映射到协议错误码（ObjectOpError 是 Tier② 语义的载体，这里
-/// 只做翻译，不吞——原 message 原样带出）。`pub(crate)` 给 assets 的加载方法
-/// 族复用。
+/// 把操作层错误映射到协议错误码（只翻译不吞，原 message 原样带出）。
+/// assets/generate/shapes 方法族共用。
 pub(crate) fn object_op_error(err: ObjectOpError) -> BrpError {
     match err {
         ObjectOpError::EntityMissing(e) => BrpError::entity_not_found(e),
@@ -67,6 +63,14 @@ pub(crate) fn object_op_error(err: ObjectOpError) -> BrpError {
     }
 }
 
+/// 实体材质柄身份的字符串读回；刚 spawn/换柄成功组件必在，查无按空串读回不报错。
+pub(crate) fn material_id_string(world: &World, entity: Entity) -> String {
+    world
+        .get::<MeshMaterial3d<StandardMaterial>>(entity)
+        .map(|m| m.0.id().to_string())
+        .unwrap_or_default()
+}
+
 /// `ash_renderer/spawn_primitive`：克隆源 primitive（共享资产柄 + 平移偏移）。
 /// 账本经 Changed 通道自动入行，资产已驻留 → 无上传，画面次帧多出一个副本。
 /// 返回新实体号与柄身份（写后读对账用）。
@@ -81,14 +85,10 @@ pub(crate) fn spawn_primitive(In(params): In<Option<Value>>, world: &mut World) 
         .get::<Mesh3d>(entity)
         .map(|m| m.0.id().to_string())
         .unwrap_or_default();
-    let material = world
-        .get::<MeshMaterial3d<StandardMaterial>>(entity)
-        .map(|m| m.0.id().to_string())
-        .unwrap_or_default();
     Ok(json!({
         "entity": entity.to_string(),
         "mesh": mesh,
-        "material": material,
+        "material": material_id_string(world, entity),
     }))
 }
 
@@ -141,6 +141,7 @@ pub(crate) fn increment_stats(
     let r = readiness.stats;
     let c = retirements.stats;
     let p = pool.recycle_ledger();
+    let ((vertex_used_peak, vertex_capacity), _) = pool.usage();
     Ok(json!({
         "rows": ledger.len(),
         "discovery": {
@@ -201,8 +202,8 @@ pub(crate) fn increment_stats(
             "pool_resident_count": pool.resident_count(),
             "pool_resident_vertex_bytes": p.resident_vertex_bytes,
             "pool_resident_index_bytes": p.resident_index_bytes,
-            "pool_used_peak_vertex": pool.usage().0 .0,
-            "pool_capacity_vertex": pool.usage().0 .1,
+            "pool_used_peak_vertex": vertex_used_peak,
+            "pool_capacity_vertex": vertex_capacity,
             "pool_graveyard_groups": p.graveyard_groups,
             "pool_free_ranges": p.free_ranges,
             "pool_free_vertex_bytes": p.free_vertex_bytes,
@@ -215,9 +216,3 @@ pub(crate) fn increment_stats(
         },
     }))
 }
-
-// `ash_renderer/despawn`/`ash_renderer/remove` 不在本模块：前者=官方
-// `world.despawn_entity`（0.20-dev 默认递归删 `Children` 子树）、后者=官方
-// `world.remove_components`，反射通道按组件名操作即可（无值构造），brp.py
-// 直接封装官方方法名——object_ops 的 despawn_tree/remove_component 封装留给
-// egui 面板复用（组件白名单见 `RemovableComponent`）。

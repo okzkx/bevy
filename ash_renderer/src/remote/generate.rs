@@ -1,25 +1,30 @@
-//! 常驻大场景生成与 chunk 组织方法族：`generate_scene` 程序化铺实例（批量
-//! 克隆共享资产，账本链路自动入行，驻留资产零重传）；
-//! `generate_chunks`/`chunk_census`/`chunk_despawn` 是 chunk 身份与整块
-//! 增删——"资产复用/块边界可观察"与"整块增删走账"的驱动面与证据通道。
+//! 大场景生成与 chunk 组织方法族：`generate_scene` 程序化铺实例（批量克隆共享
+//! 资产，账本自动入行，驻留资产零重传）；`generate_chunks`/`chunk_census`/
+//! `chunk_despawn` 是 chunk 身份与整块增删——"资产复用/块边界可观察"与"整块
+//! 增删走账"的驱动面与证据通道。
 //!
-//! 分工：操作本体在 [`crate::scene::mechanism::scene_gen`]（BRP 与 egui
-//! 共用，object_ops 同款惯例），本模块只是协议薄壳。
-//!
-//! 红线边界：写操作是人/AI 的场景编辑意图（与 set_transform/spawn 同类），
-//! 不存在"读数回灌绘制决策"的通道（draw.rs 红线口径不受影响）。
+//! 操作本体在 [`crate::scene::generate_chunks`] 等（BRP 与 egui 共用），本模块
+//! 只是协议薄壳。写操作是场景编辑意图（与 set_transform/spawn 同类），不涉及读数
+//! 回灌绘制决策。
 
-use bevy::{pbr::StandardMaterial, prelude::*};
+use bevy::{
+    pbr::StandardMaterial,
+    prelude::*,
+    remote::{BrpError, BrpResult},
+};
 use serde_json::{json, Value};
 
 use ash_macros::system;
 
-use crate::scene::mechanism::{
+use crate::scene::{
     chunk_census as chunk_census_rows, despawn_chunk, generate_chunks, generate_instances,
     ChunkGenParams, SceneGenParams,
 };
 
-use super::{invalid_params, objects::object_op_error, params::parse_params, BrpError, BrpResult};
+use super::{
+    objects::object_op_error,
+    params::{invalid_params, parse_params},
+};
 
 /// 生成源实体：显式给定直接用，缺省取场景里第一个可渲染 primitive。
 fn source_or_first_primitive(world: &mut World, source: Option<Entity>) -> Result<Entity, BrpError> {
@@ -165,6 +170,6 @@ pub(crate) fn chunk_despawn(In(params): In<Option<Value>>, world: &mut World) ->
     Ok(json!({
         "chunk": p.id,
         "root": root.to_string(),
-        "note": "removed_rows 对账看 increment_stats（次帧生效）",
+        "note": "removed_rows 结果见 increment_stats（次帧生效）",
     }))
 }

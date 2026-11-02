@@ -1,29 +1,25 @@
-//! 持续监控读数方法族（7.5）：`monitor_stats`——fps/进程内存/系统内存/显存
-//! 堆级预算 + 渲染器内部账，一次读全。与 egui 监控窗口同源（读
-//! [`MonitorHistory`] 同一本账），供 tools/monitor.py 无人值守轮询采样，
-//! 取证与修复前后对照的数据通道。7.6 增补：`frame_sync` 帧率同步开关
-//! 读写 + monitor_stats 增补刷新率/开关两字段。
-//!
-//! 红线边界照 perf 族：只读账面，读数不回灌绘制决策。
+//! 持续监控读数方法族：`monitor_stats`——fps/进程内存/系统内存/显存堆级预算 +
+//! 渲染器内部账 + 刷新率/帧率同步状态，一次读全。与 egui 监控窗口同源（读
+//! [`MonitorHistory`] 同一本账），供 tools/monitor.py 无人值守轮询采样；
+//! `frame_sync` 读写帧率同步开关。只读账面，读数不回灌绘制决策。
 
-use bevy::prelude::*;
+use bevy::{prelude::*, remote::BrpResult};
 use serde_json::{json, Value};
 
 use ash_macros::system;
 
 use crate::render::{
     Context, EguiPassTiming, FrameSyncSettings, ImageCache, MeshPool, MonitorHistory, PerfLedger,
-    RenderMode,
 };
 
-use super::{BrpResult, invalid_params};
+use super::params::parse_params_or_default;
 
 /// `ash_renderer/monitor_stats`：持续监控快照（只读）。fps 取监控历史最近
 /// 采样（≤0.5s 陈旧）；显存堆级读数现查（VK_EXT_memory_budget 缺席为 null）；
 /// 内部账 = MeshPool/ImageCache 进程自身口径。
 ///
 /// # Errors
-/// 诊断资源缺席（宿主未装配，组件错误级）。
+/// 诊断资源缺席（系统参数校验失败，bevy_remote 回 internal）。
 #[expect(
     clippy::too_many_arguments,
     reason = "BRP 只读读数口的参数表即数据源清单:监控账/池/贴图缓存/帧账/egui计时/帧率同步逐项只读,拆参数束过度设计"
@@ -75,15 +71,14 @@ pub(crate) fn monitor_stats(
 }
 
 /// `ash_renderer/frame_sync` 参数：`enabled` 可选——缺省只读。
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default)]
 struct FrameSyncParams {
     #[serde(default)]
     enabled: Option<bool>,
 }
 
-/// `ash_renderer/frame_sync`：帧率同步开关读写（7.6）。带 `enabled` 则写
-/// 开关（写侧同 cull_set_enabled 家族形状），缺省只读；两种形态都返回
-/// 当前 `{enabled, refresh_millihertz}` 供脚本 A/B 对账。
+/// `ash_renderer/frame_sync`：帧率同步开关读写。带 `enabled` 则写开关，缺省
+/// 只读；两种形态都返回当前 `{enabled, refresh_millihertz}` 供脚本 A/B 对账。
 ///
 /// # Errors
 /// 参数不合法。
@@ -92,41 +87,12 @@ pub(crate) fn frame_sync_cmd(
     In(params): In<Option<Value>>,
     mut settings: ResMut<FrameSyncSettings>,
 ) -> BrpResult {
-    if let Some(value) = params.filter(|v| !v.is_null()) {
-        let p: FrameSyncParams =
-            serde_json::from_value(value).map_err(|e| invalid_params(format!("params: {e}")))?;
-        if let Some(enabled) = p.enabled {
-            settings.enabled = enabled;
-        }
+    let p: FrameSyncParams = parse_params_or_default(params)?;
+    if let Some(enabled) = p.enabled {
+        settings.enabled = enabled;
     }
     Ok(json!({
         "enabled": settings.enabled,
         "refresh_millihertz": settings.refresh_millihertz,
     }))
-}
-
-/// `ash_renderer/set_render_mode`：着色模式切换（debug 面板 RenderMode 的 BRP
-/// 通道，8.2.3 增补）——unlit/normal/position 是 G-buffer 验收仪器，8.2.5
-/// 增补 metallic/roughness/ao/reflectance/depth 五枚 G-buffer 通道调试仪器
-///（matparam 单通道灰度直出 + 深度线性化），供无人取证分流（画面异常时先
-/// 切仪器定位问题层；mutate 材质热改的写后读验收走同口）。
-///
-/// # Errors
-/// 参数不合法（未知模式名）。
-#[system]
-pub(crate) fn set_render_mode(
-    In(params): In<Option<Value>>,
-    mut mode: ResMut<'_, RenderMode>,
-) -> BrpResult {
-    #[derive(serde::Deserialize)]
-    struct P {
-        mode: String,
-    }
-    let p: P = serde_json::from_value(params.unwrap_or(Value::Null))
-        .map_err(|e| invalid_params(format!("params: {e}")))?;
-    // 名称表唯一来源 RenderMode::label（"lambert" 为 filament 的兼容别名）
-    *mode = RenderMode::from_name(&p.mode).ok_or_else(|| {
-        invalid_params(format!("未知模式 {}：{}", p.mode, RenderMode::NAME_HINT))
-    })?;
-    Ok(json!({ "mode": p.mode }))
 }

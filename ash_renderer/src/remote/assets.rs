@@ -1,30 +1,25 @@
-//! BRP 资产内容变更方法族 + 运行期动态加载：测试驱动与
-//! AI 通道的资产级变更入口。
+//! BRP 资产内容变更与运行期动态加载方法族。官方 BRP 没有资产内容写通道（反射
+//! `world.mutate_component` 只改组件值，够不着 `Assets<T>` 里的资产本体），故自研；
+//! 操作本体在 scene 机制层（[`mutate_asset`] 与对象操作的加载封装，egui 面板
+//! 共用），本模块只是协议薄壳。
 //!
-//! 分工（与 objects 同款钉子）：**官方 BRP 没有资产内容写通道**
-//! ——反射 mutate 走 `world.mutate_component` 是组件值反射，够不着
-//! `Assets<T>` 容器里的资产本体，本方法族自研；操作本体在
-//! [`crate::scene::mechanism::mutate_asset`] 与 [`object_ops`] 的加载封装
-//! （可供 egui 面板复用的实现），本模块只是协议薄壳。
-//!
-//! 动态加载语义：`load_mesh`/`load_image` 受理即返回加载中柄——
-//! 路径失败经 [`AssetLoadFailedEvent`] 读侧收账（失败可见、行出队），到货经
-//! flush 转换上传、readiness 计量对账；加载是异步链，本方法族不等到货。
-//!
-//! 机制与边界：handler 是 Bevy system，跑在 `RemoteLast`（Last 之后）按帧
-//! 节拍执行——`Assets::get_mut` 触发的 `AssetEvent::Modified` 经 Messages
-//! 双缓冲**下一帧**被读侧（asset_events）看见，再同帧完成失效与重传，画面
-//! 次帧生效。安全边界：默认只绑 loopback、无鉴权，仅限本机。
+//! 时序：`Assets::get_mut` 触发的 `AssetEvent::Modified` 下一帧才被资产事件读侧
+//! 看见，同帧完成失效与重传，画面次帧生效。加载方法受理即返回加载中柄、不等
+//! 到货——路径失败经 `AssetLoadFailedEvent` 读侧收账，到货经上传链与 readiness
+//! 计量对账。
 
 use bevy::{prelude::*, remote::{BrpError, BrpResult}};
 use serde_json::{json, Value};
 
-use crate::scene::mechanism::{
+use crate::scene::{
     load_image_slot, load_mesh_rebind, mutate_asset, spawn_with_loaded_mesh, AssetOpError,
     MutateAsset,
 };
 
-use super::{invalid_params, objects::object_op_error, params::parse_params};
+use super::{
+    objects::{material_id_string, object_op_error},
+    params::{invalid_params, parse_params, res},
+};
 
 use ash_macros::system;
 
@@ -36,10 +31,10 @@ struct MutateAssetParams {
     /// 改材质 base_color（线性域 RGBA）。
     #[serde(default)]
     base_color: Option<[f32; 4]>,
-    /// 改材质 metallic（[0,1]，PBR 面）。
+    /// 改材质 metallic（`[0,1]`，PBR 面）。
     #[serde(default)]
     metallic: Option<f32>,
-    /// 改材质 perceptual_roughness（[0,1]，PBR 面）。
+    /// 改材质 perceptual_roughness（`[0,1]`，PBR 面）。
     #[serde(default)]
     perceptual_roughness: Option<f32>,
     /// 换材质 base_color 贴图槽：拷源实体材质的槽柄（含清槽语义）。
@@ -91,16 +86,15 @@ struct LoadMeshParams {
     entity: Option<Entity>,
     #[serde(default)]
     source: Option<Entity>,
-    /// spawn 模式的平移偏移（仅 source 模式，缺省 [0,0,0]）。
+    /// spawn 模式的平移偏移（仅 source 模式，缺省 `[0,0,0]`）。
     #[serde(default)]
     offset: Option<[f32; 3]>,
     #[serde(default)]
     name_suffix: Option<String>,
 }
 
-/// `ash_renderer/load_mesh`：运行期异步加载新 mesh（动态加载驱动）。
-/// 受理即返回加载中柄的身份读回——pending/到货/失败经 `increment_stats` 的
-/// readiness 段与失败日志对账（加载是异步链，本方法不等到货）。
+/// `ash_renderer/load_mesh`：运行期异步加载新 mesh。受理即返回加载中柄的身份
+/// 读回——pending/到货/失败经 `increment_stats` 的 readiness 段与失败日志对账。
 #[system]
 pub(crate) fn load_mesh_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: LoadMeshParams = parse_params(params, "params 缺失：需要 path 与 entity|source 二选一")?;
@@ -116,14 +110,10 @@ pub(crate) fn load_mesh_cmd(In(params): In<Option<Value>>, world: &mut World) ->
         _ => return Err(invalid_params("entity 与 source 恰好给一个")),
     }
     .map_err(object_op_error)?;
-    let material = world
-        .get::<bevy::pbr::MeshMaterial3d<bevy::pbr::StandardMaterial>>(readback.entity)
-        .map(|m| m.0.id().to_string())
-        .unwrap_or_default();
     Ok(json!({
         "entity": readback.entity.to_string(),
         "mesh": readback.mesh.to_string(),
-        "material": material,
+        "material": material_id_string(world, readback.entity),
         "state": "loading",
     }))
 }
@@ -137,8 +127,8 @@ struct LoadImageParams {
     entity: Entity,
 }
 
-/// `ash_renderer/load_image`：运行期异步加载新贴图并换 base_color 槽
-/// （贴图腿驱动）。共享材质语义：目标材质被原位改写，全部引用者同变。
+/// `ash_renderer/load_image`：运行期异步加载新贴图并换 base_color 槽。
+/// 共享材质语义：目标材质被原位改写，全部引用者同变。
 #[system]
 pub(crate) fn load_image_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: LoadImageParams = parse_params(params, "params 缺失：需要 path 与 entity")?;
@@ -157,20 +147,18 @@ struct ReloadAssetParams {
     path: String,
 }
 
-/// `ash_renderer/reload_asset`：手动触发重载（热重载链的可复现驱动）。
-/// `AssetServer::reload` 重走加载链——失败过的资产修复后由此复活（`Added`/
-/// `Modified` 事件 → revive → flush 重试），文件监听是自动通道、本方法是
-/// 测试与 AI 的确定性对照（不依赖 watcher 时序，受理即返回）。加载是异步链，
-/// 本方法不等到货。
+/// `ash_renderer/reload_asset`：手动触发重载。`AssetServer::reload` 重走加载链，
+/// 失败过的资产修复后由此复活（`Added`/`Modified` 事件 → 重新入队 → 上传重试）；
+/// 与文件监听相比不依赖 watcher 时序，供测试确定性复现。受理即返回，不等到货。
 #[system]
 pub(crate) fn reload_asset_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: ReloadAssetParams = parse_params(params, "params 缺失：需要 path")?;
-    // reload 收 `impl Into<AssetPath>`，String → AssetPath 的 From 走 panic
-    // 解析器——统一 try_parse 预校验，非法路径回协议错误
+    // 坑：String → AssetPath 的 From 解析失败会 panic，先 try_parse 预校验，
+    // 非法路径回协议错误
     let path = bevy::asset::AssetPath::try_parse(&p.path)
         .map_err(|e| invalid_params(format!("资产路径解析失败：{}: {e}", p.path)))?
         .into_owned();
-    world.resource::<AssetServer>().reload(path);
+    res::<AssetServer>(world)?.reload(path);
     Ok(json!({
         "path": p.path,
         "state": "reloading",
@@ -213,19 +201,14 @@ struct LoadWorldParams {
 }
 
 /// `ash_renderer/load_world`：整场景动态进场——load Scene0 并 spawn
-/// [`WorldAssetRoot`]，与 Startup 进场组（scene/content/world_asset）同链：
-/// 到货后由 bevy_world_serialization 的 `world_instance_spawner` 反射展开成
-/// primitive 实体树。多场景共存口：Startup 默认场景（Sponza）不动，其余
-/// 场景经此进。
-///
-/// 异步语义与 load_mesh 同款：受理即返回加载中，本方法族不等到货——
-/// 到货/失败看进场到货报告与 AssetLoadFailedEvent 读侧。
+/// `WorldAssetRoot`，与 Startup 进场同链：到货后由 bevy_world_serialization 反射
+/// 展开成 primitive 实体树。Startup 默认场景不动，其余场景经此叠加进场。
+/// 受理即返回加载中，不等到货——到货/失败看进场到货报告与加载失败事件读侧。
 #[system]
 pub(crate) fn load_world_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: LoadWorldParams = parse_params(params, "params 缺失：需要 path")?;
-    let handle = world
-        .resource::<AssetServer>()
-        // load 收 AssetPath<'static>（柄内保存），&str 须转 owned（load_mesh_rebind 同款钉）
+    let handle = res::<AssetServer>(world)?
+        // load 收 AssetPath<'static>（柄内保存），须传 owned 路径
         .load(bevy::gltf::GltfAssetLabel::Scene(0).from_asset(p.path.clone()));
     let entity = world.spawn(bevy::world_serialization::WorldAssetRoot(handle)).id();
     Ok(json!({

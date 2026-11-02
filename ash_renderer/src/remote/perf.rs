@@ -2,49 +2,59 @@
 //! 规模读数）、`perf_samples`（原始样本导出，离线汇总用）、`workload`（变更
 //! 形态开关写方法）——压测矩阵的采集与注入通道。
 //!
-//! 红线边界：三个方法只读账面/只写工作负载开关，**读数永远不回灌绘制决策**
-//!（诊断性回读边界同 cull 族）。perf 读数 = PerfLedger 环形窗口快照（Last
-//! 帧循环逐帧 push，BRP handler 在 RemoteLast 读——窗口内含至本帧上帧的样本）。
+//! 边界：只读账面/只写工作负载开关，读数不回灌绘制决策。perf 读数 = PerfLedger
+//! 环形窗口快照（Last 帧循环逐帧 push，handler 在 RemoteLast 读）。
 
-use bevy::prelude::*;
+use bevy::{prelude::*, remote::BrpResult};
 use serde_json::{json, Value};
 
 use ash_macros::system;
 
 use crate::{
-    scene::{InstanceLedger, mechanism::WorkloadSettings},
-    render::{GpuTimer, ImageCache, MeshPool, PerfLedger},
+    scene::{InstanceLedger, WorkloadSettings},
+    render::{FrameSample, GpuTimer, ImageCache, MeshPool, PerfLedger},
 };
 
-use super::{
-    invalid_params,
-    params::{parse_params, parse_params_or_default},
-    BrpResult,
-};
+use super::params::{invalid_params, parse_params, parse_params_or_default, res_mut};
 
-/// 分位数三元组（p50/p95/p99）+ 均值，从 PerfLedger 现算。
-fn percentile_block(ledger: &PerfLedger, field: impl Fn(&crate::render::FrameSample) -> f32) -> Value {
-    let values: Vec<f32> = ledger.snapshot().iter().map(&field).collect();
-    let pick = |p: f32| ledger.percentile(p, &field).map(|v| (v * 1000.0).round() / 1000.0);
+/// PerfLedger 环形窗口容量（= render 内 `PerfLedger::CAPACITY`，未导出）。
+const PERF_WINDOW: usize = 2048;
+
+/// 窗口内字段均值（空窗口 = 0）与样本数。
+fn mean_and_len(ledger: &PerfLedger, field: impl Fn(&FrameSample) -> f32) -> (f32, usize) {
+    let values: Vec<f32> = ledger.snapshot().iter().map(field).collect();
     let mean = if values.is_empty() {
         0.0
     } else {
         values.iter().sum::<f32>() / values.len() as f32
     };
+    (mean, values.len())
+}
+
+/// 分位数三元组（p50/p95/p99）+ 均值，从 PerfLedger 现算（保留三位小数）。
+fn percentile_block(ledger: &PerfLedger, field: impl Fn(&FrameSample) -> f32) -> Value {
+    let pick = |p: f32| ledger.percentile(p, &field).map(|v| (v * 1000.0).round() / 1000.0);
+    let (mean, n) = mean_and_len(ledger, &field);
     json!({
         "p50": pick(0.50),
         "p95": pick(0.95),
         "p99": pick(0.99),
         "mean": (mean * 1000.0).round() / 1000.0,
-        "n": values.len(),
+        "n": n,
     })
 }
 
+/// 字段均值（三位小数；空窗口返回 0）。
+fn mean_of(ledger: &PerfLedger, field: impl Fn(&FrameSample) -> f32) -> f64 {
+    let (mean, _) = mean_and_len(ledger, field);
+    (mean * 1000.0).round() as f64 / 1000.0
+}
+
 /// `ash_renderer/perf_stats`：帧时间分位数 + CPU 分段均值 + 显存/规模读数
-///（只读）。分位数按 PerfLedger 当前环形窗口现算——窗口 = 最近 2048 帧。
+///（只读）。分位数按 PerfLedger 当前环形窗口（最近 [`PERF_WINDOW`] 帧）现算。
 ///
 /// # Errors
-/// 诊断资源缺席（宿主未装配，组件错误级）。
+/// 诊断资源缺席（系统参数校验失败，bevy_remote 回 internal）。
 #[system]
 pub(crate) fn perf_stats(
     In(_params): In<Option<Value>>,
@@ -112,8 +122,8 @@ pub(crate) fn perf_stats(
 #[system]
 pub(crate) fn perf_samples(In(params): In<Option<Value>>, perf: Res<PerfLedger>) -> BrpResult {
     let p: LastParams = parse_params_or_default(params)?;
-    let last = p.last.unwrap_or(256);
-    if last > 2048 {
+    let last = p.last.unwrap_or(256); // 缺省导出条数
+    if last > PERF_WINDOW {
         return Err(invalid_params("last 上限 2048（窗口容量）"));
     }
     let all = perf.snapshot();
@@ -158,22 +168,13 @@ pub(crate) fn workload(In(params): In<Option<Value>>, world: &mut World) -> BrpR
         rows: Option<usize>,
     }
     let p: WorkloadParams = parse_params(params, "params 缺失：需要 enabled 与可选 rows")?;
-    let mut settings = world.resource_mut::<WorkloadSettings>();
+    let mut settings = res_mut::<WorkloadSettings>(world)?;
     settings.enabled = p.enabled;
     if let Some(rows) = p.rows {
         settings.rows = rows;
     }
     let readback = *settings;
     Ok(json!({ "workload": { "enabled": readback.enabled, "rows": readback.rows } }))
-}
-
-/// 字段均值（两位小数；空窗口返回 0）。
-fn mean_of(ledger: &PerfLedger, field: impl Fn(&crate::render::FrameSample) -> f32) -> f64 {
-    let values: Vec<f32> = ledger.snapshot().iter().map(field).collect();
-    if values.is_empty() {
-        return 0.0;
-    }
-    ((values.iter().sum::<f32>() / values.len() as f32) * 1000.0).round() as f64 / 1000.0
 }
 
 #[derive(serde::Deserialize, Default)]

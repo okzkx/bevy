@@ -1,29 +1,32 @@
-//! BRP 测试实体方法族：五形状 + 颜色 → 自动应用/按色复用 Lambert 材质的
-//! 单个测试体——遮挡剔除（Hi-Z）的遮挡对/墙体样本载具与通用测试能力。
-//! 协议薄壳：操作本体在 [`crate::scene::mechanism::spawn_test_shape`]（与场景
-//! 生成器同区同构的机制层），本模块只做参数解析与协议错误映射。
+//! BRP 测试实体方法族：`spawn_shape` 造五形状之一的单个测试体（颜色/PBR 参数 →
+//! 按参数复用的 StandardMaterial），`spawn_lod` 造 LOD 阶梯测试体——遮挡对/墙体
+//! 样本与通用测试载具。操作本体在 [`crate::scene::spawn_test_shape`]
+//! 等机制层封装，本模块只做参数解析与协议错误映射。
 
 use bevy::{prelude::*, remote::BrpResult};
 use serde_json::{json, Value};
 
-use crate::scene::mechanism::{spawn_lod_ladder, spawn_test_shape, TestShape};
+use crate::scene::{spawn_lod_ladder, spawn_test_shape, TestShape};
 
 use super::{objects::object_op_error, params::parse_params};
 
 use ash_macros::system;
+
+/// 缺省颜色：灰白（sRGB）。
+const DEFAULT_COLOR: [f32; 3] = [0.8, 0.8, 0.8];
 
 /// `ash_renderer/spawn_shape` 的请求参数：形状必填，其余可选（缺省 =
 /// 灰白色 / 原点 / 零旋转 / 单位缩放 / 默认名"测试体-\<shape\>"）。
 #[derive(serde::Deserialize)]
 struct SpawnShapeParams {
     shape: TestShape,
-    /// sRGB [0,1] 三元组；材质只设 base_color（Lambert 路径）。
+    /// base_color，sRGB `[0,1]` 三元组。
     #[serde(default)]
     color: Option<[f32; 3]>,
-    /// 金属度 [0,1]（PBR 参数面；缺省 = StandardMaterial 默认 0）。
+    /// 金属度 `[0,1]`（PBR 参数面；缺省 = StandardMaterial 默认 0）。
     #[serde(default)]
     metallic: Option<f32>,
-    /// 感知粗糙度 [0,1]（PBR 参数面；缺省 = StandardMaterial 默认 0.5）。
+    /// 感知粗糙度 `[0,1]`（PBR 参数面；缺省 = StandardMaterial 默认 0.5）。
     #[serde(default)]
     perceptual_roughness: Option<f32>,
     #[serde(default)]
@@ -41,14 +44,13 @@ struct SpawnShapeParams {
     unique: Option<bool>,
 }
 
-/// `ash_renderer/spawn_shape`：造一个测试体（五形状之一 + 颜色 →
-/// Lambert 材质）。mesh 按形状缓存、材质按颜色缓存——同参重复 spawn
-/// 共享柄零新资产；首次形状/颜色走一次上传。账本经 Added 通道自动入行，
-/// 画面次帧可见。返回实体号、资产身份与 mesh_created（对账锚点）。
+/// `ash_renderer/spawn_shape`：造一个测试体。mesh 按形状缓存、材质按颜色与 PBR
+/// 参数缓存——同参重复 spawn 共享柄零新资产，首次形状/参数走一次上传。账本经
+/// Added 通道自动入行，画面次帧可见。返回实体号、资产身份与 mesh_created（对账锚点）。
 #[system]
 pub(crate) fn spawn_shape(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: SpawnShapeParams = parse_params(params, "params 缺失：需要 shape")?;
-    let color = p.color.unwrap_or([0.8, 0.8, 0.8]);
+    let color = p.color.unwrap_or(DEFAULT_COLOR);
     let readback = spawn_test_shape(
         world,
         p.shape,
@@ -89,13 +91,13 @@ struct SpawnLodParams {
     unique: Option<bool>,
 }
 
-/// `ash_renderer/spawn_lod`：造一个 LOD 阶梯测试体（基准档
-/// 复用形状缓存，档位变体按形状缓存，登记进 LodGroups；档位资产随该实体
-/// 首次盘点一并上传）。返回实体号与各档资产身份（对账锚点）。
+/// `ash_renderer/spawn_lod`：造一个 LOD 阶梯测试体（基准档复用形状缓存，档位
+/// 变体按形状缓存，登记进 LodGroups；档位资产随该实体首次盘点一并上传）。返回
+/// 实体号与各档资产身份（对账锚点）。
 #[system]
 pub(crate) fn spawn_lod(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: SpawnLodParams = parse_params(params, "params 缺席：需要 shape")?;
-    let color = p.color.unwrap_or([0.8, 0.8, 0.8]);
+    let color = p.color.unwrap_or(DEFAULT_COLOR);
     let readback = spawn_lod_ladder(
         world,
         p.shape,
