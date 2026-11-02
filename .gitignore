@@ -3,6 +3,8 @@
 
 # Rust build artifacts
 target
+# 例外：ash_renderer 的源码目录 target/（core 的颜色/深度附件），不是构建产物
+!ash_renderer/src/render/core/target/
 crates/**/target
 benches/**/target
 tools/**/target
