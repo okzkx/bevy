@@ -67,6 +67,12 @@ pub fn fatal(msg: impl Into<Cow<'static, str>>, err: impl Into<BevyError>) -> Be
     err.with_severity(Severity::Error)
 }
 
+/// 就地构造 Warning 级错误（match 分支里作废本帧用；`?` 链用
+/// [`ResultTierExt::or_warn`]，判空用 [`OptionTierExt::ok_or_warn`]）。
+pub fn warning(msg: impl Into<Cow<'static, str>>) -> BevyError {
+    BevyError::new(Severity::Warning, msg.into())
+}
+
 /// 一次性日志：首次 [`OnceLog::log`] 执行 `f` 并置位，此后静默。代替"未置位则置位
 /// 并打日志"三行样板。
 #[derive(Default)]

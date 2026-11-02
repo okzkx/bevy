@@ -47,12 +47,14 @@ impl ResizeGate {
         self.pending = true;
     }
 
-    /// pending 帧首按需重建：重建全部成功才清，失败原样保留，下个帧首重试。
+    /// pending 帧首按需重建（宿主 resize 消息 / swapchain 次优或过时都算）：
+    /// 重建全部成功才清，失败原样保留，下个帧首重试。
     pub(super) fn rebuild_if_pending(
         &mut self,
+        swapchain_pending: bool,
         rebuild: impl FnOnce() -> Result<(), BevyError>,
     ) -> Result<(), BevyError> {
-        if !self.pending {
+        if !self.pending && !swapchain_pending {
             return Ok(());
         }
         rebuild()?;
