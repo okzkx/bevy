@@ -5,7 +5,8 @@
 use ash::{vk, Device};
 
 use crate::common::error::{Result, VulkanError};
-use crate::render::Context;
+
+use super::context::Context;
 
 /// 把一段 buffer 拷进一次性 staging 并回读到 `out`（拷 `out.len()` 字节）。
 ///
@@ -137,10 +138,7 @@ impl<'a> OneShotReadback<'a> {
                 self.fence,
             )?;
             device.wait_for_fences(std::slice::from_ref(&self.fence), true, u64::MAX)?;
-            // ash 0.38 形状：map 返回 NonNull 指针
-            let ptr = device
-                .map_memory(self.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
-                .map_err(VulkanError::from)?;
+            let ptr = device.map_memory(self.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())?;
             let range = vk::MappedMemoryRange::default()
                 .memory(self.memory)
                 .offset(0)

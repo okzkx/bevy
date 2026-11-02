@@ -5,10 +5,9 @@ use std::slice;
 
 use ash::{vk, Device};
 
-use crate::render::core::record::barrier::{image_barrier, ImageBarrier};
 use crate::render::core::binding::set_layout::DescSet;
-use crate::render::core::pipeline::graphics::PipelineRef;
-use crate::render::core::record::graphics::{bind_graphics, full_rect, set_viewport_scissor};
+use crate::render::core::record::barrier::{image_barrier, ImageBarrier};
+use crate::render::core::record::graphics::{bind_graphics, full_rect, set_viewport_scissor, PipelineRef};
 
 /// 全屏三角形 pass 的参数：一个颜色附件（写完保留，无深度）、管线、从 set 0 起绑定的描述符集。
 pub(crate) struct FullscreenPass<'a> {

@@ -2,16 +2,15 @@
 //! 没有深度、不混合、单颜色附件、动态 viewport/scissor。合成、tonemap、Bloom、
 //! SMAA 各自传入布局配方复用它；录全屏 pass 见 `record::fullscreen`。
 
-use crate::render::core::pipeline::graphics::PipelineRef;
 use ash::{vk, Device};
 use bevy::log::info;
 
 use crate::common::error::Result;
-use crate::render::Context;
-
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
+use crate::render::core::device::context::Context;
 use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::record::graphics::PipelineRef;
 
 /// 全屏管线 + pipeline layout（dynamic rendering 形态）。
 #[derive(bevy::prelude::Resource)]
@@ -56,8 +55,7 @@ impl FullscreenPipeline {
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-        // 无深度附件：深度测试/写全关（VUID-08914 侧：本管线的
-        // depthAttachmentFormat 声明走 UNDEFINED = 不声明深度）
+        // 无深度附件：深度测试/写全关（配方不声明深度格式，VUID-08914）
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default();
         let blend_attachment = [vk::PipelineColorBlendAttachmentState::default()
             .blend_enable(false)
@@ -92,19 +90,7 @@ impl FullscreenPipeline {
         })
     }
 
-    /// 管线句柄（帧录制绑定用）。
-    #[must_use]
-    pub fn pipeline(&self) -> vk::Pipeline {
-        self.handle.pipeline()
-    }
-
-    /// pipeline layout 句柄（描述符绑定与管线同源）。
-    #[must_use]
-    pub fn layout(&self) -> vk::PipelineLayout {
-        self.handle.layout()
-    }
-
-    /// 录制投影（帧输入束携带）。
+    /// 录制句柄（帧输入束携带）。
     #[must_use]
     pub(crate) fn rec(&self) -> PipelineRef {
         self.handle.rec()

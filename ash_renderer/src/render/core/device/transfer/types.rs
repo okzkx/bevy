@@ -68,6 +68,6 @@ pub struct UploadBatch {
     pub device_copies: Vec<CopyRegion>,
     /// buffer 所有权转移；源与目标队列族相同时留空。
     pub releases: Vec<Release>,
-    /// 图像所有权转移及最终的 shader 可采样布局转换。
+    /// 图像所有权转移及最终的 shader 可采样布局转换；只对同批 `image_uploads` 里的图像生效。
     pub image_releases: Vec<ImageRelease>,
 }

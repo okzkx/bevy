@@ -10,7 +10,7 @@ use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::contract::MemoryContract;
 use crate::render::core::device::memory::role::BufferRole;
 
-use super::types::{CopyRegion, Ticket, UploadBatch};
+use super::types::{Ticket, UploadBatch};
 
 mod image;
 
@@ -229,10 +229,13 @@ impl Uploader {
     /// staging 扩容或写入、命令录制或队列提交失败。
     pub fn submit_batch(&mut self, batch: UploadBatch) -> Result<Option<Ticket>> {
         let staging_len = batch.staging.len() as u64;
+        // 只含 buffer release 的批次也要提交（所有权转移本身就是工作）；image_releases
+        // 只对同批 image_uploads 里的图像生效，单独出现录不出任何命令，不计入。
         if staging_len == 0
             && batch.uploads.is_empty()
             && batch.device_copies.is_empty()
             && batch.image_uploads.is_empty()
+            && batch.releases.is_empty()
         {
             return Ok(None);
         }
@@ -268,12 +271,10 @@ impl Uploader {
         let device = &self.device;
         let slot = &mut self.slots[index];
         // 先写入 staging，再录制读取该映射内存的拷贝。
-        let Some(staging_buffer) = slot.staging.as_mut() else {
-            // 容量检查通过后 staging 槽必须已创建。
-            return Err(VulkanError::Upload(
-                "内部矛盾:扩容判定后 staging 槽位仍缺席".into(),
-            ));
-        };
+        let staging_buffer = slot
+            .staging
+            .as_mut()
+            .ok_or_else(|| VulkanError::Contract("内部矛盾:扩容判定后 staging 槽位仍缺席".into()))?;
         staging_buffer.write(0, &batch.staging)?;
         unsafe {
             device
@@ -307,7 +308,7 @@ impl Uploader {
             }
             if !batch.device_copies.is_empty() {
                 // 屏障覆盖本批 transfer 写入；后续 transfer 读取在此建立可见性。
-                for buffer in distinct_srcs(&batch.device_copies) {
+                for buffer in distinct(batch.device_copies.iter().map(|r| r.src)) {
                     let hazard = vk::BufferMemoryBarrier::default()
                         .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                         .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
@@ -390,12 +391,12 @@ impl Uploader {
     }
 }
 
-/// 去重本批 device copies 的源 buffer。
-fn distinct_srcs(regions: &[CopyRegion]) -> Vec<vk::Buffer> {
+/// 按首次出现顺序去重（本批的源 buffer、目标图像）。
+fn distinct<T: PartialEq>(items: impl IntoIterator<Item = T>) -> Vec<T> {
     let mut seen = Vec::new();
-    for region in regions {
-        if !seen.contains(&region.src) {
-            seen.push(region.src);
+    for item in items {
+        if !seen.contains(&item) {
+            seen.push(item);
         }
     }
     seen
@@ -403,7 +404,7 @@ fn distinct_srcs(regions: &[CopyRegion]) -> Vec<vk::Buffer> {
 
 impl Drop for Uploader {
     fn drop(&mut self) {
-        // 退出前会先等待设备空闲，再销毁上传器资源。
+        // 不等 GPU：退出路径先等设备空闲再拆。
         unsafe {
             self.device.destroy_semaphore(self.ticket_semaphore, None);
             self.device.destroy_command_pool(self.command_pool, None);

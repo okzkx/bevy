@@ -3,9 +3,11 @@
 
 use ash::{vk, Device};
 
-use crate::render::core::binding::set_layout::SetLayoutDesc;
 use crate::common::error::{Result, VulkanError};
+use crate::render::core::binding::set_layout::SetLayoutDesc;
+use crate::render::core::record::graphics::PipelineRef;
 
+/// 建单条图形管线；失败时回收驱动半建返回的句柄。
 pub(crate) fn create_graphics_pipeline(
     device: &Device,
     info: &vk::GraphicsPipelineCreateInfo<'_>,
@@ -47,39 +49,18 @@ impl PipelineHandle {
         Self { device: device.clone(), layout, pipeline, sets }
     }
 
-    /// 管线句柄（帧录制绑定用）。
-    #[must_use]
-    pub(crate) fn pipeline(&self) -> vk::Pipeline {
-        self.pipeline
-    }
-
-    /// pipeline layout 句柄（push/描述符绑定与管线同源）。
-    #[must_use]
-    pub(crate) fn layout(&self) -> vk::PipelineLayout {
-        self.layout
-    }
-
-    /// 录制侧的拷贝投影（帧输入束携带；绑定序校验随行）。
+    /// 录制句柄（帧输入束携带；绑定序校验随行）。
     #[must_use]
     pub fn rec(&self) -> PipelineRef {
         PipelineRef { pipeline: self.pipeline, layout: self.layout, sets: self.sets }
     }
 }
 
-/// 管线录制投影（Copy）：句柄本体管生命周期，录制输入束带这个。
-#[derive(Clone, Copy)]
-pub struct PipelineRef {
-    pub pipeline: vk::Pipeline,
-    pub layout: vk::PipelineLayout,
-    pub sets: &'static [&'static SetLayoutDesc],
-}
-
 impl Drop for PipelineHandle {
     fn drop(&mut self) {
-        // 契约边界：不等 GPU，退出排空由 teardown 的 device_wait_idle 先行；
-        // pipeline 先于 layout（引用方向），layout 先于它借用的 set layouts
-        //（归 BindlessTextureTable/FrameUniformTable/InstanceTables/GBufferTargets/ShadowTargets 等，
-        // 拆除序由 host 的 remove_resource 顺序保证）
+        // 不等 GPU：退出时 teardown_vulkan 的 device_wait_idle 先行。pipeline 先于 layout
+        //（引用方向），layout 先于它借用的 set layouts（归各资源族，拆除序由 host 的
+        // remove_resource 顺序保证）
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);

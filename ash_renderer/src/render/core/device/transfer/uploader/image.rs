@@ -7,7 +7,7 @@ use ash::{vk, Device};
 use crate::common::error::Result;
 
 use super::super::types::{StagingImageCopy, Ticket, UploadBatch};
-use super::Uploader;
+use super::{distinct, Uploader};
 
 pub(super) fn record_image_uploads(
     device: &Device,
@@ -27,7 +27,7 @@ pub(super) fn record_image_uploads(
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .image(image)
-                .subresource_range(color_mip0());
+                .subresource_range(color_mips(0, 1));
             device.cmd_pipeline_barrier(
                 command_buffer,
                 vk::PipelineStageFlags::TOP_OF_PIPE,
@@ -49,11 +49,7 @@ pub(super) fn record_image_uploads(
                     buffer_offset: region.src_offset,
                     buffer_row_length: 0,
                     buffer_image_height: 0,
-                    image_subresource: vk::ImageSubresourceLayers::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .mip_level(0)
-                        .base_array_layer(0)
-                        .layer_count(1),
+                    image_subresource: color_layer(0),
                     image_offset: vk::Offset3D::default(),
                     image_extent: vk::Extent3D {
                         width: region.width,
@@ -64,12 +60,8 @@ pub(super) fn record_image_uploads(
             );
         }
         // 多级图像将 mip0 转为 TRANSFER_SRC，供 graphics 续批读取。
-        let mut chain_seen: Vec<vk::Image> = Vec::new();
-        for region in &batch.image_uploads {
-            if region.mip_levels <= 1 || chain_seen.contains(&region.image) {
-                continue;
-            }
-            chain_seen.push(region.image);
+        let chained = chained_images(&batch.image_uploads);
+        for region in &chained {
             // 转换写入对后续 blit 的 TRANSFER_READ 可见；跨提交依赖由票据衔接。
             let src_ready = vk::ImageMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -79,7 +71,7 @@ pub(super) fn record_image_uploads(
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .image(region.image)
-                .subresource_range(color_mip0());
+                .subresource_range(color_mips(0, 1));
             device.cmd_pipeline_barrier(
                 command_buffer,
                 vk::PipelineStageFlags::TRANSFER,
@@ -92,34 +84,23 @@ pub(super) fn record_image_uploads(
         }
         // 该屏障覆盖拷贝写入；消费方以票据等待并建立 shader 读屏障。
         for image in distinct_images(&batch.image_uploads) {
-            let is_chained = batch
-                .image_uploads
-                .iter()
-                .any(|r| r.image == image && r.mip_levels > 1);
-            if is_chained {
+            if chained.iter().any(|r| r.image == image) {
                 continue;
             }
-            let release_to = batch
+            // 有 release 时顺带把所有权交给目标队列族
+            let (src_family, dst_family) = batch
                 .image_releases
                 .iter()
                 .find(|r| r.image == image)
-                .map(|r| r.to_family);
-            let out_of_transfer = match release_to {
-                Some(to_family) => vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .src_queue_family_index(queue_family)
-                    .dst_queue_family_index(to_family),
-                None => vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED),
-            }
-            .image(image)
-            .subresource_range(color_mip0());
+                .map_or((vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED), |r| (queue_family, r.to_family));
+            let out_of_transfer = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(src_family)
+                .dst_queue_family_index(dst_family)
+                .image(image)
+                .subresource_range(color_mips(0, 1));
             device.cmd_pipeline_barrier(
                 command_buffer,
                 vk::PipelineStageFlags::TRANSFER,
@@ -144,19 +125,22 @@ pub(super) fn chained_images(regions: &[StagingImageCopy]) -> Vec<&StagingImageC
 }
 
 fn distinct_images(regions: &[StagingImageCopy]) -> Vec<vk::Image> {
-    let mut seen = Vec::new();
-    for region in regions {
-        if !seen.contains(&region.image) {
-            seen.push(region.image);
-        }
-    }
-    seen
+    distinct(regions.iter().map(|r| r.image))
 }
 
-fn color_mip0() -> vk::ImageSubresourceRange {
+fn color_mips(base_mip: u32, mip_count: u32) -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
-        .level_count(1)
+        .base_mip_level(base_mip)
+        .level_count(mip_count)
+        .layer_count(1)
+}
+
+fn color_layer(mip: u32) -> vk::ImageSubresourceLayers {
+    vk::ImageSubresourceLayers::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .mip_level(mip)
+        .base_array_layer(0)
         .layer_count(1)
 }
 
@@ -186,13 +170,7 @@ pub(super) fn record_blit_continuation(
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .image(region.image)
-                .subresource_range(
-                    vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .base_mip_level(1)
-                        .level_count(region.mip_levels - 1)
-                        .layer_count(1),
-                );
+                .subresource_range(color_mips(1, region.mip_levels - 1));
             uploader.device.cmd_pipeline_barrier(
                 blit_cb,
                 vk::PipelineStageFlags::TRANSFER,
@@ -203,7 +181,6 @@ pub(super) fn record_blit_continuation(
                 &[dst_ready],
             );
             for level in 1..region.mip_levels {
-                // Halve each dimension per level, clamping both to one pixel.
                 let (src_w, src_h) = (
                     (region.width >> (level - 1)).max(1),
                     (region.height >> (level - 1)).max(1),
@@ -219,13 +196,7 @@ pub(super) fn record_blit_continuation(
                     region.image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     &[vk::ImageBlit::default()
-                        .src_subresource(
-                            vk::ImageSubresourceLayers::default()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .mip_level(level - 1)
-                                .base_array_layer(0)
-                                .layer_count(1),
-                        )
+                        .src_subresource(color_layer(level - 1))
                         .src_offsets([
                             vk::Offset3D::default(),
                             vk::Offset3D {
@@ -234,13 +205,7 @@ pub(super) fn record_blit_continuation(
                                 z: 1,
                             },
                         ])
-                        .dst_subresource(
-                            vk::ImageSubresourceLayers::default()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .mip_level(level)
-                                .base_array_layer(0)
-                                .layer_count(1),
-                        )
+                        .dst_subresource(color_layer(level))
                         .dst_offsets([
                             vk::Offset3D::default(),
                             vk::Offset3D {
@@ -260,13 +225,7 @@ pub(super) fn record_blit_continuation(
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .image(region.image)
-                    .subresource_range(
-                        vk::ImageSubresourceRange::default()
-                            .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .base_mip_level(level)
-                            .level_count(1)
-                            .layer_count(1),
-                    );
+                    .subresource_range(color_mips(level, 1));
                 uploader.device.cmd_pipeline_barrier(
                     blit_cb,
                     vk::PipelineStageFlags::TRANSFER,
@@ -286,12 +245,7 @@ pub(super) fn record_blit_continuation(
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .image(region.image)
-                .subresource_range(
-                    vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .level_count(region.mip_levels)
-                        .layer_count(1),
-                );
+                .subresource_range(color_mips(0, region.mip_levels));
             uploader.device.cmd_pipeline_barrier(
                 blit_cb,
                 vk::PipelineStageFlags::TRANSFER,
