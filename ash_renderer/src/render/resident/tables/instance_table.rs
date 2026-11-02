@@ -38,7 +38,7 @@ use bevy::pbr::StandardMaterial;
 use crate::common::bytes::{put_f32s, put_mat4, put_u32, put_u32s, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
-use super::slot_allocator::SlotAllocator;
+use crate::render::resident::slot_allocator::SlotAllocator;
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::contract::{align_up, MemoryContract};
 use crate::render::core::device::memory::role::BufferRole;
@@ -96,7 +96,7 @@ pub(crate) const PRESENCE_ENTRY_SIZE: u64 = 4;
 /// 每实例槽的 LOD 档数：0 = 基准 mesh（与对象记录相同），1..3 = 渐粗变体或缺席。
 pub const MAX_LOD_LEVELS: u32 = 4;
 /// LOD 变体条目字节数：first_index/index_count/vertex_base 三个 u32（同
-/// [`MeshSlot`](super::pool::MeshSlot)）；`index_count = 0` 表示该档未驻留，消费端回退更细档。
+/// [`MeshSlot`](crate::render::resident::assets::pool::MeshSlot)）；`index_count = 0` 表示该档未驻留，消费端回退更细档。
 pub const LOD_ENTRY_SIZE: u64 = 12;
 /// LOD 变体表步长（每实例槽 [`MAX_LOD_LEVELS`] 条，按槽号直接寻址）。
 pub const LOD_TABLE_STRIDE: u64 = LOD_ENTRY_SIZE * MAX_LOD_LEVELS as u64;

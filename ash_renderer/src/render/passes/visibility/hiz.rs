@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::common::error::{Result, VulkanError};
 use crate::common::syntax::unwrap_or_return;
 
-use crate::render::resident::images::full_mip_chain;
+use crate::render::resident::assets::image_spec::full_mip_chain;
 use crate::render::core::pipeline::compute::ComputePipeline;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;

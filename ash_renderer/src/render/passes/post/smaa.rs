@@ -18,7 +18,7 @@ use bevy::prelude::Resource;
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::role::BufferRole;
-use crate::render::resident::images::GpuImage;
+use crate::render::resident::assets::images::GpuImage;
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
 use crate::render::core::target::color::ColorTarget;
@@ -164,7 +164,7 @@ fn upload_lut(
 ) -> Result<GpuImage> {
     let sharing = ctx.sharing_families();
     let (data, w, h) = decode_lut_png(bytes, role)?;
-    let spec = crate::render::resident::images::ImageSpec {
+    let spec = crate::render::resident::assets::image_spec::ImageSpec {
         width: w,
         height: h,
         format: vk::Format::R8G8B8A8_UNORM,
@@ -270,7 +270,7 @@ impl SmaaTargets {
         self.set_layout_a = SMAA_A_SET_DESC.create(device)?;
         self.set_layout_b = SMAA_B_SET_DESC.create(device)?;
         let slots = MAX_FRAMES_IN_FLIGHT;
-        self.sampler = crate::render::resident::images::sampler_key(
+        self.sampler = crate::render::resident::sampler::sampler_key(
             &bevy::image::ImageSamplerDescriptor::linear(),
         )
         .create_sampler(device)?;

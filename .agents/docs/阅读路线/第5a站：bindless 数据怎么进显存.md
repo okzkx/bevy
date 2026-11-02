@@ -75,7 +75,7 @@ DEVICE_LOCAL 目的地：MeshPool 顶点/索引池 · GpuImage · 对象表
 
 ## 三、mesh 大池：两条 DEVICE_LOCAL 池 + 按资产去重
 
-`resident/pool.rs` 的 `MeshPool` 持有一条顶点池、一条索引池，全部 mesh 都住在里面；`resident/mesh_convert.rs` 负责把 Bevy `Mesh` 整形成池能直接收的字节。
+`resident/assets/pool.rs` 的 `MeshPool` 持有一条顶点池、一条索引池，全部 mesh 都住在里面；`resident/assets/mesh_convert.rs` 负责把 Bevy `Mesh` 整形成池能直接收的字节。
 
 **转换产物**（`convert_mesh` → `ConvertedMesh`）：交错顶点 32 B（POSITION 12 + NORMAL 12 + UV_0 8），索引一律 U32，同时扫出局部包围盒。只收 TriangleList；POSITION 缺失或格式不对就拒收（Tier①，warn 一次跳过），NORMAL/UV 缺失补 0 继续。
 
@@ -99,7 +99,7 @@ DEVICE_LOCAL 目的地：MeshPool 顶点/索引池 · GpuImage · 对象表
 
 ## 四、贴图缓存：一张图一块 dedicated memory
 
-`resident/images.rs` 分三层：`ImageSpec`（规格映射）→ `GpuImage`（Vulkan 对象本体）→ `ImageCache`（按资产身份驻留）。
+`resident/assets/image_spec.rs` 的 `ImageSpec`（规格映射）→ `resident/assets/images.rs` 的 `GpuImage`（Vulkan 对象本体）→ `ImageCache`（按资产身份驻留）。
 
 **`image_spec`**：只收 2D、`Rgba8Unorm`/`Rgba8UnormSrgb` 且有像素数据的 Bevy `Image`，其余拒收（Tier①）。sRGB 与否沿用 glTF 加载器定好的格式，本层不再推断；`ImageSampler::Default` 解析为 `ImageSamplerDescriptor::linear()`（与 Bevy `ImagePlugin` 默认一致）。mip 级数按全链 `floor(log2(max(w,h))) + 1` 算。
 

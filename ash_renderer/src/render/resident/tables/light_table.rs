@@ -16,7 +16,7 @@ use bevy::log::info;
 
 use crate::common::bytes::{put_u32, put_vec4};
 use crate::common::error::{Result, VulkanError};
-use super::slot_allocator::SlotAllocator;
+use crate::render::resident::slot_allocator::SlotAllocator;
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::contract::MemoryContract;
 use crate::render::core::device::memory::role::BufferRole;

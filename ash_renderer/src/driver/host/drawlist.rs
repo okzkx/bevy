@@ -4,7 +4,7 @@
 //! 槽号列表写进在场环，GPU 侧 build_indirect 只为列表里的行组装命令；列表来自账本
 //! 信息，不是可见集回读。行的 GPU 内容由对象表（写一次）+ 模型环/材质环（每帧）承载。
 //! 环写入只发生在 `draw_frame` 的 `wait_for_slot` 之后（fence 证据同本帧 UBO，详见
-//! `render::resident::instance_table` 模块文档）。
+//! `render::resident::tables::instance_table` 模块文档）。
 //!
 //! 行级可绘判定：实例槽缺/锚 mesh 未驻留/材质容器缺席 = 该行暂缓（就绪后自愈）；
 //! 缺贴图 = fallback 白图照画。暂缓行不进在场环，自然没有绘制命令，GPU 侧无特判。

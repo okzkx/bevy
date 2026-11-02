@@ -20,9 +20,9 @@ use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
-use crate::render::resident::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
-use crate::render::resident::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
-use crate::render::resident::instance_table::INSTANCE_SET_DESC;
+use crate::render::resident::tables::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
+use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
+use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 
 pub(crate) static GBUFFER_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
     label: "gbuffer_write",

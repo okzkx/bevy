@@ -13,7 +13,7 @@ use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET_DESC;
-use crate::render::resident::instance_table::INSTANCE_SET_DESC;
+use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 
 use super::transparent_targets::{TRANSPARENT_CAPACITY, TRANSPARENT_SET_DESC};
 

@@ -26,7 +26,7 @@ use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::passes::visibility::hiz::HIZ_OCCLUSION_SET_DESC;
-use crate::render::resident::instance_table::INSTANCE_SET_DESC;
+use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 
 pub(crate) static OCCLUSION_PIPELINE: PipelineDesc = PipelineDesc {

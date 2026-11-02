@@ -1,4 +1,5 @@
-//! 贴图资源：bevy `Image` → VkImage/view，按资产身份驻留缓存；采样器参数键。
+//! 贴图资源：按 [`ImageSpec`] 建 VkImage/view，按资产身份驻留缓存。格式核对在
+//! [`super::image_spec`]，采样器键在 [`crate::render::resident::sampler`]。
 //!
 //! 三条约束（详见 `.agents/docs/3-静态取数链路/3.3-贴图与bindless描述符/
 //! 显存机制：Buffer与Image之别、swizzle不透明与访问路径特化.md` §0）：
@@ -8,103 +9,21 @@
 //!    `maxMemoryAllocationCount` 余量充足）。
 //! 3. 图像屏障要带 old/new layout 与子资源范围，transfer 里图像段单独录制，不套 buffer 屏障。
 //!
-//! sRGB/线性由 glTF loader 按贴图用途决定，体现在 `Image.texture_descriptor.format` 的 Srgb
-//! 后缀上；本层只核对格式并映射，不二次推断。`ImageSampler::Default` 按 bevy `ImagePlugin`
-//! 的默认值解析为 `ImageSamplerDescriptor::linear()`。
-//!
-//! mip：资产只取 mip0，mip 链在上传批里由 GPU blit 逐级生成（一次性，不是每帧）；采样器
-//! `max_lod` 放开到 `VK_LOD_CLAMP_NONE`，可用级数由 view 决定。格式不支持 blit/线性过滤时
-//! 降级为单级（判定在 [`GpuImage::create`]）。
+//! mip：资产只取 mip0，mip 链在上传批里由 GPU blit 逐级生成（一次性，不是每帧），可用级数
+//! 由 view 决定。格式不支持 blit/线性过滤时降级为单级（判定在 [`GpuImage::create`]）。
 
 use std::collections::HashMap;
 
 use ash::{vk, Device, Instance};
 use bevy::asset::AssetId;
-use bevy::image::{
-    Image as BevyImage, ImageAddressMode, ImageCompareFunction, ImageFilterMode, ImageSampler,
-    ImageSamplerBorderColor, ImageSamplerDescriptor,
-};
+use bevy::image::Image as BevyImage;
 use bevy::log::info;
-use thiserror::Error;
-use wgpu_types::{TextureDimension, TextureFormat};
 
-use super::bindless_texture_table::{BindlessTextureTable, SlotBinding};
+use super::image_spec::ImageSpec;
+use crate::render::resident::tables::bindless_texture_table::{BindlessTextureTable, SlotBinding};
 use crate::render::core::device::memory::contract::MemoryContract;
 use crate::render::core::device::transfer::{Ticket, Uploader};
 use crate::common::error::{Result, VulkanError};
-
-/// bevy `Image` → 渲染器规格的映射拒绝：不影响帧循环，调用方 warn 后跳过该资产
-/// （同 [`super::mesh_convert::MeshConvertError`]）。
-#[derive(Debug, Error)]
-pub enum ImageConvertError {
-    /// 只收 RGBA8（线性/sRGB），其余格式显式拒绝，不猜。
-    #[error("不支持的贴图格式 {0:?}（只收 Rgba8Unorm[Srgb]）")]
-    UnsupportedFormat(TextureFormat),
-    #[error("不支持的维度 {0:?}（只收 2D）")]
-    UnsupportedDimension(TextureDimension),
-    /// 未初始化的存储贴图没有可上传内容。
-    #[error("贴图无像素数据（data 为 None）")]
-    MissingData,
-}
-
-/// 一张贴图的渲染器规格。Vulkan 对象由 [`GpuImage::create`] 按它建，像素字节由调用方从
-/// `Image.data` 直接取进 staging（只取 mip0）。
-#[derive(Debug)]
-pub struct ImageSpec {
-    pub width: u32,
-    pub height: u32,
-    /// 已核对的格式（创建时再查 optimal tiling feature）。
-    pub format: vk::Format,
-    /// 全链级数；实际建几级由 [`GpuImage::create`] 按格式 blit 能力决定，不支持则降为 1。
-    pub mip_levels: u32,
-    /// 已解析的采样设置（`Default` → `linear()`）。
-    pub sampler: ImageSamplerDescriptor,
-}
-
-/// bevy `Image` → [`ImageSpec`]：核对维度/格式角色，解析采样设置，算全链级数。
-///
-/// # Errors
-/// 维度非 2D、格式不在 RGBA8 两档、data 缺失时返回 [`ImageConvertError`]。
-pub fn image_spec(image: &BevyImage) -> Result<ImageSpec, ImageConvertError> {
-    let desc = &image.texture_descriptor;
-    if desc.dimension != TextureDimension::D2 {
-        return Err(ImageConvertError::UnsupportedDimension(desc.dimension));
-    }
-    let format = match desc.format {
-        TextureFormat::Rgba8UnormSrgb => vk::Format::R8G8B8A8_SRGB,
-        TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
-        other => return Err(ImageConvertError::UnsupportedFormat(other)),
-    };
-    if image.data.is_none() {
-        return Err(ImageConvertError::MissingData);
-    }
-    let sampler = match &image.sampler {
-        ImageSampler::Default => ImageSamplerDescriptor::linear(),
-        ImageSampler::Descriptor(d) => d.clone(),
-    };
-    Ok(ImageSpec {
-        width: image.width(),
-        height: image.height(),
-        format,
-        mip_levels: full_mip_chain(image.width(), image.height()),
-        sampler,
-    })
-}
-
-/// 2D 贴图的全 mip 链级数：`floor(log2(max(w,h))) + 1`（1×1 → 1 级，1024×256 → 11 级）。
-#[must_use]
-pub fn full_mip_chain(width: u32, height: u32) -> u32 {
-    let m = width.max(height).max(1);
-    (u32::BITS - m.leading_zeros()).max(1)
-}
-
-impl ImageSpec {
-    /// 是否按 sRGB 解码（base color/emissive 类；数据贴图为线性），按映射后的格式判断。
-    #[must_use]
-    pub fn srgb_role(&self) -> bool {
-        self.format == vk::Format::R8G8B8A8_SRGB
-    }
-}
 
 /// 一张 2D 贴图：VkImage（OPTIMAL，UNDEFINED 起步）+ dedicated memory + 全量 view。
 /// 布局迁移与上传在 [`crate::render::Uploader`] 的图像段，采样器归
@@ -125,7 +44,7 @@ impl GpuImage {
     /// offset 0 绑定 → 建 view。任一步失败回收已建对象。
     ///
     /// 采样器不在这里建：同参数的贴图共享一个采样器槽，若采样器随某张图生灭，先卸载的
-    /// 那张会让共享方悬空；所以采样器归 [`BindlessTextureTable`] 按 [`SamplerKey`] 持有。
+    /// 那张会让共享方悬空；所以采样器归 [`BindlessTextureTable`] 按 [`SamplerKey`](crate::render::resident::sampler::SamplerKey) 持有。
     ///
     /// `sharing_families` 有 ≥2 个不同族时按 CONCURRENT 创建。坑：用 EXCLUSIVE + release/
     /// acquire 时，验证层对"已写入但还没被 draw 访问的 UPDATE_AFTER_BIND 数组元素"的布局
@@ -409,128 +328,5 @@ impl ImageCache {
     #[must_use]
     pub fn slots(&self, id: AssetId<BevyImage>) -> Option<SlotBinding> {
         self.resident.get(&id).map(|(_, _, slots)| *slots)
-    }
-}
-
-fn filter(f: ImageFilterMode) -> vk::Filter {
-    match f {
-        ImageFilterMode::Nearest => vk::Filter::NEAREST,
-        ImageFilterMode::Linear => vk::Filter::LINEAR,
-    }
-}
-
-/// 采样器去重键：VkSampler 的全部可变参数（滤波两轴 + mip 模式、寻址三轴、比较、边框色）。
-/// 同键即同一配方，可共享一个描述符槽。不进键的：
-/// - 格式：VkSampler 没有格式参数（sRGB/线性由 image view 决定）；
-/// - lod/anisotropy/bias：[`SamplerKey::create_sampler`] 对所有采样器取同值。
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct SamplerKey {
-    mag: i32,
-    min: i32,
-    mip: i32,
-    u: i32,
-    v: i32,
-    w: i32,
-    /// None = 比较关闭（与 Some(NEVER) 的 compare_enable=true 不同）
-    compare: Option<i32>,
-    border: i32,
-}
-
-/// bevy 采样描述符 → [`SamplerKey`]（与 [`SamplerKey::create_sampler`] 的参数一一对应，改一处
-/// 必须改另一处）。
-#[must_use]
-pub fn sampler_key(d: &ImageSamplerDescriptor) -> SamplerKey {
-    SamplerKey {
-        mag: filter(d.mag_filter).as_raw(),
-        min: filter(d.min_filter).as_raw(),
-        mip: mipmap_mode(d.mipmap_filter).as_raw(),
-        u: address_mode(d.address_mode_u).as_raw(),
-        v: address_mode(d.address_mode_v).as_raw(),
-        w: address_mode(d.address_mode_w).as_raw(),
-        compare: d.compare.map(|c| compare_op(c).as_raw()),
-        border: d
-            .border_color
-            .map_or(vk::BorderColor::FLOAT_TRANSPARENT_BLACK, border_color)
-            .as_raw(),
-    }
-}
-
-impl SamplerKey {
-    /// 按键建 VkSampler（句柄归描述符表所有）。所有采样器统一：`max_lod = VK_LOD_CLAMP_NONE`
-    /// （可用级数由 view 决定，单级贴图同样适用）、不开 anisotropy、bias 0。
-    ///
-    /// # Errors
-    /// `vkCreateSampler` 失败。
-    pub(crate) fn create_sampler(&self, device: &Device) -> Result<vk::Sampler> {
-        let info = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::from_raw(self.mag))
-            .min_filter(vk::Filter::from_raw(self.min))
-            .mipmap_mode(vk::SamplerMipmapMode::from_raw(self.mip))
-            .address_mode_u(vk::SamplerAddressMode::from_raw(self.u))
-            .address_mode_v(vk::SamplerAddressMode::from_raw(self.v))
-            .address_mode_w(vk::SamplerAddressMode::from_raw(self.w))
-            .mip_lod_bias(0.0)
-            .min_lod(0.0)
-            .max_lod(vk::LOD_CLAMP_NONE)
-            .compare_enable(self.compare.is_some())
-            .compare_op(
-                self.compare
-                    .map_or(vk::CompareOp::NEVER, vk::CompareOp::from_raw),
-            )
-            .border_color(vk::BorderColor::from_raw(self.border))
-            .anisotropy_enable(false);
-        unsafe { device.create_sampler(&info, None) }.map_err(VulkanError::from)
-    }
-}
-
-fn mipmap_mode(f: ImageFilterMode) -> vk::SamplerMipmapMode {
-    match f {
-        ImageFilterMode::Nearest => vk::SamplerMipmapMode::NEAREST,
-        ImageFilterMode::Linear => vk::SamplerMipmapMode::LINEAR,
-    }
-}
-
-fn address_mode(m: ImageAddressMode) -> vk::SamplerAddressMode {
-    match m {
-        ImageAddressMode::ClampToEdge => vk::SamplerAddressMode::CLAMP_TO_EDGE,
-        ImageAddressMode::Repeat => vk::SamplerAddressMode::REPEAT,
-        ImageAddressMode::MirrorRepeat => vk::SamplerAddressMode::MIRRORED_REPEAT,
-        ImageAddressMode::ClampToBorder => vk::SamplerAddressMode::CLAMP_TO_BORDER,
-    }
-}
-
-fn compare_op(op: ImageCompareFunction) -> vk::CompareOp {
-    match op {
-        ImageCompareFunction::Never => vk::CompareOp::NEVER,
-        ImageCompareFunction::Less => vk::CompareOp::LESS,
-        ImageCompareFunction::Equal => vk::CompareOp::EQUAL,
-        ImageCompareFunction::LessEqual => vk::CompareOp::LESS_OR_EQUAL,
-        ImageCompareFunction::Greater => vk::CompareOp::GREATER,
-        ImageCompareFunction::NotEqual => vk::CompareOp::NOT_EQUAL,
-        ImageCompareFunction::GreaterEqual => vk::CompareOp::GREATER_OR_EQUAL,
-        ImageCompareFunction::Always => vk::CompareOp::ALWAYS,
-    }
-}
-
-fn border_color(c: ImageSamplerBorderColor) -> vk::BorderColor {
-    match c {
-        ImageSamplerBorderColor::TransparentBlack => vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
-        ImageSamplerBorderColor::OpaqueBlack => vk::BorderColor::FLOAT_OPAQUE_BLACK,
-        ImageSamplerBorderColor::OpaqueWhite => vk::BorderColor::FLOAT_OPAQUE_WHITE,
-        ImageSamplerBorderColor::Zero => vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::full_mip_chain;
-
-    #[test]
-    fn mip_chain_levels() {
-        assert_eq!(full_mip_chain(1, 1), 1);
-        assert_eq!(full_mip_chain(2, 2), 2);
-        assert_eq!(full_mip_chain(4, 2), 3);
-        assert_eq!(full_mip_chain(1024, 256), 11);
-        assert_eq!(full_mip_chain(6, 6), 3);
     }
 }
