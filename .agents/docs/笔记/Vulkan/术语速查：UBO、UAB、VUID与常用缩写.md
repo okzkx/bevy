@@ -41,7 +41,7 @@
 
 | 缩写 | 全称 | 一句话 |
 |---|---|---|
-| WGSL | WebGPU Shading Language | 我们的着色器源语言，喂给 naga；本项目选型与 HLSL 备用路线见[《选型记录》](../../3-静态取数链路/3.3-贴图与bindless描述符/选型记录：WGSL源语言与HLSL备用路线.md) |
+| WGSL | WebGPU Shading Language | 我们的着色器源语言，喂给 naga；本项目选型与 HLSL 备用路线见[《选型记录》](../../开发步骤/3-静态取数链路/3.3-贴图与bindless描述符/选型记录：WGSL源语言与HLSL备用路线.md) |
 | SPIR-V | Standard Portable Intermediate Representation – Vulkan | GPU 驱动消费的二进制着色器中间码，naga 的输出 |
 | HLSL / GLSL | High-Level Shading Language / OpenGL Shading Language | DirectX / OpenGL 家族的着色语言；frenderer 用 HLSL |
 | SSBO | Shader Storage Buffer Object | `STORAGE_BUFFER` 描述符类型，可读写的大块着色器存储；探针的输出数组用它 |
@@ -78,7 +78,7 @@
 | ECS | Entity Component System | Bevy 的架构模型；我们的采集系统住 PostUpdate |
 | BRP | Bevy Remote Protocol | Bevy 的远程查询协议（JSON-RPC/HTTP，端口 15702）；World 检查工具候选底座 |
 
-Bindless 与 Unity 四刀对照的完整机制（SRP Batcher/bindless/Instancing/Indirect 各砍一刀）见[《bindless机制》](../../3-静态取数链路/3.3-贴图与bindless描述符/bindless机制：从换绑到索引——frenderer锚点与Unity批处理对照.md)。
+Bindless 与 Unity 四刀对照的完整机制（SRP Batcher/bindless/Instancing/Indirect 各砍一刀）见[《bindless机制》](../../开发步骤/3-静态取数链路/3.3-贴图与bindless描述符/bindless机制：从换绑到索引——frenderer锚点与Unity批处理对照.md)。
 
 ## 5. 工程内部编号（非行业缩写，常与上面混排）
 

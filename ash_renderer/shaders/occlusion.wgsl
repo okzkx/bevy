@@ -3,7 +3,7 @@
 // instanceCount=0），遮挡独立标记 occ[slot] 只进诊断读数（分列视锥/遮挡剔除量）。
 // CPU 参照 = src/render/passes/visibility/hiz.rs 的 occluded_reverse_z /
 // occlusion_mip_level 与 occlusion.rs 的 aabb_screen_rect。
-// 原理见 .agents/docs/6-高级剔除LOD与流送/6.1-Hi-Z遮挡/Hi-Z遮挡原理：深度金字塔与保守遮挡判定.md。
+// 原理见 .agents/docs/开发步骤/6-高级剔除LOD与流送/6.1-Hi-Z遮挡/Hi-Z遮挡原理：深度金字塔与保守遮挡判定.md。
 //
 // 判定语义：
 // - 投屏：任一角点 w ≤ 0（在相机平面背后/过近）→ 恒判可见（透视除法无意义）；

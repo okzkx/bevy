@@ -1,6 +1,6 @@
 # Filament 源码参考：标准模型 BRDF 与多光源（8.2 对照基准）
 
-> 对应 [8.2 段 README 参考底座](../../8-完整延迟渲染管线/8.2-FilamentBRDF与多光源/README.md)、[Unity PBR 调研](Unity%20PBR%20调研：材质模型、BRDF%20与%20IBL.md)。版本钉：本地检出 `F:\okzkx\filament`，HEAD `373190d49`（`git describe` = rc/1.78.1-cut-31-g373190d49，移动开发线，函数行号会漂移，函数名不会）。全部引用逐行核对于 2026-10-22。
+> 对应 [8.2 段 README 参考底座](../../开发步骤/8-完整延迟渲染管线/8.2-FilamentBRDF与多光源/README.md)、[Unity PBR 调研](Unity%20PBR%20调研：材质模型、BRDF%20与%20IBL.md)。版本钉：本地检出 `F:\okzkx\filament`，HEAD `373190d49`（`git describe` = rc/1.78.1-cut-31-g373190d49，移动开发线，函数行号会漂移，函数名不会）。全部引用逐行核对于 2026-10-22。
 
 ## 0. 判定线
 

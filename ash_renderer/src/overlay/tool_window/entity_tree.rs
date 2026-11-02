@@ -6,7 +6,7 @@
 //!
 //! 取数分两层：树本身由维护系统直查 World 重建拍平缓存，不另造快照通道；属性区走
 //! [`SelectedDetails`] 纯数据快照——采集系统产、egui pass 消费（后端收集/前端展示）。
-//! 机制与证据：`.agents/docs/3-静态取数链路/3.10-egui实体层级树/`、`3.11-egui实体编辑/`。
+//! 机制与证据：`.agents/docs/开发步骤/3-静态取数链路/3.10-egui实体层级树/`、`3.11-egui实体编辑/`。
 
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};

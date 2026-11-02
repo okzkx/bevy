@@ -3,7 +3,7 @@
 //!
 //! 宽高比补位由机制层的 [`crate::scene::AshCameraAspectPlugin`] 提供；
 //! "为什么裸 `Camera` 不用 `Camera3d`"的机制见
-//! `.agents/docs/3-静态取数链路/3.1-ECS侧取数/3.1.3-相机与灯光：引擎层自建与宽高比第四补位.md`。
+//! `.agents/docs/开发步骤/3-静态取数链路/3.1-ECS侧取数/3.1.3-相机与灯光：引擎层自建与宽高比第四补位.md`。
 
 use bevy::{
     camera::{Camera, Projection},
