@@ -6,14 +6,16 @@
 
 | 位置 | 定位 | 内容 |
 |---|---|---|
-| [Bevy/](Bevy/) | Bevy 引擎侧的侦察与知识 | [Bevy GUI 实现研究](Bevy/Bevy%20GUI%20实现研究：布局、渲染、交互三层链路.md)、[Bevy World与场景生命周期](Bevy/Bevy%20World与场景生命周期：闯关全清、场景图与引用计数.md)、[bevy_remote：BRP远程协议](Bevy/bevy_remote：BRP远程协议与自定义方法.md) |
-| [Vulkan/](Vulkan/) | Vulkan API 侧的词汇与规范钉子 | [术语速查：UBO、UAB、VUID与常用缩写](Vulkan/术语速查：UBO、UAB、VUID与常用缩写.md) |
-| [引擎/](引擎/) | 引擎架构层的决策与机制论述 | [GPU-Driven 本质](引擎/GPU-Driven%20本质：决策点后移、回读墙与控制面数据面分家.md)（决策点后移与控制面/数据面分家）、[为什么引擎没有都上 GPU 驱动](引擎/为什么引擎没有都上%20GPU%20驱动：CPU%20镜像、回读墙与收益边界.md)（GDR 决策权与回读墙，正空间/边界两半姊妹篇）、[渲染管线模式与 VisBuffer](引擎/渲染管线模式与%20VisBuffer：GDR%20的着色层搭档.md)（着色层搭档）、[GPU 模拟计算](引擎/GPU%20模拟计算：纯替代%20CPU%20多线程的负载清单与搬迁分界.md)（模拟类负载清单与搬迁分界） |
-| [渲染/](渲染/README.md) | 高质量渲染方向的调研 | SCGI/PBR/GI 谱系/虚拟纹理四篇调研，明细见其 [README](渲染/README.md) |
-| 根目录 | 跨主题的通用件 | [写文档纪律](写文档纪律：帧流程三轮返工的教训.md)（方法论）、[AI VibeCoding 边学边做工作流](AI%20VibeCoding%20边学边做工作流：以本工程为例.md)（方法论：六步循环总览与正本委托表）、[开发工具与语法笔记](开发工具与语法笔记.md)（工具层）、[代码结构审查与重构记录：步骤7-8质量复盘](代码结构审查与重构记录：步骤7-8质量复盘.md)（ash_renderer 全量审查与重构验收） |
+| [Bevy/](Bevy/) | Bevy 引擎侧的侦察与知识 | [Bevy GUI 实现研究](Bevy/Bevy%20GUI%20实现研究.md)、[World与场景生命周期](Bevy/World与场景生命周期.md)、[变更检测与资产事件](Bevy/变更检测与资产事件.md)（增量上传≠增量发现、AssetId 身份/内容两层账、AssetEvent 语义）、[bevy_remote BRP协议](Bevy/bevy_remote%20BRP协议.md) |
+| [Vulkan/](Vulkan/) | Vulkan API 侧的词汇与规范钉子 | [术语速查](Vulkan/术语速查.md)（UBO/UAB/VUID 与常用缩写）、[同步模型](Vulkan/同步模型.md)（执行依赖≠内存依赖、barrier/信号量/栅栏分工、layout transition 是一次写）、[bindless描述符语义](Vulkan/bindless描述符语义.md)（UAB 三层配套、消费窗口、PARTIALLY_BOUND）、[动态渲染管线声明](Vulkan/动态渲染管线声明.md)（管线声明=附件全集形状对账、VUID 族）、[交换链与呈现](Vulkan/交换链与呈现.md)（先拆后建、present 信号量按 image index、60Hz 节拍合法空闲） |
+| [引擎/](引擎/) | 引擎架构层的决策与机制论述 | [GPU-Driven 本质](引擎/GPU-Driven%20本质.md)（决策点后移与控制面/数据面分家）、[为什么没有全上 GPU 驱动](引擎/为什么没有全上%20GPU%20驱动.md)（GDR 决策权与回读墙，正空间/边界两半姊妹篇）、[渲染管线模式与VisBuffer](引擎/渲染管线模式与VisBuffer.md)（着色层搭档）、[GPU 模拟计算](引擎/GPU%20模拟计算.md)（模拟类负载清单与搬迁分界）、[indirect 命令环](引擎/indirect%20命令环.md)（drawCount/instanceCount 两数账与身份传递）、[常驻绘制数据组织](引擎/常驻绘制数据组织.md)（写形状分家、双帧槽环+奇偶脏集、firstInstance 槽号映射）、[egui立即模式与裸GPU集成](引擎/egui立即模式与裸GPU集成.md)（声明非状态、points 顶点域、多 pass 可见性簿记） |
+| [渲染/](渲染/README.md) | 高质量渲染方向的调研与渲染知识正本 | SCGI/PBR/GI 谱系/虚拟纹理/体素五篇调研 + Filament BRDF/色调映射两篇源码参考 + Hi-Z遮挡/GPU LOD与流送/延迟渲染管线一帧全景/naga与WGSL工具链四篇知识正本，明细见其 [README](渲染/README.md) |
+| [开发方法/](开发方法/) | 可迁移的方法论 | [渲染性能归因方法](开发方法/渲染性能归因方法.md)（帧账三读数、节拍合法空闲、trace 纪律、A/B 证伪、受控对照） |
+| 根目录 | 跨主题的通用件 | [写文档纪律](写文档纪律.md)（方法论）、[AI VibeCoding 工作流](AI%20VibeCoding%20工作流.md)（方法论：六步循环总览与正本委托表）、[开发工具与语法笔记](开发工具与语法笔记.md)（工具层）、[步骤7-8质量复盘](步骤7-8质量复盘.md)（ash_renderer 全量审查与重构验收记录） |
 
 ## 放置约定
 
 - 新笔记按主题域进对应子目录，明确跨两域以上的通用方法论/工具留根。
 - GPU-driven 决策层与着色层两篇姊妹篇讲的是引擎级取舍（决策权归属、管线模式），归 `引擎/`；`渲染/` 收高质量渲染技法调研，两者互为姊妹、文内互链。
 - `渲染/` 内的调研篇共享"对 ash_renderer 的启示"收尾体例；新增调研篇记得同步其 README 表格。
+- 文件名取主题短名，全称副题留在文内 H1；重命名时全库同步引用（历史见 2026-11-02 短命名整理）。
