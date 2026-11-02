@@ -28,58 +28,49 @@ pub(crate) static FRAME_UNIFORM_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     )],
 );
 
-/// 每帧 UBO 字节数（set1 b0）。208B（mat4 view_proj + 灯光参数 + mode + mat4
-/// inv_view_proj + vec4 camera_pos，偏移见 `FrameUniformTableLayout` 静态断言表）；
-/// binding 形状（b0 UNIFORM_BUFFER）与 pipeline layout 不随尺寸变，range 在写入
-/// 时的 `DescriptorBufferInfo`，扩容不动 ABI。
+/// 每帧 UBO 字节数（set1 b0；偏移见 `FrameUniformTableLayout` 静态断言）。range 在写描述符时
+/// 给出，改尺寸不影响 binding 形状与 pipeline layout。
 pub const FRAME_UBO_SIZE: u64 = 208;
 
-/// 帧数据打包模式（UBO `mode` 字段；4 起为合成 pass 专属的 G-buffer 通道仪器；
-/// 语义见 `gbuffer_composite.wgsl` 与 host 侧材质模式说明）。
+/// UBO `mode` 字段取值（语义见 `gbuffer_composite.wgsl`）；4 起只有合成 pass 使用，用来直出
+/// G-buffer 单通道调试。
 pub const FRAME_MODE_LAMBERT: u32 = 0;
 pub const FRAME_MODE_UNLIT: u32 = 1;
 pub const FRAME_MODE_NORMAL: u32 = 2;
-/// 世界位置可视化：G-buffer 深度反投影重建的世界坐标编码直出——
-/// 深度重建机制的验收仪器（仅合成 pass 消费）。
+/// 世界位置可视化：用 G-buffer 深度反投影重建世界坐标后直出，用来检查深度重建。
 pub const FRAME_MODE_POSITION: u32 = 3;
-/// G-buffer 调试仪器：matparam 单通道灰度直出——mutate 材质热改
-///（metallic/roughness）的写后读验收口。
+/// matparam 单通道灰度直出，用来检查材质热改（metallic/roughness 等）是否写进 G-buffer。
 pub const FRAME_MODE_METALLIC: u32 = 4;
 pub const FRAME_MODE_ROUGHNESS: u32 = 5;
 pub const FRAME_MODE_AO: u32 = 6;
 pub const FRAME_MODE_REFLECTANCE: u32 = 7;
-/// reverse-Z 深度线性化灰度（clip.w / far——透视 w = 视空间深度）。
+/// reverse-Z 深度线性化灰度（clip.w / far；透视下 w 即视空间深度）。
 pub const FRAME_MODE_DEPTH: u32 = 8;
 
-/// 无灯帧的方向光占位（xyz 单位化合法方向，防归一化 NaN；直射/环境/灯色全零）。
-/// 建表时的 identity 初值与 frame.rs 的无灯分支共用此常量。
+/// 无方向光时的占位方向（xyz 已是合法方向，避免归一化出 NaN；灯色全零）。
+/// 建表初值与 draw_frame 的无灯分支共用。
 pub const PLACEHOLDER_DIR_TO_LIGHT: [f32; 4] = [0.5, 1.0, 0.3, 0.0];
 
-/// 每帧 UBO 的宿主侧取数产物（`draw_frame` 组装，[`pack_frame_uniforms`] 排布）。
+/// 每帧 UBO 的宿主侧数据（`draw_frame` 组装，[`pack_frame_uniforms`] 打包）。
 pub struct FrameUniformsData {
-    /// view × projection（列主序展平约定同 push 的 model）。
     pub view_proj: bevy::math::Mat4,
-    /// inv(view_proj)：clip→world 反投影——G-buffer 深度重建世界
-    /// 位置的常量面；相机缺席帧 identity 兜底（与 view_proj 同源同帧）。
+    /// clip → world 反投影，G-buffer 用它从深度重建世界位置；无相机帧为 identity。
     pub inv_view_proj: bevy::math::Mat4,
-    /// 表面到光方向（xyz 单位向量，w=0 占位）。**bevy GPU 同款语义**：
-    /// `prepare_lights` 写 `dir_to_light = transform.back()`（forward 取负，
-    /// "N·L 就绪"），Lambert 直接 `dot(n, dir_to_light)`，符号混淆在此斩断。
+    /// 表面指向光源的方向（xyz 单位向量，w=0），与 bevy `dir_to_light = transform.back()`
+    /// 同义，Lambert 直接 `dot(n, dir_to_light)`，不再取负。
     pub dir_to_light: [f32; 4],
-    /// 环境光（rgb = LinearRgba × brightness，bevy 同款；w 未用）。
+    /// 环境光（rgb = LinearRgba × brightness，同 bevy；w 未用）。
     pub ambient_color: [f32; 4],
-    /// 方向光（rgb = LinearRgba × illuminance，bevy 同款；w 未用）。
+    /// 方向光（rgb = LinearRgba × illuminance，同 bevy；w 未用）。
     pub light_color: [f32; 4],
-    /// 材质模式（`FRAME_MODE_*`）。
+    /// 着色模式（`FRAME_MODE_*`）。
     pub mode: u32,
-    /// 相机世界位置（xyz：光照累积的 V = normalize(camera_pos − world)
-    /// 取数面；w 未用）。相机缺席帧 zeros 兜底（与 view_proj 同源同帧）。
+    /// 相机世界位置（xyz，光照用 V = normalize(camera_pos − world)；w 未用）。无相机帧为 0。
     pub camera_pos: [f32; 4],
 }
 
-/// [`FrameUniformsData`] 的 WGSL 布局镜像（uniform address space）：本类型不参与
-/// 运行时（字节由 [`pack_frame_uniforms`] 按偏移手工排布），`offset_of!` 静态断言
-/// 把 WGSL/描述符 range/CPU 三方钉在一起。uniform 对齐 16：mode 后垫到 128。
+/// [`FrameUniformsData`] 的 WGSL uniform 布局镜像：不参与运行时，只用 `offset_of!` 静态断言
+/// 核对 [`pack_frame_uniforms`] 的偏移。uniform 对齐 16，mode 后垫到 128。
 #[repr(C)]
 struct FrameUniformTableLayout {
     view_proj: [f32; 16],
@@ -104,8 +95,7 @@ const _: () = {
     assert!(FRAME_UBO_SIZE == 208);
 };
 
-/// [`FrameUniformsData`] → 208B uniform 字节（偏移按 `FrameUniformTableLayout` 的
-/// 静态断言表手工排布）。
+/// [`FrameUniformsData`] → 208B uniform 字节（偏移见 `FrameUniformTableLayout`）。
 #[must_use]
 pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usize] {
     let mut out = [0u8; FRAME_UBO_SIZE as usize];
@@ -120,9 +110,7 @@ pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usiz
     out
 }
 
-/// identity 初值的帧数据（view_proj = identity、灯光占位、Lambert 模式）：
-/// 建好到首帧写入之间若被采样（理论不发生，帧循环首帧即重写），画面是
-/// identity 形状而非悬空值。
+/// 建表初值（identity 矩阵、占位灯光、Lambert）：首帧写入前若被读到，也不是未定义内容。
 fn identity_frame_uniforms() -> FrameUniformsData {
     FrameUniformsData {
         view_proj: bevy::math::Mat4::IDENTITY,
@@ -181,7 +169,6 @@ impl FrameUniformTable {
             )
         }
         .map_err(VulkanError::from)?;
-        // 写入过声明校验（FRAME_UNIFORM_SET_DESC b0 = UBO，写满才提交）
         for (set, ubo) in this.sets.iter().zip(&this.ubos) {
             let mut writer = DescriptorWriter::new(&FRAME_UNIFORM_SET_DESC, *set);
             writer.buffer(0, ubo.buffer(), 0, FRAME_UBO_SIZE);
@@ -202,7 +189,7 @@ impl FrameUniformTable {
         DescSet::new(&FRAME_UNIFORM_SET_DESC, self.sets[frame])
     }
 
-    /// 第 `frame` 帧槽的 UBO 本体（写相机/灯光数据的入口，帧槽 fence 纪律内）。
+    /// 第 `frame` 帧槽的 UBO（写相机/灯光数据，须在该帧槽 fence 之后）。
     pub fn ubo(&mut self, frame: usize) -> &mut GpuBuffer {
         &mut self.ubos[frame]
     }
@@ -210,8 +197,8 @@ impl FrameUniformTable {
 
 impl Drop for FrameUniformTable {
     fn drop(&mut self) {
-        // 不等 GPU：退出排空由 teardown_vulkan 的 device_wait_idle 先于一切资源 Drop。
-        // set 随 pool 一起释放；半建状态下的空句柄跳过。
+        // 不等 GPU：退出时 teardown_vulkan 已先 device_wait_idle。set 随 pool 释放；
+        // 建表中途失败时句柄可能为空，跳过。
         unsafe {
             if self.pool != vk::DescriptorPool::null() {
                 self.device.destroy_descriptor_pool(self.pool, None);

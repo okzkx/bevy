@@ -1,7 +1,7 @@
-//! 网格转换:`bevy::mesh::Mesh` → 交错 32B vertex-input 布局 +
-//! 统一 U32 索引。纯 CPU 侧字节整形,零 Vulkan 调用——Vulkan 只在 [`super::pool`] 与 `core::device::transfer` 消费产出的字节。
+//! 网格转换：`bevy::mesh::Mesh` → 交错 32B 顶点 + U32 索引。纯 CPU 字节整形，不调 Vulkan；
+//! 产出由 [`super::pool`] 与 `core::device::transfer` 上传。
 //!
-//! **定案**(这是我们的布局选择,不是 Vulkan 禁止 SoA):
+//! 顶点布局（本模块是唯一生产点，与图形管线的 vertex-input 状态是同一份约定）：
 //!
 //! | 字段 | offset | 尺寸 | 来源 |
 //! |---|---|---|---|
@@ -9,61 +9,51 @@
 //! | NORMAL | 12 | 12B(`[f32;3]`) | `Mesh::ATTRIBUTE_NORMAL`,缺则全 0 |
 //! | UV_0 | 24 | 8B(`[f32;2]`) | `Mesh::ATTRIBUTE_UV_0`,缺则全 0 |
 //!
-//! stride 32B,与图形管线的 vertex-input 状态是同一份契约(本模块是唯一生产点)。
-//! "交错 32B 不得未经验证复用为 WGSL storage struct"——vertex 数据只走
-//! vertex-input 路径,不进描述符(Bindless 表只装贴图/采样器)。
+//! 顶点数据只走 vertex-input，不进描述符；交错 32B 未经验证不得当作 WGSL storage struct 复用。
 //!
-//! **索引**:bevy 的 `Indices::U16/U32` 均收,统一输出 U32(`vk::IndexType::UINT32`)。
-//! 放弃"U16 输入保 U16 输出"的省内存分支:一字节序/firstIndex 步长/绑定对齐三处
-//! 都只留一条路,验收面减半;FlightHelmet 284166 索引按 U32 = 1.1MB,容量余量覆盖。
-//! 无索引网格输出顺序索引 0..n(显式策略,不跳过)。
+//! 索引：U16/U32 一律输出 U32（`vk::IndexType::UINT32`），只留一条路径，不为省内存保留 U16；
+//! 无索引网格输出顺序索引 0..n。
 //!
-//! **缺字段/拓扑策略**(明确处理,不静默):POSITION 缺失或格式不是
-//! Float32x3 → 拒绝该资产(没有位置的网格无法构成绘制);NORMAL/UV_0
-//! 缺失 → 0 填充继续(调试着色允许无光/无贴图,信息缺口记录在日志);拓扑非
-//! TriangleList → 拒绝(管线只配 TriangleList,strip/line 的绕向与索引语义另议)。
-//! 拒绝是 [`MeshConvertError`],由上传编排层按 Tier① warn 后跳过,帧循环继续。
+//! 拒收：拓扑不是 TriangleList（管线只配了 TriangleList）、POSITION 缺失或不是 Float32x3、
+//! 0 顶点。NORMAL/UV_0 缺失或不匹配时填 0 继续（有 warn 日志）。拒收返回
+//! [`MeshConvertError`]，调用方 warn 后跳过该资产，帧循环继续。
 
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 
-/// 交错顶点布局的 stride,上传与 vertex-input 共用(字节)。
+/// 交错顶点的 stride（字节），上传与 vertex-input 共用。
 pub const VERTEX_STRIDE: u64 = 32;
 
-/// 转换拒绝的原因(编排层按它分类 warn,一次一资产,不刷屏)。
+/// 转换拒收的原因。
 #[derive(Debug, thiserror::Error)]
 pub enum MeshConvertError {
-    /// 拓扑不在支持范围(只收 TriangleList)。
     #[error("不支持的拓扑 {0:?}(只收 TriangleList)")]
     UnsupportedTopology(PrimitiveTopology),
-    /// POSITION 缺失或不是 Float32x3——没有位置就无法绘制,拒绝。
     #[error("POSITION 缺失或不是 Float32x3")]
     MissingPosition,
-    /// POSITION 属性长度与顶点数不符(畸形资产;运行时检查而非 debug_assert
-    /// ——release 下索引越界 panic 绕过统一错误通道)。
+    /// POSITION 长度与顶点数不符（畸形资产）。用运行时检查而非 debug_assert：release 下
+    /// 越界 panic 会绕过统一错误通道。
     #[error("POSITION 长度 {0} 与顶点数 {1} 不符")]
     PositionLengthMismatch(usize, usize),
-    /// 空网格(0 顶点):没有可上传的内容。
     #[error("网格为空(0 顶点)")]
     EmptyMesh,
 }
 
-/// 一个网格的转换产物:字节已在调用方排好池内偏移后原样进 staging。
+/// 一个网格的转换产物，字节原样进 staging。
 pub struct ConvertedMesh {
-    /// 交错顶点数据,长度 = `vertex_count * VERTEX_STRIDE`。
+    /// 交错顶点数据，长度 = `vertex_count * VERTEX_STRIDE`。
     pub vertices: Vec<u8>,
-    /// U32 索引数据,长度 = `index_count * 4`。
+    /// U32 索引数据，长度 = `index_count * 4`。
     pub indices: Vec<u8>,
     pub vertex_count: u32,
     pub index_count: u32,
-    /// 局部包围盒(POSITION 逐点 min/max,与顶点同源一次扫出)——对象表记录的
-    /// 包围体素材(随驻留入库,compute 侧推导世界空间保守包围盒)。
+    /// 局部包围盒（POSITION 逐点 min/max），写进对象表记录。
     pub local_aabb: ([f32; 3], [f32; 3]),
 }
 
-/// 转换一个网格;拒绝条件见模块文档(缺失 POSITION / 非 TriangleList / 空)。
+/// 转换一个网格；拒收条件见模块注释。
 ///
 /// # Errors
-/// [`MeshConvertError`] 列出的三种拒绝;本函数不做任何分配以外的副作用。
+/// [`MeshConvertError`] 列出的拒收原因。
 pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
     if mesh.primitive_topology() != PrimitiveTopology::TriangleList {
         return Err(MeshConvertError::UnsupportedTopology(
@@ -80,7 +70,7 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
     else {
         return Err(MeshConvertError::MissingPosition);
     };
-    // 长度核对是运行时检查——畸形资产拒收入通道,不以越界 panic 出局
+    // 长度不符拒收，不让后面按下标取值时越界 panic
     if positions.len() != vertex_count {
         return Err(MeshConvertError::PositionLengthMismatch(
             positions.len(),
@@ -112,9 +102,7 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
         Err(_) => None,
     };
 
-    // 顶点交错:32B/顶点,字段内按 f32 小端逐分量展开(x86/主流 GPU 均小端;
-    // to_le_bytes 让布局不依赖平台内建序的巧合)。逐顶点三次 extend——55392 顶点
-    // 级别的量,可读性优先,不为微优化引入 bytemuck 依赖。
+    // 逐顶点按 f32 小端展开（to_le_bytes 不依赖平台字节序），同一遍扫出包围盒
     let mut vertices = Vec::with_capacity(vertex_count * VERTEX_STRIDE as usize);
     let mut aabb_min = [f32::INFINITY; 3];
     let mut aabb_max = [f32::NEG_INFINITY; 3];
@@ -122,7 +110,6 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
         for b in positions[i] {
             vertices.extend_from_slice(&b.to_le_bytes());
         }
-        // 包围盒与顶点交错同一遍扫出(POSITION 是逐点全量,边界即真值)
         for (k, v) in positions[i].into_iter().enumerate() {
             aabb_min[k] = aabb_min[k].min(v);
             aabb_max[k] = aabb_max[k].max(v);
@@ -133,7 +120,7 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
                     vertices.extend_from_slice(&b.to_le_bytes());
                 }
             }
-            None => vertices.extend_from_slice(&[0u8; 12]),
+            None => vertices.extend_from_slice(&[0u8; 12]), // 无法线：12B 全 0
         }
         match uvs {
             Some(uv) => {
@@ -141,11 +128,11 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
                     vertices.extend_from_slice(&b.to_le_bytes());
                 }
             }
-            None => vertices.extend_from_slice(&[0u8; 8]),
+            None => vertices.extend_from_slice(&[0u8; 8]), // 无 UV：8B 全 0
         }
     }
 
-    // 索引:统一 U32;无索引则 0..n 顺序生成(显式策略)。
+    // 索引统一 U32；无索引则顺序生成 0..n
     let index_count = mesh.indices().map_or(vertex_count, Indices::len);
     let mut indices = Vec::with_capacity(index_count * 4);
     match mesh.indices() {

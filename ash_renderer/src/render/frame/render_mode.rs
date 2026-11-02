@@ -1,8 +1,8 @@
 //! 场景着色模式：帧 UBO `mode` 字段的宿主侧形态与唯一名称表。
 //!
-//! 资源由 `AshHostPlugin` 插入（初值 = env `ASH_RENDER_MODE`），overlay 单选钮
-//! 与 BRP `set_render_mode` 写、`draw_frame` 读；名称表（UI 文本/BRP 参数/
-//! env 拼写/收账日志）只有 [`RenderMode::label`] 一份。
+//! 资源由 `AshHostPlugin` 插入（初值取 env `ASH_RENDER_MODE`），overlay 单选钮与 BRP
+//! `set_render_mode` 写、`draw_frame` 读；UI 文本、BRP 参数、env 拼写、日志共用
+//! [`RenderMode::label`] 这一份名称表。
 
 use bevy::prelude::*;
 
@@ -14,17 +14,15 @@ use crate::render::{
 /// 场景着色模式（UBO `mode` 的宿主侧形态）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Resource)]
 pub enum RenderMode {
-    /// Filament BRDF 光照累积（默认）：照抄 Filament surfaceShading
-    ///（UI/BRP/env 拼写为 filament，"lambert" 保留兼容别名，UBO 值不变）。
+    /// Filament BRDF 光照（默认）。名称是 filament，"lambert" 保留为兼容别名。
     Lambert,
-    /// albedo 直出：base color/UV/颜色空间对照（官方侧同款置 unlit）。
+    /// 直出 albedo，用来检查 base color/UV/颜色空间。
     Unlit,
-    /// 世界法线可视化：法线方向验收仪器（非均匀缩放案例的判定仪器）。
+    /// 世界法线可视化。
     Normal,
-    /// 世界位置可视化：G-buffer 深度反投影重建——世界位置取法的验收仪器。
+    /// 世界位置可视化（G-buffer 深度反投影重建）。
     Position,
-    /// matparam 单通道灰度直出（G-buffer 调试仪器）：metallic/roughness/
-    /// AO/reflectance 逐通道判读——mutate 材质热改的写后读验收口。
+    /// matparam 单通道灰度直出（metallic/roughness/AO/reflectance 各一档），用来检查材质热改。
     Metallic,
     Roughness,
     AmbientOcclusion,
@@ -34,7 +32,7 @@ pub enum RenderMode {
 }
 
 impl RenderMode {
-    /// 全部模式（名称解析的遍历源）。
+    /// 全部模式（名称解析遍历用）。
     pub const ALL: [Self; 9] = [
         Self::Lambert,
         Self::Unlit,
@@ -51,7 +49,7 @@ impl RenderMode {
     pub const NAME_HINT: &'static str =
         "filament(lambert 兼容)/unlit/normal/position/metallic/roughness/ao/reflectance/depth";
 
-    /// 模式名：UI 单选钮文本、BRP/env 拼写、收账日志共用的唯一名称表。
+    /// 模式名（唯一名称表）。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -67,7 +65,7 @@ impl RenderMode {
         }
     }
 
-    /// 名称解析：[`Self::label`] 的逆 + "lambert" 兼容别名；未知名 None。
+    /// [`Self::label`] 的逆，另认 "lambert" 别名；未知名返回 None。
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         if name == "lambert" {
@@ -76,12 +74,12 @@ impl RenderMode {
         Self::ALL.into_iter().find(|mode| mode.label() == name)
     }
 
-    /// 初值：env `ASH_RENDER_MODE`（缺省/空 = filament）。
+    /// 初值：env `ASH_RENDER_MODE`（缺省或空 = filament）。
     pub(crate) fn from_env() -> Self {
         match std::env::var("ASH_RENDER_MODE").ok().as_deref() {
             None | Some("") => Self::Lambert,
             Some(name) => Self::from_name(name).unwrap_or_else(|| {
-                // 拼写错误是配置问题不是运行故障：warn 后按默认继续，不中断帧循环
+                // 拼错是配置问题，warn 后按默认继续
                 warn!(
                     "ASH_RENDER_MODE={name:?} 无法识别（可选 {}），按 filament 继续",
                     Self::NAME_HINT,
@@ -91,8 +89,7 @@ impl RenderMode {
         }
     }
 
-    /// UBO `mode` 值（与 `gbuffer_composite.wgsl` 的 `MODE_*` 同值，
-    /// `FRAME_MODE_*`）。
+    /// UBO `mode` 值（`FRAME_MODE_*`，与 `gbuffer_composite.wgsl` 的 `MODE_*` 同值）。
     pub(crate) fn as_u32(self) -> u32 {
         match self {
             Self::Lambert => FRAME_MODE_LAMBERT,
