@@ -65,6 +65,8 @@ pub struct Swapchain {
     /// 写入时硬件自动做 sRGB 编码）。
     pub view_format: vk::Format,
     pub extent: vk::Extent2D,
+    /// 驱动报过 OUT_OF_DATE：下次 `rebuild` 不论尺寸都真重建。
+    out_of_date: bool,
 }
 
 /// swapchain 输出格式常量：BGRA8-UNORM 底板的 SRGB view 别名。
@@ -226,10 +228,17 @@ impl Swapchain {
             format: surface_format.format,
             view_format,
             extent: caps.current_extent,
+            out_of_date: false,
         })
     }
 
-    /// 窗口尺寸变化后重建。窗口最小化（尺寸为 0）或尺寸没变时什么都不做。
+    /// 记下"驱动报过 OUT_OF_DATE"。坑：显示模式切换/换显示器时表面失配但尺寸不变，
+    /// 不标记的话 `rebuild` 按尺寸相等早退，之后每帧 acquire 都过时、画面不恢复。
+    pub fn mark_out_of_date(&mut self) {
+        self.out_of_date = true;
+    }
+
+    /// 窗口尺寸变化或 OUT_OF_DATE 后重建。窗口最小化（尺寸为 0），或尺寸没变且未过时，什么都不做。
     ///
     /// 坑：一次真重建约 60ms，调用方必须去抖（`driver/host/frame.rs` 的 `ResizeGate`），不要拖拽中每步都调。
     pub fn rebuild(&mut self, ctx: &Context) -> Result<()> {
@@ -243,7 +252,10 @@ impl Swapchain {
             return Ok(());
         }
         // 坑：上次重建失败会留下空壳（句柄 null、extent 是旧值），尺寸相等也必须重建，否则之后每帧都拿 null 去 acquire
-        if caps.current_extent == self.extent && self.swapchain != vk::SwapchainKHR::null() {
+        if caps.current_extent == self.extent
+            && self.swapchain != vk::SwapchainKHR::null()
+            && !self.out_of_date
+        {
             return Ok(());
         }
         // 在飞帧还在用旧 image，先等 GPU 全部做完再拆。
