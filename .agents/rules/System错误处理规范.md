@@ -12,7 +12,7 @@
 ## 1. System 签名
 
 - 失败要冒泡的系统：签名 `Result<(), BevyError>`。错误类型**必须**是 `BevyError`——返回 `Result<T, 自定义E>` 时整个 Result 被当普通值，Err 静默吞（编译照过）；
-- 无失败路径的系统：保持 `()`，就地控制流走宏族（`unwrap_or!`/`warn_unwrap_or!`/`matches_or!`，见语法糖篇）；
+- 无失败路径的系统：保持 `()`，判空早退走 `unwrap_or_return!`（见语法糖篇）；
 - **禁** system 参数表出现 `MessageWriter<AppExit>`——写 AppExit 是看门 system 的专属职责，业务 system 只管冒泡。
 
 ## 2. Severity 契约（tier_handler 按 severity 分流）

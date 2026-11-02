@@ -22,8 +22,8 @@
 //! `render::RenderMode`、`render::FrameSyncSettings`、`scene::DrawListVerify`）。
 //!
 //! 各层职责：
-//! - [`common`]：工具层（横切、零业务依赖）——类型化错误与统一错误通道
-//!   （[`common::error`]）、错误处理语法糖（[`common::syntax`]）；
+//! - [`common`]：工具层（横切、零业务依赖）——GPU 记录字节打包（[`common::bytes`]）、
+//!   类型化错误与统一错误通道（[`common::error`]）、错误处理语法糖（[`common::syntax`]）；
 //! - [`render`]：Vulkan 资源与录制——`core`（Vulkan 地基 + 管线标准件，含 device transfer）、
 //!   `resident`（常驻 GPU 数据：池/贴图/描述符表/实例表/光源表）、`passes`
 //!   （按功能：可见性链、G-buffer、阴影、光照、透明、后处理、UI）、`frame`（帧槽与
@@ -31,7 +31,7 @@
 //! - [`scene`]：ECS 侧场景机制（零 Vulkan 调用）——机制半边 `mechanism`（材质缝、
 //!   稳定槽账本与变更发现、驻留管理、相机/日光控制与输入仲裁窄接口、对象/资产/
 //!   Transform 写操作封装、层级树索引）+ 业务半边 `content`（进场/取景/灯光参数/
-//!   进场核验）；
+//!   进场核验）；两半都私有，外部只用 `scene::X`；
 //! - [`overlay`]：egui 调试 UI（裸接 ash）——框架半边 `framework`（Context/字体、
 //!   Update 的 egui pass、输入桥、发布 `PointerCapture`、绘制半边 `paint_overlay`）+
 //!   业务半边 `tool_window`/`widgets`（工具窗口各页、坐标轴指示器、加载弹窗）；
@@ -43,7 +43,10 @@
 //!   调度；子模块 `init` 初始化链与反序拆除、`frame` 帧循环 `draw_frame`、
 //!   `drawlist` DrawList 组装、`frame_sync` 帧率同步应用）、`upload`（上传编排
 //!   `flush_uploads`：Last 里排在驻留 tick 之后、draw_frame 之前）；
-//! - main.rs：纯组装（装配级配置 + 插件清单；冻结边界只许增删 add_plugins）。
+//! - main.rs：纯组装（装配级配置 + 插件清单，业务逻辑不进 main）。
+
+// 文档按 `cargo doc --document-private-items` 阅读，模块文档链到私有项是有意的
+#![allow(rustdoc::private_intra_doc_links)]
 
 pub mod common;
 pub mod driver;
