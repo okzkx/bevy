@@ -11,9 +11,11 @@ use std::slice;
 use super::frame_pool::FramePool;
 
 use ash::vk;
+use bevy::ecs::error::BevyError;
 
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
+use crate::common::syntax::ResultTierExt;
 use crate::render::core::record::barrier::{image_barrier, image_barrier_with_memory, ImageBarrier};
 use crate::render::core::record::fullscreen::{
     record_fullscreen, record_fullscreen_open, record_fullscreen_sampled, FullscreenPass,
@@ -116,10 +118,21 @@ impl FramePool {
     /// Bloom → tonemap → SMAA → neighborhood + UI → 出场屏障 → queue_submit。提交在 GPU 侧等
     /// image_available 与上传票据，完成时 signal render_finished 与 fence。`render_finished`
     /// 由调用方按 acquire 的 image index 从 Swapchain 取，不按帧槽轮转。
-    ///
-    /// # Errors
-    /// 录制或提交任一步失败。
+    /// 录制或提交任一步失败 = 渲染链无法继续，按致命错误冒泡。
     pub fn record_frame(
+        &self,
+        ctx: &Context,
+        render_finished: vk::Semaphore,
+        image: vk::Image,
+        view: vk::ImageView,
+        extent: vk::Extent2D,
+        draw: &FrameDraw<'_>,
+    ) -> Result<(), BevyError> {
+        self.record_frame_steps(ctx, render_finished, image, view, extent, draw)
+            .or_fatal("录制/提交失败，渲染链无法继续")
+    }
+
+    fn record_frame_steps(
         &self,
         ctx: &Context,
         render_finished: vk::Semaphore,
