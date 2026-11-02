@@ -134,12 +134,12 @@ fn main() {
         di_props.max_update_after_bind_descriptors_in_all_pools,
     );
 
-    let device = make_device(&instance, pd);
-    let queue = unsafe { device.get_device_queue(0, 0) }; // families[0] = graphics
+    let (device, gfx) = make_device(&instance, pd);
+    let queue = unsafe { device.get_device_queue(gfx, 0) };
     let contract = unsafe { MemoryContract::new(&instance, pd) };
-    let mut uploader = Uploader::new(&device, &contract, 0, queue, 0, queue, 1024, 2).expect("探针 Uploader");
+    let mut uploader = Uploader::new(&device, &contract, gfx, queue, gfx, queue, 1024, 2).expect("探针 Uploader");
     // 生产表：容量 TABLE_CAPACITY，限额对账在 new 内落日志
-    let mut tables = BindlessTextureTable::new(&device, &instance, pd, &contract, &mut uploader, 0, TABLE_CAPACITY)
+    let mut tables = BindlessTextureTable::new(&device, &instance, pd, &contract, &mut uploader, gfx, TABLE_CAPACITY)
         .expect("生产常驻描述符表(容量 1024)");
     println!(
         "[建表] 容量 {} 双表就绪；fallback 白图占槽 0；已用纹理槽 {} / 采样器槽 {}",
@@ -199,7 +199,7 @@ fn main() {
     drop(white);
 
     // ============ 组 C：生产表采样读回 + update-after-bind ============
-    run_sampling(&device, &contract, &queue, &mut tables, &textures);
+    run_sampling(&device, &contract, gfx, &queue, &mut tables, &textures);
 
     // ============ 组 D：交回与排空（采样器引用数）============
     run_retire(&device, &instance, pd, &contract, &mut tables, &lin);
@@ -289,7 +289,8 @@ fn production_vk12() -> vk::PhysicalDeviceVulkan12Features<'static> {
         .descriptor_binding_partially_bound(true)
 }
 
-fn make_device(instance: &ash::Instance, pd: vk::PhysicalDevice) -> Device {
+/// 返回设备与 graphics 队列族。
+fn make_device(instance: &ash::Instance, pd: vk::PhysicalDevice) -> (Device, u32) {
     let families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
     let gfx = families
         .iter()
@@ -300,7 +301,7 @@ fn make_device(instance: &ash::Instance, pd: vk::PhysicalDevice) -> Device {
         .queue_family_index(gfx)
         .queue_priorities(&priority)];
     let mut vk12 = production_vk12();
-    unsafe {
+    let device = unsafe {
         instance
             .create_device(
                 pd,
@@ -310,7 +311,8 @@ fn make_device(instance: &ash::Instance, pd: vk::PhysicalDevice) -> Device {
                 None,
             )
             .expect("探针 vkCreateDevice")
-    }
+    };
+    (device, gfx)
 }
 
 /// 合批上传（与 flush_uploads 同形状：staging 连续排布 + 一次 transfer 提交）
@@ -390,6 +392,7 @@ fn f32_at(back: &[u8], i: usize) -> [f32; 4] {
 fn run_sampling(
     device: &Device,
     contract: &MemoryContract,
+    gfx: u32,
     queue: &vk::Queue,
     tables: &mut BindlessTextureTable,
     textures: &TexMap,
@@ -522,7 +525,7 @@ fn run_sampling(
         device.create_command_pool(
             &vk::CommandPoolCreateInfo::default()
                 .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-                .queue_family_index(0),
+                .queue_family_index(gfx),
             None,
         )
     }
