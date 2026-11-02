@@ -40,16 +40,23 @@ impl<T, E: Into<BevyError>> ResultTierExt<T> for Result<T, E> {
     }
 }
 
-/// Option 判空的致命收口：一行 `?` 冒泡，代替 let-else + `return Err(...)`。
+/// Option 判空的收口：一行 `?` 冒泡，代替 let-else + `return Err(...)`/`return Ok(())`。
 /// "容量保证后 XX 必在"这类判空矛盾不是断言：按致命错误优雅退出，不 panic。
 pub trait OptionTierExt<T> {
     /// None → 挂 `msg`（可 `format!`）标 [`Severity::Error`]，`?` 后优雅退出。
     fn ok_or_fatal(self, msg: impl Into<Cow<'static, str>>) -> Result<T, BevyError>;
+    /// None → 挂 `msg`（可 `format!`）标 [`Severity::Warning`]，`?` 后本帧让路
+    /// （可自愈早退，handler 打 warn 后丢弃，下帧继续）。
+    fn ok_or_warn(self, msg: impl Into<Cow<'static, str>>) -> Result<T, BevyError>;
 }
 
 impl<T> OptionTierExt<T> for Option<T> {
     fn ok_or_fatal(self, msg: impl Into<Cow<'static, str>>) -> Result<T, BevyError> {
         self.ok_or_else(|| BevyError::new(Severity::Error, msg.into()))
+    }
+
+    fn ok_or_warn(self, msg: impl Into<Cow<'static, str>>) -> Result<T, BevyError> {
+        self.ok_or_else(|| BevyError::new(Severity::Warning, msg.into()))
     }
 }
 
