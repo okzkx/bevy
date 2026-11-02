@@ -33,13 +33,13 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32)
 
 
 //-----------------------------------------------------------------------------
-// Edge Detection Pixel Shaders (First Pass)
+// Neighborhood Blending Pixel Shader (Third Pass)
 
 
 @fragment
 fn fs_main(in: NeighborhoodBlendingVaryings) -> @location(0) vec4<f32> {
     // Fetch the blending weights for current pixel:
-    // SMAA 关（flags.x=0）= 权重清零直通（输出 = 输入）
+    // SMAA 关（flags.x=0）时权重清零，输出 = 输入
     let a = vec4(
         textureSample(blend_texture, blend_sampler, in.offset.xy).a,    // Right
         textureSample(blend_texture, blend_sampler, in.offset.zw).g,    // Top
@@ -49,7 +49,6 @@ fn fs_main(in: NeighborhoodBlendingVaryings) -> @location(0) vec4<f32> {
     // Is there any blending weight with a value greater than 0.0?
     if (dot(a, vec4(1.0)) < 1.0e-5) {
         let color = textureSampleLevel(color_texture, blend_sampler, in.tex_coord, 0.0);
-        // TODO: Reprojection
         return color;
     } else {
         let h = max(a.x, a.z) > max(a.y, a.w);  // max(horizontal) > max(vertical)
@@ -72,8 +71,6 @@ fn fs_main(in: NeighborhoodBlendingVaryings) -> @location(0) vec4<f32> {
             textureSampleLevel(color_texture, blend_sampler, blending_coord.xy, 0.0);
         color += blending_weight.y *
             textureSampleLevel(color_texture, blend_sampler, blending_coord.zw, 0.0);
-
-        // TODO: Reprojection
 
         return color;
     }

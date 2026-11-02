@@ -42,7 +42,6 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> EdgeDetectionVaryings {
 @fragment
 fn fs_main(in: EdgeDetectionVaryings) -> @location(0) vec4<f32> {
     // Calculate the threshold:
-    // TODO: Predication.
     let threshold = vec2(SMAA_THRESHOLD);
 
     // Calculate luma:
@@ -83,8 +82,3 @@ fn fs_main(in: EdgeDetectionVaryings) -> @location(0) vec4<f32> {
 
     return vec4(edges, 0.0, 1.0);
 }
-
-
-
-//-----------------------------------------------------------------------------
-// Diagonal Search Functions

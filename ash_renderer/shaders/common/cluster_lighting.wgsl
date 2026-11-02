@@ -5,8 +5,8 @@
 // #import cluster
 
 // 在 acc 上逐灯累加本片元所在 cluster 的点光源贡献（加法顺序 = 调用方既有的
-// 累加顺序）。early exit 同 Filament：NoL ≤ 0 || attenuation ≤ 0 不积累。
-// 死灯（半径 ≤ 0）cluster_build 已不入列表，此处门卫只是防御。
+// 累加顺序）。NoL ≤ 0 或衰减 ≤ 0 的灯不累加。
+// 空槽（半径 ≤ 0）cluster_build 已不入列表，这里再判一次只为防御。
 // pixel_xy = 片元像素坐标（@builtin(position).xy）；视深由 world_pos 现算。
 fn accumulate_cluster_lights(acc: vec3f, p: ClusterParams, pixel_xy: vec2f, pixel: PixelParams, world_pos: vec3f, V: vec3f, n: vec3f, NoV: f32, occlusion: f32) -> vec3f {
     var light_sum = acc;

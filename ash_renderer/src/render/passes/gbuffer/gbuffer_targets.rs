@@ -1,27 +1,23 @@
-//! G-buffer 与中间渲染目标（8.1）：不透明 deferred 写入的附件面 + 合成/透明
-//! 层共用的中间颜色目标，随帧槽/swapchain 尺寸重建。
+//! G-buffer 与 HDR 中间目标：不透明物体写入的附件，加合成与透明层共用的 HDR
+//! 落色目标；每帧槽一套，随 swapchain 尺寸重建。
 //!
-//! 附件布局契约（槽位 = 渲染实例的 color attachment 顺序；motion vectors
-//! 只留位不分配——本体归步骤 9.x 前置施工件，需 InstanceLedger prev/curr
-//! 双份模型环；槽位号在此钉死，后续插入不动既有槽位语义）：
+//! 附件布局（逻辑槽号固定，后续插入不改既有槽号；槽 2 预留给 motion vectors，
+//! 不分配，所以 matparam 的颜色附件下标是 2）：
 //!
-//! | 槽 | 附件 | 格式 | 语义 |
-//! |---|---|---|---|
-//! | 0 | albedo | R8G8B8A8_UNORM | 线性反照率（贴图采样 × base_color，sRGB 解码在采样端） |
-//! | 1 | normal | R16G16B16A16_SFLOAT | 世界空间法线 xyz 直存（w 未用；编码取舍见施工记录） |
-//! | 2 | motion vectors | ——（不分配） | 留位：槽位号保留 |
-//! | 3 | matparam | R8G8B8A8_UNORM | 材质标量（8.2.1）：r=metallic / g=AO / b=perceptualRoughness / a=reflectance（8.2.3 转正）——光照累积的 PBR 入参 |
-//! | — | depth | D32_SFLOAT | reverse-Z 深度（本体按帧槽在 [`crate::render::core::target::depth`]） |
+//! | 槽 | 附件下标 | 附件 | 格式 | 语义 |
+//! |---|---|---|---|---|
+//! | 0 | 0 | albedo | R8G8B8A8_UNORM | 线性反照率（贴图采样 × base_color，sRGB 解码在采样端） |
+//! | 1 | 1 | normal | R16G16B16A16_SFLOAT | 世界空间法线 xyz 直存（w 未用） |
+//! | 2 | — | motion vectors | 不分配 | 预留 |
+//! | 3 | 2 | matparam | R8G8B8A8_UNORM | 材质标量：r=metallic / g=AO / b=perceptualRoughness / a=reflectance |
+//! | — | 深度 | depth | D32_SFLOAT | reverse-Z 深度（本体按帧槽在 [`crate::render::core::target::depth`]） |
 //!
-//! **HDR 中间目标 hdr**（R16G16B16A16_SFLOAT）：合成（G-buffer 光照）与透明
-//! forward 层的落色面——HDR 契约留位一次到位（8.4 正式启用 Bloom/ToneMapping）；
-//! present tonemap 从它采样。
-//! 该格式的 blending 支持是步骤 8 前置闸门的实测项——[`ColorTarget::new`]
-//! 逐格式查证落日志（支持≠启用纪律）。
+//! **HDR 中间目标**（R16G16B16A16_SFLOAT）：合成与透明前向层写入，present tonemap
+//! 从它采样。透明层要在它上面混合，建目标时查证格式支持混合（[`ColorTarget::new`]）。
 //!
-//! 采样集（[`Self::sampled_set`]）把附件视图以 SHADER_READ_ONLY 布局发布：
-//! 合成 pass 读 albedo/normal/depth，present tonemap 读 hdr。视图本体寿命令归
-//! 本结构，"视图先于附件销毁"由拆除序（本结构先于 FramePool）保证。
+//! 采样集（[`GBufferTargets::sampled_set`]）把附件视图按只读布局发布：合成读
+//! albedo/normal/matparam/depth，Bloom prefilter 与 present tonemap 读 hdr。深度视图
+//! 归 FramePool，本结构须先于 FramePool 销毁（拆除序保证）。
 
 use ash::{vk, Device};
 use bevy::log::info;
@@ -32,27 +28,23 @@ use crate::render::core::target::color::{ColorTarget, HDR_FORMAT};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
 
-/// albedo 附件格式（线性 8bit——G-buffer 存采样端已解码的线性反照率，
-/// 编码恰好一次判定线不受影响：SRGB 编码仍只在最终 ROP 写出发生一次）。
+/// albedo 附件格式：存采样时已解码的线性反照率；sRGB 编码只在最终写 swapchain 时做一次。
 pub const ALBEDO_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 
-/// normal 附件格式（世界空间 xyz 直存，half 精度足够；八面体压缩的带宽账
-/// 留作后续优化项，不主张）。
+/// normal 附件格式：世界空间法线 xyz 直存，half 精度。
 pub const NORMAL_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
-/// matparam 附件格式（8.2.1）：材质标量 r=metallic / g=AO / b=perceptualRoughness
-/// / a=reflectance。8bit 量化与 Filament deferred 层同档（roughness/metallic
-/// 均走 8bit 打包），PBR 语义下精度足够；法线/反照率的编码取舍不适用于标量面。
+/// matparam 附件格式：r=metallic / g=AO / b=perceptualRoughness / a=reflectance，
+/// 这些标量 8bit 精度足够。
 pub const MATPARAM_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 
-
-/// 采样集 binding 编号（合成 pass 与 present tonemap 共用同一布局）。
-pub const SAMPLED_BINDING_ALBEDO: u32 = 0;
-pub const SAMPLED_BINDING_NORMAL: u32 = 1;
-pub const SAMPLED_BINDING_HDR: u32 = 2;
-pub const SAMPLED_BINDING_DEPTH: u32 = 3;
-pub const SAMPLED_BINDING_SAMPLER: u32 = 4;
-pub const SAMPLED_BINDING_MATPARAM: u32 = 5;
+/// 采样集 binding 编号（合成、Bloom prefilter 与 present tonemap 共用同一布局）。
+const SAMPLED_BINDING_ALBEDO: u32 = 0;
+const SAMPLED_BINDING_NORMAL: u32 = 1;
+const SAMPLED_BINDING_HDR: u32 = 2;
+const SAMPLED_BINDING_DEPTH: u32 = 3;
+const SAMPLED_BINDING_SAMPLER: u32 = 4;
+const SAMPLED_BINDING_MATPARAM: u32 = 5;
 
 const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
 
@@ -83,19 +75,18 @@ pub struct GBufferTargets {
     device: Device,
     extent: vk::Extent2D,
     slots: Vec<GBufferSlot>,
-    /// 采样集布局（合成 pass 与 present tonemap 管线的 layout 素材）。
+    /// 采样集布局（合成、Bloom prefilter 与 present tonemap 管线的 layout 素材）。
     set_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
-    /// 采样集：帧槽一一对应（b0 albedo / b1 normal / b2 hdr / b3 depth / b4 采样器）。
+    /// 采样集，与帧槽一一对应。
     sets: Vec<vk::DescriptorSet>,
-    /// 附件采样的共享线性采样器（clamp-to-edge；G-buffer 采样无 UV 出界需求）。
+    /// 附件采样共用的线性采样器（clamp-to-edge）。
     sampler: vk::Sampler,
 }
 
 impl GBufferTargets {
-    /// 建 G-buffer 附件与采样集：逐格式查证落日志 → 每帧槽 albedo/normal/hdr
-    /// 三张附件 → 采样集写入（视图 + SHADER_READ_ONLY 布局）。深度视图由调用
-    /// 方传（FramePool 持有本体）。
+    /// 每帧槽建 albedo/normal/matparam/hdr 四张目标并写好采样集。深度视图由调用
+    /// 方传（本体归 FramePool）。
     ///
     /// # Errors
     /// 格式 feature 不足、Vulkan 创建/分配失败、描述符集分配/写入失败。
@@ -122,44 +113,43 @@ impl GBufferTargets {
         Ok(this)
     }
 
-    /// 采样集布局（登记给管线组装；集与布局同源纪律）。
+    /// 采样集布局（登记给管线组装）。
     #[must_use]
     pub fn sampled_layout(&self) -> SetLayout {
         SetLayout::new(&GBUFFER_SAMPLED_SET_DESC, self.set_layout)
     }
 
-    /// 第 `slot` 帧槽的采样集（合成 pass 与 present tonemap 绑定）。
+    /// 第 `slot` 帧槽的采样集。
     #[must_use]
     pub fn sampled_set(&self, slot: usize) -> DescSet {
         DescSet::new(&GBUFFER_SAMPLED_SET_DESC, self.sets[slot])
     }
 
-    /// 第 `slot` 帧槽的 albedo 附件视图（G-buffer pass attachment 0）。
+    /// 第 `slot` 帧槽的 albedo 附件视图（G-buffer pass 颜色附件 0）。
     #[must_use]
     pub fn albedo_view(&self, slot: usize) -> vk::ImageView {
         self.slots[slot].albedo.view()
     }
 
-    /// 第 `slot` 帧槽的 normal 附件视图（attachment 1）。
+    /// 第 `slot` 帧槽的 normal 附件视图（颜色附件 1）。
     #[must_use]
     pub fn normal_view(&self, slot: usize) -> vk::ImageView {
         self.slots[slot].normal.view()
     }
 
-    /// 第 `slot` 帧槽的 matparam 附件视图（attachment 2，槽位号 3——motion
-    /// vectors 留位不动，8.2.1）。
+    /// 第 `slot` 帧槽的 matparam 附件视图（颜色附件 2）。
     #[must_use]
     pub fn matparam_view(&self, slot: usize) -> vk::ImageView {
         self.slots[slot].matparam.view()
     }
 
-    /// 第 `slot` 帧槽的 HDR 中间目标视图（合成/透明层 attachment 0）。
+    /// 第 `slot` 帧槽的 HDR 中间目标视图（合成/透明层颜色附件 0）。
     #[must_use]
     pub fn hdr_view(&self, slot: usize) -> vk::ImageView {
         self.slots[slot].hdr.view()
     }
 
-    /// 第 `slot` 帧槽的 albedo image 句柄（进场/转只读屏障的目标，8.1）。
+    /// 第 `slot` 帧槽的 albedo image 句柄（布局屏障用）。
     #[must_use]
     pub fn albedo_image(&self, slot: usize) -> vk::Image {
         self.slots[slot].albedo.image()
@@ -171,7 +161,7 @@ impl GBufferTargets {
         self.slots[slot].normal.image()
     }
 
-    /// 第 `slot` 帧槽的 matparam image 句柄（同上，8.2.1）。
+    /// 第 `slot` 帧槽的 matparam image 句柄（同上）。
     #[must_use]
     pub fn matparam_image(&self, slot: usize) -> vk::Image {
         self.slots[slot].matparam.image()
@@ -183,14 +173,8 @@ impl GBufferTargets {
         self.slots[slot].hdr.image()
     }
 
-    /// 当前尺寸（resize 幂等判据）。
-    pub fn extent(&self) -> vk::Extent2D {
-        self.extent
-    }
-
-    /// 随 swapchain 尺寸重建（幂等：extent 没变就空手而归）。与深度附件同
-    /// 纪律：销毁旧资源前自带 device_wait_idle；深度视图须已按新尺寸重建
-    ///（rebuild_depth 先行）。
+    /// 随 swapchain 尺寸重建（extent 没变直接返回）。销毁旧资源前自带
+    /// device_wait_idle；深度视图须已按新尺寸重建（rebuild_depth 先行）。
     ///
     /// # Errors
     /// 等待排空或新附件创建失败。
@@ -267,14 +251,12 @@ impl GBufferTargets {
 
 impl Drop for GBufferTargets {
     fn drop(&mut self) {
-        // 契约边界：不等 GPU——重建路径的等待在 rebuild，退出排空在 teardown
-        //（拆除序：本结构先于 FramePool，采样集里的深度视图先于深度本体销毁）
+        // 不等 GPU：重建路径的等待在 rebuild，退出排空在 teardown
         self.drop_resources();
     }
 }
 
-/// 采样集建链：布局（b0..b4）+ pool + 每帧槽一集（视图 + SHADER_READ_ONLY
-/// 布局写入）+ 共享线性采样器。半建失败逐层回收（全有或全无）。
+/// 采样集建链：布局 + pool + 每帧槽一集 + 共享线性采样器。半建失败逐层回收（全有或全无）。
 fn build_sampling(
     ctx: &Context,
     extent: vk::Extent2D,
@@ -332,7 +314,7 @@ unsafe fn build_sampling_inner(
                 return Err(VulkanError::Vk(e));
             }
         };
-        // 共享线性采样器（clamp-to-edge 保底；mipmap 不参与，NEAREST 即可）
+        // mipmap 不参与，NEAREST 即可
         let sampler = device.create_sampler(
             &vk::SamplerCreateInfo::default()
                 .mag_filter(vk::Filter::LINEAR)
@@ -350,15 +332,15 @@ unsafe fn build_sampling_inner(
                 return Err(VulkanError::from(e));
             }
         };
-        // 写入过声明校验：种类按 GBUFFER_SAMPLED_SET_DESC 核对，写满才提交
+        // 写入按 GBUFFER_SAMPLED_SET_DESC 核对种类，写满才提交
         for ((set, slot), depth_view) in sets.iter().zip(slots).zip(depth_views) {
             let mut writer = DescriptorWriter::new(&GBUFFER_SAMPLED_SET_DESC, *set);
             writer
                 .image(SAMPLED_BINDING_ALBEDO, slot.albedo.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .image(SAMPLED_BINDING_NORMAL, slot.normal.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .image(SAMPLED_BINDING_HDR, slot.hdr.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                // 深度布局与帧编排的转只读目标一致（VUID-00344：描述符布局
-                // 须与 draw 时实际布局一致——DEPTH_READ_ONLY 非 SHADER_READ_ONLY）
+                // 坑：深度布局须与帧编排转只读的目标布局一致（DEPTH_STENCIL_READ_ONLY，
+                // 不是 SHADER_READ_ONLY），否则 VUID-00344
                 .image(SAMPLED_BINDING_DEPTH, *depth_view, vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
                 .image(SAMPLED_BINDING_MATPARAM, slot.matparam.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .sampler(SAMPLED_BINDING_SAMPLER, sampler);

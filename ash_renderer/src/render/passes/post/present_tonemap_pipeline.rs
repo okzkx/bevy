@@ -1,10 +1,11 @@
-//! present tonemap：HDR 加 Bloom，经 ACES 映射到 LDR 目标，再交给 SMAA。
+//! present tonemap：HDR 加 Bloom，经所选色调曲线（[`crate::render::TonemapCurve`]）映射到
+//! LDR 目标，再交给 SMAA。
 
 use ash::vk;
 
 use crate::common::error::Result;
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
-use crate::render::core::pipeline::graphics::PipelineRef;
+use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
@@ -41,14 +42,5 @@ impl PresentTonemapPipeline {
     #[must_use]
     pub(crate) fn rec(&self) -> PipelineRef {
         self.inner.rec()
-    }
-
-    pub fn pipeline(&self) -> vk::Pipeline {
-        self.inner.pipeline()
-    }
-
-    #[must_use]
-    pub fn layout(&self) -> vk::PipelineLayout {
-        self.inner.layout()
     }
 }

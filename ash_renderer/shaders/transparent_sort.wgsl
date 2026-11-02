@@ -1,25 +1,25 @@
 // 透明 GPU bitonic 排序（compute 单入口）：把 collect 产的 (深度键, 行)
-// 对按键升序全排——键 = 包围盒中心视图深度（clip.w），padding = -inf（宿主
-// 每帧 fill）。gather 端从升序数组**尾部反向**取（最远先画 = back-to-front，
-// 近似排序精度与 CPU 同档，物体级）。
+// 对按键升序全排——键 = 包围盒中心视深（clip.w），padding = -inf（宿主
+// 每帧填）。gather 从升序数组**尾部反向**取（最远先画 = back-to-front，
+// 物体级近似排序）。
 //
 // 网络形状（标准 bitonic，N = TRANSPARENT_CAPACITY = 16384，pow2）：
 //   for k in 2..=N (×2)  { for j in k/2..1 (÷2) { dispatch(k, j) } }
 // 105 次派发，每派发 N/2 线程各管一对 (i, i+j)；配对块由 j 决定。
 // push（var<immediate>，8B）：(k, j) 段参数——宿主预生成整段序列逐派发。
 //
-// 并发语义：每线程独占读改写一对元素（i 与 i^k 互补分派，无写冲突）；
-// 派发间屏障由录制层逐派发插（compute rw → compute rw）。
+// 并发：每线程独占读改写一对 (i, i+j)，无写冲突；派发之间的屏障由录制层
+// 逐次插入（compute 读写 → compute 读写）。
 
-const TRANSPARENT_CAPACITY: u32 = 16384u;
+const TRANSPARENT_CAPACITY: u32 = 16384u;  // transparent_targets.rs 同名常量
 
 @group(0) @binding(0) var<storage, read_write> t_index_list: array<u32>;
 @group(0) @binding(1) var<storage, read_write> t_keys: array<f32>;
 
 var<immediate> push: PushSort;
 struct PushSort {
-    k: u32,  // 当前段长（2 的幂，覆盖对大小）
-    j: u32,  // 方向块大小（决定升/降）
+    k: u32,  // 当前段长（2 的幂，决定升/降方向）
+    j: u32,  // 段内配对距离
 }
 
 @compute @workgroup_size(64)

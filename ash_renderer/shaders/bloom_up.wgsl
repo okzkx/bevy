@@ -1,8 +1,8 @@
 // Bloom 升采样（全屏，dual-Kawase up）：up[i] = tent(up[i+1]) + down[i]
 // ——4 tap 双线性 tent 近似 + 对应降采样级直加（shader 内求和，无混合状态）。
 //
-// 接口：set0 = b0 up 源（最小级时 = down[N-1]）+ b1 down 对应级 + b2 采样器
-// + b3 参数 UBO（BloomTargets set_layout_up；b1/b3 在最小级直通场景合法在用）。
+// 接口：set0 = b0 up 源（最小级时为 down[N-1]）+ b1 对应的 down 级 + b2 采样器
+//（BloomTargets 的升采样集；布局里的 b3 参数 UBO 本 shader 不用）。
 // #import fullscreen
 
 @group(0) @binding(0) var up_tex: texture_2d<f32>;

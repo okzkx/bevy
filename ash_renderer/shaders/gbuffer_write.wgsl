@@ -2,18 +2,17 @@
 // 直存）+ matparam（r=metallic / g=AO / b=perceptualRoughness / a=reflectance）
 // + 深度（reverse-Z）。光照在 gbuffer_composite.wgsl（全屏光照累积）。
 //
-// 材质换算（common/mesh.wgsl sample_surface，Filament gltfio 同款）：
-// metallic_roughness 贴图乘标量、perceptualRoughness clamp 0.045、occlusion 贴图
-// R 通道取 AO；normal map 经派生 TBN（屏幕空间余切框架，无顶点 tangent 依赖——
-// glTF 资产不保证 TANGENT 属性）扰动世界法线。
+// 材质换算（common/mesh.wgsl sample_surface）：metallic_roughness 贴图乘标量、
+// perceptualRoughness clamp 0.045、occlusion 贴图 R 通道取 AO；normal map 用屏幕空间
+// 推导的 TBN 扰动世界法线（glTF 资产不保证有 TANGENT 属性）。
 //
 // 接口：
 // - set0 b0/b1：纹理数组 + sampler 数组（runtime array，build.rs 补丁器补 capability）。
-// - set1 b0：每帧 UBO（FrameUniforms 208B；本 pass 只消费 view_proj）。
+// - set1 b0：每帧 UBO（FrameUniforms 208B；本 pass 只用 view_proj）。
 // - set2 b0/b1/b2：对象表/模型环/材质环（记录尺寸见 common/instance.wgsl）。
 //
-// alpha 语义：不透明 pass 不携带 alpha——albedo.a 恒写 1.0（背景判定走合成端的
-// depth==0）；alpha<1 的行由透明层承接（build_indirect 对其 instanceCount=0）。
+// alpha：不透明 pass 不带 alpha——albedo.a 恒写 1.0（背景判定看合成端的
+// depth==0）；alpha<1 的行由透明层画（build_indirect 把它们的 instanceCount 置 0）。
 enable wgpu_binding_array;
 // #import mesh
 
@@ -24,12 +23,10 @@ enable wgpu_binding_array;
 @group(2) @binding(1) var<storage, read> models: array<mat4x4f>;
 @group(2) @binding(2) var<storage, read> materials: array<MaterialRecord>;
 
-// 屏幕空间余切框架（Schüler 2015 "Normal Mapping Without a Precomputed
-// Tangent"）：由世界位置/uv 的屏幕空间导数现算 TBN——无顶点 tangent 依赖，
-// 任意 glTF 资产可用；导数要求 uniform 控制流（本 shader 无提前 return）。
-// 退化守卫：uv 导数零区（平铺 UV 的整数缝/等值像素块）t=b=0 时
-// inverseSqrt(0)=inf 与 0×inf 产生 NaN（实抓：全画面黑/白紊乱）——
-// 退化侧 T/B 列落 0，最终归一化自然回落几何法线。
+// 屏幕空间余切框架（Schüler 2015 "Normal Mapping Without a Precomputed Tangent"）：
+// 由世界位置/uv 的屏幕空间导数现算 TBN，不依赖顶点 tangent。
+// 坑：uv 导数为零处（平铺 UV 的整数缝、等值像素块）t=b=0，inverseSqrt(0)=inf，
+// 0×inf 得 NaN（画面黑/白紊乱）——退化时 T/B 列置 0，归一化后回落几何法线。
 fn cotangent_frame(n: vec3f, p: vec3f, uv: vec2f) -> mat3x3f {
     let dp1 = dpdx(p);
     let dp2 = dpdy(p);
@@ -67,10 +64,10 @@ fn fs_main(in: VsOut) -> GBufferOut {
     let mat = materials[in.material];
     let surf = sample_surface(mat, in.uv);
 
-    // —— 法线：几何法线为底，normal map 经派生 TBN 扰动（切线空间 xyz，
-    // glTF +Y up 约定：tex*2-1 后直接进 TBN）。
-    // 坑点：TBN 计算必须在一致控制流里（dpdx/dpdy 规范要求——分支内调用遇
-    // helper invocation 分歧 = 未定义值，实抓过全画面黑/白紊乱）
+    // —— 法线：几何法线为底，normal map 经 TBN 扰动（切线空间 xyz，glTF +Y up：
+    // tex*2-1 后直接进 TBN）。
+    // 坑：TBN 用 dpdx/dpdy，必须在一致控制流里算（所以放在 if 外）；放进分支会因
+    // helper invocation 分歧得到未定义值（画面黑/白紊乱）。
     let tbn = cotangent_frame(normalize(in.world_normal), in.world_pos, in.uv);
     var n = normalize(in.world_normal);
     if (mat.tex_normal != NO_TEXTURE) {

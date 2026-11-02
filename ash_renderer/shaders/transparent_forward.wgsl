@@ -1,14 +1,14 @@
 // 透明前向绘制（vertex + fragment 双入口）：Clustered Forward 透明层。
 // 顶点半边与 gbuffer_write 共用 common/mesh.wgsl（set2 常驻表按 instance_index
-// 读，firstInstance 携带槽号）；fragment 做透明行的光照与 alpha 输出——光照与
-// 不透明光照累积同光源、同一份 Filament BRDF（common/brdf.wgsl）+ cluster 点光源
-// 列表（3D cluster 索引 = 屏幕 tile × 深度片）。
+// 读，firstInstance 携带槽号）；fragment 做透明行的光照与 alpha 输出——与不透明
+// 光照累积用同样的光源、同一份 BRDF（common/brdf.wgsl）和 cluster 点光源列表
+//（3D cluster 索引 = 屏幕 tile × 深度片）。
 //
 // blend 形态（管线端 SRC_ALPHA/ONE_MINUS_SRC_ALPHA）：输出直色（非预乘），
 // alpha = 材质 base_color.a。深度 = 不透明 G-buffer 深度附件重绑（loadOp
 // LOAD、只测不写——被不透明覆盖的透明片元被 depth test 剔除）。
 //
-// 接口：set0/set1/set2 与主管线同一冻结表；set3 = 光源分簇集
+// 接口：set0/set1/set2 与 G-buffer 写入管线相同；set3 = 光源分簇集
 //（b0 ClusterParams / b1 lights / b2 cluster 列表）。
 enable wgpu_binding_array;
 // #import mesh
@@ -48,7 +48,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     var light_sum = vec3f(0.0);
 
     // —— 方向光先加、点光源后累加（累加顺序即浮点结果，保持不变）。
-    // Filament 方向光形状：NoL × colorIntensity，强度已折进 rgb
+    // 方向光：NoL × 颜色强度，强度已折进 rgb
     let l = safe_light_dir(frame.dir_to_light.xyz);
     let dir_NoL = saturate(dot(n, l));
     if (dir_NoL > 0.0) {

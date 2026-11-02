@@ -5,8 +5,7 @@
 // #import frame
 // #import instance
 
-// Filament desktop 档 MIN_PERCEPTUAL_ROUGHNESS（surface_material.fs）；clamp 在
-// 材质换算端做，光照端直用现值。
+// 最小 perceptualRoughness（取 Filament 桌面档）；clamp 在材质换算端做，光照端直用。
 const MIN_PERCEPTUAL_ROUGHNESS: f32 = 0.045;
 
 struct VsOut {
@@ -28,7 +27,7 @@ fn normal_cofactor(m: mat4x4f) -> mat3x3f {
 
 // 实例槽 = @builtin(instance_index)：indirect 命令的 firstInstance 携带槽号
 //（instanceCount=1 时 instance_index == firstInstance），按槽读 set2 常驻表。
-// 列主序全链 + 正高度 viewport 直出（Y 翻转由 naga ADJUST_COORDINATE_SPACE 注入）。
+// 正高度 viewport 直出，Y 翻转由 naga ADJUST_COORDINATE_SPACE 注入。
 fn mesh_vertex(position: vec3f, normal: vec3f, uv: vec2f, instance_index: u32) -> VsOut {
     let obj = objects[instance_index];
     let model = models[instance_index];
@@ -49,8 +48,8 @@ struct SurfaceSample {
     occlusion: f32,
 }
 
-// 材质参数换算（Filament gltfio 同款）：贴图通道乘标量、clamp 收口。mip 钉
-// level 0。采样器全记录共享 sampler_index（SamplerKey 去重后同键）。
+// 材质参数换算：贴图通道乘标量后 clamp。mip 固定 level 0。所有贴图共用记录里的
+// sampler_index。
 fn sample_surface(mat: MaterialRecord, uv: vec2f) -> SurfaceSample {
     var s: SurfaceSample;
     s.albedo = textureSampleLevel(textures[mat.tex_base_color], samplers[mat.sampler_index], uv, 0.0)

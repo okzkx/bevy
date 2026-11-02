@@ -1,16 +1,14 @@
 //! Bloom 资源族（HDR 域 dual-Kawase 链）：半分辨率降采样链（prefilter
-//! 软膝阈值 → N-1 级 down）+ 升采样链（up[i] = tent(up[i+1]) + down[i]）+
+//! 软膝阈值 → N-1 级 down）+ 升采样链（`up[i]` = tent(`up[i+1]`) + `down[i]`）+
 //! 参数 UBO（strength/enabled/tonemap）。
 //!
 //! 链路：composite HDR 线性输出 → prefilter（亮度阈值 + soft knee，读
 //! G-buffer 采样集 b2/b4）→ down 链（逐级半分辨率）→ up 链（tent 上采样
-//! 叠回降采样对应级）→ up[0] = 半分辨率 bloom 纹理，由 present tonemap
-//! 采样叠加。全屏 pass 三件套复用全屏管线骨架（无深度、单
-//! color、动态 viewport）。
+//! 叠回降采样对应级）→ `up[0]` = 半分辨率 bloom 纹理，由 present tonemap
+//! 采样叠加。三条管线都用全屏管线骨架（无深度、单 color、动态 viewport）。
 //!
-//! 布局族：L_tex = [texture, sampler]（down 链源集）；L_up = [texture, texture,
-//! sampler, uniform]（up 链双源 + 参数；tonemap 第二集复用同布局，b1 合法
-//! 闲置）。binding 收在本资源族自有布局，G-buffer 契约零触碰。
+//! 布局：L_tex = [texture, sampler]（down 链源集）；L_up = [texture, texture,
+//! sampler, uniform]（up 链双源 + 参数；tonemap 的 bloom 输入集复用同布局，b1 闲置）。
 
 use ash::{vk, Device};
 use bevy::log::info;
@@ -24,7 +22,7 @@ use crate::render::{Context, HDR_FORMAT, MAX_FRAMES_IN_FLIGHT};
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::target::color::ColorTarget;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
-use crate::render::core::pipeline::graphics::PipelineRef;
+use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{merged_pool_sizes, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
@@ -33,10 +31,10 @@ use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
 /// 降/升采样级数（半分辨率逐级）。
 pub const BLOOM_LEVELS: usize = 5;
 
-pub const BLOOM_BINDING_TEX0: u32 = 0;
-pub const BLOOM_BINDING_TEX1: u32 = 1;
-pub const BLOOM_BINDING_SAMPLER: u32 = 2;
-pub const BLOOM_BINDING_PARAMS: u32 = 3;
+const BLOOM_BINDING_TEX0: u32 = 0;
+const BLOOM_BINDING_TEX1: u32 = 1;
+const BLOOM_BINDING_SAMPLER: u32 = 2;
+const BLOOM_BINDING_PARAMS: u32 = 3;
 
 const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
 
@@ -99,12 +97,11 @@ pub struct BloomParamsData {
     pub strength: f32,
     /// bloom 开关（0/1）。
     pub enabled: f32,
-    /// tonemap 开关（0/1；debug 仪器模式由 render mode 旁路面承接，此旗标
-    /// 供 BRP A/B 对照用）。
+    /// tonemap 开关（0/1，供 BRP A/B 对照；调试显示模式另由 render mode 旁路）。
     pub tonemap: f32,
-    /// 曲线选型（0=Narkowicz 基线 / 1=Filament ACES，三态 A/B）。
+    /// 曲线（0=Narkowicz / 1=ACES，见 [`TonemapCurve`]）。
     pub curve: f32,
-    /// 亮度增益位（ap1 *= gain；ACES=1.0，LEGACY 形态=1.667）。
+    /// 亮度增益：tonemap 前 AP1 颜色乘它（1.0 = 纯 ACES，1.667 = ACES_LEGACY 观感）。
     pub gain: f32,
 }
 
@@ -134,7 +131,7 @@ pub fn pack_bloom_params(d: &BloomParamsData) -> [u8; BLOOM_PARAMS_SIZE as usize
     out
 }
 
-/// 色调映射曲线选型（Narkowicz=基线对照，FilamentAces=完整版 aces::ACES）。
+/// 色调映射曲线：Narkowicz 近似拟合（对照用）或完整 ACES（默认）。
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum TonemapCurve {
     Narkowicz,
@@ -165,23 +162,22 @@ pub struct BloomSettings {
 
 impl Default for BloomSettings {
     fn default() -> Self {
-        // gain 默认 1.667 = Filament viewer 默认 ACES_LEGACY 口径（A/B 实测：
-        // gain 1.0 画面过暗，均值亮度塌到 ~17%）；纯 ACES 观感拨 gain 1.0
+        // gain 1.667 对应 ACES_LEGACY 观感；1.0 是纯 ACES，实测画面偏暗（均值亮度约 17%）
         Self { enabled: true, strength: 0.04, tonemap: true, curve: TonemapCurve::default(), gain: 1.667 }
     }
 }
 
-/// Bloom 链资源族：down[N]（prefilter+降采样目标）+ up[N-1]（升采样目标，
-/// up[0] = 终品）+ 参数 UBO 帧槽环 + 两套描述符布局。
+/// Bloom 链资源族：`down[N]`（prefilter+降采样目标）+ `up[N-1]`（升采样目标，
+/// `up[0]` = 终品）+ 参数 UBO 帧槽环 + 两套描述符布局。
 #[derive(bevy::prelude::Resource)]
 pub struct BloomTargets {
     device: Device,
     set_layout_tex: vk::DescriptorSetLayout,
     set_layout_up: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
-    /// down[i] 源集（i=1..N-1，读 down[i-1]）。
+    /// `down[i]` 源集（i=1..N-1，读 `down[i-1]`）。
     sets_down: Vec<vk::DescriptorSet>,
-    /// up[i] 源集（i=0..N-2，读 up[i+1] 或 down[N-1] + down[i] + 参数）。
+    /// `up[i]` 源集（i=0..N-2，读 `up[i+1]` 或 `down[N-1]` + `down[i]` + 参数）。
     sets_up: Vec<vk::DescriptorSet>,
     /// tonemap 第二集（每帧槽：up0 + 采样器 + 参数 UBO）。
     sets_params: Vec<vk::DescriptorSet>,
@@ -218,9 +214,15 @@ impl BloomTargets {
         // 失败路径：已建对象都已落字段，由 Drop 回收
         unsafe { this.build_static() }?;
         this.build_targets(ctx, extent)?;
+        let sharing = ctx.sharing_families();
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            this.ubos.push(this
-                .mk_buffer(ctx, BufferRole::FrameUniform, u64::from(BLOOM_PARAMS_SIZE))?);
+            this.ubos.push(GpuBuffer::create_with_families(
+                &ctx.device,
+                ctx.memory_contract(),
+                u64::from(BLOOM_PARAMS_SIZE),
+                BufferRole::FrameUniform,
+                &sharing,
+            )?);
         }
         unsafe { this.build_descriptors() }?;
         info!(
@@ -231,9 +233,9 @@ impl BloomTargets {
         Ok(this)
     }
 
-    /// 随 swapchain 重建（闸门③，幂等——extent 不变空手而归）：链目标重建 +
-    /// pool reset 后重分配描述符集（自带 device_wait_idle，在飞旧 bloom 目标
-    /// 不可能被引用）。layout/采样器/pool 本体不动（与尺寸无关）。
+    /// 随 swapchain 重建（尺寸没变直接返回）：重建链目标，reset pool 后重分配描述符集
+    /// （自带 device_wait_idle，在飞帧不会再引用旧目标）。layout/采样器/pool 本体与尺寸
+    /// 无关，不动。
     ///
     /// # Errors
     /// 附件/描述符重建失败。
@@ -261,7 +263,7 @@ impl BloomTargets {
         Ok(())
     }
 
-    /// 尺寸相关目标：down[N] + up[N-1] + 各级 extent（旧目标先清）。
+    /// 尺寸相关目标：`down[N]` + `up[N-1]` + 各级 extent（旧目标先清）。
     fn build_targets(&mut self, ctx: &Context, extent: vk::Extent2D) -> Result<()> {
         self.down.clear();
         self.up.clear();
@@ -283,11 +285,6 @@ impl BloomTargets {
         Ok(())
     }
 
-    fn mk_buffer(&self, ctx: &Context, role: BufferRole, size: u64) -> Result<GpuBuffer> {
-        let sharing = ctx.sharing_families();
-        GpuBuffer::create_with_families(&self.device, ctx.memory_contract(), size, role, &sharing)
-    }
-
     /// 尺寸无关对象：两套布局 + 自有采样器 + pool（容量只随级数/帧槽定）。
     ///
     /// # Safety
@@ -297,8 +294,7 @@ impl BloomTargets {
         let device = &self.device;
         self.set_layout_tex = BLOOM_TEX_SET_DESC.create(device)?;
         self.set_layout_up = BLOOM_UP_SET_DESC.create(device)?;
-        // Bloom 链自有采样器（线性 + CLAMP_TO_EDGE；本体随本资源 Drop 销毁
-        // ——不走描述符表去重账，账本采样器槽留给贴图面）
+        // 自有线性采样器：随本资源 Drop 销毁，不占 bindless 表的采样器槽
         self.sampler = crate::render::resident::images::sampler_key(
             &bevy::image::ImageSamplerDescriptor::linear(),
         )
@@ -331,18 +327,16 @@ impl BloomTargets {
         let n = self.down.len();
         let slots = MAX_FRAMES_IN_FLIGHT;
         let alloc = |layout: vk::DescriptorSetLayout, count: usize| -> Result<Vec<vk::DescriptorSet>> {
-            let sets = device.allocate_descriptor_sets(
+            Ok(device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(self.pool)
                     .set_layouts(&std::iter::repeat_n(layout, count).collect::<Vec<_>>()),
-            )?;
-            Ok(sets)
+            )?)
         };
         self.sets_down = alloc(self.set_layout_tex, (n - 1) * slots)?;
         self.sets_up = alloc(self.set_layout_up, (n - 1) * slots)?;
         self.sets_params = alloc(self.set_layout_up, slots)?;
-        // 写入过声明校验：down/up/params 三段各自收集、写满提交（种类按
-        // BLOOM_TEX_SET_DESC / BLOOM_UP_SET_DESC 核对）
+        // 写入按布局声明核对种类，写满才提交
         let ro = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
         for i in 1..n {
             for slot in 0..slots {
@@ -397,13 +391,13 @@ impl BloomTargets {
         DescSet::new(&BLOOM_UP_SET_DESC, self.sets_params[slot])
     }
 
-    /// 本帧槽 down 链源集（i=1..N-1 → 下标 (i-1)*slots+slot）。
+    /// 本帧槽 down 链源集（`level` = 1..N-1，读 down[level-1]）。
     #[must_use]
     pub fn set_down(&self, level: usize, slot: usize) -> DescSet {
         DescSet::new(&BLOOM_TEX_SET_DESC, self.sets_down[(level - 1) * MAX_FRAMES_IN_FLIGHT + slot])
     }
 
-    /// 本帧槽 up 链源集（i=0..N-2 → 下标 (N-1)*slots + i*slots + slot）。
+    /// 本帧槽 up 链源集（`level` = 0..N-2）。
     #[must_use]
     pub fn set_up(&self, level: usize, slot: usize) -> DescSet {
         DescSet::new(&BLOOM_UP_SET_DESC, self.sets_up[level * MAX_FRAMES_IN_FLIGHT + slot])
@@ -457,66 +451,17 @@ impl Drop for BloomTargets {
     }
 }
 
-/// Bloom 三全屏管线（prefilter/down/up；复用全屏管线骨架）。
-/// （drop：FullscreenPipeline 自带 Drop，本结构只持句柄拷贝——layout/pipeline
-/// 句柄经由 FullscreenPipeline 的值移动保留，析构随移动值 Drop 完成。）
+/// Bloom 三条全屏管线（prefilter/down/up）。
+/// 坑：必须持有 FullscreenPipeline 本体；只存句柄拷贝的话，临时值 Drop 时管线就被
+/// 销毁（验证层报 Invalid VkPipeline）。
 #[derive(bevy::prelude::Resource)]
 pub struct BloomPipelines {
-    /// 持有 FullscreenPipeline 本体（句柄拷贝会随临时值 Drop 把管线销毁
-    /// ——首跑实抓 Invalid VkPipeline，即修）。
     prefilter: FullscreenPipeline,
     down: FullscreenPipeline,
     up: FullscreenPipeline,
 }
 
 impl BloomPipelines {
-    /// prefilter 管线句柄。
-    #[must_use]
-    pub(crate) fn prefilter_rec(&self) -> PipelineRef {
-        self.prefilter.rec()
-    }
-
-    pub fn prefilter_pipeline(&self) -> vk::Pipeline {
-        self.prefilter.pipeline()
-    }
-    /// prefilter layout 句柄。
-    #[must_use]
-    pub fn prefilter_layout(&self) -> vk::PipelineLayout {
-        self.prefilter.layout()
-    }
-    /// down 管线句柄。
-    #[must_use]
-    pub(crate) fn down_rec(&self) -> PipelineRef {
-        self.down.rec()
-    }
-
-    pub fn down_pipeline(&self) -> vk::Pipeline {
-        self.down.pipeline()
-    }
-    /// down layout 句柄。
-    #[must_use]
-    pub fn down_layout(&self) -> vk::PipelineLayout {
-        self.down.layout()
-    }
-    /// up 管线句柄。
-    #[must_use]
-    pub(crate) fn up_rec(&self) -> PipelineRef {
-        self.up.rec()
-    }
-
-    pub fn up_pipeline(&self) -> vk::Pipeline {
-        self.up.pipeline()
-    }
-    /// up layout 句柄。
-    #[must_use]
-    pub fn up_layout(&self) -> vk::PipelineLayout {
-        self.up.layout()
-    }
-}
-
-impl BloomPipelines {
-    /// 建三全屏管线（shader module/layout/pipeline 由 FullscreenPipeline 承包）。
-    ///
     /// # Errors
     /// 配方对账不过，或管线创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
@@ -524,6 +469,21 @@ impl BloomPipelines {
         let down = FullscreenPipeline::new(ctx, &BLOOM_DOWN_PIPELINE, layouts)?;
         let up = FullscreenPipeline::new(ctx, &BLOOM_UP_PIPELINE, layouts)?;
         Ok(Self { prefilter, down, up })
+    }
+
+    #[must_use]
+    pub(crate) fn prefilter_rec(&self) -> PipelineRef {
+        self.prefilter.rec()
+    }
+
+    #[must_use]
+    pub(crate) fn down_rec(&self) -> PipelineRef {
+        self.down.rec()
+    }
+
+    #[must_use]
+    pub(crate) fn up_rec(&self) -> PipelineRef {
+        self.up.rec()
     }
 }
 

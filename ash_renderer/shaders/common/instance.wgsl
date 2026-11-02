@@ -1,4 +1,4 @@
-// 实例表记录族：与 src/render/assets/instance_table.rs 的打包逐字节同序，
+// 实例表记录族：与 src/render/resident/instance_table.rs 的打包逐字节同序，
 // 记录尺寸由 build.rs 的 HOST_LAYOUT_GATE 编译期互证。
 
 // 对象表记录（48B）：基准 mesh 引脚 + 材质索引 + 局部包围盒。
@@ -24,8 +24,8 @@ struct MaterialRecord {
     tex_metallic_roughness: u32,
     tex_occlusion: u32,
     sampler_index: u32,
-    // 坑点：垫至 64 必须用标量——vec3<u32> 对齐 16 会被排到 64..76，步长撑到
-    // 80 ≠ 宿主 MATERIAL_RECORD_SIZE 64，材质槽 ≥1 全体错位
+    // 坑：垫到 64B 必须用标量——vec3<u32> 按 16 对齐会排到 64..76，步长撑到
+    // 80 ≠ 宿主 MATERIAL_RECORD_SIZE 64，槽 ≥1 的材质全体错位
     _pad1: u32,
     _pad2: u32,
     _pad3: u32,

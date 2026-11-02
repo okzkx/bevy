@@ -1,19 +1,17 @@
-// present tonemap（全屏）：HDR 中间目标 + Bloom 叠加 → 色调映射 → swapchain。
-// 本 shader 全程线性，swapchain 的 SRGB view 在 ROP 写出时做唯一一次编码。
+// present tonemap（全屏）：HDR 中间目标 + Bloom 叠加 → 色调映射 → LDR UNORM 目标
+//（再交给 SMAA）。全程线性，sRGB 编码在最后写 swapchain 的 SRGB view 时做一次。
 //
-// 曲线（bloom_params.curve，A/B 挂 bloom_set / 管线控制窗口）：
-// curve=0 Narkowicz 2015 逐通道拟合（对照基线）；
-// curve=1 Filament 完整版 aces::ACES——十步管线函数级照抄、命名保留原名
-//   （filament/src/ToneMapper.cpp:133-193 + ColorSpaceUtils.h @ 373190d49），
-//   契约域 linear Rec.2020 进出（ToneMapper.h），本 shader 的 HDR 是 linear
-//   sRGB，进曲线前 sRGB→Rec2020、出曲线后 Rec2020→sRGB 各转一次。
-// gain = 亮度增益位（ap1 *= brightness；ACES=1.0，LEGACY 形态=1.667），与曝光
-// 锚点（common/brdf.wgsl 的 EXPOSURE）分离外露。
+// 曲线（bloom_params.curve，BRP bloom_set / 管线控制窗口可切）：
+// curve=0 Narkowicz 2015 逐通道拟合（对照用）；
+// curve=1 完整 ACES，函数名沿用 Filament 原名（出处见 .agents/docs/笔记/渲染/
+//   Filament 源码参考：色调映射与 Color Grading（8.6 对照基准）.md）。它的输入输出是
+//   linear Rec.2020，本 shader 的 HDR 是 linear sRGB，进曲线前后各转一次色域。
+// gain = 亮度增益（tonemap 前 AP1 颜色乘它；1.0 = 纯 ACES，1.667 = ACES_LEGACY
+// 观感），与曝光锚点（common/brdf.wgsl 的 EXPOSURE）分开调。
 //
-// 接口：set0 = 帧 UBO（mode 旁路面）；set1 = G-buffer 采样集（b2 hdr）；set2 =
-// bloom 参数集（b0 up0 / b1 合法闲置 / b2 采样器 / b3 参数 UBO）。
-// debug 仪器旁路：mode != 0 时 HDR 内是直出可视化——跳过 bloom 叠加与色调映射
-//（写后读面失真即仪器失真）。
+// 接口：set0 = 帧 UBO（读 mode）；set1 = G-buffer 采样集（b2 hdr）；set2 =
+// bloom 参数集（b0 up0 / b1 闲置 / b2 采样器 / b3 参数 UBO）。
+// 调试显示模式（mode != 0）时 HDR 里是直出的可视化，跳过 bloom 与色调映射，免得失真。
 // #import frame
 // #import fullscreen
 
@@ -32,7 +30,7 @@ struct BloomParams {
     gain: f32,
 }
 
-// Narkowicz ACES 拟合（线性域输入/输出，编码在 SRGB view ROP 恰好一次）
+// Narkowicz ACES 拟合（线性进出）
 fn aces_narkowicz(x: vec3f) -> vec3f {
     let a = 2.51;
     let b = 0.03;
@@ -42,14 +40,11 @@ fn aces_narkowicz(x: vec3f) -> vec3f {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3f(0.0), vec3f(1.0));
 }
 
-// —— Filament 完整版 aces::ACES 照抄区（ToneMapper.cpp:133-193 +
-// ColorSpaceUtils.h @ 373190d49，函数级移植命名保留原名；输入输出
-// linear Rec.2020）——————————————————————————————————
+// —— 完整 ACES（输入输出 linear Rec.2020）——————————————————————————————————
 
 const RAD_TO_DEG: f32 = 57.29577951308232;
 
-// 色域基底矩阵（ColorSpaceUtils.h 列主序逐值照抄，每行一列；四个合成矩阵
-// 用同源合成式编译期展开：sRGB_to_Rec2020 = XYZ_to_Rec2020 * sRGB_to_XYZ 等）
+// 色域基底矩阵（列主序，每行一列）；下方四个合成矩阵由它们相乘得出
 const XYZ_TO_SRGB: mat3x3f = mat3x3f(
     3.2404542, -0.9692660, 0.0556434,
     -1.5371385, 1.8760108, -0.2040259,
@@ -126,7 +121,7 @@ fn glow_fwd(ycIn: f32, glowGainIn: f32, glowMid: f32) -> f32 {
 }
 
 fn rgb_2_hue(rgb: vec3f) -> f32 {
-    // 几何色相角（度）；中性色无色相，返回 0（Filament 同款初值兜底）
+    // 几何色相角（度）；中性色无色相，返回 0
     var hue = 0.0;
     if (!(rgb.x == rgb.y && rgb.y == rgb.z)) {
         hue = RAD_TO_DEG * atan2(sqrt(3.0) * (rgb.y - rgb.z), 2.0 * rgb.x - rgb.y - rgb.z);
@@ -151,7 +146,7 @@ fn darkSurround_to_dimSurround(linearCV: vec3f) -> vec3f {
     let DIM_SURROUND_GAMMA = 0.9811;
     let XYZ = AP1_TO_XYZ * linearCV;
     let sum = XYZ.x + XYZ.y + XYZ.z;
-    // XYZ_to_xyY：xy 分量归一，y 分量原样（分母 TINY 兜底同款）
+    // XYZ_to_xyY：xy 分量归一，Y 原样（分母下限 1e-5）
     var xyY = vec3f(XYZ.xy / max(sum, 1e-5), XYZ.y);
     xyY.z = clamp(xyY.z, 0.0, 65504.0);  // half 上界
     xyY.z = pow(xyY.z, DIM_SURROUND_GAMMA);
@@ -198,10 +193,10 @@ fn ACES(color: vec3f, brightness: f32) -> vec3f {
     // 一级受控去饱和
     var ap1d = mix(vec3f(dot(ap1, LUMINANCE_AP1)), ap1, RRT_SAT_FACTOR);
 
-    // 亮度增益位（ACES=1.0 / LEGACY=1.667）
+    // 亮度增益（1.0 = 纯 ACES / 1.667 = ACES_LEGACY 观感）
     ap1d = ap1d * brightness;
 
-    // Hill RRT+ODT 拟合（colour-unity CIECAM02 notebook）
+    // RRT+ODT 有理函数拟合（Stephen Hill）
     let a = 2.785085;
     let b = 0.107772;
     let c = 2.936045;
@@ -223,7 +218,7 @@ fn ACES(color: vec3f, brightness: f32) -> vec3f {
 fn fs_main(in: VsOut) -> @location(0) vec4f {
     let hdr = textureSampleLevel(hdr_tex, blit_sampler, in.uv, 0.0).rgb;
     if (frame.mode != 0u || bloom_params.tonemap < 0.5) {
-        // debug 仪器直出 / tonemap 关（A/B 的 B 面）——HDR 内容原样
+        // 调试显示或 tonemap 关：HDR 原样输出
         return vec4f(hdr, 1.0);
     }
     var bloom = vec3f(0.0);
