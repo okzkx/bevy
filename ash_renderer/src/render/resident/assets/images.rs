@@ -1,7 +1,7 @@
 //! 贴图资源：按 [`ImageSpec`] 建 VkImage/view，按资产身份驻留缓存。格式核对在
 //! [`super::image_spec`]，采样器键在 [`crate::render::resident::sampler`]。
 //!
-//! 三条约束（详见 `.agents/docs/3-静态取数链路/3.3-贴图与bindless描述符/
+//! 三条约束（详见 `.agents/docs/开发步骤/3-静态取数链路/3.3-贴图与bindless描述符/
 //! 显存机制：Buffer与Image之别、swizzle不透明与访问路径特化.md` §0）：
 //! 1. OPTIMAL tiling 的 image 内容不能按字节读写：上传走 `vkCmdCopyBufferToImage`
 //!    （[`crate::render::core::device::transfer`] 的图像段），读回走 `vkCmdCopyImageToBuffer`。

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Hi-Z 遮挡一键测试驱动（6.1）：起宿主 → 摆遮挡场景 → 按判定线逐项采证 → 收尾。
 
-对应 6.1.6 验收回归的核心序列（见 .agents/docs/6-高级剔除LOD与流送/6.1-Hi-Z遮挡/）。
+对应 6.1.6 验收回归的核心序列（见 .agents/docs/开发步骤/6-高级剔除LOD与流送/6.1-Hi-Z遮挡/）。
 全程 BRP 驱动，不碰鼠标。判定口径与段施工记录一致：
   ① 遮挡生效：遮挡开启档 gpu_visible < cpu_visible（被遮挡实体被合法剔除）
   ② 探针一致：occlusion_probe 判被挡物 occluded=true（与 shader 逐位同语义）

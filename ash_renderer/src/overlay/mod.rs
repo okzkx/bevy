@@ -21,9 +21,9 @@
 //! 机制层、输入仲裁窄接口 `PointerCapture` 住 [`crate::scene`]——
 //! 本模块只消费/写入这些契约，不被下层与 remote 引用。
 //!
-//! 机制与证据：`.agents/docs/3-静态取数链路/3.7-egui调试GUI/`、
-//! `.agents/docs/3-静态取数链路/3.10-egui实体层级树/`、
-//! `.agents/docs/3-静态取数链路/3.11-egui实体编辑/`。
+//! 机制与证据：`.agents/docs/开发步骤/3-静态取数链路/3.7-egui调试GUI/`、
+//! `.agents/docs/开发步骤/3-静态取数链路/3.10-egui实体层级树/`、
+//! `.agents/docs/开发步骤/3-静态取数链路/3.11-egui实体编辑/`。
 
 mod framework;
 mod tool_window;
