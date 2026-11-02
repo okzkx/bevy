@@ -19,8 +19,6 @@
 //! 坑：acquire 成功之后的 Vulkan 真失败必须致命退出——同步状态已无法恢复，warn 后
 //! 继续会等一个永远无人 signal 的 fence，直接死锁。
 
-use std::time::Instant;
-
 use bevy::{
     camera::{Camera, Projection},
     ecs::system::{NonSendMarker, SystemParam},
@@ -47,7 +45,7 @@ use crate::{
         pack_cluster_uniforms, pack_frame_uniforms, pack_shadow_uniforms, AcquireOutcome,
         BindlessTextureTable, BloomFrameDraw, BloomParamsData, BloomPipelines, BloomSettings,
         BloomTargets, ClusterBuildPass, CompositePipeline, Context, CullDiagnostics, CullDraw,
-        CullPass, CullSettings, FrameDraw, FramePool, FrameSample, FrameUniformTable,
+        CullPass, CullSettings, FrameDraw, FramePool, FrameUniformTable,
         FrameUniformsData, GBufferPipeline, GBufferTargets, GpuBuffer, GpuTimer, HizPyramid,
         ImageCache, IndirectDraw, IndirectPass, IndirectStats, InstanceTables, LightClusters,
         LightTable, LodDiagnostics, LodDraw, LodPass, LodSettings, MeshPool, OcclusionDiagnostics,
@@ -65,8 +63,10 @@ use crate::{
 use super::drawlist::{self, DrawabilitySources, ParityDirty};
 
 mod resize_gate;
+mod stopwatch;
 
 use self::resize_gate::ResizeGate;
+use self::stopwatch::FrameStopwatch;
 
 /// 遮挡 fallback 的相机历史（`draw_frame` 的 `Local`，跨帧保持）：跳变判定用
 /// "当前 vs 两帧前"——遮挡读的金字塔正是两帧前的深度。阈值见 occlusion 模块文档，
@@ -300,22 +300,13 @@ pub(crate) fn draw_frame(
     gate.rebuild_if_pending(|| rebuild_size_dependent(core, &mut occlusion.hiz, post, cluster))?;
 
     // —— 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在提交前一刻）。
-    let frame_wall_ms = core.perf.mark_frame_start();
-    let frame_clock = Instant::now();
+    let mut watch = FrameStopwatch::start(&mut core.perf);
     core.frames.wait_for_slot()?;
-    let wait_slot_ms = ms_since(frame_clock);
     let slot = core.frames.current_index();
-    // —— GPU 帧计时取回：本槽 fence 已等完，timestamp 可读。读数是本槽上轮（两帧前）
-    // 的提交，稳态下与当前帧同构；停用时恒 0
-    let gpu_sections = core
-        .timer
-        .fetch(slot)
-        .or_fatal("GPU 帧计时取回失败，渲染链无法继续")?
-        .unwrap_or([0.0; 8]);
+    watch.wait_slot_done(&mut core.timer, slot)?;
 
     // —— acquire：OUT_OF_DATE = 这个 swapchain 已不可用（最小化/恢复/独占模式切换等），
     // 必须立即重建，等不得下一帧
-    let acquire_clock = Instant::now();
     let index = match core.swapchain.acquire(core.frames.current().image_available) {
         Ok(AcquireOutcome::Ready(index)) => index,
         Ok(AcquireOutcome::Suboptimal(index)) => {
@@ -333,7 +324,7 @@ pub(crate) fn draw_frame(
         }
         Err(e) => return Err(fatal("acquire 失败，渲染链无法继续", e)),
     };
-    let acquire_ms = ms_since(acquire_clock);
+    watch.acquire_done();
 
     // —— 组装 DrawList（增量）：实例槽缺/mesh 未驻留/材质缺席的行暂缓，就绪后自愈。
     let sources = DrawabilitySources {
@@ -342,9 +333,8 @@ pub(crate) fn draw_frame(
         lod_groups: &scene.lod_groups,
         floor_anchor: scene.residency_settings.floor_anchor,
     };
-    let assemble_clock = Instant::now();
     drawlist::assemble_update(&mut scene.ledger, sources);
-    let assemble_ms = ms_since(assemble_clock);
+    watch.assemble_done();
     // 对照模式（BRP 开关）：全量走访与增量缓存逐字段比对，只进计量，不驱动绘制
     if scene.verify.enabled {
         let pending = scene.ledger.assembly_pending();
@@ -393,7 +383,6 @@ pub(crate) fn draw_frame(
     write_post_ubos(post, slot)?;
     write_cluster_slot(cluster, slot, &view, core.swapchain.extent)?;
     write_transparent_slot(transparent, slot)?;
-    let rings_clock = Instant::now();
     drawlist::write_rings(
         &mut scene.instance_tables,
         ledger,
@@ -404,7 +393,7 @@ pub(crate) fn draw_frame(
         slot,
     )
     .or_fatal("模型/材质/在场/LOD 环写失败，渲染链无法继续")?;
-    let rings_ms = ms_since(rings_clock);
+    watch.rings_done();
 
     // —— compute 段：各半边按开关决定 dispatch 或 host 填充（A/B 对照），诊断读数在
     // 写入路径之后取，都在 wait_for_slot 的 fence 保护内。诊断只进计量，任何系统不得
@@ -529,7 +518,6 @@ pub(crate) fn draw_frame(
         hiz: Some(&*occlusion.hiz),
         timer: core.timer.enabled.then_some(&*core.timer),
     };
-    let record_clock = Instant::now();
     core.frames
         .record_frame(
             &core.ctx,
@@ -540,12 +528,11 @@ pub(crate) fn draw_frame(
             &frame_draw,
         )
         .or_fatal("录制/提交失败，渲染链无法继续")?;
-    let record_submit_ms = ms_since(record_clock);
+    watch.record_done();
 
     // —— present：等待的信号量按 acquire 的 image index 取（不按帧槽轮转）。
     // OUT_OF_DATE 只标 pending，交给下个帧首重建；其余真失败先暂存——提交已发生，
     // advance 必须照常推进保持帧槽账本一致，收尾后在系统末尾冒泡。
-    let present_clock = Instant::now();
     let present_failure = match core.swapchain.present(
         core.ctx.queue,
         core.swapchain.render_finished[index as usize],
@@ -559,29 +546,10 @@ pub(crate) fn draw_frame(
         }
         Err(e) => Some(e),
     };
-    let present_ms = ms_since(present_clock);
+    watch.present_done();
 
     // —— 帧样本入账：只进计量。让路帧（最小化/acquire 过时）不经过此处。
-    let cpu_total_ms = wait_slot_ms + acquire_ms + assemble_ms + rings_ms + record_submit_ms + present_ms;
-    core.perf.push(FrameSample {
-        frame_wall_ms,
-        wait_slot_ms,
-        acquire_ms,
-        assemble_ms,
-        rings_ms,
-        record_submit_ms,
-        present_ms,
-        cpu_total_ms,
-        gpu_compute_ms: gpu_sections[0],
-        gpu_shadow_ms: gpu_sections[1],
-        gpu_gbuffer_ms: gpu_sections[2],
-        gpu_lighting_ms: gpu_sections[3],
-        gpu_hiz_ms: gpu_sections[4],
-        gpu_present_ms: gpu_sections[5],
-        gpu_total_ms: gpu_sections[7], // [6] = 尾段，不入账
-        instance_rows: indirect_count,
-        visible_rows: visible_among_live,
-    });
+    watch.push(&mut core.perf, indirect_count, visible_among_live);
 
     occlusion.hiz.note_reduced();
     core.frames.advance();
@@ -633,11 +601,6 @@ fn rebuild_size_dependent(
 /// 逐帧槽收集（重建入参：深度 image/view、光源环 buffer）。
 fn per_slot<T>(f: impl FnMut(usize) -> T) -> Vec<T> {
     (0..MAX_FRAMES_IN_FLIGHT).map(f).collect()
-}
-
-/// 自 `start` 起的毫秒数（帧样本 CPU 分段）。
-fn ms_since(start: Instant) -> f32 {
-    start.elapsed().as_secs_f32() * 1000.0
 }
 
 /// 非透视投影的 near 兜底：级联的 near/d 视深换算只对透视投影成立，正交下
