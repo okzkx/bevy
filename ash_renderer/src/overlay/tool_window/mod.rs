@@ -25,7 +25,7 @@ use crate::render::{
     IndirectStats, LodDiagnostics, LodSettings, MeshPool, MonitorHistory, OcclusionDiagnostics,
     OcclusionSettings, PerfLedger, RenderMode, ShadowSettings, SmaaSettings,
 };
-use crate::scene::mechanism::{TransformEditQueue, WorkloadSettings};
+use crate::scene::{TransformEditQueue, WorkloadSettings};
 use culling::CullingPage;
 use entity_tree::{
     EntityTreePage, EntityTreeState, SelectedDetails, SelectedEntity, TransformDragCache,
@@ -37,7 +37,7 @@ use shading::ShadingPage;
 
 /// 工具窗口的页面。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(in crate::overlay) enum ToolPage {
+enum ToolPage {
     Shading,
     Culling,
     Pipeline,
@@ -81,20 +81,20 @@ impl Default for ToolWindowState {
 
 /// 工具窗口外壳的一次构建输入：[`ToolWindowParams::show`] 每帧组好，页面内容由
 /// `show` 的闭包按页分发。
-pub(in crate::overlay) struct ToolWindow<'a> {
-    pub(in crate::overlay) ctx: &'a egui::Context,
-    pub(in crate::overlay) state: &'a mut ToolWindowState,
+struct ToolWindow<'a> {
+    ctx: &'a egui::Context,
+    state: &'a mut ToolWindowState,
 }
 
 /// 左侧导航栏宽度（points）。
 const NAV_WIDTH: f32 = 150.0;
 
 impl ToolWindow<'_> {
-    pub(in crate::overlay) fn show(self, page_ui: impl FnOnce(&mut egui::Ui, ToolPage)) {
+    fn show(self, page_ui: impl FnOnce(&mut egui::Ui, ToolPage)) {
         let Self { ctx, state } = self;
         egui::Window::new("工具窗口")
             .default_open(false)
-            .default_pos(egui::pos2(12.0, 12.0))
+            .default_pos(egui::pos2(12.0, 12.0)) // 左上角，points
             .default_size(egui::vec2(720.0, 480.0))
             .min_size(egui::vec2(420.0, 240.0))
             .resizable(true)
@@ -161,27 +161,21 @@ pub(super) fn gib(bytes: u64) -> f64 {
 
 /// Startup：工具窗口各页的状态资源落地（着色模式由 driver 的宿主插件插入）。
 pub(in crate::overlay) fn insert_tool_window_resources(commands: &mut Commands) {
-    // 工具窗口导航状态：当前页 + 分组折叠
     commands.insert_resource(ToolWindowState::default());
-    // 层级树点选：属性面板的编辑目标来源
     commands.insert_resource(SelectedEntity::default());
-    // 树拍平缓存：脏信号观测器 + 维护系统重建，默认脏 = 首帧立树
+    // 默认脏 = 首帧立树
     commands.insert_resource(EntityTreeState::default());
-    // 属性快照：采集系统每帧重写，Startup 先落空壳
+    // 采集系统每帧重写，Startup 先落空壳
     commands.insert_resource(SelectedDetails::default());
-    // 旋转拖拽缓存：拖拽期内冻结欧拉表示分支（防跨分支混写闪烁）
     commands.insert_resource(TransformDragCache::default());
-    // 帧率显示平滑：0.5s 出一次平均快照
     commands.insert_resource(FpsMeter::default());
-    // 持续监控历史：随 fps 快照节奏采样，窗口显隐不影响记账
+    // 随 fps 快照节奏采样，窗口显隐不影响记账
     commands.insert_resource(MonitorHistory::default());
-    // 分位数面板缓存：0.5s 重算，调试窗只读
     commands.insert_resource(PerfPanelCache::default());
 }
 
-/// 工具窗口各页的一次性参数束：统计、着色模式、导航状态、点选与层级树、各页
-/// 开关与诊断读数合成一个 SystemParam——系统参数上限 16（FrameInput 同款式的
-/// 束打法），新增页面件全走这里，不撑大 pass 签名。
+/// 工具窗口各页的参数束：各页读写的资源合成一个 SystemParam（避开系统参数
+/// 16 个上限），新增页面件全走这里，不撑大 pass 签名。
 #[derive(SystemParam)]
 pub(in crate::overlay) struct ToolWindowParams<'w, 's> {
     stats: RendererStats<'w>,
@@ -199,23 +193,17 @@ pub(in crate::overlay) struct ToolWindowParams<'w, 's> {
     tree_state: ResMut<'w, EntityTreeState>,
     /// 属性快照（采集系统产，只读消费）
     details: Res<'w, SelectedDetails>,
-    /// 旋转拖拽缓存（拖拽期内冻结欧拉表示分支）
     drag_cache: ResMut<'w, TransformDragCache>,
-    /// Transform 编辑排队（pass 产，清账系统消费）
+    /// Transform 编辑排队（pass 产，编辑落地系统消费）
     edit_queue: ResMut<'w, TransformEditQueue>,
-    /// 剔除开关（checkbox 写，draw_frame 读）
+    // 以下 *_settings 由 checkbox/滑杆就地写（draw_frame 读，BRP 同名方法写同一份）；
+    // *_diag/*_stats 由 draw_frame 每帧刷新，只读展示
     cull_settings: ResMut<'w, CullSettings>,
-    /// 剔除诊断读数（draw_frame 每帧刷新，只读展示）
     cull_diag: Res<'w, CullDiagnostics>,
-    /// 遮挡开关（checkbox 写，draw_frame 读）
     occlusion_settings: ResMut<'w, OcclusionSettings>,
-    /// 遮挡诊断读数（draw_frame 每帧刷新，只读展示）
     occlusion_diag: Res<'w, OcclusionDiagnostics>,
-    /// LOD 开关（checkbox 写，draw_frame 读）
     lod_settings: ResMut<'w, LodSettings>,
-    /// LOD 诊断读数（draw_frame 每帧刷新，只读展示）
     lod_diag: Res<'w, LodDiagnostics>,
-    /// indirect 闭环读数（draw_frame 每帧刷新，只读展示）
     indirect_stats: Res<'w, IndirectStats>,
     /// chunk 盘点（块数与成员总数计量行）
     chunks: ChunkRows<'w, 's>,
@@ -226,24 +214,19 @@ pub(in crate::overlay) struct ToolWindowParams<'w, 's> {
     image_cache: Res<'w, ImageCache>,
     mesh_pool: Res<'w, MeshPool>,
     workload: Res<'w, WorkloadSettings>,
-    /// 阴影开关（checkbox 写，draw_frame 读；BRP shadow_set 同源）
     shadow_settings: ResMut<'w, ShadowSettings>,
-    /// Bloom/tonemap 开关与参数（checkbox/滑杆写；BRP bloom_set 同源）
     bloom_settings: ResMut<'w, BloomSettings>,
-    /// SMAA 开关（checkbox 写；BRP smaa_set 同源）
     smaa_settings: ResMut<'w, SmaaSettings>,
 }
 
 impl ToolWindowParams<'_, '_> {
-    /// 节拍底座（每帧调用，不隶属 pass）：fps 快照 + 监控采样 + 分位缓存。
-    /// 跳过帧也要推进采样账（监控历史随快照节奏入账、窗口显隐不影响记账）。
-    /// 返回本帧是否刚刷新快照（面板 pass 触发源之一）。
+    /// 节拍底座（每帧调用，不隶属 pass）：fps 快照 + 监控采样 + 分位缓存，跳过帧
+    /// 也要推进。返回本帧是否刚刷新快照（面板 pass 触发源之一）。
     pub(in crate::overlay) fn tick_snapshot(&mut self, delta_secs: f32) -> bool {
         let ticked = self.fps.tick(delta_secs);
         if ticked {
             self.history
                 .sample(self.fps.snapshot.fps, self.fps.snapshot.ms, self.vulkan.as_deref());
-            // 分位数面板缓存同节奏重算（调试窗逐帧只读，不再逐帧全量 sort）
             self.pct_cache.refresh(&self.perf);
         }
         ticked

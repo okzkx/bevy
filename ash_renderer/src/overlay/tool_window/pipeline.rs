@@ -1,8 +1,6 @@
-//! 管线控制页：渲染管线开关与参数——阴影（cascade CSM）、
-//! 后处理（Bloom/tonemap、SMAA）。checkbox/滑杆直写
-//! [`ShadowSettings`]/[`BloomSettings`]/[`SmaaSettings`] 资源，`draw_frame`
-//! 每帧照资源执行；BRP `shadow_set`/`bloom_set`/`smaa_set` 写同一份资源，
-//! 面板与脚本天然同源（不养两份逻辑）。
+//! 管线控制页：阴影（cascade CSM）与后处理（Bloom/tonemap、SMAA）的开关与参数。
+//! checkbox/滑杆直写 [`ShadowSettings`]/[`BloomSettings`]/[`SmaaSettings`] 资源，
+//! `draw_frame` 每帧照资源执行；BRP `shadow_set`/`bloom_set`/`smaa_set` 写同一份。
 //!
 //! 开关语义：
 //! - 阴影关 = shadow 剔除标记/命令/绘制/采样全链旁路（无阴影基线画面）；
@@ -13,11 +11,8 @@ use crate::render::{BloomSettings, ShadowSettings, SmaaSettings, TonemapCurve};
 
 /// 管线控制页的一次构建输入：框架 pass 每帧组好，开关就地写资源。
 pub(in crate::overlay) struct PipelinePage<'a> {
-    /// 阴影开关（checkbox 直接写，draw_frame 读；BRP shadow_set 同源）。
     pub(in crate::overlay) shadow: &'a mut ShadowSettings,
-    /// Bloom/tonemap 开关与参数（checkbox/滑杆直接写；BRP bloom_set 同源）。
     pub(in crate::overlay) bloom: &'a mut BloomSettings,
-    /// SMAA 开关（checkbox 直接写，draw_frame 读；BRP smaa_set 同源）。
     pub(in crate::overlay) smaa: &'a mut SmaaSettings,
 }
 

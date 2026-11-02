@@ -2,13 +2,11 @@
 //! 关系递归展示，节点带 Name（无名按组件角色命名）+ 组件标签；点选节点落
 //! [`SelectedEntity`] 资源，面板下部是属性区——组件全清单、渲染语义
 //! 行（Mesh/材质/贴图槽）与 Transform 编辑（DragValue，写经
-//! [`crate::scene::mechanism`] 的 Transform 编辑封装）。
+//! [`crate::scene`] 的 Transform 编辑封装）。
 //!
-//! 取数分两层：树本身走 SystemParam 直查 World（参数束样式照 [`super::frame_stats`]
-//! 的 `RendererStats`），不另造快照通道；属性区走 [`SelectedDetails`] 纯数据
-//! 快照——采集系统（只读 &World）产、egui pass 消费，与官方"后端收集/前端展示"
-//! 分工同形（用户定案：学数据组织，不学 UI 表现）。机制与证据：
-//! `.agents/docs/3-静态取数链路/3.10-egui实体层级树/`、`3.11-egui实体编辑/`。
+//! 取数分两层：树本身由维护系统直查 World 重建拍平缓存，不另造快照通道；属性区走
+//! [`SelectedDetails`] 纯数据快照——采集系统产、egui pass 消费（后端收集/前端展示）。
+//! 机制与证据：`.agents/docs/3-静态取数链路/3.10-egui实体层级树/`、`3.11-egui实体编辑/`。
 
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
@@ -18,7 +16,6 @@ use bevy::{
     ecs::{
         lifecycle::{DespawnEvent, InsertEvent, RemoveEvent},
         reflect::{AppTypeRegistry, ReflectComponent},
-        system::SystemParam,
         world::EntityRef,
     },
     math::EulerRot,
@@ -29,7 +26,7 @@ use bevy::{
 
 use ash_macros::system;
 
-use crate::scene::mechanism::{
+use crate::scene::{
     EntityRow, SceneTreeIndex, SceneTreeNode, TransformEdit, TREE_MAX_DEPTH,
 };
 
@@ -38,22 +35,13 @@ use crate::scene::mechanism::{
 #[derive(Resource, Default)]
 pub(in crate::overlay) struct SelectedEntity(pub(in crate::overlay) Option<Entity>);
 
-/// 层级树一次取数（SystemParam 束）：全部实体的层级与呈现要素一次查询拿全。
-/// 逐项 Option/Has——非场景实体（窗口/相机/灯光/资产根）也进树，缺什么降级什么；
-/// 单查询即可完成根定位（`Has<ChildOf>`）与按实体号取行（`.get`），无需第二查询。
-/// 只被树拍平维护系统消费（重建时全量走访）；egui pass 不逐帧查询。
-#[derive(SystemParam)]
-pub(in crate::overlay) struct EntityTreeData<'w, 's> {
-    entities: Query<'w, 's, EntityRow>,
-}
-
 /// 拍平树一行：等高行数组元素。`depth` 只用于缩进，`expanded` 在重建时
-/// 从展开态账读出（行渲染不再自持折叠状态）。
-pub(in crate::overlay) struct TreeRow {
+/// 从展开态账读出（行渲染不自持折叠状态）。
+struct TreeRow {
     entity: Entity,
     depth: usize,
     label: String,
-    /// 有子节点（渲染折叠形态；点击 = 展开/收起 + 选中，与历史一致）。
+    /// 有子节点（渲染折叠形态；点击 = 展开/收起 + 选中）。
     has_children: bool,
     /// 展开态（has_children 时有意义）。
     expanded: bool,
@@ -63,17 +51,17 @@ pub(in crate::overlay) struct TreeRow {
 /// egui pass 只读 [`EntityTreeState::rows`] 切片（`ScrollArea::show_rows`
 /// 只构建视口内的行）——pass 成本与实体总数解耦。
 ///
-/// 脏信号三观测器（Insert/Remove/Despawn 裸事件 = 实体增删/换柄/层级/标签
-/// 形态任一变化）置 [`EntityTreeState::dirty`]；展开/收起由 UI 写展开态账
-/// 后同样置脏。Name 的 Mut 改写不走 Insert，不触发重建（本工程 Name 只在
-/// 进场/BRP spawn 时写入，均走 Insert）。
+/// 脏信号三观测器（Insert/Remove/Despawn = 实体增删/换柄/层级/标签形态任一变化）
+/// 置 [`EntityTreeState::dirty`]；展开/收起由 UI 写展开态账后同样置脏。
+/// 坑：Name 的原地改写不走 Insert，不触发重建（本工程 Name 只在进场/BRP spawn
+/// 时写入，均走 Insert）。
 #[derive(Resource)]
 pub(in crate::overlay) struct EntityTreeState {
     rows: Vec<TreeRow>,
     relevant: usize,
     total: usize,
     dirty: bool,
-    /// 展开态账（按实体）：首次见到按历史默认（深度 < 2 展开）落账，
+    /// 展开态账（按实体）：首次见到按默认（深度 < 2 展开）落账，
     /// 之后跨重建保持。死实体在重建时清扫。
     expanded: HashMap<Entity, bool>,
 }
@@ -142,9 +130,8 @@ impl EntityTreeState {
 }
 
 /// 脏信号观测器：任一组件 Insert（含实体 spawn 与换柄）/Remove/Despawn 都
-/// 可能改树形态（增删/层级/标签/相关性）——置脏即收，重建交给维护系统统一
-/// 做。稳态（无事件）零成本。按事件类型各注册一份实例（[`add_tree_dirty_observers`]）。
-pub(in crate::overlay) fn mark_tree_dirty<E: Event>(_: On<E>, st: Option<ResMut<EntityTreeState>>) {
+/// 可能改树形态（增删/层级/标签/相关性）——只置脏，重建交给维护系统统一做。
+fn mark_tree_dirty<E: Event>(_: On<E>, st: Option<ResMut<EntityTreeState>>) {
     if let Some(mut st) = st {
         st.dirty = true;
     }
@@ -162,12 +149,12 @@ pub(in crate::overlay) fn add_tree_dirty_observers(app: &mut App) -> &mut App {
 #[system]
 pub(in crate::overlay) fn maintain_entity_tree(
     mut st: ResMut<EntityTreeState>,
-    rows: EntityTreeData,
+    rows: Query<EntityRow>,
 ) {
     if !st.dirty {
         return;
     }
-    st.rebuild(&rows.entities);
+    st.rebuild(&rows);
     st.dirty = false;
 }
 
@@ -202,16 +189,13 @@ impl EntityTreePage<'_> {
         let mut toggles: Vec<Entity> = Vec::new();
         egui::ScrollArea::vertical()
             .id_salt("实体层级树")
-            .max_height(380.0)
+            .max_height(380.0) // points
             .show_rows(ui, row_height, state.rows.len(), |ui, range| {
-                for i in range {
-                    let TreeRow { entity, depth, label, has_children, expanded } =
-                        &state.rows[i];
+                for TreeRow { entity, depth, label, has_children, expanded } in &state.rows[range] {
                     let is_selected = selected.0 == Some(*entity);
-                    let indent = egui::vec2(*depth as f32 * ROW_INDENT, 0.0);
                     ui.horizontal(|ui| {
                         ui.set_height(row_height);
-                        ui.add_space(indent.x);
+                        ui.add_space(*depth as f32 * ROW_INDENT);
                         if *has_children {
                             let arrow = if *expanded { "▼ " } else { "▶ " };
                             if ui
@@ -236,11 +220,10 @@ impl EntityTreePage<'_> {
     }
 }
 
-/// 每层缩进宽度（points 域，照历史 CollapsingHeader 的视觉层级感）。
+/// 每层缩进宽度（points）。
 const ROW_INDENT: f32 = 14.0;
 
-/// 选中实体属性快照：采集系统每帧对选中实体产一份纯数据，属性区
-/// 只渲染快照（官方"后端收集/前端展示"分工：bevy_inspector 数据层同形）。
+/// 选中实体属性快照：采集系统每帧对选中实体产一份纯数据，属性区只渲染快照。
 /// 选中实体 despawn 后 `exists = false`，属性区借它清账。
 #[derive(Resource, Default)]
 pub(in crate::overlay) struct SelectedDetails {
@@ -262,22 +245,22 @@ pub(in crate::overlay) struct SelectedDetails {
 
 /// Transform 三组量的纯数值形态：编辑控件直接喂快照副本。
 #[derive(Clone, Copy)]
-pub(in crate::overlay) struct TransformVals {
-    pub(in crate::overlay) translation: [f32; 3],
+struct TransformVals {
+    translation: [f32; 3],
     /// YXZ 欧拉角（度），与展示同口径。
-    pub(in crate::overlay) euler_yxz_deg: [f32; 3],
-    pub(in crate::overlay) scale: [f32; 3],
+    euler_yxz_deg: [f32; 3],
+    scale: [f32; 3],
 }
 
 /// 旋转拖拽缓存：按住的整段拖拽期内欧拉三元组冻结在按下帧的表示分支，
-/// 拖拽框只改被拖的那位。若每帧从快照重建，拖拽分量跨欧拉分解分支边界
-/// （±90°/±180°）时 to_euler 会翻转另两位（±180°），与拖拽框的累加值
-/// 混分支合成出错误旋转——物体姿态逐帧跳变（闪烁）。松手即作废。
+/// 拖拽框只改被拖的那位。松手即作废。
+/// 坑：若每帧从快照重建，拖拽分量跨欧拉分解分支边界（±90°/±180°）时 to_euler
+/// 会翻转另两位（±180°），与拖拽框累加值混分支合成错误旋转——物体姿态逐帧闪烁。
 #[derive(Resource, Default)]
 pub(in crate::overlay) struct TransformDragCache(Option<(Entity, [f32; 3])>);
 
 /// 组件清单一行：短名 + 已注册反射组件的字段只读行（None = 名字-only）。
-pub(in crate::overlay) struct ComponentRow {
+struct ComponentRow {
     name: String,
     fields: Option<Vec<(String, String)>>,
 }
@@ -285,8 +268,7 @@ pub(in crate::overlay) struct ComponentRow {
 /// 从材质取一个可选图柄（贴图槽表第二列的函数形状，抽型免 type_complexity）。
 type TextureSlotGet = fn(&StandardMaterial) -> &Option<Handle<Image>>;
 
-/// 材质五贴图槽（bevy_pbr/src/pbr_material.rs 的 StandardMaterial 字段）：
-/// (展示名, 取柄)。
+/// StandardMaterial 的五个贴图槽：(展示名, 取柄)。
 const TEXTURE_SLOTS: &[(&str, TextureSlotGet)] = &[
     ("base_color", |m| &m.base_color_texture),
     ("emissive", |m| &m.emissive_texture),
@@ -307,10 +289,10 @@ const SKIP_REFLECT: &[TypeId] = &[
     TypeId::of::<ChildOf>(),
 ];
 
-/// 属性快照采集：每帧对选中实体产一份纯数据（单实体量级，全帧
-/// 成本可忽略）。**必须独占系统（&mut World）直接写资源**——只读 &World +
-/// Commands 落账的 deferred 命令在本链上从不生效（快照恒为默认值），
-/// 直接写零不确定性；链在 egui pass 之前。
+/// 属性快照采集：每帧对选中实体产一份纯数据（单实体量级，成本可忽略）；链在
+/// egui pass 之前。
+/// 坑：必须独占系统（&mut World）直接写资源——只读 &World + Commands 落账的
+/// deferred 命令在本链上从不生效（快照恒为默认值）。
 #[system]
 pub(in crate::overlay) fn collect_selected_details(world: &mut World) {
     let Some(entity) = world.resource::<SelectedEntity>().0 else {
@@ -322,7 +304,7 @@ pub(in crate::overlay) fn collect_selected_details(world: &mut World) {
         exists: true,
         ..Default::default()
     };
-    let Some(er) = world.get_entity(entity).ok() else {
+    let Ok(er) = world.get_entity(entity) else {
         details.exists = false;
         world.insert_resource(details);
         return;
@@ -330,9 +312,8 @@ pub(in crate::overlay) fn collect_selected_details(world: &mut World) {
     details.name = er.get::<Name>().map(|n| n.as_str().to_owned());
     details.children = er.get::<Children>().map(|c| c.len());
     details.mesh = er.get::<Mesh3d>().map(|m| m.0.id());
-    let mat_id = er.get::<MeshMaterial3d<StandardMaterial>>().map(|m| m.0.id());
-    details.material = mat_id;
-    let mat = mat_id.and_then(|id| {
+    details.material = er.get::<MeshMaterial3d<StandardMaterial>>().map(|m| m.0.id());
+    let mat = details.material.and_then(|id| {
         world
             .get_resource::<Assets<StandardMaterial>>()
             .and_then(|assets| assets.get(id))
@@ -357,54 +338,30 @@ pub(in crate::overlay) fn collect_selected_details(world: &mut World) {
 }
 
 /// 组件全清单：archetype 口径（`EntityRef::archetype().components()`），零反射
-/// 全量；已注册反射的组件附字段只读行。
+/// 全量；已注册反射且无专行的组件附字段只读行。
 fn component_rows(world: &World, er: &EntityRef) -> Vec<ComponentRow> {
     let components = world.components();
-    let Some(registry) = world.get_resource::<AppTypeRegistry>() else {
-        // 注册表缺席（不该发生：register_type 已懒插）——退化只报名字（Tier①）
-        return er
-            .archetype()
-            .components()
-            .iter()
-            .filter_map(|cid| components.get_info(*cid))
-            .map(|info| ComponentRow {
-                name: info.name().shortname().to_string(),
-                fields: None,
-            })
-            .collect();
+    // 注册表缺席（不该发生：register_type 已懒插）时退化只报名字
+    let registry = world.get_resource::<AppTypeRegistry>().map(|r| r.read());
+    let reflected_fields = |tid: TypeId| {
+        if SKIP_REFLECT.contains(&tid) {
+            return None; // 已有精确专行，不上反射行
+        }
+        let rc = registry.as_ref()?.get(tid)?.data::<ReflectComponent>()?;
+        Some(reflect_field_rows(rc.reflect(*er)?))
     };
-    let registry = registry.read();
     er.archetype()
         .components()
         .iter()
         .filter_map(|cid| components.get_info(*cid))
-        .map(|info| {
-            let mut row = ComponentRow {
-                name: info.name().shortname().to_string(),
-                fields: None,
-            };
-            let Some(tid) = info.type_id() else {
-                return row;
-            };
-            if SKIP_REFLECT.contains(&tid) {
-                return row; // 已有精确专行，不上反射行
-            }
-            let Some(entry) = registry.get(tid) else {
-                return row;
-            };
-            let Some(rc) = entry.data::<ReflectComponent>() else {
-                return row;
-            };
-            if let Some(reflected) = rc.reflect(*er) {
-                row.fields = Some(reflect_field_rows(reflected));
-            }
-            row
+        .map(|info| ComponentRow {
+            name: info.name().shortname().to_string(),
+            fields: info.type_id().and_then(&reflected_fields),
         })
         .collect()
 }
 
-/// 反射字段只读行（ReflectRef 分发）：Struct 拆逐字段行，其余整值一行。
-/// dyn PartialReflect 自带 Debug（bevy_reflect/src/reflect.rs:517），直接格式化。
+/// 反射字段只读行（ReflectRef 分发）：Struct 拆逐字段行，其余整值一行（Debug 格式）。
 fn reflect_field_rows(v: &dyn PartialReflect) -> Vec<(String, String)> {
     match v.reflect_ref() {
         ReflectRef::Struct(s) => (0..s.field_len())
@@ -419,7 +376,7 @@ fn reflect_field_rows(v: &dyn PartialReflect) -> Vec<(String, String)> {
 
 /// 属性区：快照渲染（头部/渲染语义/全局平移/组件清单）+ Transform
 /// 编辑（DragValue 读快照副本）。返回一次编辑（有拖改时），写路径归
-/// [`crate::scene::mechanism`] 的 Transform 编辑封装——本函数零 World 访问，纯渲染。
+/// [`crate::scene`] 的 Transform 编辑封装——本函数零 World 访问，纯渲染。
 fn show_details(
     ui: &mut egui::Ui,
     details: &SelectedDetails,
@@ -452,10 +409,8 @@ fn show_details(
     for (label, image) in &details.textures {
         ui.monospace(format!("贴图   {label}  {image:?}"));
     }
-    // Transform 编辑：读快照值进副本，任一量被拖改即整组回写（未动
-    // 的组发原值，覆盖等价于原地——旋转组例外，见下方缓存接管）。
-    // 平移/缩放分量相互独立，快照原值回写恒等价；旋转是"三元组表达一个
-    // 四元数"，三元必须同分支（见 TransformDragCache）。
+    // Transform 编辑：读快照值进副本，任一量被拖改即整组回写（未动的分量发原值，
+    // 等价于原地）；旋转三元组须同表示分支，由 TransformDragCache 接管
     let mut edit = None;
     if let Some(t) = details.local {
         // 缓存按实体挂靠：换选中即作废；无进行中拖拽则对齐快照（当前表示分支）
@@ -503,31 +458,30 @@ fn show_details(
     ui.strong(format!("组件 {}", details.component_rows.len()));
     egui::ScrollArea::vertical()
         .id_salt("组件清单")
-        .max_height(260.0)
+        .max_height(260.0) // points
         .show(ui, |ui| {
-        for row in &details.component_rows {
-            match &row.fields {
-                Some(fields) => {
-                    egui::CollapsingHeader::new(egui::RichText::new(&row.name).monospace())
-                        // id_salt 混实体号:同短名组件(如多个 Transform 行)
-                        // 的折叠状态不跨实体互串
-                        .id_salt(format!("{}/{}", entity.index(), row.name))
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            for (fname, fvalue) in fields {
-                                ui.horizontal(|ui| {
-                                    ui.monospace(fname.as_str());
-                                    ui.weak(fvalue.as_str());
-                                });
-                            }
-                        });
-                }
-                None => {
-                    ui.monospace(row.name.as_str());
+            for row in &details.component_rows {
+                match &row.fields {
+                    Some(fields) => {
+                        egui::CollapsingHeader::new(egui::RichText::new(&row.name).monospace())
+                            // id_salt 混实体号：同短名组件的折叠状态不跨实体互串
+                            .id_salt(format!("{}/{}", entity.index(), row.name))
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for (fname, fvalue) in fields {
+                                    ui.horizontal(|ui| {
+                                        ui.monospace(fname.as_str());
+                                        ui.weak(fvalue.as_str());
+                                    });
+                                }
+                            });
+                    }
+                    None => {
+                        ui.monospace(row.name.as_str());
+                    }
                 }
             }
-        }
-    });
+        });
     edit
 }
 
