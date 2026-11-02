@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use bevy::{pbr::StandardMaterial, prelude::*};
 
-use crate::scene::mechanism::ObjectOpError;
+use crate::scene::mechanism::{euler_deg_yxz, ObjectOpError};
 
 /// 测试体形状枚举。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]
@@ -48,7 +48,7 @@ struct MaterialKey {
 
 /// 延迟创建的测试资产缓存；首次需要时才创建并登记资源。
 #[derive(Resource, Default)]
-pub struct TestShapeAssets {
+struct TestShapeAssets {
     meshes: HashMap<TestShape, Handle<Mesh>>,
     materials: HashMap<MaterialKey, Handle<StandardMaterial>>,
 }
@@ -70,7 +70,7 @@ pub struct TestShapeReadback {
 /// 形状网格构造失败时返回错误。
 #[expect(
     clippy::too_many_arguments,
-    reason = "spawn 参数面即 BRP 请求字段的逐项镜像（形状/色/变换/命名/缓存旁路），收束会藏掉与协议面的逐项对账"
+    reason = "参数逐项对应 BRP 请求字段（形状/色/变换/命名/跳过缓存），便于与协议逐项对照"
 )]
 pub fn spawn_test_shape(
     world: &mut World,
@@ -85,26 +85,26 @@ pub fn spawn_test_shape(
     unique: bool,
 ) -> Result<TestShapeReadback, ObjectOpError> {
     // unique 为每个实体创建独立 mesh 资产；默认复用缓存 mesh。
+    // 坑：Assets<Mesh>/Assets<StandardMaterial> 须已初始化，否则 resource_mut 会 panic。
     let (mesh_handle, mesh_created) = if unique {
         (world.resource_mut::<Assets<Mesh>>().add(build_shape_mesh(shape)?), true)
     } else {
-    match world
-        .get_resource::<TestShapeAssets>()
-        .and_then(|a| a.meshes.get(&shape))
-        .cloned()
-    {
-        Some(handle) => (handle, false),
-        None => {
-            let mesh = build_shape_mesh(shape)?;
-            let handle = world.resource_mut::<Assets<Mesh>>().add(mesh);
-            // 调用方须先初始化 Assets<Mesh>，否则 resource_mut 会 panic。
-            world
-                .get_resource_or_insert_with(TestShapeAssets::default)
-                .meshes
-                .insert(shape, handle.clone());
-            (handle, true)
+        match world
+            .get_resource::<TestShapeAssets>()
+            .and_then(|a| a.meshes.get(&shape))
+            .cloned()
+        {
+            Some(handle) => (handle, false),
+            None => {
+                let mesh = build_shape_mesh(shape)?;
+                let handle = world.resource_mut::<Assets<Mesh>>().add(mesh);
+                world
+                    .get_resource_or_insert_with(TestShapeAssets::default)
+                    .meshes
+                    .insert(shape, handle.clone());
+                (handle, true)
+            }
         }
-    }
     };
     let key = MaterialKey {
         color: color.map(f32::to_bits),
@@ -139,13 +139,7 @@ pub fn spawn_test_shape(
         transform.translation = t;
     }
     if let Some(r) = rotation_euler_deg {
-        // 与 Transform 编辑共用 YXZ 顺序，输入为度数。
-        transform.rotation = Quat::from_euler(
-            EulerRot::YXZ,
-            r.x.to_radians(),
-            r.y.to_radians(),
-            r.z.to_radians(),
-        );
+        transform.rotation = euler_deg_yxz(r);
     }
     if let Some(s) = scale {
         transform.scale = s;

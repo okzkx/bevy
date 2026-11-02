@@ -11,7 +11,7 @@ use bevy::{
     input::{mouse::MouseButton, ButtonInput},
 };
 
-use super::camera_control::{DragSession, FULL_TURN_PER_HEIGHT};
+use super::camera_control::{active_window, DragSession, FULL_TURN_PER_HEIGHT};
 use super::pointer_capture::{PointerCapture, PointerCaptureSet};
 
 use ash_macros::system;
@@ -57,7 +57,7 @@ fn light_rotate(orbit: &mut SunOrbit, delta: Vec2, turn: f32, cam_right: Vec3, c
     let d = Quat::from_axis_angle(cam_up, delta.x * turn) * d;
     let d = Quat::from_axis_angle(cam_right, delta.y * turn) * d;
     *orbit = SunOrbit::from_dir(d);
-    orbit.elevation = orbit.elevation.clamp(MIN_SUN_ELEVATION, MAX_SUN_ELEVATION);
+    orbit.elevation = clamp_elevation(orbit.elevation);
 }
 
 /// 方向光沿实体 forward 照射，因此朝向设为太阳方向的反向。
@@ -87,45 +87,27 @@ fn light_control(
     mut engaged: Local<bool>,
 ) {
     // 主窗口缺席或最小化时，取消拖拽会话。
-    let Ok(window) = windows.single() else {
+    let Some(window) = active_window(&windows) else {
         *session = DragSession::default();
         return;
     };
-    if window.width() <= 0.0 || window.height() <= 0.0 {
-        *session = DragSession::default();
-        return;
-    }
     let cursor = window.cursor_position();
 
-    if mouse.just_pressed(MouseButton::Middle) && !capture.over_ui {
-        session.dragging = cursor.is_some();
-        session.last_cursor = cursor;
-    }
-    if mouse.just_released(MouseButton::Middle) {
-        session.dragging = false;
-        session.last_cursor = None;
-    }
+    session.track(&mouse, MouseButton::Middle, cursor, capture.over_ui);
 
     // 中键拖动按窗口高度归一；旋转轴使用上一帧传播的相机右轴和上轴。
-    if session.dragging
-        && mouse.pressed(MouseButton::Middle)
-        && let Some(pos) = cursor
-    {
-        if let Some(last) = session.last_cursor {
-            let delta = pos - last;
-            let turn = FULL_TURN_PER_HEIGHT / window.height();
-            let (cam_right, cam_up) = cams
-                .iter()
-                .next()
-                .map_or((Vec3::X, Vec3::Y), |tf| (*tf.right(), *tf.up()));
-            for (transform, orbit) in &mut lights {
-                let transform = transform.into_inner();
-                let orbit = orbit.into_inner();
-                light_rotate(orbit, delta, turn, cam_right, cam_up);
-                apply_sun_rotation(orbit, transform);
-            }
+    if let Some(delta) = session.drag_delta(mouse.pressed(MouseButton::Middle), cursor) {
+        let turn = FULL_TURN_PER_HEIGHT / window.height();
+        let (cam_right, cam_up) = cams
+            .iter()
+            .next()
+            .map_or((Vec3::X, Vec3::Y), |tf| (*tf.right(), *tf.up()));
+        for (transform, orbit) in &mut lights {
+            let transform = transform.into_inner();
+            let orbit = orbit.into_inner();
+            light_rotate(orbit, delta, turn, cam_right, cam_up);
+            apply_sun_rotation(orbit, transform);
         }
-        session.last_cursor = Some(pos);
     }
 
     if !*engaged

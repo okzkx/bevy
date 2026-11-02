@@ -19,23 +19,14 @@ impl Plugin for AshCameraGuardPlugin {
     }
 }
 
-/// 记录每个被移除的外来相机一次，避免重复告警。
-#[derive(Default)]
-pub struct EjectedCameras {
-    logged: Vec<Entity>,
-}
-
 #[system]
-pub(super) fn guard_unique_camera(
-    cameras: Query<(Entity, &Camera), Without<CameraOrbit>>,
-    mut ejected: Local<EjectedCameras>,
+fn guard_unique_camera(
+    cameras: Query<Entity, (With<Camera>, Without<CameraOrbit>)>,
     mut commands: Commands,
 ) {
-    for (entity, _) in &cameras {
+    // 外来相机当帧就删，同一实体不会再出现，日志无需去重
+    for entity in &cameras {
         commands.entity(entity).despawn();
-        if !ejected.logged.contains(&entity) {
-            ejected.logged.push(entity);
-            info!("相机卫兵：外来相机 {entity:?} 移除（宿主唯一相机语义，进场内容不接管取景）");
-        }
+        info!("相机卫兵：外来相机 {entity:?} 移除（宿主唯一相机语义，进场内容不接管取景）");
     }
 }

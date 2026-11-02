@@ -30,27 +30,32 @@ pub fn apply_transform_edit(
     entity: Entity,
     edit: TransformEdit,
 ) -> Result<(), TransformEditError> {
-    if world.get_entity(entity).is_err() {
-        return Err(TransformEditError::EntityMissing);
-    }
-    let Some(mut t) = world.get_mut::<Transform>(entity) else {
-        return Err(TransformEditError::TransformMissing);
-    };
+    world
+        .get_entity(entity)
+        .map_err(|_| TransformEditError::EntityMissing)?;
+    let mut t = world
+        .get_mut::<Transform>(entity)
+        .ok_or(TransformEditError::TransformMissing)?;
     if let Some(v) = edit.translation {
         t.translation = v;
     }
     if let Some(e) = edit.rotation_euler_deg {
-        t.rotation = Quat::from_euler(
-            EulerRot::YXZ,
-            e.x.to_radians(),
-            e.y.to_radians(),
-            e.z.to_radians(),
-        );
+        t.rotation = euler_deg_yxz(e);
     }
     if let Some(s) = edit.scale {
         t.scale = s;
     }
     Ok(())
+}
+
+/// 度数欧拉角 → 四元数（YXZ 顺序）；Transform 编辑与测试体生成共用同一口径。
+pub(crate) fn euler_deg_yxz(e: Vec3) -> Quat {
+    Quat::from_euler(
+        EulerRot::YXZ,
+        e.x.to_radians(),
+        e.y.to_radians(),
+        e.z.to_radians(),
+    )
 }
 
 /// 单条编辑失败时记录警告并丢弃该项，继续处理后续编辑。

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::{image::Image, pbr::StandardMaterial, prelude::*};
 
-/// 异步就绪计量（判定线证据口径，与 [`super::ledger::IncrementStats`] 分列）：
+/// 异步就绪计量（与 [`super::ledger::IncrementStats`] 分列）：
 /// pending/等待/到货/失败/取消分开报，不把"零上传"说成"零账面成本"。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ReadinessStats {
@@ -21,7 +21,7 @@ pub struct ReadinessStats {
     pub last_arrival_wait: u64,
     /// 到货累计（pending 身份成功转换上传、驻留登记的次数）。
     pub arrivals_total: u64,
-    /// 加载失败事件累计（[`AssetLoadFailedEvent`] 收到数，含无人等待的身份）。
+    /// 加载失败事件累计（[`AssetLoadFailedEvent`](bevy::asset::AssetLoadFailedEvent) 收到数，含无人等待的身份）。
     pub failures_total: u64,
     /// 本帧失败数（同 [`Self::failures_total`] 的帧窗口）。
     pub failures_frame: usize,
@@ -103,9 +103,8 @@ impl AssetReadiness {
         self.failed_materials.remove(&id);
     }
 
-    /// 失败记录出清（资产卸载联动）：身份随资产卸载出账——与 revive 的
-    /// 区别 = 不是"重试放行"而是账面出清（资产已不在容器，旧失败记录是僵尸
-    /// 账；同路径重载若再失败会重新进集，`Added` 事件 revive 双保险）。幂等。
+    /// 失败记录出清（资产卸载联动）：资产已不在容器，旧失败记录不再有意义；
+    /// 与 revive 的区别是账面出清而非重试放行。同路径重载若再失败会重新进集。幂等。
     pub fn clear_failure_mesh(&mut self, id: AssetId<Mesh>) {
         self.failed_meshes.remove(&id);
     }
@@ -177,29 +176,29 @@ impl AssetReadiness {
         marked_meshes: &HashSet<AssetId<Mesh>>,
         marked_images: &HashSet<AssetId<Image>>,
     ) {
-        self.pending_meshes.retain(|id, waited| {
-            if marked_meshes.contains(id) {
-                *waited += 1;
-                self.stats.wait_frames_total += 1;
-                true
-            } else {
-                self.stats.cancelled_total += 1;
-                false
-            }
-        });
-        self.pending_images.retain(|id, waited| {
-            if marked_images.contains(id) {
-                *waited += 1;
-                self.stats.wait_frames_total += 1;
-                true
-            } else {
-                self.stats.cancelled_total += 1;
-                false
-            }
-        });
+        age_pending(&mut self.pending_meshes, marked_meshes, &mut self.stats);
+        age_pending(&mut self.pending_images, marked_images, &mut self.stats);
         self.stats.pending_meshes = self.pending_meshes.len();
         self.stats.pending_images = self.pending_images.len();
     }
+}
+
+/// 仍被引用的 pending 身份等待 +1，失去引用的出账计取消。
+fn age_pending<A: Asset>(
+    pending: &mut HashMap<AssetId<A>, u64>,
+    marked: &HashSet<AssetId<A>>,
+    stats: &mut ReadinessStats,
+) {
+    pending.retain(|id, waited| {
+        if marked.contains(id) {
+            *waited += 1;
+            stats.wait_frames_total += 1;
+            true
+        } else {
+            stats.cancelled_total += 1;
+            false
+        }
+    });
 }
 
 /// 初始化就绪账；failed 侧事件由 [`super::asset_events::AshAssetEventPlugin`] 接线。

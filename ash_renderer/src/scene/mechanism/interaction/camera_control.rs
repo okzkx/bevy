@@ -19,7 +19,7 @@ use super::pointer_capture::{PointerCapture, PointerCaptureSet};
 use ash_macros::system;
 
 /// 拖满一个窗口高度转一周；位移使用 points 域，与 DPI 无关。相机和日光控制共用。
-pub(crate) const FULL_TURN_PER_HEIGHT: f32 = std::f32::consts::TAU;
+pub(super) const FULL_TURN_PER_HEIGHT: f32 = std::f32::consts::TAU;
 
 /// 每格滚轮的缩放系数：滚近 ×0.95、滚远 ×1/0.95，
 /// 指数缩放保证远近手感一致。
@@ -50,7 +50,7 @@ pub struct CameraOrbit {
 }
 
 impl CameraOrbit {
-/// 从现有相机位置和注视点反解轨道参数。
+    /// 从现有相机位置和注视点反解轨道参数。
     pub fn from_pose(position: Vec3, target: Vec3) -> Self {
         let offset = position - target;
         Self {
@@ -68,19 +68,61 @@ impl CameraOrbit {
         let (sin_pitch, cos_pitch) = ops::sin_cos(self.pitch);
         self.radius * Vec3::new(sin_yaw * cos_pitch, sin_pitch, cos_yaw * cos_pitch)
     }
+
+    /// 把轨道参数写回相机 Transform：位置 = target + offset，朝向对准 target。
+    fn write_transform(&self, transform: &mut Transform) {
+        transform.translation = self.target + self.offset();
+        transform.look_at(self.target, Vec3::Y);
+    }
 }
 
 /// 一次拖拽的跨帧会话：接管标志 + 上一帧指针位置（points 域）。
-/// 机制半边的拖拽控制（相机 / 日光）共用。
+/// 相机与日光的拖拽控制共用。
 #[derive(Default)]
-pub(crate) struct DragSession {
-    pub(crate) dragging: bool,
+pub(super) struct DragSession {
+    dragging: bool,
     /// None 表示没有记录的上一帧光标位置。
-    pub(crate) last_cursor: Option<Vec2>,
+    last_cursor: Option<Vec2>,
 }
 
-/// CLI 相机给值命令：逐项可选（None = 不动该量）。角度用度数（与
-/// [`TransformEdit`] 的欧拉口径一致），zoom
+impl DragSession {
+    /// 按下 `button`（且指针不在 UI 上）开始会话，松开结束。
+    pub(super) fn track(
+        &mut self,
+        mouse: &ButtonInput<MouseButton>,
+        button: MouseButton,
+        cursor: Option<Vec2>,
+        over_ui: bool,
+    ) {
+        if mouse.just_pressed(button) && !over_ui {
+            self.dragging = cursor.is_some();
+            self.last_cursor = cursor;
+        }
+        if mouse.just_released(button) {
+            *self = Self::default();
+        }
+    }
+
+    /// 拖拽中且键仍按住时记下本帧光标，并返回相对上一帧的位移（首帧无位移）。
+    pub(super) fn drag_delta(&mut self, held: bool, cursor: Option<Vec2>) -> Option<Vec2> {
+        let pos = cursor.filter(|_| self.dragging && held)?;
+        self.last_cursor.replace(pos).map(|last| pos - last)
+    }
+}
+
+/// 可交互的主窗口：缺席或最小化（宽/高 ≤ 0）时为 None。
+pub(super) fn active_window<'w>(
+    windows: &'w Query<&Window, With<PrimaryWindow>>,
+) -> Option<&'w Window> {
+    let window = windows.single().ok()?;
+    if window.width() <= 0.0 || window.height() <= 0.0 {
+        return None;
+    }
+    Some(window)
+}
+
+/// BRP 相机给值命令：逐项可选（None = 不动该量）。角度用度数（与
+/// `TransformEdit` 的欧拉口径一致），zoom
 /// 与滚轮的指数缩放同语义（<1 推近、>1 拉远）。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CameraOrbitCommand {
@@ -116,7 +158,7 @@ pub fn apply_camera_command(
     let mut query = world.query::<(&mut Transform, &mut CameraOrbit, &Camera)>();
     match query.single_mut(world) {
         Ok((mut transform, mut orbit, _)) => {
-            apply_orbit_command(&mut transform, &mut orbit, &cmd)
+            Ok(apply_orbit_command(&mut transform, &mut orbit, &cmd))
         }
         Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
             Err(CameraCommandError::AmbiguousCamera)
@@ -130,7 +172,7 @@ fn apply_orbit_command(
     transform: &mut Transform,
     orbit: &mut CameraOrbit,
     cmd: &CameraOrbitCommand,
-) -> Result<CameraOrbit, CameraCommandError> {
+) -> CameraOrbit {
     if let Some(target) = cmd.target {
         orbit.target = target;
     }
@@ -146,9 +188,8 @@ fn apply_orbit_command(
     if let Some(zoom) = cmd.zoom {
         orbit.radius = (orbit.radius * zoom).clamp(MIN_ORBIT_RADIUS, MAX_ORBIT_RADIUS);
     }
-    transform.translation = orbit.target + orbit.offset();
-    transform.look_at(orbit.target, Vec3::Y);
-    Ok(*orbit)
+    orbit.write_transform(transform);
+    *orbit
 }
 
 /// 右键环视的一帧增量：相机位置钉住不动，yaw/pitch 随拖拽换算（方向与左键
@@ -200,7 +241,7 @@ impl Plugin for AshCameraControlPlugin {
 /// Update 中处理轨道、环视、滚轮缩放和漫游输入，并将相机朝向对准环绕中心。
 #[expect(
     clippy::too_many_arguments,
-    reason = "bevy 系统的参数表即依赖注入清单：窗口/鼠标/键盘/滚轮/换算率/时间/UI 仲裁/相机组/双拖拽会话/首接管收账，逐项声明是框架惯例"
+    reason = "bevy 系统的参数表即依赖注入清单：窗口/鼠标/键盘/滚轮/换算率/时间/UI 仲裁/相机组/双拖拽会话/首次接管日志，逐项声明是框架惯例"
 )]
 #[system]
 fn camera_control(
@@ -217,34 +258,16 @@ fn camera_control(
     mut engaged: Local<bool>,
 ) {
     // 主窗口缺席或最小化时，取消左键拖拽会话。
-    let Ok(window) = windows.single() else {
+    let Some(window) = active_window(&windows) else {
         *session = DragSession::default();
         return;
     };
-    if window.width() <= 0.0 || window.height() <= 0.0 {
-        *session = DragSession::default();
-        return;
-    }
     let cursor = window.cursor_position();
     // UI 仲裁由 overlay 在本帧发布。
     let ui_wants = capture.over_ui;
 
-    if mouse.just_pressed(MouseButton::Left) && !ui_wants {
-        session.dragging = cursor.is_some();
-        session.last_cursor = cursor;
-    }
-    if mouse.just_released(MouseButton::Left) {
-        session.dragging = false;
-        session.last_cursor = None;
-    }
-    if mouse.just_pressed(MouseButton::Right) && !ui_wants {
-        look.dragging = cursor.is_some();
-        look.last_cursor = cursor;
-    }
-    if mouse.just_released(MouseButton::Right) {
-        look.dragging = false;
-        look.last_cursor = None;
-    }
+    session.track(&mouse, MouseButton::Left, cursor, ui_wants);
+    look.track(&mouse, MouseButton::Right, cursor, ui_wants);
 
     let mut dirty = false;
     // 指针位于 UI 上时，滚轮输入留给调试窗口。
@@ -256,40 +279,23 @@ fn camera_control(
             dirty = true;
         }
     }
-    // 左键拖动屏幕位移转换为方位角和仰角变化。
-    if session.dragging
-        && mouse.pressed(MouseButton::Left)
-        && let Some(pos) = cursor
+    let turn = FULL_TURN_PER_HEIGHT / window.height();
+    // 左键拖动屏幕位移转换为方位角和仰角变化；指针在 UI 上时只跟踪光标不转动。
+    if let Some(delta) = session.drag_delta(mouse.pressed(MouseButton::Left), cursor)
+        && !ui_wants
     {
-        if ui_wants {
-            session.last_cursor = Some(pos);
-        } else {
-            if let Some(last) = session.last_cursor {
-                let delta = pos - last;
-                let turn = FULL_TURN_PER_HEIGHT / window.height();
-                for (_, mut orbit) in &mut cameras {
-                    orbit.yaw -= delta.x * turn;
-                    orbit.pitch = (orbit.pitch + delta.y * turn).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-                }
-                dirty |= delta != Vec2::ZERO;
-            }
-            session.last_cursor = Some(pos);
+        for (_, mut orbit) in &mut cameras {
+            orbit.yaw -= delta.x * turn;
+            orbit.pitch = (orbit.pitch + delta.y * turn).clamp(-PITCH_LIMIT, PITCH_LIMIT);
         }
+        dirty |= delta != Vec2::ZERO;
     }
     // 右键拖动旋转视线并移动环绕中心；此路径不检查 UI 悬停状态。
-    if look.dragging
-        && mouse.pressed(MouseButton::Right)
-        && let Some(pos) = cursor
-    {
-        if let Some(last) = look.last_cursor {
-            let delta = pos - last;
-            let turn = FULL_TURN_PER_HEIGHT / window.height();
-            for (_, mut orbit) in &mut cameras {
-                look_rotate(&mut orbit, delta, turn);
-            }
-            dirty |= delta != Vec2::ZERO;
+    if let Some(delta) = look.drag_delta(mouse.pressed(MouseButton::Right), cursor) {
+        for (_, mut orbit) in &mut cameras {
+            look_rotate(&mut orbit, delta, turn);
         }
-        look.last_cursor = Some(pos);
+        dirty |= delta != Vec2::ZERO;
     }
     // WASDQE 漫游：WASD 沿视线系、Q/E 世界升降，速度随 radius 自适应；
     // egui 文本编辑中让键（面板输入不被相机劫持）。
@@ -309,8 +315,7 @@ fn camera_control(
         return;
     }
     for (mut transform, orbit) in &mut cameras {
-        transform.translation = orbit.target + orbit.offset();
-        transform.look_at(orbit.target, Vec3::Y);
+        orbit.write_transform(&mut transform);
     }
     if !*engaged
         && let Ok((_, orbit)) = cameras.single()

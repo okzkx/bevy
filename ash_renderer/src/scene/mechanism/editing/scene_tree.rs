@@ -53,8 +53,17 @@ impl SceneTreeIndex {
         for (entity, name, children, has_parent, cam, light, mesh, mat, root, local, global) in rows
         {
             total += 1;
-            if is_relevant(name, children, has_parent, cam, light, mesh, mat, root, local, global)
-            {
+            let relevant = name.is_some()
+                || children.is_some()
+                || has_parent
+                || cam
+                || light
+                || mesh.is_some()
+                || mat.is_some()
+                || root
+                || local.is_some()
+                || global.is_some();
+            if relevant {
                 nodes.insert(
                     entity,
                     SceneTreeNode {
@@ -81,34 +90,6 @@ impl SceneTreeIndex {
         roots.sort_by_key(|e| e.index());
         Self { nodes, roots, total }
     }
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "过滤参数与查询字段一一对应，保留参数表便于核对筛选条件"
-)]
-fn is_relevant(
-    name: Option<&Name>,
-    children: Option<&Children>,
-    has_parent: bool,
-    cam: bool,
-    light: bool,
-    mesh: Option<&Mesh3d>,
-    mat: Option<&MeshMaterial3d<StandardMaterial>>,
-    root: bool,
-    local: Option<&Transform>,
-    global: Option<&GlobalTransform>,
-) -> bool {
-    name.is_some()
-        || children.is_some()
-        || has_parent
-        || cam
-        || light
-        || mesh.is_some()
-        || mat.is_some()
-        || root
-        || local.is_some()
-        || global.is_some()
 }
 
 /// 优先使用 Name；否则按实体角色命名，并显示实体号和组件标签。
