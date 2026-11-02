@@ -312,19 +312,9 @@ pub(crate) fn draw_frame(
     watch.acquire_done();
 
     // —— 组装 DrawList（增量）：实例槽缺/mesh 未驻留/材质缺席的行暂缓，就绪后自愈。
-    let sources = DrawabilitySources {
-        pool: &scene.pool,
-        std_materials: &scene.std_materials,
-        lod_groups: &scene.lod_groups,
-        floor_anchor: scene.residency_settings.floor_anchor,
-    };
-    drawlist::assemble_update(&mut scene.ledger, sources);
+    let sources = DrawabilitySources::new(&scene.pool, &scene.std_materials, &scene.lod_groups, scene.residency_settings.floor_anchor);
+    drawlist::assemble_update(&mut scene.ledger, sources, &mut scene.verify);
     watch.assemble_done();
-    // 对照模式（BRP 开关）：全量走访与增量缓存逐字段比对，只进计量，不驱动绘制
-    if scene.verify.enabled {
-        let pending = scene.ledger.assembly_pending();
-        drawlist::verify_assembly(&scene.ledger, sources, pending, &mut scene.verify);
-    }
     // 奇偶脏集先于视图取走，此后 assembly 视图对账本共享借用
     let dirty = ParityDirty::take(&mut scene.ledger, slot);
     let ledger: &InstanceLedger = &scene.ledger;
@@ -376,8 +366,7 @@ pub(crate) fn draw_frame(
         &dirty,
         &assembly,
         slot,
-    )
-    .or_fatal("模型/材质/在场/LOD 环写失败，渲染链无法继续")?;
+    )?;
     watch.rings_done();
 
     // —— compute 段：各半边按开关决定 dispatch 或 host 填充（A/B 对照），诊断读数在
@@ -442,15 +431,14 @@ pub(crate) fn draw_frame(
                 slot,
                 extent,
                 paint_log,
-            )
-            .or_fatal("overlay 绘制半边失败，渲染链无法继续")?;
+            )?;
             paint.map(|p| (p, ui_buffers))
         }
         None => None,
     };
 
     // —— 录制 + 提交。上传票据在 GPU 侧等待（ALL_COMMANDS），CPU 不阻塞。
-    // 坑：image_available 已被置位、image 已到手，从这里起任何失败都只能 or_fatal 退出，
+    // 坑：image_available 已被置位、image 已到手，从这里起任何失败都只能致命退出，
     // 不能 warn 后继续（理由见模块文档）。
     let image = core.swapchain.images[index as usize];
     let target_view = core.swapchain.views[index as usize];
@@ -511,8 +499,7 @@ pub(crate) fn draw_frame(
             target_view,
             extent,
             &frame_draw,
-        )
-        .or_fatal("录制/提交失败，渲染链无法继续")?;
+        )?;
     watch.record_done();
 
     // —— present：等待的信号量按 acquire 的 image index 取（不按帧槽轮转）。

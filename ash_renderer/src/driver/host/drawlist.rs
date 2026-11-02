@@ -20,6 +20,7 @@ use std::collections::BTreeSet;
 
 use crate::common::bytes::put_u32s;
 use crate::common::error::VulkanError;
+use crate::common::syntax::ResultTierExt;
 use crate::scene::{
     anchor_level, AssemblyView, DrawListVerify, InstanceLedger, InstanceRow, LodGroups,
 };
@@ -40,6 +41,17 @@ pub(crate) struct DrawabilitySources<'a> {
 }
 
 impl<'a> DrawabilitySources<'a> {
+    /// 可绘锚解析来源（组装、对照与环写共用；传字段引用——收整个 scene 会钉死
+    /// 后续对 ledger 的可变借用）。
+    pub(crate) fn new(
+        pool: &'a MeshPool,
+        std_materials: &'a Assets<StandardMaterial>,
+        lod_groups: &'a LodGroups,
+        floor_anchor: bool,
+    ) -> Self {
+        Self { pool, std_materials, lod_groups, floor_anchor }
+    }
+
     /// 可绘判定闭包：实例槽缺 / 锚未驻留 / 材质容器缺席 = None（暂缓）；
     /// 可绘 = (槽号, 材质身份, alpha<1)。
     pub(crate) fn eval(
@@ -65,12 +77,22 @@ impl<'a> DrawabilitySources<'a> {
 
 /// 组装 DrawList（增量）：触发账本组装缓存重估，产物经 `ledger.assembly_view()`
 /// 供帧循环只读。行集不变帧零走访，变更帧成本 O(重估行)。
-pub(crate) fn assemble_update(ledger: &mut InstanceLedger, sources: DrawabilitySources) {
+/// 尾随跑对照模式（BRP 开关，[`DrawListVerify`]）：开启时全量走访与增量结果
+/// 逐字段比对，只进计量；比对成本计入本段 assemble 计时（仅开启时存在）。
+pub(crate) fn assemble_update(
+    ledger: &mut InstanceLedger,
+    sources: DrawabilitySources,
+    verify: &mut DrawListVerify,
+) {
     ledger.assembly_update(
         &mut sources.eval(),
         sources.floor_anchor,
         sources.lod_groups.generation(),
     );
+    if verify.enabled {
+        let pending = ledger.assembly_pending();
+        verify_assembly(ledger, sources, pending, verify);
+    }
 }
 
 /// 全量参照走访：与增量缓存同判定的 O(账本行) 枚举，只进比对不进绘制。
@@ -101,7 +123,7 @@ fn assemble_reference(
 
 /// 对照模式逐帧比对：全量参照 vs 增量缓存（槽号列表、暂缓数、材质集、alpha<1 计数），
 /// 不一致只记进账面，不中断渲染。
-pub(crate) fn verify_assembly(
+fn verify_assembly(
     ledger: &InstanceLedger,
     sources: DrawabilitySources,
     pending_rows: usize,
@@ -290,11 +312,21 @@ fn write_lod_table_ring(
 }
 
 /// 帧槽环写入入口（draw_frame 在 wait_for_slot 之后调用）：模型增量 + 材质全量 +
-/// 在场全量 + LOD 表增量，都落在本帧槽的环上。
-///
-/// # Errors
-/// 环 buffer 写失败（host-visible 缺席/越界，内部契约矛盾）。
+/// 在场全量 + LOD 表增量，都落在本帧槽的环上。任一环失败 = 渲染链无法继续，按致命冒泡。
 pub(crate) fn write_rings(
+    tables: &mut InstanceTables,
+    ledger: &InstanceLedger,
+    sources: DrawabilitySources,
+    image_cache: &ImageCache,
+    dirty: &ParityDirty,
+    assembly: &AssemblyView<'_>,
+    frame: usize,
+) -> Result<(), BevyError> {
+    write_all_rings(tables, ledger, sources, image_cache, dirty, assembly, frame)
+        .or_fatal("模型/材质/在场/LOD 环写失败，渲染链无法继续")
+}
+
+fn write_all_rings(
     tables: &mut InstanceTables,
     ledger: &InstanceLedger,
     sources: DrawabilitySources,
