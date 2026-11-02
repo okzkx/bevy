@@ -40,8 +40,8 @@
 
 1. `core/device/memory/` 按 `role` → `contract` → `buffer` 读：`role.rs` 的 `BufferRole::spec` 是 8 种角色"usage + 必需属性 + 优先属性"的唯一一份表；`contract.rs` 的 `MemoryContract` 一次冻结设备内存事实，`find_type` 按规格选内存类型；`buffer.rs` 的 `GpuBuffer` 是全库 buffer 的唯一形态（恰量分配、持久映射、非 coherent 时自动 flush/invalidate）。本站所有表和池都只引用它们，不另立规则。
 2. `core/device/transfer.rs`：`UploadBatch` 合批、`Ticket`（单调递增的 u64 票据）、staging 两槽轮转（复用前等本槽上一张票据）。`Release`/`ImageRelease` 是队列族所有权让渡屏障，不是 staging 回收；生产路径按 CONCURRENT 共享，这两个列表恒空。
-3. `resident/pool.rs` + `mesh_convert.rs`：`MeshPool` 的 bump 分配、`MeshSlot`/`PoolRange`、维护账与回收账（`MaintenanceLedger`、`RecycleLedger`）；`mesh_convert` 把 Bevy `Mesh` 转成池内顶点格式。
-4. `resident/images.rs`：`ImageCache` 按资产身份驻留贴图，每张图一块 dedicated memory；`SamplerKey` 去重采样器。
+3. `resident/assets/pool.rs` + `mesh_convert.rs`：`MeshPool` 的 bump 分配、`MeshSlot`/`PoolRange`、维护账与回收账（`MaintenanceLedger`、`RecycleLedger`）；`mesh_convert` 把 Bevy `Mesh` 转成池内顶点格式。
+4. `resident/assets/images.rs`：`ImageCache` 按资产身份驻留贴图，每张图一块 dedicated memory；`resident/sampler.rs` 的 `SamplerKey` 去重采样器。
 
 校验要点：staging 释放挂在哪张票据上、谁保证 GPU 拷完才回收（对照第 3 站 fence 模型）；uploader 图像段的布局转换和 buffer 拷贝为什么分开录（对照第 4 站，uploader 是直接调 `cmd_pipeline_barrier` 的几处之一）；必需属性不满足时是报错冒泡，不是静默降级。
 
@@ -49,9 +49,9 @@
 
 1. `core/binding/set_layout.rs`：`SetLayoutDesc` 静态声明（binding 编号/种类/数量/阶段/旗标），`create` 先跑宿主自检再建原生布局；`merged_pool_sizes` 从声明推导 descriptor pool 容量；`DescSet` 是带声明身份的集。
 2. `core/binding/descriptor_writer.rs`：每次写入按声明校验种类与元素界，`submit` 前查完备性——非 `PARTIALLY_BOUND` 的 binding 必须写满。
-3. `resident/bindless_texture_table.rs`：`BINDLESS_TEXTURE_SET_DESC`（set0，UPDATE_AFTER_BIND + PARTIALLY_BOUND 的贴图/采样器表）、`BindlessTextureTable`（采样器按参数去重并计引用）、`SlotBinding`；`resident/slot_allocator.rs`：三张表共用的槽位分配器（立即归还 / 延迟回收两种）；`resident/frame_uniform_table.rs`：`FRAME_UNIFORM_SET_DESC`（set1，每帧槽一份 UBO）、`FrameUniformTable`、`FrameUniformsData`。
-4. `resident/instance_table.rs`：`INSTANCE_SET_DESC`（set2）与 `InstanceTables`；模块文档里的 hazard 纪律是第 9 站环写入的依据。
-5. `resident/light_table.rs`：`LightTable`、`LightRecord`；为什么有两份见第 1 站笔记。
+3. `resident/tables/bindless_texture_table.rs`：`BINDLESS_TEXTURE_SET_DESC`（set0，UPDATE_AFTER_BIND + PARTIALLY_BOUND 的贴图/采样器表）、`BindlessTextureTable`（采样器按参数去重并计引用）、`SlotBinding`；`resident/slot_allocator.rs`：三张表共用的槽位分配器（立即归还 / 延迟回收两种）；`resident/tables/frame_uniform_table.rs`：`FRAME_UNIFORM_SET_DESC`（set1，每帧槽一份 UBO）、`FrameUniformTable`、`FrameUniformsData`。
+4. `resident/tables/instance_table.rs`：`INSTANCE_SET_DESC`（set2）与 `InstanceTables`；模块文档里的 hazard 纪律是第 9 站环写入的依据。
+5. `resident/tables/light_table.rs`：`LightTable`、`LightRecord`；为什么有两份见第 1 站笔记。
 
 校验要点：bindless 槽位"按槽发布、从不写满"如何同时满足 `PARTIALLY_BOUND` 与写入器的完备性检查；UAB 只开在 sampled image / sampler 上的理由（对照第 2 站启用的特性）；set1 的帧槽 UBO 何时可写（第 3 站 `wait_for_slot` 之后）。可用 BRP 只读方法 `ash_renderer/layout_contract` 现场查看声明表。
 

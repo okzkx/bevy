@@ -295,7 +295,7 @@ impl BloomTargets {
         self.set_layout_tex = BLOOM_TEX_SET_DESC.create(device)?;
         self.set_layout_up = BLOOM_UP_SET_DESC.create(device)?;
         // 自有线性采样器：随本资源 Drop 销毁，不占 bindless 表的采样器槽
-        self.sampler = crate::render::resident::images::sampler_key(
+        self.sampler = crate::render::resident::sampler::sampler_key(
             &bevy::image::ImageSamplerDescriptor::linear(),
         )
         .create_sampler(device)?;

@@ -30,9 +30,9 @@ use crate::render::passes::visibility::hiz::{HIZ_DOWNSAMPLE_PIPELINE, HIZ_OCCLUS
 use crate::render::passes::visibility::indirect::BUILD_INDIRECT_PIPELINE;
 use crate::render::passes::visibility::lod::LOD_SELECT_PIPELINE;
 use crate::render::passes::visibility::occlusion::OCCLUSION_PIPELINE;
-use crate::render::resident::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
-use crate::render::resident::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
-use crate::render::resident::instance_table::INSTANCE_SET_DESC;
+use crate::render::resident::tables::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
+use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
+use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 
 /// 宿主建的全部管线。
 pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[

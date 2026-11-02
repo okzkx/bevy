@@ -21,8 +21,10 @@ use ash::{vk, Device, Instance};
 use bevy::image::ImageSamplerDescriptor;
 use bevy::log::info;
 
-use super::images::{sampler_key, GpuImage, ImageSpec, SamplerKey};
-use super::slot_allocator::SlotAllocator;
+use crate::render::resident::assets::image_spec::ImageSpec;
+use crate::render::resident::assets::images::GpuImage;
+use crate::render::resident::sampler::{sampler_key, SamplerKey};
+use crate::render::resident::slot_allocator::SlotAllocator;
 use crate::render::core::device::transfer::{StagingImageCopy, UploadBatch, Uploader};
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;

@@ -24,7 +24,7 @@ use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
-use crate::render::resident::instance_table::{INDIRECT_COMMAND_SIZE, INSTANCE_SET_DESC, MARK_SIZE, OBJECT_TABLE_CAPACITY};
+use crate::render::resident::tables::instance_table::{INDIRECT_COMMAND_SIZE, INSTANCE_SET_DESC, MARK_SIZE, OBJECT_TABLE_CAPACITY};
 
 pub const SHADOW_BINDING_UNIFORM: u32 = 0;
 const SHADOW_BINDING_MAP0: u32 = 1;

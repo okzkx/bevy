@@ -26,7 +26,7 @@ use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
-use crate::render::resident::instance_table::INSTANCE_SET_DESC;
+use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 use crate::render::MAX_LOD_LEVELS;
 
