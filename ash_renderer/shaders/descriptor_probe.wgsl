@@ -1,4 +1,4 @@
-// 描述符链路探针着色器（examples/descriptor_probe.rs）：形状 = 主管线冻结的 set/binding 表。
+// 描述符链路探针着色器（examples/descriptor_probe.rs）：set0/set1 形状与主管线一致。
 //
 // - set0 b0/b1：纹理数组 + sampler 数组（WGSL texture/sampler 分离），本版不带
 //   长度 = runtime array（SPIR-V OpTypeRuntimeArray；build.rs 补丁器补

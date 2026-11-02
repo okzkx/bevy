@@ -1,6 +1,6 @@
-//! 3.2 上传链探针:转换 → 合批上传 → 驻留去重 → 维护扩容 → 跨族依赖,五层全链证据。
+//! 上传链探针:转换 → 合批上传 → 驻留去重 → 维护扩容 → 跨族依赖,五层全链证据。
 //!
-//! 与 memory_probe 同纪律:各组是"观察 + 诊断",验证层 + 同步验证常开,VUID 收账:
+//! 各组是"观察 + 诊断",验证层 + 同步验证常开,VUID 收账:
 //! - 组 A(转换观察组,纯 CPU):交错 32B 布局逐字节验证(pos@0/normal@12/uv@24、
 //!   小端、stride);U16 索引统一加宽 U32;三种拒绝(拓扑/空/缺 POSITION)按定案
 //!   策略各验一遍。
@@ -10,20 +10,18 @@
 //!   零新提交(票据不增,判定线"重复快照不重复上传")。
 //! - 组 C(维护扩容观察组):小容量池(首个批次触发 1MiB 初建)先收小资产,再收
 //!   1.2MiB 资产触发显式维护——等在飞票据 → 整段迁移 → 等迁移票据 → 等图形
-//!   最后使用(4.1.1)→ 销毁旧池,停顿入账;迁移后新旧两资产内容逐字节复核
+//!   最后使用 → 销毁旧池,停顿入账;迁移后新旧两资产内容逐字节复核
 //!   (迁移没搬坏数据);wait_draws 钩子断言=迁移恰等一次、初建不触发。
-//! - 组 D(跨族依赖观察组,3.4 接线预演):transfer 提交批末 release(仅当本机有
-//!   专用 transfer 族),graphics 提交侧等 timeline 票据(GPU 侧等待,CPU 不阻塞)
-//!   + acquire + 真实读(pool→readback)+ fence;宿主比对。EXCLUSIVE 成对
-//!     release/acquire 在同步验证下全链跑通;同族回退机(无专用 transfer 族)无
-//!     ownership 转移,形状由 memory_probe 同族闭环覆盖,本组注明跳过。
+//! - 组 D(跨族依赖观察组):transfer 提交批末 release(仅当本机有专用 transfer
+//!   族),graphics 提交侧等 timeline 票据(GPU 侧等待,CPU 不阻塞)+ acquire +
+//!   真实读(pool→readback)+ fence;宿主比对。同族回退机(无专用 transfer 族)
+//!   无 ownership 转移,形状由 memory_probe 同族闭环覆盖,本组注明跳过。
 //!
-//! 自含 Entry → Instance → PhysicalDevice → Device 最小链(不碰窗口);与主工程
-//! 差异:无 surface/swapchain;timelineSemaphore 显式启用(上传票据真实使用,
-//! 支持与启用分开——1.3 支持 mandatory,启用仍须声明)。接口定案:旧 SubmitInfo
-//! + TimelineSemaphoreSubmitInfo + 旧 pipeline barrier(不启用 synchronization2,
-//!   不混用 submit2/barrier2)。销毁纪律:各组先等票到 + 宿主读完,再拆——无在途
-//!   引用可证明。
+//! 自含 Entry → Instance → PhysicalDevice → Device 最小链(不碰窗口);
+//! timelineSemaphore 显式启用(1.3 支持 mandatory,启用仍须声明)。用旧
+//! SubmitInfo + TimelineSemaphoreSubmitInfo + 旧 pipeline barrier(不启用
+//! synchronization2,不混用 submit2/barrier2)。各组先等票到 + 宿主读完再拆,
+//! 无在途引用可证明。
 
 use std::sync::Mutex;
 
@@ -62,27 +60,96 @@ fn main() {
     println!(
         "验证层 {VALIDATION_LAYER:?}: {}",
         if validation_installed {
-            "已安装,本探针请求启用 + 同步验证(VUID 收账见结尾)"
+            "已安装,本探针请求启用 + 同步验证(VUID 汇总见结尾)"
         } else {
             "未安装(本机缺 Vulkan SDK),本轮裸奔——结果不构成验证证据"
         }
     );
 
+    let instance = make_instance(&entry, validation_installed);
+    let messenger = validation_installed.then(|| make_messenger(&entry, &instance));
+
+    let pd = pick_physical_device(&instance);
+
+    group_a_conversion();
+
+    let (device, gfx_family, gfx_queue, transfer_family, transfer_queue) =
+        create_device(&instance, pd);
+    let contract = unsafe { MemoryContract::new(&instance, pd) };
+    let ctx = ProbeCtx {
+        device: &device,
+        contract: &contract,
+        gfx_family,
+        gfx_queue,
+        transfer_family,
+        transfer_queue,
+    };
+    let cross_family = transfer_family != gfx_family;
+    println!(
+        "上传链参数:graphics 族 {gfx_family},transfer 族 {transfer_family}({})",
+        if cross_family {
+            "专用 transfer 族,跨族分支可实测"
+        } else {
+            "同族回退(无专用 transfer 族),跨族组按回退情况注明"
+        }
+    );
+
+    group_b_upload_closure(&ctx);
+    group_c_maintenance(&ctx);
+    if cross_family {
+        group_d_cross_family(&ctx);
+    } else {
+        println!("\n== 组 D(跨族依赖观察):本机无专用 transfer 族,EXCLUSIVE release/acquire 路径无硬件载体——");
+        println!(
+            "   回退路径未实测(诚实注明);同族形状(等票据 + TRANSFER→消费屏障,无 ownership 转移)"
+        );
+        println!("   已由 memory_probe 组 A 同族闭环在验证层下零 VUID 覆盖。");
+    }
+
+    unsafe { device.destroy_device(None) };
+
+    // 坑:messenger 须先于 instance 销毁(ash 无自动 Drop),漏了报 VUID-00629
+    if let Some((loader, handle)) = messenger {
+        unsafe { loader.destroy_debug_utils_messenger(handle, None) };
+    }
+    unsafe { instance.destroy_instance(None) };
+
+    println!("\n== 验证层消息汇总(全程)==");
+    let vu = VU_LOG
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !validation_installed {
+        println!("  [SKIP] validation layer 未安装：上传功能性观察完成，但无 Vulkan 验证层证据");
+    } else if vu.is_empty() {
+        println!("  (零条——上传全链在验证层 + 同步验证下清净)");
+    } else {
+        for m in vu.iter() {
+            println!("  {m}");
+        }
+        panic!("正向上传路径收到验证层消息 {} 条", vu.len());
+    }
+    println!("\n结论:组 A=转换逐字节;组 B=上传闭环 + 票据 + 去重;组 C=维护迁移内容保持;");
+    println!(
+        "组 D=跨族 release/acquire 全链(本机具备专用 transfer 族时)。"
+    );
+}
+
+fn make_instance(entry: &Entry, validation: bool) -> ash::Instance {
     let app_info = vk::ApplicationInfo::default()
         .application_name(c"upload_probe")
         .api_version(vk::API_VERSION_1_3);
-    let ext_names: Vec<*const std::ffi::c_char> = if validation_installed {
+    let ext_names: Vec<*const std::ffi::c_char> = if validation {
         vec![debug_utils::NAME.as_ptr()]
     } else {
         Vec::new()
     };
-    let layer_names: Vec<*const std::ffi::c_char> = if validation_installed {
+    let layer_names: Vec<*const std::ffi::c_char> = if validation {
         vec![VALIDATION_LAYER.as_ptr()]
     } else {
         Vec::new()
     };
-    // 同步验证随主工程同款(VkValidationFeaturesEXT);enables 须活到 create_instance 返回
-    let sync_enables = if validation_installed {
+    // 同步验证(VkValidationFeaturesEXT);enables 须活到 create_instance 返回(pNext 存指针)
+    let sync_enables = if validation {
         Some([vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION])
     } else {
         None
@@ -96,27 +163,32 @@ fn main() {
         sync_validation = sync_validation.enabled_validation_features(enables);
         instance_info = instance_info.push_next(&mut sync_validation);
     }
-    let instance =
-        unsafe { entry.create_instance(&instance_info, None) }.expect("vkCreateInstance");
+    unsafe { entry.create_instance(&instance_info, None) }.expect("vkCreateInstance")
+}
 
-    let _debug = validation_installed.then(|| {
-        let loader = debug_utils::Instance::new(&entry, &instance);
-        let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
-            .message_severity(
-                vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                    | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
-            )
-            .message_type(
-                vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
-            )
-            .pfn_user_callback(Some(probe_callback));
-        unsafe { loader.create_debug_utils_messenger(&messenger_info, None) }
-            .expect("创建验证 messenger")
-    });
+fn make_messenger(
+    entry: &Entry,
+    instance: &ash::Instance,
+) -> (debug_utils::Instance, vk::DebugUtilsMessengerEXT) {
+    let loader = debug_utils::Instance::new(entry, instance);
+    let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+        .message_severity(
+            vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+        )
+        .message_type(
+            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+        )
+        .pfn_user_callback(Some(probe_callback));
+    let handle = unsafe { loader.create_debug_utils_messenger(&messenger_info, None) }
+        .expect("创建验证 messenger");
+    (loader, handle)
+}
 
-    // 与主工程同门槛:只选报 1.3 的设备
+/// 选第一台报 1.3 的设备并打印其版本。
+fn pick_physical_device(instance: &ash::Instance) -> vk::PhysicalDevice {
     let pds = unsafe { instance.enumerate_physical_devices() }.expect("枚举物理设备");
     let pd = *pds
         .iter()
@@ -132,70 +204,7 @@ fn main() {
         vk::api_version_minor(props.api_version),
         vk::api_version_patch(props.api_version),
     );
-
-    group_a_conversion();
-
-    let (device, gfx_family, gfx_queue, transfer_family, transfer_queue) =
-        create_device(&instance, pd);
-    let contract = unsafe { MemoryContract::new(&instance, pd) };
-    let cross_family = transfer_family != gfx_family;
-    println!(
-        "上传链参数:graphics 族 {gfx_family},transfer 族 {transfer_family}({})",
-        if cross_family {
-            "专用 transfer 族,跨族分支可实测"
-        } else {
-            "同族回退(无专用 transfer 族),跨族组按回退口径注明"
-        }
-    );
-
-    group_b_upload_closure(&device, &contract, transfer_family, transfer_queue, gfx_family, gfx_queue);
-    group_c_maintenance(&device, &contract, transfer_family, transfer_queue, gfx_family, gfx_queue);
-    if cross_family {
-        group_d_cross_family(
-            &device,
-            &contract,
-            gfx_family,
-            gfx_queue,
-            transfer_family,
-            transfer_queue,
-        );
-    } else {
-        println!("\n== 组 D(跨族依赖观察):本机无专用 transfer 族,EXCLUSIVE release/acquire 路径无硬件载体——");
-        println!(
-            "   回退路径未实测(诚实注明);同族形状(等票据 + TRANSFER→消费屏障,无 ownership 转移)"
-        );
-        println!("   已由 memory_probe 组 A 同族闭环在验证层下零 VUID 覆盖。");
-    }
-
-    unsafe { device.destroy_device(None) };
-
-    // messenger 先于 instance 销毁——ash 0.38 无自动 Drop,漏了会被 VUID-00629 收账
-    if let Some(messenger) = _debug {
-        let loader = debug_utils::Instance::new(&entry, &instance);
-        unsafe { loader.destroy_debug_utils_messenger(messenger, None) };
-    }
-    unsafe { instance.destroy_instance(None) };
-
-    println!("\n== 验证层消息收账(全程)==");
-    let vu = VU_LOG
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !validation_installed {
-        println!("  [SKIP] validation layer 未安装：上传功能性观察完成，但无 Vulkan 执法证据");
-    } else if vu.is_empty() {
-        println!("  (零条——上传全链在验证层 + 同步验证下清净)");
-    } else {
-        for m in vu.iter() {
-            println!("  {m}");
-        }
-        if validation_installed {
-            panic!("正向上传路径收到验证层消息 {} 条", vu.len());
-        }
-    }
-    println!("\n结论口径:组 A=转换逐字节;组 B=上传闭环 + 票据 + 去重;组 C=维护迁移内容保持;");
-    println!(
-        "组 D=跨族 release/acquire 全链(本机具备专用 transfer 族时)。规范依据见 3.2 施工记录。"
-    );
+    pd
 }
 
 // ============ 组 A:转换观察(纯 CPU)============
@@ -257,7 +266,7 @@ fn group_a_conversion() {
             "顶点{v} UV 区全 0"
         );
     }
-    println!("[缺字段] NORMAL/UV_0 缺失 → 全 0 填充(3.4 调试着色可容忍,信息缺口日志化)");
+    println!("[缺字段] NORMAL/UV_0 缺失 → 全 0 填充(调试着色可容忍,缺失信息写入日志)");
 
     // 无索引网格:顺序索引生成
     let mut non_indexed = Mesh::new(
@@ -357,6 +366,33 @@ fn demo_mesh(seed: usize, verts: usize, bare: bool) -> Mesh {
 
 // ============ 上传与校验助手(组 B/C/D 共用,调交付类型本体)============
 
+/// 设备侧公共参数(组 B/C/D 共用)。
+struct ProbeCtx<'a> {
+    device: &'a Device,
+    contract: &'a MemoryContract,
+    gfx_family: u32,
+    gfx_queue: vk::Queue,
+    transfer_family: u32,
+    transfer_queue: vk::Queue,
+}
+
+impl ProbeCtx<'_> {
+    /// 交付本体 Uploader:transfer 族提交,staging 环 2 槽 × `staging_capacity` 起步。
+    fn uploader(&self, staging_capacity: u64, label: &str) -> Uploader {
+        Uploader::new(
+            self.device,
+            self.contract,
+            self.transfer_family,
+            self.transfer_queue,
+            self.gfx_family,
+            self.gfx_queue,
+            staging_capacity,
+            2,
+        )
+        .unwrap_or_else(|e| panic!("{label} 创建上传器: {e:?}"))
+    }
+}
+
 /// 单资产走完整交付路径:去重判定 → 容量保证 → bump → 排批 → 提交 → 驻留登记。
 /// 返回票据;重复身份直接短路返回 0(零提交)。
 fn upload_asset(
@@ -415,14 +451,9 @@ fn upload_asset(
 }
 
 /// 读回校验:一段 pool 区间经一次 batch(device_copies)拷到 readback 同偏移,
-/// 等票据完成后宿主逐字节比对期望内容。创建的 readback buffer 返回(组 D 复用)。
-#[expect(
-    clippy::too_many_arguments,
-    reason = "读回校验面需要设备/契约/上传器/两池/区间/期望六组事实,拆结构体是探针内过度设计"
-)]
+/// 等票据完成后宿主逐字节比对期望内容。返回两块 readback,由调用方等全部票据后拆。
 fn verify_ranges(
-    device: &Device,
-    contract: &MemoryContract,
+    ctx: &ProbeCtx,
     uploader: &mut Uploader,
     vertex_pool: vk::Buffer,
     index_pool: vk::Buffer,
@@ -430,6 +461,7 @@ fn verify_ranges(
     expected: &[&[u8]],
     label: &str,
 ) -> (GpuBuffer, GpuBuffer) {
+    let ProbeCtx { device, contract, .. } = *ctx;
     // 按池种类各建一份 readback:不同种的拷贝若落同一 buffer 会重叠写,
     // 同提交内重叠写未定义——顶点/索引分开落位,同种内 bump 偏移天然不重叠
     let ends = |want_index: bool| {
@@ -487,35 +519,19 @@ fn verify_ranges(
 
 // ============ 组 B:上传闭环 + 票据 + 去重 ============
 
-fn group_b_upload_closure(
-    device: &Device,
-    contract: &MemoryContract,
-    transfer_family: u32,
-    transfer_queue: vk::Queue,
-    gfx_family: u32,
-    gfx_queue: vk::Queue,
-) {
-    let mut pool = MeshPool::new(device, contract, &[]);
-    let mut uploader = Uploader::new(
-        device,
-        contract,
-        transfer_family,
-        transfer_queue,
-        gfx_family,
-        gfx_queue,
-        256 * 1024,
-        2,
-    )
-    .expect("组 B 创建上传器");
+fn group_b_upload_closure(ctx: &ProbeCtx) {
+    let mut pool = MeshPool::new(ctx.device, ctx.contract, &[]);
+    let mut uploader = ctx.uploader(256 * 1024, "组 B");
     println!(
-        "[编排] MeshPool 懒建 + Uploader(staging 环 2 槽 × 256KiB 起步,transfer 族 {transfer_family})"
+        "[编排] MeshPool 懒建 + Uploader(staging 环 2 槽 × 256KiB 起步,transfer 族 {})",
+        ctx.transfer_family
     );
 
     let id_small = probe_id(1);
     let id_quad = probe_id(2);
     let small_converted = convert_mesh(&demo_mesh(0, 4, false)).expect("small 转换");
     let quad_converted = convert_mesh(&demo_mesh(100, 4, true)).expect("quad 转换");
-    // 快照里带池后拷贝一份期望值(readback 校验用)
+    // 转换结果移交上传前留一份期望值(readback 校验用)
     let small_expect_v = small_converted.vertices.clone();
     let small_expect_i = small_converted.indices.clone();
     let quad_expect_v = quad_converted.vertices.clone();
@@ -546,7 +562,7 @@ fn group_b_upload_closure(
     let slot_small = *pool.resident(id_small).expect("已驻留");
     let slot_quad = *pool.resident(id_quad).expect("已驻留");
     println!(
-        "[引脚] small: vertex_base {} first_index {}; quad: vertex_base {} first_index {}(3.4 draw 的 firstIndex/vertexOffset 由账本行携带)",
+        "[引脚] small: vertex_base {} first_index {}; quad: vertex_base {} first_index {}(draw 的 firstIndex/vertexOffset 由账本行携带)",
         slot_small.vertex_base(), slot_small.first_index(), slot_quad.vertex_base(), slot_quad.first_index()
     );
     let (vertex_pool, index_pool) = (
@@ -554,8 +570,7 @@ fn group_b_upload_closure(
         pool.index_buffer().expect("索引池"),
     );
     let (_readback_v, _readback_i) = verify_ranges(
-        device,
-        contract,
+        ctx,
         &mut uploader,
         vertex_pool,
         index_pool,
@@ -574,7 +589,7 @@ fn group_b_upload_closure(
         "组 B",
     );
     println!("[内容] 四段读回逐字节一致(host 写 → staging flush → 设备拷 → 宿主读全链)");
-    // 清场:等全部票据完成再拆(销毁纪律可证明)
+    // 清场:等全部票据完成再拆
     uploader.wait_all_uploads().expect("等全部在飞票据");
     drop(_readback_v);
     drop(_readback_i);
@@ -584,34 +599,17 @@ fn group_b_upload_closure(
 
 // ============ 组 C:维护扩容(迁移内容保持 + 停顿分账)============
 
-fn group_c_maintenance(
-    device: &Device,
-    contract: &MemoryContract,
-    transfer_family: u32,
-    transfer_queue: vk::Queue,
-    gfx_family: u32,
-    gfx_queue: vk::Queue,
-) {
+fn group_c_maintenance(ctx: &ProbeCtx) {
     println!("\n== 组 C(维护扩容观察:容量不足 → 显式维护迁移)==");
-    let mut pool = MeshPool::new(device, contract, &[]);
-    let mut uploader = Uploader::new(
-        device,
-        contract,
-        transfer_family,
-        transfer_queue,
-        gfx_family,
-        gfx_queue,
-        64 * 1024,
-        2,
-    )
-    .expect("组 C 创建上传器");
+    let mut pool = MeshPool::new(ctx.device, ctx.contract, &[]);
+    let mut uploader = ctx.uploader(64 * 1024, "组 C");
 
     // 小资产先收:触发初建(1MiB 起步,按需量加余量)
     let id_small = probe_id(11);
     let small = convert_mesh(&demo_mesh(0, 4, false)).expect("C small 转换");
     let small_expect_v = small.vertices.clone();
     let small_expect_i = small.indices.clone();
-    // 图形最后使用等待的计数钩子(4.1.1):迁移路径必须等它,非迁移路径不调
+    // 图形最后使用等待的计数钩子:迁移路径必须等它,非迁移路径不调
     let wait_draws_calls = std::cell::Cell::new(0u32);
     let mut wait_draws = || {
         wait_draws_calls.set(wait_draws_calls.get() + 1);
@@ -644,7 +642,7 @@ fn group_c_maintenance(
     let ((uv2, cv2), (ui2, ci2)) = pool.usage();
     let ledger = pool.maintenance_ledger();
     println!(
-        "[维护] 大资产票据 #{t2}:顶点 {uv2}/{cv2}B 索引 {ui2}/{ci2}B;扩容 {grow} 次,累计停顿 {pause}ms(等在飞+迁移+图形最后使用,与正常上传分账;wait_draws 断言见上)",
+        "[维护] 大资产票据 #{t2}:顶点 {uv2}/{cv2}B 索引 {ui2}/{ci2}B;扩容 {grow} 次,累计停顿 {pause}ms(等在飞+迁移+图形最后使用,与正常上传分开统计;wait_draws 断言见上)",
         grow = ledger.grow_count,
         pause = ledger.pause_ms_total,
     );
@@ -652,7 +650,7 @@ fn group_c_maintenance(
     assert_eq!(
         wait_draws_calls.get(),
         1,
-        "图形最后使用等待恰一次(4.1.1:迁移销毁旧池前等帧槽 fence;初建/普通上传不触发)"
+        "图形最后使用等待恰一次(迁移销毁旧池前等帧槽 fence;初建/普通上传不触发)"
     );
     assert_eq!(
         t2, 3,
@@ -667,8 +665,7 @@ fn group_c_maintenance(
         pool.index_buffer().expect("索引池"),
     );
     let (_readback_v, _readback_i) = verify_ranges(
-        device,
-        contract,
+        ctx,
         &mut uploader,
         vertex_pool,
         index_pool,
@@ -694,33 +691,23 @@ fn group_c_maintenance(
     drop(pool);
 }
 
-// ============ 组 D:跨族 release/acquire(3.4 接线预演)============
+// ============ 组 D:跨族 release/acquire ============
 
-fn group_d_cross_family(
-    device: &Device,
-    contract: &MemoryContract,
-    gfx_family: u32,
-    gfx_queue: vk::Queue,
-    transfer_family: u32,
-    transfer_queue: vk::Queue,
-) {
-    println!("\n== 组 D(跨族依赖观察:release → graphics 等票据 + acquire + 真实读)==");
-    let mut pool = MeshPool::new(device, contract, &[]);
-    let mut uploader = Uploader::new(
+fn group_d_cross_family(ctx: &ProbeCtx) {
+    let ProbeCtx {
         device,
         contract,
-        transfer_family,
-        transfer_queue,
         gfx_family,
         gfx_queue,
-        64 * 1024,
-        2,
-    )
-    .expect("组 D 创建上传器");
+        transfer_family,
+        ..
+    } = *ctx;
+    println!("\n== 组 D(跨族依赖观察:release → graphics 等票据 + acquire + 真实读)==");
+    let mut pool = MeshPool::new(device, contract, &[]);
+    let mut uploader = ctx.uploader(64 * 1024, "组 D");
 
     let converted = convert_mesh(&demo_mesh(0, 4, false)).expect("D 转换");
     let expect_v = converted.vertices.clone();
-    let expect_i = converted.indices.clone();
     // 上传批:末尾把顶点池(图形要读的那个)release 给 graphics 族。
     // EXCLUSIVE 成对语义:release 在 transfer 提交内;配对 acquire 在 graphics 提交内。
     // 本组手工排批(不走 upload_asset),为的是在提交里带上 release。
@@ -768,7 +755,7 @@ fn group_d_cross_family(
     );
 
     // graphics 侧提交:等 timeline 票据(GPU 侧等待,CPU 不阻塞)+ acquire + 真实读
-    let readback = GpuBuffer::create(device, contract, vertex.size, BufferRole::Readback)
+    let mut readback = GpuBuffer::create(device, contract, vertex.size, BufferRole::Readback)
         .expect("D readback 创建");
     let gfx_command_pool = unsafe {
         device.create_command_pool(
@@ -796,8 +783,8 @@ fn group_d_cross_family(
         )
     }
     .expect("D begin");
-    // acquire:与 release 的族号成对;src 阶段按规范用 ALL_COMMANDS 等 release 完成
-    // (sync.adoc:acquire 第一作用域为空,happens-before 由 ALL_COMMANDS 引入);
+    // acquire:与 release 的族号成对;src 阶段用 ALL_COMMANDS 等 release 完成
+    // (acquire 第一作用域为空,happens-before 由 ALL_COMMANDS 引入);
     // srcAccessMask 被规范声明忽略,置空。dst 是本提交里的真实访问:TRANSFER 读。
     let acquire = vk::BufferMemoryBarrier::default()
         .src_access_mask(vk::AccessFlags::empty())
@@ -849,8 +836,8 @@ fn group_d_cross_family(
             .end_command_buffer(gfx_command_buffer)
             .expect("D end");
 
-        // 等待点语义:图形提交在 ALL_COMMANDS 起等上传票据——"等待发生在 GPU 执行
-        // 依赖处,不要求 CPU 先阻塞等上传完成再提交"(施工计划 §2)
+        // 等待点在 GPU 执行依赖处:图形提交在 ALL_COMMANDS 起等上传票据,
+        // CPU 不必先阻塞等上传完成再提交
         let wait_values = [ticket];
         let mut timeline_submit =
             vk::TimelineSemaphoreSubmitInfo::default().wait_semaphore_values(&wait_values);
@@ -879,8 +866,7 @@ fn group_d_cross_family(
     println!("[acquire] graphics 提交:等票据 #{ticket}(GPU 侧)+ acquire + pool→readback 拷贝(图形队列上的真实读)");
 
     let mut back = vec![0u8; vertex.size as usize];
-    let mut readback_mut = readback;
-    readback_mut
+    readback
         .read(vertex.offset, &mut back)
         .expect("D 宿主读 readback");
     assert_eq!(&back[..], &expect_v[..], "组 D 顶点池跨族读回不符");
@@ -888,11 +874,10 @@ fn group_d_cross_family(
 
     // 清场:等全部票据完成再拆
     uploader.wait_all_uploads().expect("等全部在飞票据");
-    drop(readback_mut);
+    drop(readback);
     unsafe { device.destroy_command_pool(gfx_command_pool, None) };
     drop(uploader);
     drop(pool);
-    let _ = expect_i; // 索引池未参与跨族读(未 release),留证据变量名防误删
 }
 
 /// graphics + 专用 transfer(如有)双族设备:返回 (device, gfx_family, gfx_queue,

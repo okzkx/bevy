@@ -1,32 +1,29 @@
-//! 3.3 前置闸门探针:naga 30.0.1 WGSL → SPIR-V 小样例 + spirv-val + 临时 Vulkan
+//! bindless 能力探针:naga 30.0.1 WGSL → SPIR-V 小样例 + spirv-val + 临时 Vulkan
 //! 管线试验,四验收点(设备支持/编译成功/SPIR-V 合法/最终采样正确)逐层取证。
 //!
-//! 与 3.2 三探针同纪律:自含 Entry → Instance → PhysicalDevice → Device 最小链
-//! (不碰窗口),验证层 + 同步验证(VkValidationFeaturesEXT)常开,VUID 收账。
+//! 自含 Entry → Instance → PhysicalDevice → Device 最小链(不碰窗口),验证层 +
+//! 同步验证(VkValidationFeaturesEXT)常开,VUID 收账。
 //!
 //! - 组 A(编译与结构观察组,纯 CPU):两份同形状 WGSL(runtime 数组无长度 /
 //!   定长 4)经 wgsl-in → naga::valid → spv-out;手写 SPIR-V 词流扫描核对
 //!   capability/扩展/入口/runtime array/NonUniform 装饰/set-binding 对/
-//!   字段偏移(与 Rust `offset_of!` 镜像互证——"按实际布局冻结"的证据面)。
-//!   重点记录疑点:naga 30.0.1 spv 后端是否发射 `OpCapability
-//!   RuntimeDescriptorArray`(源码 grep 为零,待本组实证)。
+//!   字段偏移(与 Rust `offset_of!` 镜像互证)。重点记录:naga 30.0.1 spv 后端是否
+//!   发射 `OpCapability RuntimeDescriptorArray`。
 //! - 组 B(spirv-val 观察组):SDK `spirv-val --target-env vulkan1.3` 逐模块;
 //!   被拒则经最小确定性补丁(capability 段注入缺失 OpCapability/OpExtension)
-//!   重验,记录补丁前后差异。缺失 SDK 工具 = 证据链断裂,如实阻塞不冒充通过。
+//!   重验,记录补丁前后差异。缺 SDK 工具 = 证据链断裂,如实阻塞不冒充通过。
 //! - 组 C(管线试验观察组):对每个过 val 的模块建独立设备——Vulkan12Features
 //!   先查后开(查询值 = "设备支持"验收点证据;支持 ≠ 启用),两张 2×2 贴图走
 //!   `vkCmdCopyBufferToImage` + `UNDEFINED→TRANSFER_DST→SHADER_READ_ONLY`
-//!   屏障对(显存机制篇约束:不走 buffer barrier 模板);set0 用
-//!   update-after-bind + partially-bound 池/布局(4 槽写 2 槽,3.3.3 生产配方
-//!   预演);compute dispatch 两条采样路径:push 索引(一致)与每调用 storage
-//!   索引(非一致)——读回比对纹理选择(绿/红)与 sampler 选择(NEAREST 红 /
-//!   LINEAR 混色)。
+//!   屏障对;set0 用 update-after-bind + partially-bound 池/布局(4 槽写 2 槽);
+//!   compute dispatch 两条采样路径:push 索引(一致)与每调用 storage 索引(非一致)
+//!   ——读回比对纹理选择(绿/红)与 sampler 选择(NEAREST 红 / LINEAR 混色)。
 //! - 组 D(负例诊断组):未启用 runtimeDescriptorArray 的设备上建带
-//!   OpTypeRuntimeArray 的 compute 管线——只收账不断言驱动行为,断言落在
-//!   VU_LOG 是否出现预期 VUID(实测钉号)。
+//!   OpTypeRuntimeArray 的 compute 管线——只收账不断言驱动行为,看 VU_LOG 是否
+//!   出现相关消息。
 //!
-//! 接口形状即冻结草案:set0 = 纹理数组 + sampler 数组(WGSL texture/sampler
-//! 分离),set1 = 每帧 UBO,push constant = 每 draw 参数(96B ≤ 128B 最低上限)。
+//! 接口形状:set0 = 纹理数组 + sampler 数组(WGSL texture/sampler 分离),set1 = 每帧
+//! UBO,set2 = 试验 I/O,push constant = 每 draw 参数(96B ≤ 128B 最低上限)。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -95,82 +92,22 @@ fn main() {
     println!(
         "验证层 {VALIDATION_LAYER:?}: {}",
         if validation_installed {
-            "已安装,本探针请求启用 + 同步验证(VUID 收账见结尾)"
+            "已安装,本探针请求启用 + 同步验证(VUID 汇总见结尾)"
         } else {
             "未安装(本机缺 Vulkan SDK),本轮裸奔——结果不构成验证证据"
         }
     );
 
-    let app_info = vk::ApplicationInfo::default()
-        .application_name(c"bindless_probe")
-        .api_version(vk::API_VERSION_1_3);
-    let ext_names: Vec<*const std::ffi::c_char> = if validation_installed {
-        vec![debug_utils::NAME.as_ptr()]
-    } else {
-        Vec::new()
-    };
-    let layer_names: Vec<*const std::ffi::c_char> = if validation_installed {
-        vec![VALIDATION_LAYER.as_ptr()]
-    } else {
-        Vec::new()
-    };
-    // 同步验证随主工程同款(VkValidationFeaturesEXT);enables 须活到 create_instance 返回
-    let sync_enables = if validation_installed {
-        Some([vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION])
-    } else {
-        None
-    };
-    let mut sync_validation = vk::ValidationFeaturesEXT::default();
-    let mut instance_info = vk::InstanceCreateInfo::default()
-        .application_info(&app_info)
-        .enabled_extension_names(&ext_names)
-        .enabled_layer_names(&layer_names);
-    if let Some(enables) = &sync_enables {
-        sync_validation = sync_validation.enabled_validation_features(enables);
-        instance_info = instance_info.push_next(&mut sync_validation);
-    }
-    let instance =
-        unsafe { entry.create_instance(&instance_info, None) }.expect("vkCreateInstance");
+    let instance = make_instance(&entry, validation_installed);
+    let messenger = validation_installed.then(|| make_messenger(&entry, &instance));
 
-    let _debug = validation_installed.then(|| {
-        let loader = debug_utils::Instance::new(&entry, &instance);
-        let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
-            .message_severity(
-                vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                    | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
-            )
-            .message_type(
-                vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
-            )
-            .pfn_user_callback(Some(probe_callback));
-        unsafe { loader.create_debug_utils_messenger(&messenger_info, None) }
-            .expect("创建验证 messenger")
-    });
-
-    // 与主工程同门槛:只选报 1.3 的设备
-    let pds = unsafe { instance.enumerate_physical_devices() }.expect("枚举物理设备");
-    let pd = *pds
-        .iter()
-        .find(|pd| unsafe { instance.get_physical_device_properties(**pd) }.api_version
-            >= vk::API_VERSION_1_3)
-        .expect("没有报支持 Vulkan 1.3 的物理设备");
-    let props = unsafe { instance.get_physical_device_properties(pd) };
-    let dev_name =
-        unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy();
-    println!(
-        "设备 {dev_name}: API v{}.{}.{}(过 1.3 基线)",
-        vk::api_version_major(props.api_version),
-        vk::api_version_minor(props.api_version),
-        vk::api_version_patch(props.api_version),
-    );
+    let pd = pick_physical_device(&instance);
 
     // ============ 组 A:编译与结构观察 ============
     let runtime = compile_module("runtime", RUNTIME_WGSL);
     let fixed = compile_module("fixed", FIXED_WGSL);
-    // 负例②用补丁词流(capability 已声明、特性未启用 → 期待 feature 执法);
-    // patch 幂等(已存在的不重复注),与组 B 闸门内的补丁同函数同结果
+    // 组 D 负例②用补丁词流(capability 已声明、特性未启用 → 期待 feature 执法);
+    // patch 幂等(已存在的不重复注),与组 B 的补丁同函数同结果
     let patched_runtime = patch_descriptor_indexing(&runtime.words);
 
     // ============ 组 B:spirv-val + 补丁 ============
@@ -188,17 +125,17 @@ fn main() {
                 "\n[阻塞] 本机未找到 spirv-val(VULKAN_SDK 未设且默认路径不存在)——"
             );
             println!(
-                "       闸门④的\"SPIR-V 合法\"验收点无官方工具证据,组 C/D 一并停跑;"
+                "       \"SPIR-V 合法\"检查无官方工具证据,组 C/D 一并停跑;"
             );
             println!(
-                "       不把缺环境的静默当证据(3.3 README 红线)。装 Vulkan SDK 后重跑。"
+                "       不把缺环境的静默当证据。装 Vulkan SDK 后重跑。"
             );
         }
     }
 
     // ============ 组 C:Vulkan 管线试验 ============
     if candidates.is_empty() {
-        println!("\n[结论] 无模块通过 spirv-val——闸门④\"SPIR-V 合法\"未过,管线试验无载体。");
+        println!("\n[结论] 无模块通过 spirv-val——\"SPIR-V 合法\"检查未过,管线试验无载体。");
     } else {
         for cand in &candidates {
             run_trial(&instance, pd, cand);
@@ -208,30 +145,101 @@ fn main() {
     // ============ 组 D:负例诊断 ============
     group_d_negative(&instance, pd, &runtime.words, &patched_runtime, validation_installed);
 
-    // messenger 先于 instance 销毁——ash 0.38 无自动 Drop,漏了会被 VUID-00629 收账
-    if let Some(messenger) = _debug {
-        let loader = debug_utils::Instance::new(&entry, &instance);
-        unsafe { loader.destroy_debug_utils_messenger(messenger, None) };
+    // 坑:messenger 须先于 instance 销毁(ash 无自动 Drop),漏了报 VUID-00629
+    if let Some((loader, handle)) = messenger {
+        unsafe { loader.destroy_debug_utils_messenger(handle, None) };
     }
     unsafe { instance.destroy_instance(None) };
 
-    println!("\n== 验证层消息收账(全程)==");
+    println!("\n== 验证层消息汇总(全程)==");
     let vu = VU_TOTAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !validation_installed {
         println!("  [SKIP] Validation-layer evidence unavailable; this run is a device/CPU observation only.");
     } else if vu.is_empty() {
-        println!("  (零条——验证层目标路径清净;组 D 负例按组内口径报告)");
+        println!("  (零条——验证层目标路径无告警;组 D 负例见组内报告)");
     } else {
         for m in vu.iter() {
             println!("  {m}");
         }
     }
-    drop(vu);
-    println!("\n结论口径:组 A=编译 + 结构扫描(四验收点之\"编译成功\");组 B=spirv-val");
+    println!("\n结论:组 A=编译 + 结构扫描(四项检查之\"编译成功\");组 B=spirv-val");
     println!("(之\"SPIR-V 合法\");组 C=设备支持 + 管线 + 采样读回(之\"设备支持\"\"最终采样");
-    println!("正确\");组 D=负例诊断(只收账)。冻结结论与面板落账见 3.3 施工记录。");
+    println!("正确\");组 D=负例诊断(只记录验证层消息)。");
+}
+
+fn make_instance(entry: &Entry, validation: bool) -> ash::Instance {
+    let app_info = vk::ApplicationInfo::default()
+        .application_name(c"bindless_probe")
+        .api_version(vk::API_VERSION_1_3);
+    let ext_names: Vec<*const std::ffi::c_char> = if validation {
+        vec![debug_utils::NAME.as_ptr()]
+    } else {
+        Vec::new()
+    };
+    let layer_names: Vec<*const std::ffi::c_char> = if validation {
+        vec![VALIDATION_LAYER.as_ptr()]
+    } else {
+        Vec::new()
+    };
+    // 同步验证(VkValidationFeaturesEXT);enables 须活到 create_instance 返回(pNext 存指针)
+    let sync_enables = if validation {
+        Some([vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION])
+    } else {
+        None
+    };
+    let mut sync_validation = vk::ValidationFeaturesEXT::default();
+    let mut instance_info = vk::InstanceCreateInfo::default()
+        .application_info(&app_info)
+        .enabled_extension_names(&ext_names)
+        .enabled_layer_names(&layer_names);
+    if let Some(enables) = &sync_enables {
+        sync_validation = sync_validation.enabled_validation_features(enables);
+        instance_info = instance_info.push_next(&mut sync_validation);
+    }
+    unsafe { entry.create_instance(&instance_info, None) }.expect("vkCreateInstance")
+}
+
+fn make_messenger(
+    entry: &Entry,
+    instance: &ash::Instance,
+) -> (debug_utils::Instance, vk::DebugUtilsMessengerEXT) {
+    let loader = debug_utils::Instance::new(entry, instance);
+    let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+        .message_severity(
+            vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+        )
+        .message_type(
+            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+        )
+        .pfn_user_callback(Some(probe_callback));
+    let handle = unsafe { loader.create_debug_utils_messenger(&messenger_info, None) }
+        .expect("创建验证 messenger");
+    (loader, handle)
+}
+
+/// 选第一台报 1.3 的设备并打印其版本。
+fn pick_physical_device(instance: &ash::Instance) -> vk::PhysicalDevice {
+    let pds = unsafe { instance.enumerate_physical_devices() }.expect("枚举物理设备");
+    let pd = *pds
+        .iter()
+        .find(|pd| unsafe { instance.get_physical_device_properties(**pd) }.api_version
+            >= vk::API_VERSION_1_3)
+        .expect("没有报支持 Vulkan 1.3 的物理设备");
+    let props = unsafe { instance.get_physical_device_properties(pd) };
+    let dev_name =
+        unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy();
+    println!(
+        "设备 {dev_name}: API v{}.{}.{}(过 1.3 基线)",
+        vk::api_version_major(props.api_version),
+        vk::api_version_minor(props.api_version),
+        vk::api_version_patch(props.api_version),
+    );
+    pd
 }
 
 // ============ 组 A:编译与结构扫描(纯 CPU)============
@@ -242,10 +250,10 @@ fn compile_module(label: &'static str, source: &str) -> CompiledModule {
     println!("\n== 组 A({label}:naga 30.0.1 wgsl-in → spv-out + 结构扫描)==");
     let module = match naga::front::wgsl::parse_str(source) {
         Ok(m) => m,
-        Err(e) => panic!("[{label}] WGSL 解析失败(验收点\"编译成功\"未过): {e}"),
+        Err(e) => panic!("[{label}] WGSL 解析失败(\"编译成功\"检查未过): {e}"),
     };
     // 能力面显式声明:binding 数组、其非一致索引、var<immediate>(push constant)。
-    // "支持 ≠ 启用"纪律的编译侧对应物:validator 只在这些能力被授予时放行。
+    // validator 只在这些能力被授予时放行。
     let caps = naga::valid::Capabilities::IMMEDIATES
         | naga::valid::Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY
         | naga::valid::Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING;
@@ -267,25 +275,23 @@ fn compile_module(label: &'static str, source: &str) -> CompiledModule {
     CompiledModule {
         label,
         words,
-        scan,
         needs_runtime: label == "runtime",
     }
 }
 
-pub struct CompiledModule {
-    pub label: &'static str,
-    pub words: Vec<u32>,
-    pub scan: SpvScan,
+struct CompiledModule {
+    label: &'static str,
+    words: Vec<u32>,
     /// 是否需要 runtimeDescriptorArray 特性:runtime 版纹理/sampler 数组不带长度
     /// → UniformConstant 里的 OpTypeRuntimeArray 需要该特性;fixed 版不需要。
     /// 注意 storage 输出的 `array<vec4f>` 也是 OpTypeRuntimeArray,但那是 SSBO
     /// 核心语义(1.0 起),不算 descriptor-indexing 需求——所以按模块来源判,不按
     /// 全模块 OpTypeRuntimeArray 计数判。
-    pub needs_runtime: bool,
+    needs_runtime: bool,
 }
 
 /// SPIR-V 词流结构摘要:capability/扩展/入口/数组形态/NonUniform/set-binding/偏移。
-pub struct SpvScan {
+struct SpvScan {
     version: (u8, u8),
     capabilities: Vec<u32>,
     extensions: Vec<String>,
@@ -380,7 +386,7 @@ fn scan_spv(words: &[u32]) -> SpvScan {
     }
 }
 
-/// 装饰与偏移的观察组打印(结构证据,供施工记录摘录)。
+/// 结构扫描结果打印(capability/入口/数组/绑定/偏移)。
 fn print_scan(label: &str, scan: &SpvScan) {
     let caps: Vec<String> = scan.capabilities.iter().map(|&c| cap_name(c)).collect();
     println!(
@@ -418,11 +424,11 @@ fn cap_name(value: u32) -> String {
     }
 }
 
-/// 结构断言(载荷性检查,失败即闸门证据缺失):
-/// - 入口 GLCompute "main";binding 表恰为 0:0/0:1/1:0/2:0/2:1;
+/// 结构断言,任一不符即 panic:
+/// - 入口 GLCompute "main";binding 表含 0:0/0:1/1:0/2:0/2:1;
 /// - NonUniform ≥ 1(非一致路径须被 naga 自动装饰,不写 GLSL nonuniformEXT);
-/// - push 结构偏移恰为 0/64/68/80(与下方 Rust 镜像 `offset_of!` 互证);
-/// - runtime 版必有 OpTypeRuntimeArray;定长版 texture/sampler 走 OpTypeArray。
+/// - 存在偏移 0/64/68/80 的 push 结构(与下方 Rust 镜像 `offset_of!` 互证)和单成员
+///   每帧 UBO 结构;声明 Shader capability。
 fn assert_scan(label: &str, scan: &SpvScan) {
     assert!(
         scan.entry_points
@@ -463,20 +469,18 @@ fn assert_scan(label: &str, scan: &SpvScan) {
             if scan.capabilities.contains(&CAP_RUNTIME_DESCRIPTOR_ARRAY) {
                 "已声明"
             } else {
-                "未声明(naga 30.0.1 后端源码 grep 零发射——是否合法交组 B spirv-val 裁决)"
+                "未声明(naga 30.0.1 后端源码 grep 零发射——是否合法由组 B spirv-val 判定)"
             },
         );
     }
 }
 
 /// push 参数的 Rust 镜像:与 WGSL PushParams 字段同序,`offset_of!` 在编译期钉住
-/// 一侧事实,SPIR-V 扫描钉住另一侧——两边对上才是"按实际布局冻结"。
+/// CPU 侧偏移,SPIR-V 扫描钉住 shader 侧——两边对上才算布局一致。
 #[repr(C)]
 struct PushParamsMirror {
-    // Mat4/Vec4 带 16B 对齐(与 WGSL uniform 布局的 vec4 对齐一致):WGSL 里
-    // base_color: vec4f 对齐 16 → 偏移 80;若用裸 [f32; 4](对齐 4)会落在 68+4=72,
-    // 与 shader 侧不一致——"repr(C) 不能独立证明 CPU/shader 对齐"正是施工计划
-    // §2 的提醒,本镜像把 16B 对齐显式钉在类型上。
+    // 坑:repr(C) 不保证与 shader 对齐一致。WGSL base_color: vec4f 对齐 16 → 偏移 80;
+    // 用裸 [f32; 4](对齐 4)会落在 72。Mat4/Vec4 自带 16B 对齐,把对齐钉在类型上。
     model: bevy::math::Mat4,
     tex_index: u32,
     sampler_index: u32,
@@ -556,7 +560,7 @@ fn spirv_val_gate(val_exe: &std::path::Path, module: &CompiledModule) -> Option<
             for line in out.lines() {
                 println!("    {line}");
             }
-            println!("[结论] {label} 模块无合法形态(补丁未挽回)——闸门④该模块未过",
+            println!("[结论] {label} 模块无合法形态(补丁未挽回)——该模块未通过 SPIR-V 合法性检查",
                 label = module.label);
             None
         }
@@ -564,7 +568,7 @@ fn spirv_val_gate(val_exe: &std::path::Path, module: &CompiledModule) -> Option<
 }
 
 /// 跑一次 spirv-val:词流写临时 .spv(小端),--target-env vulkan1.3,运行后清理。
-/// 通过返回 Ok;被拒返回 Err(stderr/stderr 合并文本)。
+/// 通过返回 Ok;被拒返回 Err(stderr 文本,为空则取 stdout)。
 fn run_spirv_val(val_exe: &std::path::Path, words: &[u32]) -> Result<(), String> {
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     let spv_path = std::env::temp_dir().join("ash_bindless_probe_val.spv");
@@ -593,9 +597,8 @@ fn run_spirv_val(val_exe: &std::path::Path, words: &[u32]) -> Result<(), String>
 /// SPV_EXT_descriptor_indexing 扩展(已存在的不重复注)。声明多余的 capability
 /// 只收紧设备要求,不放松合法性。
 ///
-/// SPIR-V 逻辑布局顺序是 capabilities → extensions → …:capability 必须插在
-/// extension 区段之前,extension 插在既有 extension 之后、下一段之前,所以分两个
-/// 插入点两段拼接,不合并成一点(否则 capability 会落到 extension 后面,布局违规)。
+/// 坑:SPIR-V 逻辑布局顺序是 capabilities → extensions → …,所以分两个插入点拼接
+///(capability 段尾、extension 段尾);合并成一点会让 capability 落到 extension 后面,布局违规。
 fn patch_descriptor_indexing(words: &[u32]) -> Vec<u32> {
     let mut caps_present: Vec<u32> = Vec::new();
     let mut exts_present: Vec<String> = Vec::new();
@@ -613,15 +616,13 @@ fn patch_descriptor_indexing(words: &[u32]) -> Vec<u32> {
     }
     let cap_insert = pos;
     // 第二遍:从 capability 结束点继续吃 OpExtension,记下 extension 区段结束点
-    let mut ext_pos = cap_insert;
     let mut ext_insert = cap_insert;
-    while ext_pos < words.len() {
-        let word0 = words[ext_pos];
+    while ext_insert < words.len() {
+        let word0 = words[ext_insert];
         let wc = ((word0 >> 16) as usize).max(1);
         if (word0 & 0xFFFF) as u16 == OP_EXTENSION {
-            exts_present.push(decode_spv_string(&words[ext_pos + 1..ext_pos + wc]));
-            ext_insert = ext_pos + wc;
-            ext_pos += wc;
+            exts_present.push(decode_spv_string(&words[ext_insert + 1..ext_insert + wc]));
+            ext_insert += wc;
         } else {
             break;
         }
@@ -676,10 +677,7 @@ const EXPECT_MIX: [f32; 4] = [0.9, 0.0, 0.1, 1.0];
 /// 字段偏移已由 `PushParamsMirror` 的 `offset_of!` 在编译期钉死。
 fn push_bytes(tex_index: u32, sampler_index: u32) -> [u8; 96] {
     let mut b = [0u8; 96];
-    let identity: [f32; 16] = [
-        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-    ];
-    for (i, v) in identity.iter().enumerate() {
+    for (i, v) in bevy::math::Mat4::IDENTITY.to_cols_array().iter().enumerate() {
         b[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
     }
     b[64..68].copy_from_slice(&tex_index.to_le_bytes());
@@ -704,7 +702,7 @@ fn index_bytes() -> [u8; 16] {
 /// panic(验收点未过);全程 VUID 收账。
 fn run_trial(instance: &ash::Instance, pd: vk::PhysicalDevice, cand: &Candidate) {
     println!("\n== 组 C({}:临时 Vulkan 管线试验)==", cand.label);
-    println!("[val 口径] {}", cand.val_note);
+    println!("[val 说明] {}", cand.val_note);
 
     // 验收点①设备支持:先查后开——查询值打印为证,需要位不支持则如实注明跳过。
     let mut queried = vk::PhysicalDeviceVulkan12Features::default();
@@ -722,13 +720,12 @@ fn run_trial(instance: &ash::Instance, pd: vk::PhysicalDevice, cand: &Candidate)
     let props = unsafe { instance.get_physical_device_properties(pd) };
     println!(
         "[限额] maxPushConstantsSize={}B maxPerStageDescriptorSampledImages={} \
-         maxDescriptorSetSampledImages={} maxPerStageDescriptorSamplers={}(1024 容量定案素材,归 3.3.2)",
+         maxDescriptorSetSampledImages={} maxPerStageDescriptorSamplers={}(用于确定 1024 容量)",
         props.limits.max_push_constants_size,
         props.limits.max_per_stage_descriptor_sampled_images,
         props.limits.max_descriptor_set_sampled_images,
         props.limits.max_per_stage_descriptor_samplers,
     );
-    let need = feature_set(cand.needs_runtime);
     let supported = queried.descriptor_indexing == vk::TRUE
         && queried.shader_sampled_image_array_non_uniform_indexing == vk::TRUE
         && queried.descriptor_binding_sampled_image_update_after_bind == vk::TRUE
@@ -741,35 +738,15 @@ fn run_trial(instance: &ash::Instance, pd: vk::PhysicalDevice, cand: &Candidate)
         return;
     }
 
-    // 设备与队列(compute 走 graphics 队列,不另设 compute 族)
-    let families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
-    let gfx_family = families
-        .iter()
-        .position(|f| f.queue_flags.contains(vk::QueueFlags::GRAPHICS))
-        .expect("无 graphics 族") as u32;
-    let mut vk12 = need;
-    let priority = [1.0f32];
-    let queue_infos = [vk::DeviceQueueCreateInfo::default()
-        .queue_family_index(gfx_family)
-        .queue_priorities(&priority)];
-    let device = unsafe {
-        instance
-            .create_device(
-                pd,
-                &vk::DeviceCreateInfo::default()
-                    .queue_create_infos(&queue_infos)
-                    .push_next(&mut vk12),
-                None,
-            )
-            .expect("组 C vkCreateDevice")
-    };
+    // compute 走 graphics 队列,不另设 compute 族
+    let (device, gfx_family) = create_device(instance, pd, cand.needs_runtime, "组 C");
     let queue = unsafe { device.get_device_queue(gfx_family, 0) };
     let contract = unsafe { MemoryContract::new(instance, pd) };
 
-    // 两张贴图(OPTIMAL tiling,独立于任何 buffer 池——显存机制篇约束②)
+    // 两张贴图(OPTIMAL tiling,各自独立分配内存)
     let tex0 = unsafe { TestImage::new(&device, &contract, "tex0") };
     let tex1 = unsafe { TestImage::new(&device, &contract, "tex1") };
-    // staging 用交付本体 GpuBuffer(契约 flush 纪律),像素 16B/张
+    // staging 用交付本体 GpuBuffer(按契约 flush),像素 16B/张
     let mut stage0 = GpuBuffer::create(&device, &contract, 16, BufferRole::Staging)
         .expect("staging0 创建");
     let mut stage1 =
@@ -922,14 +899,7 @@ fn run_trial(instance: &ash::Instance, pd: vk::PhysicalDevice, cand: &Candidate)
         let created = device
             .create_compute_pipelines(
                 vk::PipelineCache::null(),
-                &[vk::ComputePipelineCreateInfo::default()
-                    .stage(
-                        vk::PipelineShaderStageCreateInfo::default()
-                            .stage(vk::ShaderStageFlags::COMPUTE)
-                            .module(shader_module)
-                            .name(c"main"),
-                    )
-                    .layout(shapes.pipeline_layout)],
+                &[compute_pipeline_info(shader_module, shapes.pipeline_layout)],
                 None,
             )
             .map_err(|(_, e)| e)
@@ -966,8 +936,7 @@ fn run_trial(instance: &ash::Instance, pd: vk::PhysicalDevice, cand: &Candidate)
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )
             .expect("begin");
-        // 拷贝前:UNDEFINED → TRANSFER_DST(显存机制篇:layout 转换是 image 特有
-        // 语义,不走 3.2 buffer barrier 模板;初见屏障 src 无需 access)
+        // 拷贝前:UNDEFINED → TRANSFER_DST
         let to_dst = [
             image_barrier(tex0.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL),
             image_barrier(tex1.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL),
@@ -1061,18 +1030,18 @@ fn run_trial(instance: &ash::Instance, pd: vk::PhysicalDevice, cand: &Candidate)
         "[采样] out = [{:?}, {:?}, {:?}]——push 一致索引选绿、NEAREST 取整红、LINEAR 混色全部正确",
         out0, out1, out2,
     );
-    // 验收点纪律:目标路径 WARNING/ERROR 清净,非空即闸门未过(不静默)
+    // 验收点:目标路径 WARNING/ERROR 须为零,非空即 panic(不静默)
     let vu = drain_vu();
     if vu.is_empty() {
-        println!("[收账] 本组验证层消息零条——管线试验在验证层 + 同步验证下清净");
+        println!("[汇总] 本组验证层消息零条——管线试验在验证层 + 同步验证下清净");
     } else {
         for m in &vu {
             println!("  {m}");
         }
-        panic!("[{}] 组 C 收到验证层消息 {} 条——\"零告警\"验收点未过", cand.label, vu.len());
+        panic!("[{}] 组 C 收到验证层消息 {} 条——未满足\"零告警\"要求", cand.label, vu.len());
     }
 
-    // 清场:等空闲再反序拆(销毁纪律)
+    // 清场:等空闲再反序拆
     unsafe { device.device_wait_idle() }.expect("trial 收场 wait_idle");
     unsafe { device.destroy_pipeline(pipeline, None) };
     unsafe { device.destroy_shader_module(shader_module, None) };
@@ -1134,18 +1103,19 @@ fn image_barrier(
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .image(image)
-        .subresource_range(
-            vk::ImageSubresourceRange::default()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1),
-        )
+        .subresource_range(color_range())
+}
+
+/// 2D mip0 单层的 COLOR 子资源范围(屏障与 view 同口径)。
+fn color_range() -> vk::ImageSubresourceRange {
+    vk::ImageSubresourceRange::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .level_count(1)
+        .layer_count(1)
 }
 
 /// 探针内联的 host-visible(HOST_VISIBLE|HOST_COHERENT 必需)buffer:UBO/索引/
-/// 输出三块的载体。3.3.1 正式施工时按需扩 BufferRole,本组不替正式段做决定。
+/// 输出三块的载体。
 struct PlainBuffer {
     device: Device,
     buffer: vk::Buffer,
@@ -1220,7 +1190,7 @@ impl PlainBuffer {
 
 impl Drop for PlainBuffer {
     fn drop(&mut self) {
-        // unmap 显式先行(同 GpuBuffer 纪律),再拆 buffer、还 memory
+        // unmap 显式先行,再拆 buffer、还 memory
         unsafe {
             self.device.unmap_memory(self.memory);
             self.device.destroy_buffer(self.buffer, None);
@@ -1230,8 +1200,7 @@ impl Drop for PlainBuffer {
 }
 
 /// 一张 2×2 RGBA8 OPTIMAL 贴图:image + view + 独立分配的 DEVICE_LOCAL 内存
-/// (显存机制篇约束②:image 不复用 MeshPool;逐张 allocate 在 2 张时远不触及
-/// maxMemoryAllocationCount,子分配归 3.3.1 施工)。
+///(逐张 allocate,2 张远不触及 maxMemoryAllocationCount)。
 struct TestImage {
     device: Device,
     image: vk::Image,
@@ -1279,14 +1248,7 @@ impl TestImage {
                         .image(image)
                         .view_type(vk::ImageViewType::TYPE_2D)
                         .format(vk::Format::R8G8B8A8_UNORM)
-                        .subresource_range(
-                            vk::ImageSubresourceRange::default()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .base_mip_level(0)
-                                .level_count(1)
-                                .base_array_layer(0)
-                                .layer_count(1),
-                        ),
+                        .subresource_range(color_range()),
                     None,
                 )
                 .expect("贴图视图");
@@ -1328,10 +1290,9 @@ impl InterfaceShapes {
     unsafe fn new(device: &Device) -> Self {
         let uab_partially = vk::DescriptorBindingFlags::UPDATE_AFTER_BIND
             | vk::DescriptorBindingFlags::PARTIALLY_BOUND;
-        // UAB|PARTIALLY_BOUND 旗标不走 binding 自身字段(ash 0.38 的
-        // DescriptorSetLayoutBinding 无此字段),经 VkDescriptorSetLayoutBinding-
-        // FlagsCreateInfo 扩展结构挂进 layout 创建;bindingCount 须与 layout 的
-        // binding 数一致,故 set0 两个 binding 都给旗标位。
+        // UAB|PARTIALLY_BOUND 旗标经 DescriptorSetLayoutBindingFlagsCreateInfo 挂进
+        // layout 创建(binding 自身无此字段);bindingCount 须与 layout 的 binding 数
+        // 一致,故 set0 两个 binding 都给旗标位。
         let set0_bindings = [
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -1351,9 +1312,8 @@ impl InterfaceShapes {
             let set_layouts = [
                 device
                     .create_descriptor_set_layout(
-                        // UAB 旗标三层配套之一:layout 自身必须带
-                        // UPDATE_AFTER_BIND_POOL 旗标(VUID-03000)——首跑被验证层
-                        // 抓到缺这层,正是"旗标配套"纪律的活证据
+                        // 坑:UAB 三层旗标须配套(binding / layout / pool),layout 缺
+                        // UPDATE_AFTER_BIND_POOL 报 VUID-03000
                         &vk::DescriptorSetLayoutCreateInfo::default()
                             .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
                             .bindings(&set0_bindings)
@@ -1429,8 +1389,8 @@ impl Drop for InterfaceShapes {
 /// 负例双案:未启用 runtimeDescriptorArray 特性的设备上——
 /// ① 原生 naga 词流(模块连 RuntimeDescriptorArray capability 都没声明);
 /// ② capability 补丁词流(capability 已声明,只缺特性)。
-/// 探针纪律:故意违规只收账不断言驱动行为——"成功返回 ≠ 规范许可";断言只
-/// 落在 VU_LOG 是否出现预期 VUID(实测钉号入施工记录)。
+/// 故意违规只收账不断言驱动行为(成功返回 ≠ 规范许可),结果按 VU_LOG 是否出现
+/// RuntimeDescriptorArray 相关消息报告。
 fn group_d_negative(
     instance: &ash::Instance,
     pd: vk::PhysicalDevice,
@@ -1439,31 +1399,11 @@ fn group_d_negative(
     validation_installed: bool,
 ) {
     if !validation_installed {
-        println!("\n== 组 D [SKIP] validation layer 未安装，负例不构成执法证据 ==");
+        println!("\n== 组 D [SKIP] validation layer 未安装，负例不构成验证层证据 ==");
         return;
     }
     println!("\n== 组 D(负例诊断:关 runtimeDescriptorArray 特性,双案)==");
-    let families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
-    let gfx_family = families
-        .iter()
-        .position(|f| f.queue_flags.contains(vk::QueueFlags::GRAPHICS))
-        .expect("无 graphics 族") as u32;
-    let mut vk12 = feature_set(false); // runtime 位关,其余照常
-    let priority = [1.0f32];
-    let queue_infos = [vk::DeviceQueueCreateInfo::default()
-        .queue_family_index(gfx_family)
-        .queue_priorities(&priority)];
-    let device = unsafe {
-        instance
-            .create_device(
-                pd,
-                &vk::DeviceCreateInfo::default()
-                    .queue_create_infos(&queue_infos)
-                    .push_next(&mut vk12),
-                None,
-            )
-            .expect("负例 vkCreateDevice")
-    };
+    let (device, _gfx_family) = create_device(instance, pd, false, "负例"); // runtime 位关,其余照常
     let shapes = unsafe { InterfaceShapes::new(&device) };
     // 负例管线形状对齐组 C:同一套 set 布局 + push 范围,违规只落在 SPIR-V 一侧
     for (case, words) in [
@@ -1478,21 +1418,14 @@ fn group_d_negative(
         let creation = unsafe {
             device.create_compute_pipelines(
                 vk::PipelineCache::null(),
-                &[vk::ComputePipelineCreateInfo::default()
-                    .stage(
-                        vk::PipelineShaderStageCreateInfo::default()
-                            .stage(vk::ShaderStageFlags::COMPUTE)
-                            .module(shader_module)
-                            .name(c"main"),
-                    )
-                    .layout(shapes.pipeline_layout)],
+                &[compute_pipeline_info(shader_module, shapes.pipeline_layout)],
                 None,
             )
         };
         match creation {
             Ok(pipelines) => {
                 println!(
-                    "[负例{case}] 管线创建返回成功——\"成功返回 ≠ 规范许可\",以验证层收账为准"
+                    "[负例{case}] 管线创建返回成功——\"成功返回 ≠ 规范许可\",以验证层消息为准"
                 );
                 unsafe { device.destroy_pipeline(pipelines[0], None) };
             }
@@ -1507,27 +1440,69 @@ fn group_d_negative(
             }
         }
         let vu = drain_vu();
-        let hits: Vec<&String> = vu
+        let (hits, others): (Vec<&String>, Vec<&String>) = vu
             .iter()
-            .filter(|m| m.to_ascii_lowercase().contains("runtimedescriptorarray"))
-            .collect();
+            .partition(|m| m.to_ascii_lowercase().contains("runtimedescriptorarray"));
         if hits.is_empty() {
-            println!("[负例{case}] 未见含 RuntimeDescriptorArray 的 VUID——执法未发生,如实注明");
+            println!("[负例{case}] 未见含 RuntimeDescriptorArray 的 VUID——验证层未检出,如实注明");
         } else {
             for m in hits {
-                println!("[负例{case}] 已被验证层收账: {m}");
+                println!("[负例{case}] 已被验证层检出: {m}");
             }
         }
-        for m in &vu {
-            if !m.to_ascii_lowercase().contains("runtimedescriptorarray") {
-                println!("[负例{case}] 其他收账消息: {m}");
-            }
+        for m in others {
+            println!("[负例{case}] 其他验证层消息: {m}");
         }
         unsafe { device.destroy_shader_module(shader_module, None) };
     }
     unsafe { device.device_wait_idle() }.expect("负例收场 wait_idle");
     drop(shapes);
     unsafe { device.destroy_device(None) };
+}
+
+/// 建 graphics 族设备(特性集见 [`feature_set`]),返回设备与族号。
+fn create_device(
+    instance: &ash::Instance,
+    pd: vk::PhysicalDevice,
+    runtime: bool,
+    label: &str,
+) -> (Device, u32) {
+    let families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
+    let gfx_family = families
+        .iter()
+        .position(|f| f.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+        .expect("无 graphics 族") as u32;
+    let mut vk12 = feature_set(runtime);
+    let priority = [1.0f32];
+    let queue_infos = [vk::DeviceQueueCreateInfo::default()
+        .queue_family_index(gfx_family)
+        .queue_priorities(&priority)];
+    let device = unsafe {
+        instance.create_device(
+            pd,
+            &vk::DeviceCreateInfo::default()
+                .queue_create_infos(&queue_infos)
+                .push_next(&mut vk12),
+            None,
+        )
+    }
+    .unwrap_or_else(|e| panic!("{label} vkCreateDevice: {e:?}"));
+    (device, gfx_family)
+}
+
+/// compute 管线创建信息:入口 main + 给定模块与布局(组 C 试验与组 D 负例共用)。
+fn compute_pipeline_info(
+    module: vk::ShaderModule,
+    layout: vk::PipelineLayout,
+) -> vk::ComputePipelineCreateInfo<'static> {
+    vk::ComputePipelineCreateInfo::default()
+        .stage(
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(module)
+                .name(c"main"),
+        )
+        .layout(layout)
 }
 
 /// 组 C/D 共用的 Vulkan12Features 配方:descriptor_indexing 伞位 + 三个具体位,

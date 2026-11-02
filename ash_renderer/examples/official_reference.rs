@@ -1,30 +1,30 @@
-//! 3.5.3 官方对照参照进程：同一 FlightHelmet 场景交给**官方 bevy_render/wgpu**
-//! 渲染，与 ash_renderer 主程序（自研 ash 管线）做并排受控对照（3.5.3）。
+//! 官方对照参照进程：FlightHelmet 场景交给**官方 bevy_render/wgpu** 渲染，供与
+//! ash_renderer 主程序（自研 ash 管线）并排截图对照。
 //!
-//! 独立进程而非同进程双渲染器——面板定案"避免让自研进程初始化 wgpu"。本
-//! crate 的 bevy 依赖默认 feature 本就全开（主程序只是运行时 disable 渲染族
-//! 插件），所以一个普通 example 就是完整的官方渲染宿主，零额外依赖。
+//! 用独立进程而非同进程双渲染器：避免让自研进程初始化 wgpu。本 crate 的 bevy
+//! 依赖默认 feature 全开（主程序只是运行时 disable 渲染族插件），所以一个普通
+//! example 就是完整的官方渲染宿主，零额外依赖。
 //!
-//! **对照条件表**（与 ash_renderer 主程序逐项同源，收官记录引用本表）：
+//! **本例对照条件**：
 //!
-//! | 条件 | 本例 | ash_renderer 主程序 |
-//! |---|---|---|
-//! | 资产 | FlightHelmet.gltf #Scene0（仓库 assets/） | 同 |
-//! | 场景 | 仅头盔（六 primitive，无地面/方块） | 同 |
-//! | 相机 | (0.7,0.7,1.0) 看 (0,0.3,0)，Perspective 默认 fov | 同（scene/camera.rs 同参数） |
-//! | 分辨率 | 1280×720 | 同（winit 默认） |
-//! | 方向光 | 20000 lx（FULL_DAYLIGHT），rot ZYX(0,-0.15π,-0.15π)，shadow 关 | 同（scene/lights.rs 同参数） |
-//! | 环境光 | GlobalAmbientLight 默认（80，LightPlugin 预插） | 同（3.5.1 读进 UBO） |
-//! | 材质 | glTF 原样 + `OFFICIAL_REF_MODE=unlit` 时全置 unlit | 不透明调试覆盖 + mode 三态 |
-//! | 输出链 | LDR 直出（无 Hdr）+ Tonemapping::None + DebandDither 关 + Msaa::Off | 线性着色 → SRGB view 编码 |
+//! | 条件 | 本例 |
+//! |---|---|
+//! | 资产 | FlightHelmet.gltf #Scene0（仓库 assets/），仅头盔，无地面/方块 |
+//! | 相机 | (0.7,0.7,1.0) 看 (0,0.3,0)，Perspective 默认 fov |
+//! | 分辨率 | 1280×720 |
+//! | 方向光 | 20000 lx（FULL_DAYLIGHT），rot ZYX(0,-0.15π,-0.15π)，shadow 关 |
+//! | 环境光 | GlobalAmbientLight 默认（80，LightPlugin 预插） |
+//! | 材质 | glTF 原样；`OFFICIAL_REF_MODE=unlit` 时全置 unlit |
+//! | 输出链 | LDR 直出（无 Hdr）+ Tonemapping::None + DebandDither 关 + Msaa::Off |
 //!
-//! 输出端约定：两侧最终都走"线性值 → sRGB 编码恰好一次"；Tonemapping::None
-//! 让官方侧不做 tonemap（默认 TonyMcMapface 是两侧行数不同的一处已知差异），
-//! 亮侧超 1 的部分同样线性削顶——方向/明暗界线可判读，绝对亮度不对齐（待决）。
+//! 坑：主程序现状已与本例不同源——默认场景 Sponza（`--scene` 可换回头盔）、相机为
+//! Sponza 中庭机位、环境光 800、输出链 HDR + Bloom + ACES + SMAA；只有方向光照度与
+//! 朝向仍一致（`src/scene/content/lights.rs`）。并排对照前须先对齐这些条件，否则差异
+//! 不可归因。
 //!
 //! 跑法：`cargo run -p ash_renderer --example official_reference`；进程 6s 自动
-//! 退出，供并排截图脚本定时抓图（PrintWindow 按标题，全屏截图会被前台应用
-//! 遮挡——3.2 前置闸门的方法论钉子）。
+//! 退出，供并排截图脚本定时抓图（坑：按窗口标题 PrintWindow 抓，全屏截图会被
+//! 前台应用遮挡）。
 
 use std::f32::consts::PI;
 
@@ -49,7 +49,7 @@ fn main() -> AppExit {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        // 与主程序同尺寸（写显是对照条件表的一部分）
+                        // 与主程序窗口同尺寸（winit 默认 1280×720），显式写出
                         resolution: WindowResolution::new(1280, 720),
                         title: "official-reference".into(),
                         ..default()
@@ -67,14 +67,13 @@ fn main() -> AppExit {
         .run()
 }
 
-/// 场景装配（Startup）：头盔 + 方向光 + 相机，参数抄主程序 scene/ 与官方
-/// anti_aliasing.rs 的同一组值——条件表三行同源。
+/// 场景装配（Startup）：头盔 + 方向光 + 相机，取值见文件头对照条件表。
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     // 头盔（无地面/方块——那些是抗锯齿示例的演示物，不属于对照条件）
     commands.spawn(WorldAssetRoot(asset_server.load(
         GltfAssetLabel::Scene(0).from_asset("models/FlightHelmet/FlightHelmet.gltf"),
     )));
-    // 方向光：与 scene/lights.rs 同参数（shadow 默认即关，写显是条件表）
+    // 方向光：照度/朝向与主程序 lights.rs 一致；shadow 默认即关，显式写出
     commands.spawn((
         DirectionalLight {
             illuminance: light_consts::lux::FULL_DAYLIGHT,
@@ -83,8 +82,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         },
         Transform::from_rotation(Quat::from_euler(EulerRot::ZYX, 0.0, PI * -0.15, PI * -0.15)),
     ));
-    // 相机：与 scene/camera.rs 同取景；输出链钉 LDR+无 tonemap+无 dither+1×，
-    // 与自研侧"线性着色 → sRGB 编码恰好一次"同形
+    // 相机：输出链钉 LDR + 无 tonemap + 无 dither + 1×，线性值 → sRGB 编码恰好一次
     commands.spawn((
         Camera3d::default(),
         Msaa::Off,
@@ -96,7 +94,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 }
 
 /// unlit 覆盖（`OFFICIAL_REF_MODE=unlit` 时启用）：容器内全部 StandardMaterial
-/// 置 unlit（bevy 侧跳过光照直出 base color，与主程序 mode=1 同口径）。材质
+/// 置 unlit（跳过光照直出 base color，与主程序 RenderMode::Unlit 同口径）。材质
 /// 异步到货——每帧幂等重扫，新到货的材质下一帧被覆盖；未启用时只报一次。
 fn apply_unlit_override(
     mut materials: ResMut<Assets<StandardMaterial>>,

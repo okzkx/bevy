@@ -1,27 +1,18 @@
-//! 3.2.1 timeline 探针 v2（缺陷 D5 重写）：验证层执法下的驱动观察，不再是"规范裁决"。
+//! timeline 信号量探针：验证层执法下的驱动观察，不做规范裁决。
 //!
-//! v1（68fdafa88）已撤回的教训（见《已实现缺陷与修复验收》§5）：
-//! - A/B 两组都调 queue_submit2 却不启用 synchronization2，双双违反
-//!   VUID-vkQueueSubmit2-synchronization2-03866，B 不是干净对照；
-//! - 不请求验证层，"PASS"只是没炸，不是"验证层通过"；
-//! - "违规必得 ERROR_FEATURE_NOT_PRESENT""PASS 即合法""1.3 结构没有字段即无需
-//!   启用"都是错误判据：应用违反 valid usage 时驱动不承担按固定返回码拒绝的义务，
-//!   成功返回不是规范许可。
-//!
-//! v1 的运行记录仅作历史观察保留（3.2.1 记录 §复核），其结论不再引用。
-//!
-//! v2 的两组是"观察 + 诊断"，不是正误裁决：
+//! 两组都是"观察 + 诊断"：
 //! - 组 A（合法用法观察组）：显式启用 timelineSemaphore + synchronization2，
 //!   走创建 → 查初值 → submit2 signal → host wait → 复查全链；
 //! - 组 B（负例诊断组）：不启用 timelineSemaphore 直接创建 TIMELINE 信号量，
 //!   只收验证层的预期诊断（VUID-VkSemaphoreTypeCreateInfo-timelineSemaphore-03252），
 //!   不期待驱动必返回固定错误码，创建即拆，不当正常路径继续用。
 //!
-//! 信号量销毁的完成条件可证明：host wait 返回时计数已到 SIGNAL_VALUE，
-//! 即 signal 那笔提交已执行完、无在途引用——此刻销毁合法。
+//! 坑：判据只认验证层收账。应用违反 valid usage 时驱动不承担按固定返回码拒绝的
+//! 义务，成功返回 ≠ 规范许可；不请求验证层时"PASS"只是没炸。调 queue_submit2
+//! 必须启用 synchronization2（VUID-vkQueueSubmit2-synchronization2-03866）。
 //!
-//! 本探针不碰窗口/surface，自含 Entry → Instance → PhysicalDevice → Device
-//! 最小链，与主工程互不影响（cargo run --example timeline_probe）。
+//! 不碰窗口/surface，自含 Entry → Instance → PhysicalDevice → Device 最小链
+//!（cargo run --example timeline_probe）。
 
 use std::slice;
 use std::sync::Mutex;
@@ -70,74 +61,16 @@ fn main() {
     println!(
         "验证层 {VALIDATION_LAYER:?}: {}",
         if validation_installed {
-            "已安装，本探针请求启用（VUID 收账见结尾）"
+            "已安装，本探针请求启用（VUID 汇总见结尾）"
         } else {
             "未安装（本机缺 Vulkan SDK），本轮裸奔——结果不构成验证证据"
         }
     );
 
-    let app_info = vk::ApplicationInfo::default()
-        .application_name(c"timeline_probe")
-        .api_version(vk::API_VERSION_1_3);
-    let ext_names = if validation_installed {
-        vec![debug_utils::NAME.as_ptr()]
-    } else {
-        Vec::new()
-    };
-    let layer_names = if validation_installed {
-        vec![VALIDATION_LAYER.as_ptr()]
-    } else {
-        Vec::new()
-    };
-    // 同步验证随主工程同款（VkValidationFeaturesEXT）：组 A 的 signal/wait 配对
-    // 要在执法面下跑通才算数。enables 须活到 create_instance 返回（pNext 存指针）。
-    let sync_enables = if validation_installed {
-        Some([vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION])
-    } else {
-        None
-    };
-    let mut sync_validation = vk::ValidationFeaturesEXT::default();
-    let mut instance_info = vk::InstanceCreateInfo::default()
-        .application_info(&app_info)
-        .enabled_extension_names(&ext_names)
-        .enabled_layer_names(&layer_names);
-    if let Some(enables) = &sync_enables {
-        sync_validation = sync_validation.enabled_validation_features(enables);
-        instance_info = instance_info.push_next(&mut sync_validation);
-    }
-    let instance = unsafe { entry.create_instance(&instance_info, None) }.expect("vkCreateInstance");
+    let instance = make_instance(&entry, validation_installed);
+    let messenger = validation_installed.then(|| make_messenger(&entry, &instance));
 
-    let _debug = validation_installed.then(|| {
-        let loader = debug_utils::Instance::new(&entry, &instance);
-        let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
-            .message_severity(
-                vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                    | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
-            )
-            .message_type(
-                vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
-            )
-            .pfn_user_callback(Some(probe_callback));
-        unsafe { loader.create_debug_utils_messenger(&messenger_info, None) }.expect("创建验证 messenger")
-    });
-
-    // 与主工程同门槛：只选报 1.3 的设备
-    let pds = unsafe { instance.enumerate_physical_devices() }.expect("枚举物理设备");
-    let pd = *pds
-        .iter()
-        .find(|pd| unsafe { instance.get_physical_device_properties(**pd) }.api_version >= vk::API_VERSION_1_3)
-        .expect("没有报支持 Vulkan 1.3 的物理设备");
-    let props = unsafe { instance.get_physical_device_properties(pd) };
-    let dev_name =
-        unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy();
-    println!(
-        "设备 {dev_name}: API v{}.{}.{}（过 1.3 基线）",
-        vk::api_version_major(props.api_version),
-        vk::api_version_minor(props.api_version),
-        vk::api_version_patch(props.api_version),
-    );
+    let pd = pick_physical_device(&instance);
 
     // 支持查询（features2 链）：报告"驱动支持吗"，与设备创建时的启用集合分开报。
     let mut vk12_query = vk::PhysicalDeviceVulkan12Features::default();
@@ -180,19 +113,18 @@ fn main() {
             .any(|m| m.contains("VUID-VkSemaphoreTypeCreateInfo-timelineSemaphore-03252"));
         println!(
             "[组 B 诊断] VUID-03252 {}",
-            if hit { "已被验证层执法收账" } else { "未见（验证层未运行或未覆盖此检查）" }
+            if hit { "已被验证层检出" } else { "未见（验证层未运行或未覆盖此检查）" }
         );
         unsafe { device.destroy_device(None) };
     }
 
-    // messenger 先于 instance 销毁——ash 0.38 无自动 Drop，漏了会被 VUID-00629 收账
-    if let Some(messenger) = _debug {
-        let loader = debug_utils::Instance::new(&entry, &instance);
-        unsafe { loader.destroy_debug_utils_messenger(messenger, None) };
+    // 坑：messenger 须先于 instance 销毁（ash 无自动 Drop），漏了报 VUID-00629
+    if let Some((loader, handle)) = messenger {
+        unsafe { loader.destroy_debug_utils_messenger(handle, None) };
     }
     unsafe { instance.destroy_instance(None) };
 
-    println!("\n== 验证层 VUID 收账 ==");
+    println!("\n== 验证层 VUID 汇总 ==");
     let vu = VU_LOG.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if vu.is_empty() {
         println!("  （零条——仅当验证层已启用时，这才是\"已验证无告警\"的证据）");
@@ -201,8 +133,81 @@ fn main() {
             println!("  {m}");
         }
     }
-    println!("\n结论口径：本探针只回答\"这套用法在验证层下跑通了没有\"；");
-    println!("timeline 必须显式启用的规范依据见《已实现缺陷与修复验收》§1 引用的 features.adoc L105-106 与 VUID-03252，不以本探针的 PASS 裁决。");
+    println!("\n结论：本探针只回答\"这套用法在验证层下跑通了没有\"；");
+    println!("timeline 必须显式启用的规范依据见 features.adoc L105-106 与 VUID-03252，不以本探针的 PASS 为准。");
+}
+
+fn make_instance(entry: &Entry, validation: bool) -> ash::Instance {
+    let app_info = vk::ApplicationInfo::default()
+        .application_name(c"timeline_probe")
+        .api_version(vk::API_VERSION_1_3);
+    let ext_names = if validation {
+        vec![debug_utils::NAME.as_ptr()]
+    } else {
+        Vec::new()
+    };
+    let layer_names = if validation {
+        vec![VALIDATION_LAYER.as_ptr()]
+    } else {
+        Vec::new()
+    };
+    // 同步验证（VkValidationFeaturesEXT）：组 A 的 signal/wait 配对要在其下跑通才算数。
+    // enables 须活到 create_instance 返回（pNext 存指针）。
+    let sync_enables = if validation {
+        Some([vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION])
+    } else {
+        None
+    };
+    let mut sync_validation = vk::ValidationFeaturesEXT::default();
+    let mut instance_info = vk::InstanceCreateInfo::default()
+        .application_info(&app_info)
+        .enabled_extension_names(&ext_names)
+        .enabled_layer_names(&layer_names);
+    if let Some(enables) = &sync_enables {
+        sync_validation = sync_validation.enabled_validation_features(enables);
+        instance_info = instance_info.push_next(&mut sync_validation);
+    }
+    unsafe { entry.create_instance(&instance_info, None) }.expect("vkCreateInstance")
+}
+
+fn make_messenger(
+    entry: &Entry,
+    instance: &ash::Instance,
+) -> (debug_utils::Instance, vk::DebugUtilsMessengerEXT) {
+    let loader = debug_utils::Instance::new(entry, instance);
+    let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+        .message_severity(
+            vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+        )
+        .message_type(
+            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+        )
+        .pfn_user_callback(Some(probe_callback));
+    let handle = unsafe { loader.create_debug_utils_messenger(&messenger_info, None) }
+        .expect("创建验证 messenger");
+    (loader, handle)
+}
+
+/// 选第一台报 1.3 的设备并打印其版本。
+fn pick_physical_device(instance: &ash::Instance) -> vk::PhysicalDevice {
+    let pds = unsafe { instance.enumerate_physical_devices() }.expect("枚举物理设备");
+    let pd = *pds
+        .iter()
+        .find(|pd| unsafe { instance.get_physical_device_properties(**pd) }.api_version >= vk::API_VERSION_1_3)
+        .expect("没有报支持 Vulkan 1.3 的物理设备");
+    let props = unsafe { instance.get_physical_device_properties(pd) };
+    let dev_name =
+        unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy();
+    println!(
+        "设备 {dev_name}: API v{}.{}.{}（过 1.3 基线）",
+        vk::api_version_major(props.api_version),
+        vk::api_version_minor(props.api_version),
+        vk::api_version_patch(props.api_version),
+    );
+    pd
 }
 
 /// graphics 族设备。`enable_bits=true` 链 Vulkan12Features.timeline_semaphore +
@@ -279,7 +284,7 @@ fn run_timeline_round(device: &Device, queue: vk::Queue) {
 
 /// 组 B 负例：不启用 timelineSemaphore 直接创建 TIMELINE 信号量。
 /// 任何结局只记录不断言——驱动可以返回成功也可以报错，验证层的 VUID-03252
-/// 才是要收的账；"必返 ERROR_FEATURE_NOT_PRESENT"正是 v1 被撤回的判据。
+/// 才是要收的账，不假设必返 ERROR_FEATURE_NOT_PRESENT。
 fn try_create_timeline_without_enable(device: &Device) -> Result<vk::Semaphore, vk::Result> {
     unsafe {
         let mut ty = vk::SemaphoreTypeCreateInfo::default()

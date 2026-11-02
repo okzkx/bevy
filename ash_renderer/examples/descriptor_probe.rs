@@ -1,13 +1,14 @@
-//! 3.3.3/3.3.4 描述符链路探针：**生产表全链实证**。与前置闸门 bindless_probe 的
-//! 分工——闸门验证的是"接口能不能编译、能不能过 val、能不能在临时布局上采样"，
-//! 本探针验证的是 **`BindlessTextureTable`（生产 CPU 侧真身）**：
+//! 描述符链路探针：**生产表全链实证**。与 bindless_probe 的分工——后者验证接口能
+//! 不能编译、能不能过 val、能不能在临时布局上采样；本探针验证的是
+//! **`BindlessTextureTable`（生产 CPU 侧真身）**：
 //!
 //! - 组 A（设备与限额对账）：生产五位特性集建设备；UAB 轨五项限额实测值落账；
 //!   `BindlessTextureTable::new` 以 `TABLE_CAPACITY`(1024) 建表——限额对账在表内执行
-//!   并落日志（3.3.2 判定线：对账不过 = 显式报错，不静默截断）。
+//!   并落日志（对账不过 = 显式报错，不静默截断）。
 //! - 组 B（发布与去重 + 耗尽负例）：生产表上发布三张测试贴图（红/绿/蓝，两张
-//!   线性一张 NEAREST 采样器）——纹理槽 1/2/3 顺位、采样器按功能键去重（两张
-//!   线性共享槽 1）；小容量表（容量 4）第 4 次发布 → 槽耗尽报错（不越界不截断）。
+//!   线性一张 NEAREST 采样器）——纹理槽 1/2/3 顺位、采样器按功能键去重（linear 与
+//!   fallback 共享槽 0，nearest 占槽 1）；小容量表（容量 4）第 4 次发布 → 槽耗尽
+//!   报错（不越界不截断）。
 //! - 组 C（采样读回 + descriptor update-after-bind 配置）：compute dispatch 经**生产 set0/set1**
 //!   采样（push 一致路径 + storage 非一致路径），读回比对纹理选择与采样器槽位；
 //!   首次提交完成之后改写纹理槽 3，二次 dispatch 读回新内容，验证 UAB layout/pool
@@ -18,7 +19,7 @@
 //!
 //! 自含 Entry→Instance→Device 最小链（不碰窗口），验证层 + 同步验证常开；
 //! SPIR-V 走 build.rs 正式编译路径（`OUT_DIR/descriptor_probe.spv`，含 capability
-//! 补丁器）——探针消费的就是 3.4 将消费的同一产物。
+//! 补丁器），与主管线着色器同一产物链。
 //!
 //! set2 是探针专用 I/O（storage 进出），**不属于生产表**；采样路径 set0/set1
 //! 完全是生产形状。
@@ -51,6 +52,17 @@ fn uniform_pixels(rgba: [u8; 4]) -> [u8; 16] {
     out
 }
 
+/// `size`×`size` 单 mip 的 RGBA8 线性规格（测试贴图统一规格，采样器差异在发布键上制造）。
+fn unorm_spec(size: u32) -> ImageSpec {
+    ImageSpec {
+        width: size,
+        height: size,
+        format: vk::Format::R8G8B8A8_UNORM,
+        mip_levels: 1,
+        sampler: ImageSamplerDescriptor::linear(),
+    }
+}
+
 /// 测试贴图集：名字 → (GPU 本体, 像素)。
 type TexMap = HashMap<&'static str, (GpuImage, [u8; 4])>;
 
@@ -68,7 +80,7 @@ fn main() {
     println!(
         "验证层 {VALIDATION_LAYER:?}: {}",
         if validation_installed {
-            "已安装，启用 + 同步验证（VUID 收账见结尾）"
+            "已安装，启用 + 同步验证（VUID 汇总见结尾）"
         } else {
             "未安装——本轮裸奔，结果不构成验证证据"
         }
@@ -83,7 +95,7 @@ fn main() {
         .expect("没有报支持 Vulkan 1.3 的物理设备");
 
     // ============ 组 A：设备特性与限额对账 ============
-    println!("\n== 组 A(设备特性与限额对账)==");
+    println!("\n== 组 A(设备特性与限额核对)==");
     let mut queried = vk::PhysicalDeviceVulkan12Features::default();
     let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut queried);
     unsafe { instance.get_physical_device_features2(pd, &mut features2) };
@@ -108,13 +120,13 @@ fn main() {
     }
     assert!(
         need.iter().all(|(_, v)| *v != 0),
-        "生产五位特性不齐——设备出局（与 context.rs 硬校验同判据）"
+        "生产所需五项特性不齐——设备不可用（与 context.rs 硬校验同判据）"
     );
     let mut di_props = vk::PhysicalDeviceDescriptorIndexingProperties::default();
     let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut di_props);
     unsafe { instance.get_physical_device_properties2(pd, &mut props2) };
     println!(
-        "[UAB 限额] 每阶段 sampledImages={} / 每 set {} | 每阶段 samplers={} / 每 set {} | 全池总额={}（对账在 BindlessTextureTable::new 内执行并落账）",
+        "[UAB 限额] 每阶段 sampledImages={} / 每 set {} | 每阶段 samplers={} / 每 set {} | 全池总额={}（限额核对在 BindlessTextureTable::new 内执行并写日志）",
         di_props.max_per_stage_descriptor_update_after_bind_sampled_images,
         di_props.max_descriptor_set_update_after_bind_sampled_images,
         di_props.max_per_stage_descriptor_update_after_bind_samplers,
@@ -136,21 +148,14 @@ fn main() {
         tables.used_sampler_slots(),
     );
 
-    // 测试贴图：红/绿/蓝 2×2 均色（全部 linear 规格；采样器差异在发布键上制造）
+    // 测试贴图：红/绿/蓝 2×2 均色
     let mut textures: TexMap = HashMap::new();
     for (name, rgba) in [
         ("red", [255u8, 0, 0, 255]),
         ("green", [0, 255, 0, 255]),
         ("blue", [0, 0, 255, 255]),
     ] {
-        let spec = ImageSpec {
-            width: 2,
-            height: 2,
-            format: vk::Format::R8G8B8A8_UNORM,
-            mip_levels: 1,
-            sampler: ImageSamplerDescriptor::linear(),
-        };
-        let img = GpuImage::create(&device, &instance, pd, &contract, &spec, &[]).expect("测试贴图");
+        let img = GpuImage::create(&device, &instance, pd, &contract, &unorm_spec(2), &[]).expect("测试贴图");
         textures.insert(name, (img, rgba));
     }
 
@@ -173,7 +178,7 @@ fn main() {
     assert_eq!(
         tables.used_sampler_slots(),
         2,
-        "采样器按功能键去重：fallback(0) + linear(1) + nearest(2)，两张线性贴图共享槽 1"
+        "采样器按功能键去重：linear 与 fallback 共享槽 0，nearest 占槽 1，共 2 槽"
     );
 
     // 耗尽负例：容量 4 的小表——fallback(0) + 三张贴图(1,2,3) 满载，第 4 张必须报错
@@ -183,14 +188,7 @@ fn main() {
     upload_and_publish(&mut uploader, &mut small_tables, &textures, &[
         ("red", &lin), ("green", &lin), ("blue", &near),
     ]);
-    let white_spec = ImageSpec {
-        width: 2,
-        height: 2,
-        format: vk::Format::R8G8B8A8_UNORM,
-        mip_levels: 1,
-        sampler: ImageSamplerDescriptor::linear(),
-    };
-    let white = GpuImage::create(&device, &instance, pd, &contract, &white_spec, &[]).expect("白色贴图");
+    let white = GpuImage::create(&device, &instance, pd, &contract, &unorm_spec(2), &[]).expect("白色贴图");
     match small_tables.publish(white.view(), &lin) {
         Ok(_) => panic!("容量 4 的小表第 4 次发布竟然成功——容量纪律失效"),
         Err(e) => {
@@ -210,9 +208,7 @@ fn main() {
     unsafe { device.device_wait_idle() }.expect("探针收场 wait_idle");
     drop(tables);
     drop(small_tables);
-    for (_, (img, _)) in textures {
-        drop(img);
-    }
+    drop(textures);
     drop(uploader);
     unsafe { device.destroy_device(None) };
     if let Some((loader, handle)) = messenger {
@@ -220,7 +216,7 @@ fn main() {
     }
     unsafe { instance.destroy_instance(None) };
 
-    println!("\n== 验证层消息收账(全程)==");
+    println!("\n== 验证层消息汇总(全程)==");
     let vu = VU_TOTAL.lock().unwrap_or_else(|p| p.into_inner());
     if !validation_installed {
         println!("  [SKIP] Validation-layer evidence unavailable; descriptor behavior was only observed.");
@@ -230,7 +226,7 @@ fn main() {
         for m in vu.iter() {
             println!("  {m}");
         }
-        panic!("收到验证层消息 {} 条——\"零告警\"验收点未过", vu.len());
+        panic!("收到验证层消息 {} 条——未满足\"零告警\"要求", vu.len());
     }
 }
 
@@ -248,7 +244,7 @@ fn make_instance(entry: &Entry, validation: bool) -> ash::Instance {
     } else {
         Vec::new()
     };
-    // 同步验证随主工程同款(VkValidationFeaturesEXT)
+    // 同步验证(VkValidationFeaturesEXT);sync_enables 须活到 create_instance 返回
     let mut sync_validation = vk::ValidationFeaturesEXT::default();
     let mut instance_info = vk::InstanceCreateInfo::default()
         .application_info(&app_info)
@@ -280,9 +276,9 @@ fn make_messenger(entry: &Entry, instance: &ash::Instance) -> (debug_utils::Inst
     (loader, handle)
 }
 
-/// 生产特性集（与 context.rs 启用清单同款：timeline + descriptor indexing 五位
-/// ——支持 ≠ 启用，每一位显式声明；timeline 是 Uploader 票据信号量的前提，
-/// 缺它 = VUID-03252，本探针首跑实抓）。
+/// 生产特性集（与 `render::core::device::context` 启用清单同款：timeline + descriptor
+/// indexing 五位，每一位显式声明）。坑：timeline 是 Uploader 票据信号量的前提，缺它报
+/// VUID-03252。
 fn production_vk12() -> vk::PhysicalDeviceVulkan12Features<'static> {
     vk::PhysicalDeviceVulkan12Features::default()
         .timeline_semaphore(true)
@@ -318,8 +314,7 @@ fn make_device(instance: &ash::Instance, pd: vk::PhysicalDevice) -> Device {
 }
 
 /// 合批上传（与 flush_uploads 同形状：staging 连续排布 + 一次 transfer 提交）
-/// → 等票据（探针合法的 CPU 等待；生产路径由 3.4 的 GPU 侧票据等待承接）
-/// → 逐张发布并打印槽位。
+/// → CPU 等票据（生产路径改为 GPU 侧等票据）→ 逐张发布并打印槽位。
 fn upload_and_publish(
     uploader: &mut Uploader,
     tables: &mut BindlessTextureTable,
@@ -357,7 +352,7 @@ fn upload_and_publish(
 }
 
 /// push 常量 96B：identity model + tex/sampler 索引 + 零 base_color
-/// （偏移 0/64/68/80，与闸门 Rust 镜像 offset_of! 互证）。
+/// （偏移 0/64/68/80，与 bindless_probe 的 Rust 镜像 offset_of! 互证）。
 fn push_bytes(tex_index: u32, sampler_index: u32) -> [u8; 96] {
     let mut b = [0u8; 96];
     for (i, v) in Mat4::IDENTITY.to_cols_array().iter().enumerate() {
@@ -390,7 +385,8 @@ fn f32_at(back: &[u8], i: usize) -> [f32; 4] {
 
 /// 组 C：生产表采样读回 + update-after-bind。
 ///
-/// 槽位前提（组 B 定下的账）：纹理槽 1=红 2=绿 3=蓝；采样器槽 1=linear 2=nearest。
+/// 槽位前提（组 B 定下的账）：纹理槽 1=红 2=绿 3=蓝；采样器槽 0=linear（与 fallback
+/// 共享）1=nearest。
 fn run_sampling(
     device: &Device,
     contract: &MemoryContract,
@@ -446,11 +442,9 @@ fn run_sampling(
     }
     .expect("set2 分配")[0];
 
-    // 每调用索引。**槽位账本以 publish 返回值为准，不按心算**：去重后 linear 键
-    // 与 fallback 共享采样器槽 0、nearest 占槽 1——初版探针误按"linear=1/nearest=2"
-    // 心算用了未写入的槽 2，读回竟然"全对"且验证层零告警，恰好实证特性族篇 §5
-    // "空槽访问是 UB、验证层不保证能抓"（首跑教训，钉入施工记录）。
-    // 现按真实账本：i=0 → (tex2 绿, 采样槽 0 线性)；i=1 → (tex1 红, 采样槽 1 最近)
+    // 每调用索引：i=0 → (tex2 绿, 采样槽 0 线性)；i=1 → (tex1 红, 采样槽 1 最近)。
+    // 坑：槽位以 publish 返回值为准，不按心算——误用未写入的槽是 UB，读回可能"全对"
+    // 且验证层零告警（PARTIALLY_BOUND 空槽访问验证层不保证能抓）。
     let mut indices =
         GpuBuffer::create(device, contract, 16, BufferRole::Storage).expect("indices buffer");
     let mut idx_bytes = [0u8; 16];
@@ -604,8 +598,8 @@ fn run_sampling(
     );
 
     // —— update-after-bind:set 已在 dispatch 1 被绑定并提交完成,此刻改写纹理槽 3
-    // 为绿图 view,二次 dispatch 应读出新内容——UAB 的存在意义在生产表上实证
-    let (_, (green_img, _)) = textures.iter().find(|(name, _)| **name == "green").expect("绿图");
+    // 为绿图 view,二次 dispatch 应读出新内容
+    let (green_img, _) = &textures["green"];
     let green_view_info = [vk::DescriptorImageInfo::default()
         .image_view(green_img.view())
         .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
@@ -627,7 +621,7 @@ fn run_sampling(
     assert_close(out0_after, GREEN, "out[0] UAB 更新后(tex3 应读出绿)");
     println!("[UAB] 二次 dispatch 读回绿——update-after-bind 在生产表上生效");
 
-    // 清场:排空后反序拆。set2 不显式 free(pool 无 FREE 位,VUID-00312——首跑实抓),
+    // 清场:排空后反序拆。坑:set2 不显式 free(pool 无 FREE 位,free 报 VUID-00312),
     // pool 销毁即整体回收
     unsafe { device.device_wait_idle() }.expect("组 C 收场 wait_idle");
     unsafe { device.destroy_pipeline(pipeline, None) };
@@ -640,7 +634,7 @@ fn run_sampling(
     unsafe { device.destroy_descriptor_set_layout(set2_layout, None) };
 }
 
-/// 验证层回调（与 bindless_probe 同款收账）。
+/// 验证层回调：消息原文入 VU_TOTAL（返回 FALSE = 不被截获）。
 ///
 /// # Safety
 /// 由 Vulkan 实现按回调契约调用；`p_callback_data` 依约定为合法指针或空。
@@ -676,15 +670,8 @@ fn run_retire(
     lin: &SamplerKey,
 ) {
     println!("\n== 组 D(交回与排空)==");
-    let spec = ImageSpec {
-        width: 1,
-        height: 1,
-        format: vk::Format::R8G8B8A8_UNORM,
-        mip_levels: 1,
-        sampler: ImageSamplerDescriptor::linear(),
-    };
     // 只发布不采样，内容无关
-    let img = GpuImage::create(device, instance, pd, contract, &spec, &[]).expect("组 D 贴图");
+    let img = GpuImage::create(device, instance, pd, contract, &unorm_spec(1), &[]).expect("组 D 贴图");
     let mut wait_idle = || unsafe { device.device_wait_idle() }.map_err(Into::into);
 
     // 和 fallback 同参数：交回后采样器槽 0 仍有别的用户，只回收纹理槽
@@ -703,7 +690,7 @@ fn run_retire(
     assert_eq!(own.texture, shared.texture, "排空后的纹理槽应被复用");
     assert_ne!(own.sampler, 0, "新参数不能拿到仍在用的采样器槽 0");
     tables.retire(own);
-    assert_eq!(tables.retired_slot_count(), 2, "唯一用户交回，纹理槽 + 采样器槽都进待回收账");
+    assert_eq!(tables.retired_slot_count(), 2, "唯一用户交回，纹理槽 + 采样器槽都进待回收队列");
     assert_eq!(tables.drain_retired_slots(&mut wait_idle).expect("排空"), 2);
     let again = tables.publish(img.view(), &repeat).expect("再次发布");
     assert_eq!(again, own, "排空后同参数应复用同一对槽");

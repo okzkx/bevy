@@ -1,26 +1,25 @@
-//! 3.2.2.1 内存契约探针:验证层执法下的契约正路观察 + 绑定负例诊断。
+//! 内存契约探针:验证层执法下的契约正路观察 + 绑定负例诊断。
 //!
-//! 与 timeline_probe v2 同纪律:两组是"观察 + 诊断",不是规范裁决——
+//! 两组是"观察 + 诊断",不是规范裁决——
 //! - 组 A(合同正路观察组):契约三层各验一遍——
 //!   ① 类型选择:按角色的必需/优先属性选型,打印设备内存类型/堆表与选中结果
 //!   (staging 期望 HOST_VISIBLE、pool 期望 DEVICE_LOCAL,contract.find_type 担保);
-//!   ② 绑定:恰按 requirements.size 分配、offset 0 绑定(四条绑定条款由流程满足);
+//!   ② 绑定:恰按 requirements.size 分配、offset 0 绑定;
 //!   ③ 读写与 coherent 分支:两段非对齐写 → host 读回校验;再用一次最小 copyBuffer
 //!   闭环(staging→device→readback,fence 等待后读回)——flush/invalidate 的可见性
-//!   语义只有在设备真抄写一遍后才可观察。全部范围断言逐字节,不只对总字节。
+//!   只有在设备真抄写一遍后才可观察。全部范围断言逐字节,不只对总字节。
 //! - 组 B(负例诊断组):memoryOffset 不是 requirements.alignment 的整数倍
-//!   直接绑定,只收验证层的预期诊断(对齐条款:01036;SDK 1.4 层按新修订报
-//!   VUID-vkBindBufferMemory-None-10739,QCOM tile 例外措辞,同一条款),
-//!   不期待驱动必返回固定错误码,绑定即拆,不当正常路径继续用。
+//!   直接绑定,只收验证层的预期诊断(对齐条款 VUID-01036;新版层报
+//!   VUID-vkBindBufferMemory-None-10739,同一条款),不期待驱动必返回固定错误码,
+//!   绑定即拆,不当正常路径继续用。
 //!
-//! 本探针不碰窗口/surface,自含 Entry → Instance → PhysicalDevice → Device 最小链,
-//! 用 [`ash_renderer::render`] 的契约类型本体(测的是交付代码,不是探针复制品)。
-//! 与主工程 device 的差异:本探针不链 12/13 feature(内存路径不涉及这些位),
-//! 用旧 SubmitInfo + 旧 pipeline barrier(不启用 synchronization2 就不用 submit2,
-//! 接口定案归 3.2.4);同步验证照主工程常开。
+//! 不碰窗口/surface,自含 Entry → Instance → PhysicalDevice → Device 最小链,
+//! 测的是 [`ash_renderer::render`] 的契约类型本体(不是探针复制品)。设备不链
+//! 1.2/1.3 feature(内存路径不涉及),用旧 SubmitInfo + 旧 pipeline barrier
+//! (不启用 synchronization2 就不用 submit2);同步验证常开。
 //!
-//! 销毁纪律与 timeline_probe 同款可证明:fence wait 返回 = 拷贝提交执行完、
-//! 无在途引用,此刻拆 buffer/command pool 合法。
+//! 销毁时机可证明:fence wait 返回 = 拷贝提交执行完、无在途引用,此刻拆
+//! buffer/command pool 合法。
 
 use std::slice;
 use std::sync::Mutex;
@@ -54,75 +53,16 @@ fn main() {
     println!(
         "验证层 {VALIDATION_LAYER:?}: {}",
         if validation_installed {
-            "已安装,本探针请求启用 + 同步验证(VUID 收账见结尾)"
+            "已安装,本探针请求启用 + 同步验证(VUID 汇总见结尾)"
         } else {
             "未安装(本机缺 Vulkan SDK),本轮裸奔——结果不构成验证证据"
         }
     );
 
-    let app_info = vk::ApplicationInfo::default()
-        .application_name(c"memory_probe")
-        .api_version(vk::API_VERSION_1_3);
-    let ext_names: Vec<*const std::ffi::c_char> = if validation_installed {
-        vec![debug_utils::NAME.as_ptr()]
-    } else {
-        Vec::new()
-    };
-    let layer_names: Vec<*const std::ffi::c_char> = if validation_installed {
-        vec![VALIDATION_LAYER.as_ptr()]
-    } else {
-        Vec::new()
-    };
-    // 同步验证随主工程同款(VkValidationFeaturesEXT);enables 须活到 create_instance 返回
-    let sync_enables = if validation_installed {
-        Some([vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION])
-    } else {
-        None
-    };
-    let mut sync_validation = vk::ValidationFeaturesEXT::default();
-    let mut instance_info = vk::InstanceCreateInfo::default()
-        .application_info(&app_info)
-        .enabled_extension_names(&ext_names)
-        .enabled_layer_names(&layer_names);
-    if let Some(enables) = &sync_enables {
-        sync_validation = sync_validation.enabled_validation_features(enables);
-        instance_info = instance_info.push_next(&mut sync_validation);
-    }
-    let instance =
-        unsafe { entry.create_instance(&instance_info, None) }.expect("vkCreateInstance");
+    let instance = make_instance(&entry, validation_installed);
+    let messenger = validation_installed.then(|| make_messenger(&entry, &instance));
 
-    let _debug = validation_installed.then(|| {
-        let loader = debug_utils::Instance::new(&entry, &instance);
-        let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
-            .message_severity(
-                vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                    | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
-            )
-            .message_type(
-                vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
-            )
-            .pfn_user_callback(Some(probe_callback));
-        unsafe { loader.create_debug_utils_messenger(&messenger_info, None) }
-            .expect("创建验证 messenger")
-    });
-
-    // 与主工程同门槛:只选报 1.3 的设备
-    let pds = unsafe { instance.enumerate_physical_devices() }.expect("枚举物理设备");
-    let pd = *pds
-        .iter()
-        .find(|pd| unsafe { instance.get_physical_device_properties(**pd) }.api_version >= vk::API_VERSION_1_3)
-        .expect("没有报支持 Vulkan 1.3 的物理设备");
-    let props = unsafe { instance.get_physical_device_properties(pd) };
-    let dev_name =
-        unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy();
-    println!(
-        "设备 {dev_name}: API v{}.{}.{}(过 1.3 基线)",
-        vk::api_version_major(props.api_version),
-        vk::api_version_minor(props.api_version),
-        vk::api_version_patch(props.api_version),
-    );
+    let pd = pick_physical_device(&instance);
 
     // align_up 零成本自检(bump 偏移与 atom 舍入共用的算术地基)
     assert_eq!(align_up(0, 64), 0);
@@ -134,11 +74,11 @@ fn main() {
     println!("\n== 组 A(合同正路观察组)==");
     {
         let (device, queue) = create_device(&instance, pd);
-        // 契约事实冻结:内存类型/堆表 + atom 粒度。表本身是选择决策的证据输入。
+        // 契约事实:内存类型/堆表 + atom 粒度,是选型结果的证据输入。
         let contract = unsafe { MemoryContract::new(&instance, pd) };
         let mem_props = unsafe { instance.get_physical_device_memory_properties(pd) };
         println!(
-            "契约冻结:nonCoherentAtomSize = {}B,内存类型 {} 个 / 堆 {} 个:",
+            "内存契约:nonCoherentAtomSize = {}B,内存类型 {} 个 / 堆 {} 个:",
             contract.non_coherent_atom_size(),
             mem_props.memory_type_count,
             mem_props.memory_heap_count
@@ -221,9 +161,7 @@ fn main() {
             readback.host_coherent(),
         );
 
-        // 最小 copyBuffer 闭环:staging → pool → readback,fence 等完成再读。
-        // 同族单队列,无 ownership 转移;两条内存屏障只补执行/内存依赖
-        // (transfer 写 → transfer 读;transfer 写 → HOST 读)。
+        // 最小 copyBuffer 闭环:staging → pool → readback,fence 等完成再读
         record_copy_round(&device, queue, &staging, &pool, &readback);
         for (off, len) in [REGION_A, REGION_B] {
             let mut back = vec![0u8; len];
@@ -256,9 +194,9 @@ fn main() {
             if !validation_installed {
                 "跳过(VK_LAYER_KHRONOS_validation 未安装)"
             } else if clean_so_far {
-                "零条——合同正路在执法下清净"
+                "零条——正常路径在验证层检查下无告警"
             } else {
-                "非空——见结尾收账,组 A 不清净"
+                "非空——见结尾汇总,组 A 有告警"
             }
         );
         if validation_installed {
@@ -324,7 +262,7 @@ fn main() {
             if !validation_installed {
                 "跳过(VK_LAYER_KHRONOS_validation 未安装)"
             } else if hit {
-                "已被验证层执法收账"
+                "已被验证层检出"
             } else {
                 "失败(验证层已安装但未见预期 VUID)"
             }
@@ -335,30 +273,101 @@ fn main() {
         unsafe { device.destroy_device(None) };
     }
 
-    // messenger 先于 instance 销毁——ash 0.38 无自动 Drop,漏了会被 VUID-00629 收账
-    if let Some(messenger) = _debug {
-        let loader = debug_utils::Instance::new(&entry, &instance);
-        unsafe { loader.destroy_debug_utils_messenger(messenger, None) };
+    // 坑:messenger 须先于 instance 销毁(ash 无自动 Drop),漏了报 VUID-00629
+    if let Some((loader, handle)) = messenger {
+        unsafe { loader.destroy_debug_utils_messenger(handle, None) };
     }
     unsafe { instance.destroy_instance(None) };
 
-    println!("\n== 验证层消息收账(全程)==");
+    println!("\n== 验证层消息汇总(全程)==");
     let vu = VU_LOG
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !validation_installed {
-        println!("  [SKIP] validation layer 未安装：VUID 总账无有效证据");
+        println!("  [SKIP] validation layer 未安装：VUID 汇总无有效证据");
     } else if vu.is_empty() {
-        println!("  (零条——组 B 未触发,收账以组内打印为准)");
+        println!("  (零条——组 B 未触发,以组内打印为准)");
     } else {
         for m in vu.iter() {
             println!("  {m}");
         }
     }
-    println!("\n结论口径:组 A = 契约三层在验证层 + 同步验证下跑通;组 B 只证明对齐条款能被执法,");
+    println!("\n结论:组 A = 契约三层在验证层 + 同步验证下跑通;组 B 只证明对齐条款能被验证层检出,");
     println!(
-        "不作为生产路径证据。规范依据(memory.adoc 绑定/映射/flush 各条款)见《3.2.2.1 施工记录》。"
+        "不作为生产路径证据。规范依据见 memory.adoc 绑定/映射/flush 各条款。"
     );
+}
+
+fn make_instance(entry: &Entry, validation: bool) -> ash::Instance {
+    let app_info = vk::ApplicationInfo::default()
+        .application_name(c"memory_probe")
+        .api_version(vk::API_VERSION_1_3);
+    let ext_names: Vec<*const std::ffi::c_char> = if validation {
+        vec![debug_utils::NAME.as_ptr()]
+    } else {
+        Vec::new()
+    };
+    let layer_names: Vec<*const std::ffi::c_char> = if validation {
+        vec![VALIDATION_LAYER.as_ptr()]
+    } else {
+        Vec::new()
+    };
+    // 同步验证(VkValidationFeaturesEXT);enables 须活到 create_instance 返回(pNext 存指针)
+    let sync_enables = if validation {
+        Some([vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION])
+    } else {
+        None
+    };
+    let mut sync_validation = vk::ValidationFeaturesEXT::default();
+    let mut instance_info = vk::InstanceCreateInfo::default()
+        .application_info(&app_info)
+        .enabled_extension_names(&ext_names)
+        .enabled_layer_names(&layer_names);
+    if let Some(enables) = &sync_enables {
+        sync_validation = sync_validation.enabled_validation_features(enables);
+        instance_info = instance_info.push_next(&mut sync_validation);
+    }
+    unsafe { entry.create_instance(&instance_info, None) }.expect("vkCreateInstance")
+}
+
+fn make_messenger(
+    entry: &Entry,
+    instance: &ash::Instance,
+) -> (debug_utils::Instance, vk::DebugUtilsMessengerEXT) {
+    let loader = debug_utils::Instance::new(entry, instance);
+    let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+        .message_severity(
+            vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+        )
+        .message_type(
+            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+        )
+        .pfn_user_callback(Some(probe_callback));
+    let handle = unsafe { loader.create_debug_utils_messenger(&messenger_info, None) }
+        .expect("创建验证 messenger");
+    (loader, handle)
+}
+
+/// 选第一台报 1.3 的设备并打印其版本。
+fn pick_physical_device(instance: &ash::Instance) -> vk::PhysicalDevice {
+    let pds = unsafe { instance.enumerate_physical_devices() }.expect("枚举物理设备");
+    let pd = *pds
+        .iter()
+        .find(|pd| unsafe { instance.get_physical_device_properties(**pd) }.api_version >= vk::API_VERSION_1_3)
+        .expect("没有报支持 Vulkan 1.3 的物理设备");
+    let props = unsafe { instance.get_physical_device_properties(pd) };
+    let dev_name =
+        unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy();
+    println!(
+        "设备 {dev_name}: API v{}.{}.{}(过 1.3 基线)",
+        vk::api_version_major(props.api_version),
+        vk::api_version_minor(props.api_version),
+        vk::api_version_patch(props.api_version),
+    );
+    pd
 }
 
 /// 验证层回调:消息原文入 VU_LOG(返回 FALSE = 不被截获)。
@@ -386,7 +395,7 @@ unsafe extern "system" fn probe_callback(
     vk::FALSE
 }
 
-/// graphics 族设备,零 feature 链(内存路径不涉及 12/13 位;与主工程的差异见文件头)。
+/// graphics 族设备,零 feature 链(内存路径不涉及 1.2/1.3 位)。
 fn create_device(instance: &ash::Instance, pd: vk::PhysicalDevice) -> (Device, vk::Queue) {
     let families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
     let gfx = families
