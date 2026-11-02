@@ -13,8 +13,8 @@
 //! `wait_for_slot` 后取一次为 `slot`，本帧全部帧槽环/UBO/描述符集按它定位。
 //!
 //! 错误：错误点一行 `or_warn`/`or_fatal` 后 `?` 冒泡进统一错误通道，本系统只管控制流。
-//! 两处保持显式分支、不走 `?`：OUT_OF_DATE 是控制流；present 真失败先暂存，`advance`
-//! 照常跑保持帧槽账本一致后再冒泡。
+//! 让路语义也走 `?`（Warn 级）：最小化整帧让路、swapchain 过时本帧作废。present 真失败
+//! 保持显式分支：先暂存，`advance` 照常跑保持帧槽账本一致后再冒泡。
 //!
 //! 坑：acquire 成功之后的 Vulkan 真失败必须致命退出——同步状态已无法恢复，warn 后
 //! 继续会等一个永远无人 signal 的 fence，直接死锁。
@@ -42,8 +42,7 @@ use crate::{
     },
     render::{
         cascade_matrices, conservative_world_aabb, frustum_planes, pack_bloom_params,
-        pack_cluster_uniforms, pack_frame_uniforms, pack_shadow_uniforms, AcquireOutcome,
-        BindlessTextureTable, BloomFrameDraw, BloomParamsData, BloomPipelines, BloomSettings,
+        pack_cluster_uniforms, pack_frame_uniforms, pack_shadow_uniforms, BindlessTextureTable, BloomFrameDraw, BloomParamsData, BloomPipelines, BloomSettings,
         BloomTargets, ClusterBuildPass, CompositePipeline, Context, CullDiagnostics, CullDraw,
         CullPass, CullSettings, FrameDraw, FramePool, FrameUniformTable,
         FrameUniformsData, GBufferPipeline, GBufferTargets, GpuBuffer, GpuTimer, HizPyramid,
@@ -297,7 +296,7 @@ pub(crate) fn draw_frame(
     } = &mut input;
     gate.yield_minimized(&mut core.resized)?;
     // pending 全部重建成功才清：失败帧让路或退出，下个帧首原样重试
-    gate.rebuild_if_pending(|| rebuild_size_dependent(core, &mut occlusion.hiz, post, cluster))?;
+    gate.rebuild_if_pending(core.swapchain.pending_rebuild(), || rebuild_size_dependent(core, &mut occlusion.hiz, post, cluster))?;
 
     // —— 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在提交前一刻）。
     let mut watch = FrameStopwatch::start(&mut core.perf);
@@ -307,23 +306,9 @@ pub(crate) fn draw_frame(
 
     // —— acquire：OUT_OF_DATE = 这个 swapchain 已不可用（最小化/恢复/独占模式切换等），
     // 必须立即重建，等不得下一帧
-    let index = match core.swapchain.acquire(core.frames.current().image_available) {
-        Ok(AcquireOutcome::Ready(index)) => index,
-        Ok(AcquireOutcome::Suboptimal(index)) => {
-            // 拿得到图但尺寸不理想：照常画完这帧，下个帧首重建
-            gate.request_rebuild();
-            index
-        }
-        Err(VulkanError::SwapchainOutOfDate) => {
-            // 本帧作废（没拿到图）。重建失败让路，下帧 acquire 再过时就地重试；重建后
-            // 置 pending，帧首按新 extent 重建其余尺寸相关资源
-            core.swapchain.mark_out_of_date();
-            core.swapchain.rebuild(&core.ctx).or_warn("acquire 过时后重建失败")?;
-            gate.request_rebuild();
-            return Ok(());
-        }
-        Err(e) => return Err(fatal("acquire 失败，渲染链无法继续", e)),
-    };
+    // —— acquire：OUT_OF_DATE/次优在 Swapchain::acquire_index 内消化（置位 + 让路），
+    // 重建交给下个帧首（幂等）；次优照常画完本帧。
+    let index = core.swapchain.acquire_index(core.frames.current().image_available)?;
     watch.acquire_done();
 
     // —— 组装 DrawList（增量）：实例槽缺/mesh 未驻留/材质缺席的行暂缓，就绪后自愈。
