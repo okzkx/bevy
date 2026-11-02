@@ -1,6 +1,5 @@
-//! shadow 命令组装 compute 半边：管线 + 录制。命令环（IndirectCommands
-//! ×4）与标记环住在 [`crate::render::ShadowTargets`]；本模块
-//! 只管"怎么派"。组装语义见 `shadow_build.wgsl`（两枚语义钉的执行面注释）。
+//! shadow 命令组装的 compute 半边：管线与录制。命令环（×4）与标记环住在
+//! [`crate::render::ShadowTargets`]，组装语义见 `shadow_build.wgsl`。
 
 use ash::vk;
 use bevy::log::info;
@@ -27,7 +26,7 @@ pub(crate) static SHADOW_BUILD_PIPELINE: PipelineDesc = PipelineDesc {
 };
 
 /// compute push 总长（WGSL `PushBuild` 同源）：count 4B。
-pub const SHADOW_BUILD_PUSH_SIZE: u32 = 4;
+const SHADOW_BUILD_PUSH_SIZE: u32 = 4;
 
 /// 一帧 shadow 命令组装 dispatch 的录制输入。
 #[derive(Clone, Copy)]
@@ -67,9 +66,8 @@ impl ShadowBuildPass {
     }
 }
 
-/// 录制一帧 shadow 命令组装 dispatch：绑管线 → 双集 → push → dispatch →
-/// 命令环屏障（compute 写 → DRAW_INDIRECT 读——shadow 命令环是独立 buffer，
-/// 屏障单独立）。标记读依赖由 cull::record 的屏障承担。
+/// 录制一帧 shadow 命令组装 dispatch。交接屏障罩住 compute 写命令环 → DRAW_INDIRECT
+/// 读（shadow 命令环是独立 buffer，要单独收口）；标记读依赖由 cull::record 的屏障承担。
 pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,

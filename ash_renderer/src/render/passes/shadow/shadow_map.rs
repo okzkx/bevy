@@ -1,16 +1,12 @@
-//! 8.3 shadow 资源族：级联深度图 + shadow UBO + 标记/命令环 + 描述符集 +
-//! depth-only 绘制管线。shadow 域的 binding 全部收在本 set（不复用/不解冻
-//! instance set2 冻结表）：b0 UBO、b1..4 级联深度图（合成采样）、b5..8 四
-//! cascade 可见标记（cull 写/宿主读）、b9..12 四 cascade 命令环（shadow_build
-//! 写/shadow draw 读）。
+//! shadow 资源族与 depth-only 绘制管线：四张级联深度图、shadow UBO、标记环、命令环、
+//! 描述符集。shadow 域的 binding 全收在本 set，不动 instance set2：b0 UBO、b1..4 级联
+//! 深度图（合成采样）、b5 交错标记环（cull 写/host 读）、b6..9 四 cascade 命令环
+//! （shadow_build 写/shadow draw 读）。
 //!
-//! 深度图 = [`DepthTarget`] ×4（D32_SFLOAT，DEPTH+SAMPLED 用途，reverse-Z
-//! clear 0——与主深度链同向，[`crate::render::core::target::depth`] 模块注释的成套纪律）；固定
-//! [`SHADOW_MAP_SIZE`]² 不随 swapchain resize 重建（级联覆盖面与屏幕分辨率
-//! 无关，resize 判定线由此免受影响）。
+//! 深度图 = [`DepthTarget`] ×4（reverse-Z，清 0），固定 [`SHADOW_MAP_SIZE`]² 不随
+//! swapchain resize 重建（级联覆盖面与屏幕分辨率无关）。
 //!
-//! 帧槽纪律：UBO/标记/命令环 ×[`MAX_FRAMES_IN_FLIGHT`]，宿主读写全在
-//! wait_for_slot fence 证据之后（与模型环/主标记同一纪律）。
+//! UBO/标记/命令环 ×[`MAX_FRAMES_IN_FLIGHT`]，host 读写都在 `wait_for_slot` 之后。
 
 use ash::{vk, Device};
 use bevy::log::info;
@@ -21,18 +17,19 @@ use crate::render::core::device::memory::role::BufferRole;
 use crate::render::passes::shadow::cascades::{SHADOW_CASCADES, SHADOW_MAP_SIZE, SHADOW_UBO_SIZE};
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
-use crate::render::core::target::depth::DepthTarget;
-use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle, PipelineRef};
+use crate::render::core::target::depth::{DepthTarget, DEPTH_FORMAT};
+use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
-use crate::render::resident::instance_table::INSTANCE_SET_DESC;
+use crate::render::resident::instance_table::{INDIRECT_COMMAND_SIZE, INSTANCE_SET_DESC, MARK_SIZE, OBJECT_TABLE_CAPACITY};
 
 pub const SHADOW_BINDING_UNIFORM: u32 = 0;
-pub const SHADOW_BINDING_MAP0: u32 = 1;
-pub const SHADOW_BINDING_MARK0: u32 = 5;
-pub const SHADOW_BINDING_CMD0: u32 = 6;
+const SHADOW_BINDING_MAP0: u32 = 1;
+const SHADOW_BINDING_MARK0: u32 = 5;
+const SHADOW_BINDING_CMD0: u32 = 6;
 
 const _: () = assert!(SHADOW_CASCADES == 4, "SHADOW_SET_DESC 按 4 级 cascade 逐个列 binding");
 const CS: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
@@ -92,23 +89,19 @@ pub struct ShadowTargets {
 }
 
 impl ShadowTargets {
-    /// 建资源链：4×深度图 → 逐槽 UBO/标记/命令环 → set 布局 → pool + 描述符
-    /// 写入。半建失败逐层回收（全有或全无）。
+    /// 建资源链：4×深度图 → 逐槽 UBO/标记/命令环 → set 布局 → pool + 描述符写入。
+    /// 中途失败时已建部分由 Drop 回收。
     ///
     /// # Errors
     /// 深度图/Vulkan 创建失败。
     pub fn new(ctx: &Context) -> Result<Self> {
         let extent = vk::Extent2D { width: SHADOW_MAP_SIZE, height: SHADOW_MAP_SIZE };
-        let mut maps = Vec::with_capacity(SHADOW_CASCADES);
-        let result: Result<()> = (|| {
-            for c in 0..SHADOW_CASCADES {
-                maps.push(DepthTarget::new(ctx, extent).map_err(|e| {
-                    VulkanError::Init(format!("cascade {c} 深度图创建失败: {e}"))
-                })?);
-            }
-            Ok(())
-        })();
-        result?;
+        let maps = (0..SHADOW_CASCADES)
+            .map(|c| {
+                DepthTarget::new(ctx, extent)
+                    .map_err(|e| VulkanError::Init(format!("cascade {c} 深度图创建失败: {e}")))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut this = Self {
             device: ctx.device.clone(),
             set_layout: vk::DescriptorSetLayout::null(),
@@ -119,11 +112,7 @@ impl ShadowTargets {
             marks: Vec::new(),
             commands: Vec::new(),
         };
-        let built = unsafe { this.build(ctx) };
-        if let Err(e) = built {
-            this.destroy_partials();
-            return Err(e);
-        }
+        this.build(ctx)?;
         info!(
             "shadow 资源就绪: {SHADOW_CASCADES} 级联 × {SHADOW_MAP_SIZE}² D32（reverse-Z clear 0）\
              × {} 帧槽（UBO {SHADOW_UBO_SIZE}B / 标记 / 命令环四族）",
@@ -132,97 +121,60 @@ impl ShadowTargets {
         Ok(this)
     }
 
-    /// # Safety
-    /// 深度图已建成功；失败路径由调用方回收已建半成品。
-    unsafe fn build(&mut self, ctx: &Context) -> Result<()> {
+    /// 深度图建好后的后半段：buffer → set 布局 → pool → 描述符写入。
+    fn build(&mut self, ctx: &Context) -> Result<()> {
         let slots = MAX_FRAMES_IN_FLIGHT;
         let sharing = ctx.sharing_families();
         let mk = |role: BufferRole, size: u64| -> Result<GpuBuffer> {
             GpuBuffer::create_with_families(&ctx.device, ctx.memory_contract(), size, role, &sharing)
         };
-        let mark_size =
-            u64::from(crate::render::resident::instance_table::OBJECT_TABLE_CAPACITY) * 4 * 4;
-        let cmd_size = u64::from(crate::render::resident::instance_table::OBJECT_TABLE_CAPACITY) * 20;
+        let capacity = u64::from(OBJECT_TABLE_CAPACITY);
+        let mark_size = capacity * SHADOW_CASCADES as u64 * MARK_SIZE;
+        let cmd_size = capacity * INDIRECT_COMMAND_SIZE;
         for _ in 0..slots {
             self.ubos.push(mk(BufferRole::FrameUniform, u64::from(SHADOW_UBO_SIZE))?);
-            // 标记单份交错（[槽][cascade] 4×u32/槽）；命令环 ×cascade——
-            // mark()/command() 以 slot 直址
+            // 标记单份交错（[槽][cascade]）；命令环 ×cascade
             self.marks.push(mk(BufferRole::Storage, mark_size)?);
             for _ in 0..SHADOW_CASCADES {
                 self.commands.push(mk(BufferRole::IndirectCommands, cmd_size)?);
             }
         }
+        let device = &ctx.device;
+        self.set_layout = SHADOW_SET_DESC.create(device)?;
+        let pool_sizes = SHADOW_SET_DESC.pool_sizes_vec(slots as u32);
+        let set_layouts = vec![self.set_layout; slots];
         unsafe {
-            let device = &ctx.device;
-            self.set_layout = SHADOW_SET_DESC.create(device).inspect_err(|_| self.destroy_buffers())?;
-            let shadow_pool_sizes = SHADOW_SET_DESC.pool_sizes_vec(slots as u32);
-            self.pool = device
-                .create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo::default()
-                        .max_sets(slots as u32)
-                        .pool_sizes(&shadow_pool_sizes),
-                    None,
-                )
-                .inspect_err(|_| {
-                    device.destroy_descriptor_set_layout(self.set_layout, None);
-                    self.set_layout = vk::DescriptorSetLayout::null();
-                })?;
-            self.sets = device
-                .allocate_descriptor_sets(
-                    &vk::DescriptorSetAllocateInfo::default()
-                        .descriptor_pool(self.pool)
-                        .set_layouts(
-                            &std::iter::repeat_n(self.set_layout, slots).collect::<Vec<_>>(),
-                        ),
-                )
-                .inspect_err(|_| {
-                    device.destroy_descriptor_pool(self.pool, None);
-                    self.pool = vk::DescriptorPool::null();
-                })?;
-            // 描述符写入：b0 UBO（逐槽）、b1..4 深度图 sampled view（全槽同源
-            // ——固定尺寸图不随帧变）、b5 标记 / b6..9 命令环（逐槽）。
-            // 写入过声明校验（种类按 SHADOW_SET_DESC 核对，写满才提交）。
-            for slot in 0..slots {
-                let mut writer = DescriptorWriter::new(&SHADOW_SET_DESC, self.sets[slot]);
-                writer.buffer(SHADOW_BINDING_UNIFORM, self.ubos[slot].buffer(), 0, vk::WHOLE_SIZE);
-                for (c, map) in self.maps.iter().enumerate() {
-                    writer.image(SHADOW_BINDING_MAP0 + c as u32, map.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-                }
-                // b5 = 单份交错标记环（[槽][cascade]）
-                writer.buffer(SHADOW_BINDING_MARK0, self.marks[slot].buffer(), 0, vk::WHOLE_SIZE);
-                for c in 0..SHADOW_CASCADES {
-                    writer.buffer(
-                        SHADOW_BINDING_CMD0 + c as u32,
-                        self.commands[slot * SHADOW_CASCADES + c].buffer(),
-                        0,
-                        vk::WHOLE_SIZE,
-                    );
-                }
-                writer.submit(device)?;
+            self.pool = device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(slots as u32)
+                    .pool_sizes(&pool_sizes),
+                None,
+            )?;
+            self.sets = device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(self.pool)
+                    .set_layouts(&set_layouts),
+            )?;
+        }
+        // 深度图不随帧变，全槽写同一批 view；其余逐槽
+        for slot in 0..slots {
+            let mut writer = DescriptorWriter::new(&SHADOW_SET_DESC, self.sets[slot]);
+            writer.buffer(SHADOW_BINDING_UNIFORM, self.ubos[slot].buffer(), 0, vk::WHOLE_SIZE);
+            for (c, map) in self.maps.iter().enumerate() {
+                writer.image(SHADOW_BINDING_MAP0 + c as u32, map.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
             }
+            writer.buffer(SHADOW_BINDING_MARK0, self.marks[slot].buffer(), 0, vk::WHOLE_SIZE);
+            for c in 0..SHADOW_CASCADES {
+                writer.buffer(
+                    SHADOW_BINDING_CMD0 + c as u32,
+                    self.commands[slot * SHADOW_CASCADES + c].buffer(),
+                    0,
+                    vk::WHOLE_SIZE,
+                );
+            }
+            writer.submit(device)?;
         }
         Ok(())
-    }
-
-    fn destroy_buffers(&mut self) {
-        self.ubos.clear();
-        self.marks.clear();
-        self.commands.clear();
-    }
-
-    fn destroy_partials(&mut self) {
-        self.destroy_buffers();
-        unsafe {
-            if self.pool != vk::DescriptorPool::null() {
-                self.device.destroy_descriptor_pool(self.pool, None);
-                self.pool = vk::DescriptorPool::null();
-            }
-            if self.set_layout != vk::DescriptorSetLayout::null() {
-                self.device.destroy_descriptor_set_layout(self.set_layout, None);
-                self.set_layout = vk::DescriptorSetLayout::null();
-            }
-        }
-        self.maps.clear();
     }
 
     /// shadow set 布局句柄（管线/录制借源，拆除序先于本资源）。
@@ -237,18 +189,12 @@ impl ShadowTargets {
         DescSet::new(&SHADOW_SET_DESC, self.sets[slot])
     }
 
-    /// 本帧槽 shadow UBO（宿主写入口，fence 纪律内）。
+    /// 本帧槽 shadow UBO（host 写入口）。
     pub fn ubo(&mut self, slot: usize) -> &mut GpuBuffer {
         &mut self.ubos[slot]
     }
 
-    /// 本帧槽交错标记环（宿主读数口，布局 [槽][cascade] 4×u32）。
-    #[must_use]
-    pub fn mark(&self, slot: usize) -> &GpuBuffer {
-        &self.marks[slot]
-    }
-
-    /// 本帧槽交错标记环（宿主全可见填充写入口，fence 纪律内）。
+    /// 本帧槽交错标记环（host 读写入口，布局 `[槽][cascade]` 4×u32）。
     pub fn mark_mut(&mut self, slot: usize) -> &mut GpuBuffer {
         &mut self.marks[slot]
     }
@@ -274,29 +220,24 @@ impl ShadowTargets {
 
 impl Drop for ShadowTargets {
     fn drop(&mut self) {
+        // new 中途失败时句柄可能是 null，destroy null 是规范允许的 no-op。
+        // 深度图/UBO/标记/命令环随字段 Drop，退出排空由 teardown 的 device_wait_idle 先行
         unsafe {
-            if self.pool != vk::DescriptorPool::null() {
-                self.device.destroy_descriptor_pool(self.pool, None);
-            }
-            if self.set_layout != vk::DescriptorSetLayout::null() {
-                self.device.destroy_descriptor_set_layout(self.set_layout, None);
-            }
+            self.device.destroy_descriptor_pool(self.pool, None);
+            self.device.destroy_descriptor_set_layout(self.set_layout, None);
         }
-        // 深度图/UBO/标记/命令环随字段 Drop——退出排空由 teardown 的
-        // device_wait_idle 先行覆盖（与帧级资源同纪律）
     }
 }
 
-/// shadow 域 depth-only 绘制管线 + layout（[set2 实例表, shadow set] + 4B push
-/// = cascade 索引）。dynamic rendering 无色附件，深度 D32 reverse-Z（清 0 +
-/// GREATER 与主链成套）。
+/// shadow 域 depth-only 绘制管线 + layout（[set2 实例表, shadow set] + 4B push =
+/// cascade 索引）。无色附件，深度 D32 reverse-Z（清 0 + GREATER，与主链同向）。
 #[derive(bevy::prelude::Resource)]
 pub struct ShadowPipeline {
     handle: PipelineHandle,
 }
 
-/// 4B push：cascade 索引（逐 pass 一推——帧级全局量的本职，cull 112B 同款理由）。
-pub const SHADOW_PUSH_SIZE: u32 = 4;
+/// 4B push：cascade 索引（逐 pass 推一次）。
+const SHADOW_PUSH_SIZE: u32 = 4;
 
 pub(crate) static SHADOW_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
     label: "shadow_write",
@@ -305,7 +246,7 @@ pub(crate) static SHADOW_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
     sets: &[&INSTANCE_SET_DESC, &SHADOW_SET_DESC],
     push: Some(PushRange { stages: vk::ShaderStageFlags::VERTEX, size: SHADOW_PUSH_SIZE }),
     color_formats: &[],
-    depth_format: Some(crate::render::core::target::depth::DEPTH_FORMAT),
+    depth_format: Some(DEPTH_FORMAT),
 };
 
 impl ShadowPipeline {
@@ -314,19 +255,18 @@ impl ShadowPipeline {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        SHADOW_WRITE_PIPELINE.build(ctx, layouts, |layout, stages| unsafe {
+        SHADOW_WRITE_PIPELINE.build(ctx, layouts, |layout, stages| {
             Self::create_pipeline(&ctx.device, layout, stages)
         })
     }
 
-    /// # Safety
-    /// `layout` 与 `stages` 里的 module 须为合法句柄。
-    unsafe fn create_pipeline(
+    /// 管线状态装配（layout 已建；module 由 [`PipelineDesc::build`] 回收）。
+    fn create_pipeline(
         device: &Device,
         layout: vk::PipelineLayout,
         stages: &[vk::PipelineShaderStageCreateInfo<'_>],
     ) -> Result<Self> {
-        // 顶点输入与主管线同一份 32B 交错契约（mesh_convert 同源）
+        // 顶点输入与主管线同一份 32B 交错格式，这里只取位置
         let vertex_binding = [vk::VertexInputBindingDescription::default()
             .binding(0)
             .stride(crate::render::VERTEX_STRIDE as u32)
@@ -362,10 +302,8 @@ impl ShadowPipeline {
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        // dynamic rendering：无色附件、深度 D32（VUID-08914 声明面 = 实例
-        // 附件全集——shadow 实例只有深度）
-        let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-            .depth_attachment_format(SHADOW_WRITE_PIPELINE.depth_format.expect("shadow_write 声明深度"));
+        // 附件格式须等于渲染时的实际附件全集（VUID-08914）：shadow 只有深度
+        let mut rendering_info = vk::PipelineRenderingCreateInfo::default().depth_attachment_format(DEPTH_FORMAT);
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)
             .vertex_input_state(&vertex_input)
@@ -385,21 +323,9 @@ impl ShadowPipeline {
         Ok(Self { handle: PipelineHandle::new(device, layout, pipeline, SHADOW_WRITE_PIPELINE.sets) })
     }
 
-    /// 管线句柄。
     /// 录制投影（帧输入束携带）。
     #[must_use]
     pub(crate) fn rec(&self) -> PipelineRef {
         self.handle.rec()
-    }
-
-    #[must_use]
-    pub fn pipeline(&self) -> vk::Pipeline {
-        self.handle.pipeline()
-    }
-
-    /// layout 句柄。
-    #[must_use]
-    pub fn layout(&self) -> vk::PipelineLayout {
-        self.handle.layout()
     }
 }

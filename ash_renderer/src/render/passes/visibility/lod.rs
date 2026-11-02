@@ -1,27 +1,18 @@
-//! GPU LOD 选档 compute 半边：管线 + push 排布 + CPU 参照纯函数 +
-//! 诊断账面。第三 compute pass——在遮挡测试之后、indirect 组装之前（档位
-//! 环 b8 由本段写、build_indirect 读：命令三字段从 LOD 变体表按档直址，
-//! instanceCount 语义不变）。
+//! GPU LOD 选档的 compute 半边：管线、push 排布、CPU 参照纯函数、诊断账面。在遮挡
+//! 测试之后、indirect 组装之前运行：本 pass 写档位环 b8，build_indirect 读它，命令
+//! 三字段从 LOD 变体表按档直址，instanceCount 语义不变。
 //!
-//! 机制（对应 lod_select.wgsl 头注，此处只记 Rust 侧契约）：
-//! - **判据**：屏幕覆盖尺寸（AABB 投屏 clamp 后最大边）——与 hiz 金字塔
-//!   选层同族（一次投影两个消费端）。自然档位 =
-//!   floor(log2(threshold / s))，阈值/迟滞随 96B push 每帧进 compute。
-//! - **迟滞**（判定线 2 口径）：向粗切换需越过自然边界 ×(1−h)，向细切换
-//!   即时；prev 读档位环本槽 = 两帧前本帧槽输出（fence 纪律同标记环，
-//!   2 帧滞后由迟滞带吸收，静态场景收敛值不受影响）。
-//! - **fallback 无需专段**：选档每帧从当前相机现算，无跨帧状态依赖
-//!   （档位环只是迟滞状态，不是真值）；未驻留档由 build_indirect 的
-//!   表内回退承担（本段不做，见 indirect 模块）。
-//! - **A/B 开关**（[`LodSettings`]）：关 = 不 dispatch，档位环 host 填 0
-//!   （最细档）——命令三字段回到对象记录基准，画面语义与 indirect 闭环基线一致。
-//! - **push**：view_proj（64B）+ screen（8B @64）+ bound（u32 @72）+
-//!   threshold（f32 @76）+ hysteresis（f32 @80）+ 垫（到 96B 对齐 16），
-//!   布局断言与 WGSL `PushLod` 静态互证（occlusion 80B 同款纪律；
-//!   cull push 的 16B 垫余量在此兑现——96B ≤ maxPushConstantsSize 128B
-//!   保底，无需查询）。
-//! - **标记环纪律**：b8 读写都在 `wait_for_slot` fence 内（host 诊断读数
-//!   = 本帧槽两帧前 compute 的输出）；dispatch 上界 = 实例槽 bump bound。
+//! 机制见 lod_select.wgsl 头注，这里只记 Rust 侧约定：
+//! - **判据**：屏幕覆盖尺寸（AABB 投屏 clamp 后最大边）。自然档位 =
+//!   floor(log2(threshold / s))，阈值/迟滞随 push 每帧进 compute。
+//! - **迟滞**：向粗切换需越过自然边界 ×(1−h)，向细切换即时；prev 读档位环本槽 =
+//!   两帧前本帧槽输出（host 读同样在 fence 之后），2 帧滞后由迟滞带吸收，静态场景
+//!   收敛值不受影响。
+//! - **无跨帧真值**：选档每帧从当前相机现算，档位环只是迟滞状态；未驻留档由
+//!   build_indirect 的表内回退承担。
+//! - **开关**（[`LodSettings`]）：关 = 不 dispatch，档位环 host 填 0（最细档），命令
+//!   三字段回到对象记录基准。
+//! - dispatch 上界 = 实例槽 bump bound。
 
 use ash::vk;
 use bevy::math::Mat4;
@@ -39,7 +30,6 @@ use crate::render::resident::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 use crate::render::MAX_LOD_LEVELS;
 
-/// shader 模块字节（build.rs 产物，spirv-val 已过）。
 pub(crate) static LOD_SELECT_PIPELINE: PipelineDesc = PipelineDesc {
     label: "lod_select",
     shader: &shader_abi::LOD_SELECT,
@@ -52,10 +42,11 @@ pub(crate) static LOD_SELECT_PIPELINE: PipelineDesc = PipelineDesc {
 
 /// compute push 总长（layout 声明 + WGSL `PushLod` 同源）：
 /// mat4（64B）+ screen（8B @64）+ bound（u32 @72）+ threshold（f32 @76）+
-/// hysteresis（f32 @80）+ 垫（到 16 对齐）= 96B。
-pub(crate) const LOD_PUSH_SIZE: u32 = 96;
+/// hysteresis（f32 @80）+ 垫（到 16 对齐）= 96B。规范保证 maxPushConstantsSize
+/// ≥ 128，无需查询。
+const LOD_PUSH_SIZE: u32 = 96;
 
-/// [`pack_lod_push`] 的 WGSL 布局镜像（与 `lod_select.wgsl::PushLod` 静态互证）。
+/// [`pack_lod_push`] 的 WGSL 布局镜像（与 `lod_select.wgsl::PushLod` 对照）。
 #[repr(C)]
 struct LodPushLayout {
     view_proj: [[f32; 4]; 4],
@@ -75,9 +66,9 @@ const _: () = {
 };
 
 /// view_proj + 屏幕尺寸 + dispatch 上界 + 判据参数 → 96B compute push 字节
-///（偏移按 [`LodPushLayout`] 静态断言表排布，标量小端走 [`crate::common::bytes`]）。
+///（偏移按 [`LodPushLayout`] 静态断言表排布）。
 #[must_use]
-pub(crate) fn pack_lod_push(
+fn pack_lod_push(
     view_proj: &Mat4,
     screen: [f32; 2],
     bound: u32,
@@ -93,11 +84,11 @@ pub(crate) fn pack_lod_push(
     out
 }
 
-// ===== CPU 参照纯函数（判定线 1/2 的库测试与 lod_census 对照本体）=====
+// ===== CPU 参照纯函数（与 lod_select.wgsl 同式，库测试与 BRP 对照用）=====
 
-/// 屏幕覆盖尺寸 → 自然档位：`floor(log2(threshold / s))`——s 每减半升一档，
+/// 屏幕覆盖尺寸 → 自然档位：`floor(log2(threshold / s))`，s 每减半升一档，
 /// clamp 进 `[0, max_levels-1]`（s ≥ 阈值 → 0 最细档；完全离屏 s=0 → 最粗档，
-/// 反正不画）。与 lod_select.wgsl 的 raw 同式（floor 语义，半档不跳档）。
+/// 反正不画）。
 #[must_use]
 pub fn lod_raw_level(size_px: f32, threshold_px: f32, max_levels: u32) -> u32 {
     let s = size_px.max(1.0);
@@ -105,9 +96,8 @@ pub fn lod_raw_level(size_px: f32, threshold_px: f32, max_levels: u32) -> u32 {
     (raw as i64).clamp(0, i64::from(max_levels) - 1) as u32
 }
 
-/// 迟滞档位裁决：向粗（raw > prev）需 `s ≤ 该档自然边界 ×(1−h)`（越过阈值
-/// 带才降档），向细（raw < prev）即时升档，相等保持——判定线 2 的状态机
-/// 本体。prev 取档位环本槽值（两帧前输出，钉明见模块注释）。
+/// 迟滞档位裁决：向粗（raw > prev）需 `s ≤ 该档自然边界 ×(1−h)`（越过阈值带才
+/// 降档），向细（raw < prev）即时升档，相等保持。prev = 档位环本槽值。
 #[must_use]
 pub fn lod_hysteresis_level(
     raw: u32,
@@ -132,9 +122,7 @@ pub fn lod_hysteresis_level(
 }
 
 /// LOD 开关与判据参数（egui checkbox 与 BRP `lod_set_enabled`/`lod_set_params`
-/// 写，draw_frame 读）。关 = 不 dispatch 选档，档位环 host 填 0——数据层
-/// A/B 的 B 面（判定线 5）；与 CullSettings/OcclusionSettings 分立（三开关
-/// 独立成组，三开关矩阵的 A/B 归因）。
+/// 写，draw_frame 读）。关 = 不 dispatch 选档，档位环 host 填 0。
 #[derive(Resource)]
 pub struct LodSettings {
     pub enabled: bool,
@@ -150,18 +138,17 @@ impl Default for LodSettings {
     }
 }
 
-/// LOD 诊断账面（每帧 draw_frame 刷新，egui 面板/BRP 读数口；只进计量，
-/// 任何系统不得读它决定画什么——同剔除诊断边界）。档位读数 = 本帧槽两帧前
-/// compute 的输出（HOST_VISIBLE 直读，fence 纪律内）。
+/// LOD 诊断读数（draw_frame 每帧刷新，egui 面板/BRP 读）。只做计量，不得用它决定
+/// 画什么。档位读数 = 本帧槽两帧前 compute 的输出（host 直读，在 fence 之后）。
 #[derive(Resource, Default)]
 pub struct LodDiagnostics {
-    /// LOD 开关快照（与 [`LodSettings`] 同步）。
+    /// LOD 开关快照。
     pub enabled: bool,
     /// 本帧是否实际 dispatch（enabled ∧ 场内有实例槽）。
     pub dispatched: bool,
     /// dispatch 上界（实例槽 bump bound）。
     pub bound: u32,
-    /// 档位分布（在场可绘行中各档行数——档位环直读，判定线 5 的读数口）。
+    /// 档位分布（在场可绘行中各档行数）。
     pub level_counts: [u32; MAX_LOD_LEVELS as usize],
     /// 参与统计的行数（= 本帧 DrawList 可绘行数）。
     pub rows_compared: usize,
@@ -180,19 +167,18 @@ pub struct LodDraw {
 }
 
 /// 选档 compute 管线（set2 单集 + 96B push）。
-#[derive(bevy::prelude::Resource)]
+#[derive(Resource)]
 pub struct LodPass {
     pipeline: ComputePipeline,
 }
 
 impl LodPass {
-    /// 建管线：layout 只借 set2（本段只读 set2 的 b0/b1、写 b8，无第二描述符集）。
+    /// 建管线：layout 只借 set2（读 b0/b1、写 b8）。
     ///
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        let pipeline = ComputePipeline::new(ctx, &LOD_SELECT_PIPELINE, layouts)?;
-        Ok(Self { pipeline })
+        Ok(Self { pipeline: ComputePipeline::new(ctx, &LOD_SELECT_PIPELINE, layouts)? })
     }
 
     /// 组一帧 dispatch 输入。draw_frame 消费，录制走 [`record`]。
@@ -213,9 +199,8 @@ impl LodPass {
     }
 }
 
-/// 录制一帧选档 dispatch（遮挡测试之后、build_indirect 之前）：绑管线 →
-/// set2 → push → dispatch → 交接屏障（档位环写 → build_indirect 读；与
-/// occlusion::record 的收口同形状，dst 超集盖图形 VS 读与计算组装读）。
+/// 录制一帧选档 dispatch（遮挡测试之后、build_indirect 之前）。交接屏障罩住档位环
+/// 写 → build_indirect 读。
 pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
@@ -231,8 +216,7 @@ mod tests {
     use super::MAX_LOD_LEVELS as MAX_LEVELS;
     use bevy::math::{Mat4, Vec3};
 
-    /// 自然档位分带（判定线 1 的参照语义基准）：floor 语义下 s 每减半升一档，
-    /// 边界值归更粗档（s = T/2 恰为档 1）。
+    /// 自然档位分带：floor 语义下 s 每减半升一档，边界值归更粗档（s = T/2 恰为档 1）。
     #[test]
     fn raw_level_bands() {
         let t = 256.0f32;
@@ -249,8 +233,7 @@ mod tests {
         assert_eq!(lod_raw_level(0.001, t, max), 3);
     }
 
-    /// 迟滞状态机（判定线 2，最危险单点）：向粗需越过 (1−h) 边界、向细
-    /// 即时、带内不抖动。
+    /// 迟滞状态机：向粗需越过 (1−h) 边界、向细即时、带内不抖动。
     #[test]
     fn hysteresis_state_machine() {
         let t = 256.0f32;
