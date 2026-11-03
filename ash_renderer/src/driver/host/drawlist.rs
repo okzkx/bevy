@@ -19,10 +19,9 @@ use bevy::prelude::*;
 use std::collections::BTreeSet;
 
 use crate::common::bytes::put_u32s;
-use crate::common::error::VulkanError;
 use crate::common::syntax::ResultTierExt;
 use crate::scene::{
-    anchor_level, AssemblyView, DrawListVerify, InstanceLedger, InstanceRow, LodGroups,
+    anchor_level, DrawListVerify, InstanceLedger, InstanceRow, LodGroups,
 };
 use crate::render::{
     pack_lod_entry, pack_material_record, pack_model, BindlessTextureTable, ImageCache, InstanceTables,
@@ -165,8 +164,8 @@ fn assemble_reference(
 /// 本帧槽的奇偶脏集（模型环/LOD 表环）：须在取组装视图之前从账本取走——此后
 /// 视图对账本共享借用，环写入全程不再可变访问账本。
 pub(crate) struct ParityDirty {
-    model: Vec<Entity>,
-    lod: Vec<Entity>,
+    pub(crate) model: Vec<Entity>,
+    pub(crate) lod: Vec<Entity>,
 }
 
 impl ParityDirty {
@@ -185,150 +184,132 @@ fn row_with_slot(ledger: &InstanceLedger, entity: Entity) -> Option<(&InstanceRo
     Some((row, row.instance_slot?))
 }
 
-/// 写模型环（增量）：改动行跨两个帧槽各写一次（两帧后两个环都新鲜），静态场景零写入。
-fn write_model_ring(
-    tables: &mut InstanceTables,
-    ledger: &InstanceLedger,
-    model_dirty: &[Entity],
-    frame: usize,
-) -> Result<(), VulkanError> {
-    for entity in model_dirty {
-        let Some((row, slot)) = row_with_slot(ledger, *entity) else { continue };
-        let bytes = pack_model(&row.model);
-        tables.model_ring(frame).write(u64::from(slot) * MODEL_STRIDE, &bytes)?;
+/// 四环写入方法（`draw_frame` 在 `wait_for_slot` 之后调用，fence 证据同本帧 UBO）：
+/// 模型增量 + 材质全量 + 在场全量 + LOD 表增量，都落本帧槽的环。任一环失败 = 渲染链
+/// 无法继续，方法内部按致命冒泡。impl 块留在 driver 层而非 instance_table.rs——方法
+/// 消费 scene 层账本与 Bevy 资产容器，放 render 侧会反向依赖。
+impl InstanceTables {
+    /// 写模型环（增量）：改动行跨两个帧槽各写一次（两帧后两个环都新鲜），静态场景零写入。
+    pub(crate) fn write_model_ring(
+        &mut self,
+        ledger: &InstanceLedger,
+        model_dirty: &[Entity],
+        frame: usize,
+    ) -> Result<(), BevyError> {
+        for entity in model_dirty {
+            let Some((row, slot)) = row_with_slot(ledger, *entity) else { continue };
+            let bytes = pack_model(&row.model);
+            self.model_ring(frame)
+                .write(u64::from(slot) * MODEL_STRIDE, &bytes)
+                .or_fatal("模型环写失败，渲染链无法继续")?;
+        }
+        Ok(())
     }
-    Ok(())
-}
 
-/// 写材质环（全量）：可绘行的去重材质 → 本帧槽的环。内容每帧从资产容器/驻留缓存
-/// 现读，材质参数变化与贴图换槽自动次帧生效。
-///
-/// 不做增量：全量重写本身就是材质内容的变更通道，增量写会把参数变化冻结在旧记录
-/// 里，还得另开通道补齐。
-fn write_material_ring(
-    tables: &mut InstanceTables,
-    std_materials: &Assets<StandardMaterial>,
-    image_cache: &ImageCache,
-    materials: &[AssetId<StandardMaterial>],
-    frame: usize,
-) -> Result<(), VulkanError> {
-    for id in materials {
-        let Some(material) = std_materials.get(*id) else {
-            continue; // 行级判定已暂缓缺材质的行，环侧不补写
-        };
-        let Some(slot) = tables.material_slot(*id) else {
-            continue; // 可绘行的材质槽必在；防御性跳过
-        };
-        let color = material.base_color.to_linear();
-        let resident = |texture: Option<&Handle<Image>>| {
-            texture.and_then(|handle| image_cache.slots(handle.id()))
-        };
-        let slots = resident(material.base_color_texture.as_ref())
-            .unwrap_or_else(BindlessTextureTable::fallback_slots);
-        // 其余三贴图缺席写 NO_TEXTURE_INDEX（shader 跳过采样）。roughness 记 perceptual
-        // 域、reflectance 记原值，clamp 与换算在 shader 端
-        let optional_slot = |texture: Option<&Handle<Image>>| {
-            resident(texture).map_or(NO_TEXTURE_INDEX, |slots| slots.texture)
-        };
-        let bytes = pack_material_record(
-            [color.red, color.green, color.blue, color.alpha],
-            material.metallic,
-            material.perceptual_roughness,
-            material.reflectance,
-            [
-                slots.texture,
-                optional_slot(material.normal_map_texture.as_ref()),
-                optional_slot(material.metallic_roughness_texture.as_ref()),
-                optional_slot(material.occlusion_texture.as_ref()),
-            ],
-            slots.sampler,
-        );
-        tables
-            .material_ring(frame)
-            .write(u64::from(slot) * MATERIAL_RECORD_SIZE, &bytes)?;
+    /// 写材质环（全量）：可绘行的去重材质 → 本帧槽的环。内容每帧从资产容器/驻留缓存
+    /// 现读，材质参数变化与贴图换槽自动次帧生效。
+    ///
+    /// 不做增量：全量重写本身就是材质内容的变更通道，增量写会把参数变化冻结在旧记录
+    /// 里，还得另开通道补齐。
+    pub(crate) fn write_material_ring(
+        &mut self,
+        std_materials: &Assets<StandardMaterial>,
+        image_cache: &ImageCache,
+        materials: &[AssetId<StandardMaterial>],
+        frame: usize,
+    ) -> Result<(), BevyError> {
+        for id in materials {
+            let Some(material) = std_materials.get(*id) else {
+                continue; // 行级判定已暂缓缺材质的行，环侧不补写
+            };
+            let Some(slot) = self.material_slot(*id) else {
+                continue; // 可绘行的材质槽必在；防御性跳过
+            };
+            let color = material.base_color.to_linear();
+            let resident = |texture: Option<&Handle<Image>>| {
+                texture.and_then(|handle| image_cache.slots(handle.id()))
+            };
+            let slots = resident(material.base_color_texture.as_ref())
+                .unwrap_or_else(BindlessTextureTable::fallback_slots);
+            // 其余三贴图缺席写 NO_TEXTURE_INDEX（shader 跳过采样）。roughness 记 perceptual
+            // 域、reflectance 记原值，clamp 与换算在 shader 端
+            let optional_slot = |texture: Option<&Handle<Image>>| {
+                resident(texture).map_or(NO_TEXTURE_INDEX, |slots| slots.texture)
+            };
+            let bytes = pack_material_record(
+                [color.red, color.green, color.blue, color.alpha],
+                material.metallic,
+                material.perceptual_roughness,
+                material.reflectance,
+                [
+                    slots.texture,
+                    optional_slot(material.normal_map_texture.as_ref()),
+                    optional_slot(material.metallic_roughness_texture.as_ref()),
+                    optional_slot(material.occlusion_texture.as_ref()),
+                ],
+                slots.sampler,
+            );
+            self.material_ring(frame)
+                .write(u64::from(slot) * MATERIAL_RECORD_SIZE, &bytes)
+                .or_fatal("材质环写失败，渲染链无法继续")?;
+        }
+        Ok(())
     }
-    Ok(())
-}
 
-/// 写在场环（全量）：可绘行槽号列表 → 本帧槽的环。列表来自组装缓存，但环按帧槽
-/// 双缓冲，每帧都要写。
-fn write_presence_ring(
-    tables: &mut InstanceTables,
-    slots: &[u32],
-    frame: usize,
-) -> Result<(), VulkanError> {
-    if slots.is_empty() {
-        return Ok(()); // 空场：环内容无人读（dispatch 上界 = count = 0）
+    /// 写在场环（全量）：可绘行槽号列表 → 本帧槽的环。列表来自组装缓存，但环按帧槽
+    /// 双缓冲，每帧都要写。
+    pub(crate) fn write_presence_ring(
+        &mut self,
+        slots: &[u32],
+        frame: usize,
+    ) -> Result<(), BevyError> {
+        if slots.is_empty() {
+            return Ok(()); // 空场：环内容无人读（dispatch 上界 = count = 0）
+        }
+        let mut bytes = vec![0u8; slots.len() * 4];
+        put_u32s(&mut bytes, 0, slots);
+        self.presence_ring(frame)
+            .write(0, &bytes)
+            .or_fatal("在场环写失败，渲染链无法继续")
     }
-    let mut bytes = vec![0u8; slots.len() * 4];
-    put_u32s(&mut bytes, 0, slots);
-    tables.presence_ring(frame).write(0, &bytes)
-}
 
-/// 写 LOD 变体表环（增量）：换槽或档位资产到货的行 → 本帧槽的表环写该槽各档绘制
-/// 参数，未驻留的档保持 0（消费端回退）。level 0 = 本行基准 mesh；保底锚开启时
-/// 基准可能未驻留，此时回退对象记录的参数，即保底档。同槽的档位环一并清 0：换槽 =
-/// 新对象，从最细档重新收敛（另一帧槽的环随奇偶脏集下帧补写）。
-fn write_lod_table_ring(
-    tables: &mut InstanceTables,
-    ledger: &InstanceLedger,
-    pool: &MeshPool,
-    lod_groups: &LodGroups,
-    lod_dirty: &[Entity],
-    frame: usize,
-) -> Result<(), VulkanError> {
-    for entity in lod_dirty {
-        let Some((row, slot)) = row_with_slot(ledger, *entity) else { continue };
-        let mut bytes = vec![0u8; LOD_TABLE_STRIDE as usize];
-        let mut put_entry = |level: usize, id| {
-            if let Some(mesh_slot) = pool.resident(id) {
-                let o = level * LOD_ENTRY_SIZE as usize;
-                let entry = pack_lod_entry(mesh_slot.first_index(), mesh_slot.index_count, mesh_slot.vertex_base());
-                bytes[o..o + LOD_ENTRY_SIZE as usize].copy_from_slice(&entry);
-            }
-        };
-        put_entry(0, row.mesh.id());
-        if let Some(levels) = lod_groups.levels_of(row.mesh.id()) {
-            for (level, handle) in levels.iter().enumerate().skip(1) {
-                if let Some(handle) = handle {
-                    put_entry(level, handle.id());
+    /// 写 LOD 变体表环（增量）：换槽或档位资产到货的行 → 本帧槽的表环写该槽各档绘制
+    /// 参数，未驻留的档保持 0（消费端回退）。level 0 = 本行基准 mesh；保底锚开启时
+    /// 基准可能未驻留，此时回退对象记录的参数，即保底档。同槽的档位环一并清 0：换槽 =
+    /// 新对象，从最细档重新收敛（另一帧槽的环随奇偶脏集下帧补写）。
+    pub(crate) fn write_lod_table_ring(
+        &mut self,
+        ledger: &InstanceLedger,
+        pool: &MeshPool,
+        lod_groups: &LodGroups,
+        lod_dirty: &[Entity],
+        frame: usize,
+    ) -> Result<(), BevyError> {
+        for entity in lod_dirty {
+            let Some((row, slot)) = row_with_slot(ledger, *entity) else { continue };
+            let mut bytes = vec![0u8; LOD_TABLE_STRIDE as usize];
+            let mut put_entry = |level: usize, id| {
+                if let Some(mesh_slot) = pool.resident(id) {
+                    let o = level * LOD_ENTRY_SIZE as usize;
+                    let entry = pack_lod_entry(mesh_slot.first_index(), mesh_slot.index_count, mesh_slot.vertex_base());
+                    bytes[o..o + LOD_ENTRY_SIZE as usize].copy_from_slice(&entry);
+                }
+            };
+            put_entry(0, row.mesh.id());
+            if let Some(levels) = lod_groups.levels_of(row.mesh.id()) {
+                for (level, handle) in levels.iter().enumerate().skip(1) {
+                    if let Some(handle) = handle {
+                        put_entry(level, handle.id());
+                    }
                 }
             }
+            self.lod_table_ring(frame)
+                .write(u64::from(slot) * LOD_TABLE_STRIDE, &bytes)
+                .or_fatal("LOD 表环写失败，渲染链无法继续")?;
+            self.lod_level_ring(frame)
+                .write(u64::from(slot) * LOD_LEVEL_SIZE, &0u32.to_le_bytes())
+                .or_fatal("LOD 档位环清零失败，渲染链无法继续")?;
         }
-        tables.lod_table_ring(frame).write(u64::from(slot) * LOD_TABLE_STRIDE, &bytes)?;
-        tables
-            .lod_level_ring(frame)
-            .write(u64::from(slot) * LOD_LEVEL_SIZE, &0u32.to_le_bytes())?;
+        Ok(())
     }
-    Ok(())
-}
-
-/// 帧槽环写入入口（draw_frame 在 wait_for_slot 之后调用）：模型增量 + 材质全量 +
-/// 在场全量 + LOD 表增量，都落在本帧槽的环上。任一环失败 = 渲染链无法继续，按致命冒泡。
-pub(crate) fn write_rings(
-    tables: &mut InstanceTables,
-    ledger: &InstanceLedger,
-    sources: DrawabilitySources,
-    image_cache: &ImageCache,
-    dirty: &ParityDirty,
-    assembly: &AssemblyView<'_>,
-    frame: usize,
-) -> Result<(), BevyError> {
-    write_all_rings(tables, ledger, sources, image_cache, dirty, assembly, frame)
-        .or_fatal("模型/材质/在场/LOD 环写失败，渲染链无法继续")
-}
-
-fn write_all_rings(
-    tables: &mut InstanceTables,
-    ledger: &InstanceLedger,
-    sources: DrawabilitySources,
-    image_cache: &ImageCache,
-    dirty: &ParityDirty,
-    assembly: &AssemblyView<'_>,
-    frame: usize,
-) -> Result<(), VulkanError> {
-    write_model_ring(tables, ledger, &dirty.model, frame)?;
-    write_material_ring(tables, sources.std_materials, image_cache, assembly.materials, frame)?;
-    write_presence_ring(tables, assembly.slots, frame)?;
-    write_lod_table_ring(tables, ledger, sources.pool, sources.lod_groups, &dirty.lod, frame)
 }

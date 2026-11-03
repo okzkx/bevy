@@ -21,8 +21,6 @@ pub use mechanism::{
     GapMode, GapSnapshot, InstanceLedger, InstanceRow, LodDemand, LodGroups, ResidencySet,
     ResidencySettings, ResidencyStats,
 };
-pub(crate) use mechanism::AssemblyView;
-
 // mechanism/editing
 pub use mechanism::{
     apply_transform_edit, load_image_slot, load_mesh_rebind, mutate_asset, replace_handles,
