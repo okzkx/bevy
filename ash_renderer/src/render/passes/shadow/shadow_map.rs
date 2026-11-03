@@ -16,7 +16,8 @@ use crate::common::error::{Result, VulkanError};
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::record::barrier::ImageBarrier;
 use crate::render::core::record::graphics::{
-    bind_graphics, bind_vertex_index, full_rect, set_viewport_scissor, PipelineRef,
+    bind_graphics, bind_vertex_index, full_rect, reverse_z_depth_attachment, set_viewport_scissor,
+    PipelineRef,
 };
 use crate::render::core::device::memory::role::BufferRole;
 use crate::render::passes::shadow::cascades::{SHADOW_CASCADES, SHADOW_MAP_SIZE, SHADOW_UBO_SIZE};
@@ -357,14 +358,7 @@ pub(crate) fn record(
         if let Some(shadow) = shadow {
             let map_extent = vk::Extent2D { width: SHADOW_MAP_SIZE, height: SHADOW_MAP_SIZE };
             for (c, map_view) in shadow.views.iter().enumerate() {
-                let shadow_depth_attachment = vk::RenderingAttachmentInfo::default()
-                    .image_view(*map_view)
-                    .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                    .load_op(vk::AttachmentLoadOp::CLEAR)
-                    .store_op(vk::AttachmentStoreOp::STORE)
-                    .clear_value(vk::ClearValue {
-                        depth_stencil: vk::ClearDepthStencilValue { depth: 0.0, stencil: 0 },
-                    });
+                let shadow_depth_attachment = reverse_z_depth_attachment(*map_view);
                 device.cmd_begin_rendering(
                     cb,
                     &vk::RenderingInfo::default()

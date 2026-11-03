@@ -20,7 +20,8 @@ use crate::render::core::record::fullscreen::{
     record_fullscreen, record_fullscreen_open, record_fullscreen_sampled, FullscreenPass,
 };
 use crate::render::core::record::graphics::{
-    bind_graphics, bind_vertex_index, full_rect, set_viewport, set_viewport_scissor, PipelineRef,
+    bind_graphics, bind_vertex_index, color_attachment, full_rect, reverse_z_depth_attachment,
+    set_viewport, set_viewport_scissor, PipelineRef,
 };
 use crate::render::core::binding::set_layout::DescSet;
 use crate::render::passes::lighting::cluster::{self, ClusterBuildDraw};
@@ -298,33 +299,13 @@ impl FramePool {
         // ---- ④ G-buffer：不透明物体写三色附件 + 深度 ----
         // 全部 loadOp CLEAR（背景像素内容无意义，合成按 depth==0 判背景）；深度清 0（reverse-Z
         // 远平面），STORE 供合成与 Hi-Z 采样。
-        let color_attachment = |view: vk::ImageView, clear: [f32; 4]| {
-            vk::RenderingAttachmentInfo::default()
-                .image_view(view)
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue {
-                    color: vk::ClearColorValue { float32: clear },
-                })
-        };
         // 附件数必须与管线声明一致（VUID-06179：colorAttachmentCount 相等）
         let gbuffer_attachments = [
-            color_attachment(draw.gbuffer.albedo_view(slot), [0.0, 0.0, 0.0, 0.0]),
-            color_attachment(draw.gbuffer.normal_view(slot), [0.0, 0.0, 0.0, 0.0]),
-            color_attachment(draw.gbuffer.matparam_view(slot), [0.0, 0.0, 0.0, 1.0]),
+            color_attachment(draw.gbuffer.albedo_view(slot), Some([0.0, 0.0, 0.0, 0.0])),
+            color_attachment(draw.gbuffer.normal_view(slot), Some([0.0, 0.0, 0.0, 0.0])),
+            color_attachment(draw.gbuffer.matparam_view(slot), Some([0.0, 0.0, 0.0, 1.0])),
         ];
-        let depth_attachment = vk::RenderingAttachmentInfo::default()
-            .image_view(frame.depth.view)
-            .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .clear_value(vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 0.0,
-                    stencil: 0,
-                },
-            });
+        let depth_attachment = reverse_z_depth_attachment(frame.depth.view);
         device.cmd_begin_rendering(
             cb,
             &vk::RenderingInfo::default()

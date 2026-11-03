@@ -7,7 +7,9 @@ use ash::{vk, Device};
 
 use crate::render::core::binding::set_layout::DescSet;
 use crate::render::core::record::barrier::ImageBarrier;
-use crate::render::core::record::graphics::{bind_graphics, full_rect, set_viewport_scissor, PipelineRef};
+use crate::render::core::record::graphics::{
+    bind_graphics, color_attachment, full_rect, set_viewport_scissor, PipelineRef,
+};
 
 /// 全屏三角形 pass 的参数：一个颜色附件（写完保留，无深度）、管线、从 set 0 起绑定的描述符集。
 pub(crate) struct FullscreenPass<'a> {
@@ -40,16 +42,7 @@ pub(crate) unsafe fn record_fullscreen_open(
     cb: vk::CommandBuffer,
     pass: &FullscreenPass<'_>,
 ) {
-    let attachment = vk::RenderingAttachmentInfo::default()
-        .image_view(pass.view)
-        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .store_op(vk::AttachmentStoreOp::STORE);
-    let attachment = match pass.clear {
-        Some(float32) => attachment
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32 } }),
-        None => attachment.load_op(vk::AttachmentLoadOp::DONT_CARE),
-    };
+    let attachment = color_attachment(pass.view, pass.clear);
     unsafe {
         device.cmd_begin_rendering(
             cb,
