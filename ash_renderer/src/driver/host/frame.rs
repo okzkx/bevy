@@ -20,12 +20,9 @@
 //! 继续会等一个永远无人 signal 的 fence，直接死锁。
 
 use bevy::{
-    camera::{Camera, Projection},
-    ecs::system::{NonSendMarker, SystemParam},
-    light::{AmbientLight, DirectionalLight, GlobalAmbientLight},
-    math::{Mat4, Quat},
+    ecs::system::NonSendMarker,
+    math::Mat4,
     prelude::*,
-    window::WindowResized,
 };
 
 use ash::vk;
@@ -33,236 +30,46 @@ use ash::vk;
 use ash_macros::system;
 
 use crate::{
-    common::bytes::put_f32s,
     common::error::VulkanError,
-    common::syntax::{fatal, OnceLog, OptionTierExt, ResultTierExt},
-    overlay::{paint_overlay, OverlayLogState, UiDrawData},
-    scene::{
-        DrawListVerify, GapSnapshot, InstanceLedger, LodGroups, ResidencySettings,
-    },
+    common::syntax::{fatal, ResultTierExt},
+    scene::{GapSnapshot, InstanceLedger},
     render::{
-        cascade_matrices, conservative_world_aabb, frustum_planes, pack_bloom_params,
-        pack_cluster_uniforms, pack_frame_uniforms, pack_shadow_uniforms, BindlessTextureTable, BloomFrameDraw, BloomParamsData, BloomPipelines, BloomSettings,
-        BloomTargets, ClusterBuildPass, CompositePipeline, Context, CullDiagnostics, CullDraw,
-        CullPass, CullSettings, FrameDraw, FramePool, FrameUniformTable,
-        FrameUniformsData, GBufferPipeline, GBufferTargets, GpuBuffer, GpuTimer, HizPyramid,
-        ImageCache, IndirectDraw, IndirectPass, IndirectStats, InstanceTables, LightClusters,
-        LightTable, LodDiagnostics, LodDraw, LodPass, LodSettings, MeshPool, OcclusionDiagnostics,
-        OcclusionDraw, OcclusionFallback, OcclusionPass, OcclusionSettings, OverlayPipeline,
-        PerfLedger, PresentTonemapPipeline, RenderMode, ShadowBuildPass, ShadowCascadeInput,
-        ShadowCascades, ShadowPipeline, ShadowSettings, ShadowTargets,
-        ShadowUniformsData, ShadowWriteDraw, SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines,
-        SmaaSettings, SmaaTargets, Swapchain, TransparentFrame, TransparentPasses,
-        TransparentPipeline, TransparentTargets, Uploader, GAP_MARK_SIZE, INDIRECT_COMMAND_SIZE,
-        LOD_LEVEL_SIZE, MARK_SIZE, MAX_FRAMES_IN_FLIGHT, MAX_LOD_LEVELS,
-        PLACEHOLDER_DIR_TO_LIGHT, SHADOW_CASCADES, SHADOW_MAP_SIZE,
+        FrameDraw, GpuBuffer,
+        InstanceTables,
+        GAP_MARK_SIZE,
     },
 };
 
 use super::drawlist::{self, DrawabilitySources, ParityDirty};
 
+mod cluster;
+mod culling;
+mod indirect;
+mod input;
+mod lighting;
+mod lod;
+mod overlay;
+mod post;
 mod resize_gate;
+mod scene;
+mod shadow;
 mod stopwatch;
+mod transparent;
 mod frame_logs;
 
-use self::resize_gate::ResizeGate;
+use self::input::FrameInput;
+use self::cluster::create_cluster_build_draw;
+use self::culling::{create_frustum_cull_draw, create_occlusion_draw};
+use self::indirect::create_indirect_draw;
+use self::lighting::FrameLight;
+use self::lod::create_lod_draw;
+use self::overlay::create_overlay_draw;
+use self::post::{bloom_draw, smaa_draws};
+use self::resize_gate::rebuild_size_dependent;
+use self::scene::{scene_world_aabb, FrameView};
+use self::shadow::shadow_write_draw;
 use self::stopwatch::FrameStopwatch;
-use self::frame_logs::FrameLogs;
-
-/// 遮挡 fallback 的相机历史（`draw_frame` 的 `Local`，跨帧保持）：跳变判定用
-/// "当前 vs 两帧前"——遮挡读的金字塔正是两帧前的深度。阈值见 occlusion 模块文档，
-/// 连续缓慢环绕不触发。
-#[derive(Default)]
-struct OcclusionGate {
-    prev: Option<(Vec3, Quat)>,
-    prev_prev: Option<(Vec3, Quat)>,
-}
-
-impl OcclusionGate {
-    /// 推入本帧机位并返回"相对两帧前是否跳变"（历史不足 = 未就绪 = 视同跳变）。
-    fn push(&mut self, now: Option<(Vec3, Quat)>) -> bool {
-        let jump = match (self.prev_prev, now) {
-            (Some((p0, r0)), Some((p1, r1))) => {
-                (p1 - p0).length() > 0.5 // 世界单位
-                    || Quat::angle_between(r0, r1) > 15f32.to_radians()
-            }
-            _ => true, // 启动/相机缺席帧
-        };
-        self.prev_prev = self.prev.take();
-        self.prev = now;
-        jump
-    }
-}
-
-/// 相机查询：投影 + 位姿 + 可选的每相机 `AmbientLight` 覆盖（挂了则压过全局资源）。
-type CameraQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static Projection,
-        &'static GlobalTransform,
-        Option<&'static AmbientLight>,
-    ),
-    With<Camera>,
->;
-
-/// 方向光查询（取第一盏，方向 = 实体 `back()`）。
-type LightQuery<'w, 's> = Query<'w, 's, (&'static GlobalTransform, &'static DirectionalLight)>;
-
-/// draw_frame 的参数束：按特性分子束，系统签名只剩本束 + 主线程标记。
-#[derive(SystemParam)]
-pub(crate) struct FrameInput<'w, 's> {
-    gpu: FrameGpuInput<'w, 's>,
-    timing: FrameTimingInput<'w>,
-    scene: SceneInput<'w, 's>,
-    frustum_cull: FrustumCullInput<'w>,
-    indirect: IndirectInput<'w>,
-    occlusion: OcclusionInput<'w>,
-    lod: LodInput<'w>,
-    shadow: ShadowInput<'w>,
-    post: PostInput<'w>,
-    cluster: ClusterInput<'w>,
-    transparent: TransparentInput<'w>,
-    /// GPU 缺口快照：帧起在 fence 保护内读缺口标记环的结果，驻留管理器 tick（Last，帧
-    /// 提交后）与 BRP census 经此消费，不直读环。
-    gap_snapshot: ResMut<'w, GapSnapshot>,
-    overlay: OverlayInput<'w, 's>,
-    gate: Local<'s, ResizeGate>,
-    logs: Local<'s, FrameLogs>,
-    occlusion_gate: Local<'s, OcclusionGate>,
-}
-
-/// 帧共享的设备、帧槽、描述符表与上传通道取用束。
-#[derive(SystemParam)]
-pub(crate) struct FrameGpuInput<'w, 's> {
-    ctx: Res<'w, Context>,
-    swapchain: ResMut<'w, Swapchain>,
-    frames: ResMut<'w, FramePool>,
-    tables: ResMut<'w, BindlessTextureTable>,
-    frame_uniform_table: ResMut<'w, FrameUniformTable>,
-    resized: MessageReader<'w, 's, WindowResized>,
-    /// 普通帧只读票号，overlay 在场时还会提交图集上传。
-    uploader: ResMut<'w, Uploader>,
-}
-
-/// GPU 时戳与 CPU 帧样本账的取用束。
-#[derive(SystemParam)]
-pub(crate) struct FrameTimingInput<'w> {
-    timer: ResMut<'w, GpuTimer>,
-    perf: ResMut<'w, PerfLedger>,
-}
-
-/// overlay 绘制输入：UI 数据可缺席，管线仍是必需资源。
-#[derive(SystemParam)]
-pub(crate) struct OverlayInput<'w, 's> {
-    ui: Option<UiDrawData<'w>>,
-    pipeline: Res<'w, OverlayPipeline>,
-    paint_log: Local<'s, OverlayLogState>,
-}
-
-/// 场景侧输入：账本、资产容器与驻留、GPU 常驻绘制数据、相机与灯光。
-#[derive(SystemParam)]
-pub(crate) struct SceneInput<'w, 's> {
-    /// 稳定槽账本（跨帧增量维护；模型环待写集的独占消费点在本系统）。
-    ledger: ResMut<'w, InstanceLedger>,
-    std_materials: Res<'w, Assets<StandardMaterial>>,
-    pool: Res<'w, MeshPool>,
-    image_cache: Res<'w, ImageCache>,
-    /// GPU 常驻绘制数据（对象表/各帧槽环）：本帧环写入与标记环读写的写点。
-    instance_tables: ResMut<'w, InstanceTables>,
-    /// LOD 组登记处（只读——可绘锚解析与 LOD 表环写入的变体柄来源）。
-    lod_groups: Res<'w, LodGroups>,
-    /// 驻留管理器设置（DrawList 可绘锚解析读 floor_anchor 开关）。
-    residency_settings: Res<'w, ResidencySettings>,
-    /// 组装对照账面（BRP 开关；关闭时零成本）。
-    verify: ResMut<'w, DrawListVerify>,
-    cameras: CameraQuery<'w, 's>,
-    lights: LightQuery<'w, 's>,
-    ambient: Option<Res<'w, GlobalAmbientLight>>,
-    /// 着色模式（AshHostPlugin 恒插入；overlay 单选钮与 BRP 写）。
-    render_mode: Res<'w, RenderMode>,
-}
-
-/// 视锥剔除：compute 管线 + 开关（egui/BRP 写，AshHostPlugin 恒插入）+ 诊断账面。
-#[derive(SystemParam)]
-pub(crate) struct FrustumCullInput<'w> {
-    pass: Res<'w, CullPass>,
-    settings: Res<'w, CullSettings>,
-    diag: ResMut<'w, CullDiagnostics>,
-}
-
-/// indirect 命令组装：compute 管线 + 诊断账面（只进计量）。
-#[derive(SystemParam)]
-pub(crate) struct IndirectInput<'w> {
-    pass: Res<'w, IndirectPass>,
-    stats: ResMut<'w, IndirectStats>,
-}
-
-/// Hi-Z 遮挡：测试管线 + 金字塔（归约链录制句柄 + warmup 走账）+ 开关 + 诊断账面。
-#[derive(SystemParam)]
-pub(crate) struct OcclusionInput<'w> {
-    pass: Res<'w, OcclusionPass>,
-    hiz: ResMut<'w, HizPyramid>,
-    settings: Res<'w, OcclusionSettings>,
-    diag: ResMut<'w, OcclusionDiagnostics>,
-}
-
-/// GPU LOD 选档：compute 管线 + 开关与判据参数 + 诊断账面。
-#[derive(SystemParam)]
-pub(crate) struct LodInput<'w> {
-    pass: Res<'w, LodPass>,
-    settings: Res<'w, LodSettings>,
-    diag: ResMut<'w, LodDiagnostics>,
-}
-
-/// 级联阴影：资源族（级联 UBO/标记/命令环 + 深度图 + 描述符）+ depth-only 绘制
-/// 管线 + 命令组装 compute + 开关。
-#[derive(SystemParam)]
-pub(crate) struct ShadowInput<'w> {
-    targets: ResMut<'w, ShadowTargets>,
-    pipeline: Res<'w, ShadowPipeline>,
-    build_pass: Res<'w, ShadowBuildPass>,
-    settings: Res<'w, ShadowSettings>,
-}
-
-/// G-buffer 管线与附件（附件随帧槽深度重建）。
-#[derive(SystemParam)]
-pub(crate) struct GBufferInput<'w> {
-    pipeline: Res<'w, GBufferPipeline>,
-    targets: ResMut<'w, GBufferTargets>,
-}
-
-/// 延迟光照与后处理：G-buffer + HDR 中间目标（随 resize 重建）、
-/// 合成管线（G-buffer 光照 → HDR）、present tonemap（HDR + Bloom → ACES →
-/// LDR）、Bloom 链与 SMAA 的资源/管线/开关。
-#[derive(SystemParam)]
-pub(crate) struct PostInput<'w> {
-    gbuffer: GBufferInput<'w>,
-    composite: Res<'w, CompositePipeline>,
-    tonemap: Res<'w, PresentTonemapPipeline>,
-    bloom: ResMut<'w, BloomTargets>,
-    bloom_pipelines: Res<'w, BloomPipelines>,
-    bloom_settings: Res<'w, BloomSettings>,
-    smaa: ResMut<'w, SmaaTargets>,
-    smaa_pipelines: Res<'w, SmaaPipelines>,
-    smaa_settings: Res<'w, SmaaSettings>,
-}
-
-/// 光源分簇：cluster 资源、cluster_build 管线和光源常驻表。合成与透明前向共用。
-#[derive(SystemParam)]
-pub(crate) struct ClusterInput<'w> {
-    clusters: ResMut<'w, LightClusters>,
-    build_pass: Res<'w, ClusterBuildPass>,
-    lights: ResMut<'w, LightTable>,
-}
-
-/// 透明层：透明命令链资源、三条 compute 管线和透明前向管线。
-#[derive(SystemParam)]
-pub(crate) struct TransparentInput<'w> {
-    targets: ResMut<'w, TransparentTargets>,
-    passes: Res<'w, TransparentPasses>,
-    pipeline: Res<'w, TransparentPipeline>,
-}
+use self::transparent::transparent_draw;
 
 /// ash 帧循环系统（注册与排序在 [`super`]；流程与错误分流见模块文档）。
 #[system]
@@ -413,27 +220,8 @@ pub(crate) fn draw_frame(
         .then(|| shadow.build_pass.draw(indirect_count));
 
     // —— overlay 绘制：图集整传（可能多一张 transfer 票据，所以本帧 wait_ticket 必须
-    // 在此后取）→ 镶嵌 → 顶点环写入。overlay 未装 = 整段跳过。
-    let ui = match overlay.ui.take() {
-        Some(mut ui_data) => {
-            let ui_buffers = ui_data.ring.buffers(slot);
-            let paint = paint_overlay(
-                &gpu.ctx,
-                &ui_data.egui,
-                &mut ui_data.frame,
-                &ui_data.mirror,
-                &mut ui_data.gpu,
-                &mut ui_data.ring,
-                &mut gpu.tables,
-                &mut gpu.uploader,
-                slot,
-                extent,
-                &mut overlay.paint_log,
-            )?;
-            paint.map(|p| (p, ui_buffers))
-        }
-        None => None,
-    };
+    // 在此后取）→ 镶嵌 → 顶点环写入。UI 数据缺席 = None（record_frame 的 UI 段整段跳过）。
+    let ui = create_overlay_draw(&gpu.ctx, &mut gpu.tables, &mut gpu.uploader, overlay, slot, extent)?;
 
     // —— 录制 + 提交。上传票据在 GPU 侧等待（ALL_COMMANDS），CPU 不阻塞。
     // 坑：image_available 已被置位、image 已到手，从这里起任何失败都只能致命退出，
@@ -460,8 +248,7 @@ pub(crate) fn draw_frame(
         gbuffer: &post.gbuffer.targets,
         composite: post.composite.rec(),
         cluster_set: cluster.clusters.frame_set(slot),
-        cluster_build: (indirect_count > 0)
-            .then(|| cluster.build_pass.draw(cluster.clusters.grid())),
+        cluster_build: create_cluster_build_draw(cluster, indirect_count),
         tonemap: post.tonemap.rec(),
         bloom_params_set: post.bloom.params_set(slot),
         bloom: bloom_draw(post, slot),
@@ -530,355 +317,6 @@ pub(crate) fn draw_frame(
     }
 }
 
-/// 尺寸变化 → 帧首按需重建，时机在 acquire 之前。rebuild 幂等（尺寸没变就空手而归），
-/// 拖拽中每步一建、帧循环不断流。其余尺寸相关资源随其后按新 extent 重建（同样幂等；
-/// 各自带 device_wait_idle，不会引用到在飞旧资源）。swapchain 重建失败让路下帧重试，
-/// 其余失败致命退出。
-fn rebuild_size_dependent(
-    gpu: &mut FrameGpuInput,
-    hiz: &mut HizPyramid,
-    post: &mut PostInput,
-    cluster: &mut ClusterInput,
-) -> Result<(), BevyError> {
-    let ctx: &Context = &gpu.ctx;
-    gpu.swapchain
-        .rebuild(ctx)
-        .or_warn("resize 后重建失败，下帧重试")?;
-    let extent = gpu.swapchain.extent;
-    gpu.frames
-        .rebuild_depth(ctx, extent)
-        .or_fatal("深度附件重建失败，渲染链无法继续")?;
-    // Hi-Z 金字塔随深度附件同批重建（warmup 重置，遮挡测试让路到金字塔重新就绪）
-    hiz.rebuild(ctx, extent, &per_slot(|s| gpu.frames.depth_image(s)))
-        .or_fatal("Hi-Z 金字塔重建失败，渲染链无法继续")?;
-    post.bloom
-        .rebuild(ctx, extent)
-        .or_fatal("Bloom 链重建失败，渲染链无法继续")?;
-    // 依赖上面已重建的深度视图（G-buffer 采样集 b3）
-    post.gbuffer.targets
-        .rebuild(ctx, extent, &per_slot(|s| gpu.frames.depth_view(s)))
-        .or_fatal("G-buffer 附件重建失败，渲染链无法继续")?;
-    // 光源常驻表与尺寸无关不重建，只把它的 buffer 重新绑进新描述符集
-    cluster
-        .clusters
-        .rebuild(ctx, extent, &per_slot(|s| cluster.lights.ring_buffer(s)))
-        .or_fatal("光源分簇 cluster 表重建失败，渲染链无法继续")?;
-    // tonemap/edge/blend 的 renderArea 与附件尺寸必须同帧对齐
-    post.smaa
-        .rebuild(ctx, extent)
-        .or_fatal("SMAA 三目标重建失败，渲染链无法继续")
-}
-
-/// 逐帧槽收集（重建入参：深度 image/view、光源环 buffer）。
-fn per_slot<T>(f: impl FnMut(usize) -> T) -> Vec<T> {
-    (0..MAX_FRAMES_IN_FLIGHT).map(f).collect()
-}
-
-/// 非透视投影的 near 兜底：级联的 near/d 视深换算只对透视投影成立，正交下
-/// 级联拟合不保证正确，此值只保证换算有定义。
-const NON_PERSPECTIVE_NEAR: f32 = 100.0;
-
-/// 相机位姿（相机在场帧才有）：遮挡跳变判定、级联拟合与光照 V 向量的输入。
-#[derive(Clone, Copy)]
-struct CameraPose {
-    pos: Vec3,
-    rot: Quat,
-    /// 投影 near（级联 z_ndc↔视深换算）。
-    near: f32,
-}
-
-impl CameraPose {
-    fn forward(&self) -> Vec3 {
-        self.rot * Vec3::NEG_Z
-    }
-}
-
-/// 本帧视图：相机矩阵 + 位姿 + 每相机环境光覆盖。相机缺席是场景装配问题，
-/// 报一次后 identity 兜底、位姿 None（画面不可读但不崩帧循环）。矩阵乘序/
-/// 列主序与 WGSL 端同一约定。
-struct FrameView<'a> {
-    view_proj: Mat4,
-    /// clip→world 反投影（深度重建与级联角点反推；与 view_proj 同帧同源）。
-    inv_view_proj: Mat4,
-    camera: Option<CameraPose>,
-    /// 相机组件 `AmbientLight`（若挂）压过全局 `GlobalAmbientLight` 资源。
-    ambient_override: Option<&'a AmbientLight>,
-}
-
-impl<'a> FrameView<'a> {
-    fn from_camera(cameras: &'a CameraQuery, logs: &mut FrameLogs) -> Self {
-        match cameras.single() {
-            Ok((projection, global, ambient_override)) => {
-                let view_proj = projection.get_clip_from_view() * global.affine().inverse();
-                let near = match projection {
-                    Projection::Perspective(p) => p.near,
-                    _ => NON_PERSPECTIVE_NEAR,
-                };
-                Self {
-                    view_proj,
-                    // glam 的 Mat4::inverse 通用逆，投影矩阵可逆性由投影构造保证
-                    inv_view_proj: view_proj.inverse(),
-                    camera: Some(CameraPose {
-                        pos: global.translation(),
-                        rot: global.rotation(),
-                        near,
-                    }),
-                    ambient_override,
-                }
-            }
-            Err(_) => {
-                logs.warned_no_camera.log(|| {
-                    warn!("相机缺席：view_proj 用 identity 兜底（画面不可读属预期，查相机装配）")
-                });
-                Self {
-                    view_proj: Mat4::IDENTITY,
-                    inv_view_proj: Mat4::IDENTITY,
-                    camera: None,
-                    ambient_override: None,
-                }
-            }
-        }
-    }
-
-    /// 相机世界位置（w = 0；相机缺席帧 zeros 兜底）。
-    fn camera_pos4(&self) -> [f32; 4] {
-        self.camera.map(|c| c.pos.extend(0.0).to_array()).unwrap_or([0.0; 4])
-    }
-}
-
-/// 本帧光照输入（帧 UBO 与级联拟合同源）。
-struct FrameLight {
-    /// 实体 back()（forward 取负，"N·L 就绪"）；无灯 = 合法方向占位。
-    dir_to_light: [f32; 4],
-    /// linear × illuminance；无灯 = 直射项归零。
-    light_color: [f32; 4],
-    /// linear × brightness；两种来源均无 = 环境项归零。
-    ambient_color: [f32; 4],
-}
-
-impl FrameLight {
-    /// 方向光取第一盏（多灯告警一次，多灯支持未实现）；环境光相机覆盖优先。
-    fn gather(
-        lights: &LightQuery,
-        view: &FrameView,
-        global_ambient: Option<&GlobalAmbientLight>,
-        render_mode: RenderMode,
-        ledger_empty: bool,
-        logs: &mut FrameLogs,
-    ) -> Self {
-        let light_count = lights.iter().count();
-        let (dir_to_light, light_color) = match lights.iter().next() {
-            Some((light_tf, light)) => {
-                let back = light_tf.back();
-                let [r, g, b, a] = LinearRgba::from(light.color).to_f32_array();
-                (
-                    [back.x, back.y, back.z, 0.0],
-                    [r * light.illuminance, g * light.illuminance, b * light.illuminance, a],
-                )
-            }
-            None => (PLACEHOLDER_DIR_TO_LIGHT, [0.0; 4]),
-        };
-        if light_count != 1 && !ledger_empty {
-            logs.warned_light_count.log(|| {
-                warn!("方向光 {light_count} 盏（取第一盏/无灯直射项归零），多灯支持未实现")
-            });
-        }
-        let ambient = view
-            .ambient_override
-            .map(|a| (a.color, a.brightness))
-            .or(global_ambient.map(|g| (g.color, g.brightness)));
-        let ambient_color = match ambient {
-            Some((color, brightness)) => LinearRgba::from(color).to_f32_array().map(|c| c * brightness),
-            None => {
-                logs.warned_no_ambient.log(|| {
-                    warn!("环境光缺席：GlobalAmbientLight 资源与相机 AmbientLight 均无，环境项归零")
-                });
-                [0.0; 4]
-            }
-        };
-        if light_count > 0 {
-            logs.lights_logged.log(|| info!(
-                "灯光 UBO 汇总：方向光 {light_count} 盏（dir_to_light = back()，light = {}）；\
-                 环境 = {}（来源 {}）；材质模式 = {}（ASH_RENDER_MODE）",
-                fmt_vec4(light_color),
-                fmt_vec4(ambient_color),
-                if view.ambient_override.is_some() { "相机 AmbientLight" } else { "GlobalAmbientLight" },
-                render_mode.label(),
-            ));
-        }
-        Self { dir_to_light, light_color, ambient_color }
-    }
-}
-
-/// 本帧槽主 UBO：相机矩阵 + 灯光 + 材质模式 + 相机世界位置（光照累积 V 向量）。
-impl FrameUniformTable {
-    /// impl 留在 driver 层而非 frame_uniform_table.rs：方法消费本模块私有的
-    /// FrameView/FrameLight，放 render 侧会反向依赖（同四环写入的落位理由）。
-    fn write_frame_ubo(
-        &mut self,
-        slot: usize,
-        view: &FrameView,
-        light: &FrameLight,
-        render_mode: RenderMode,
-    ) -> Result<(), BevyError> {
-        self.ubo(slot)
-            .write(
-                0,
-                &pack_frame_uniforms(&FrameUniformsData {
-                    view_proj: view.view_proj,
-                    inv_view_proj: view.inv_view_proj,
-                    dir_to_light: light.dir_to_light,
-                    ambient_color: light.ambient_color,
-                    light_color: light.light_color,
-                    mode: render_mode.as_u32(),
-                    camera_pos: view.camera_pos4(),
-                }),
-            )
-            .or_fatal("帧 UBO 写失败，渲染链无法继续")
-    }
-}
-
-/// 场景世界 AABB 并集（级联 far 外扩与深度盒向太阳侧延伸的输入）。
-fn scene_world_aabb(ledger: &InstanceLedger, pool: &MeshPool) -> Option<(Vec3, Vec3)> {
-    let mut scene_aabb: Option<(Vec3, Vec3)> = None;
-    for (_, row) in ledger.rows() {
-        let Some(mesh_slot) = pool.resident(row.mesh.id()) else { continue };
-        let (wmin, wmax) =
-            conservative_world_aabb(&row.model, mesh_slot.local_aabb.0, mesh_slot.local_aabb.1);
-        let (wmin, wmax) = (Vec3::from_array(wmin), Vec3::from_array(wmax));
-        scene_aabb = Some(match scene_aabb {
-            None => (wmin, wmax),
-            Some((mn, mx)) => (mn.min(wmin), mx.max(wmax)),
-        });
-    }
-    scene_aabb
-}
-
-impl ShadowInput<'_> {
-    /// shadow UBO：级联矩阵（log 分割拟合）+ 四×六平面（cull 内联标记与 shadow_stats
-    /// CPU 参照同源）+ 分割带/相机基（composite 选级联）。相机缺席帧 = identity 矩阵。
-    fn write_ubo(
-        &mut self,
-        slot: usize,
-        view: &FrameView,
-        light: &FrameLight,
-        scene_aabb: Option<(Vec3, Vec3)>,
-    ) -> Result<(), BevyError> {
-        let fit = match view.camera {
-            Some(cam) => cascade_matrices(&ShadowCascadeInput {
-                inv_view_proj: view.inv_view_proj,
-                camera_pos: cam.pos,
-                camera_forward: cam.forward(),
-                near: cam.near,
-                dir_to_light: Vec3::from_slice(&light.dir_to_light[..3]),
-                scene_aabb,
-            }),
-            None => ShadowCascades {
-                view_proj: [Mat4::IDENTITY; SHADOW_CASCADES],
-                splits: [f32::INFINITY; SHADOW_CASCADES],
-                texel_world: [1.0; SHADOW_CASCADES],
-                inv_span: [0.0; SHADOW_CASCADES],
-            },
-        };
-        let cascade_planes = fit.view_proj.map(|m| frustum_planes(&m));
-        let uniform = ShadowUniformsData {
-            cascade_view_proj: fit.view_proj,
-            planes: std::array::from_fn(|i| cascade_planes[i / 6][i % 6]),
-            splits: fit.splits,
-            camera_forward: view
-                .camera
-                .map(|c| c.forward().extend(0.0).to_array())
-                .unwrap_or([0.0; 4]),
-            camera_pos: view.camera_pos4(),
-            map_size: SHADOW_MAP_SIZE as f32,
-            enabled: f32::from(self.settings.enabled),
-            texel_world: fit.texel_world,
-            inv_span: fit.inv_span,
-        };
-        self.targets
-            .ubo(slot)
-            .write(0, &pack_shadow_uniforms(&uniform))
-            .or_fatal("shadow UBO 写失败，渲染链无法继续")
-    }
-}
-
-impl PostInput<'_> {
-    /// 后处理帧槽 UBO：Bloom 五标量 + SmaaInfo（rt_metrics + 开关）。
-    fn write_slot_ubos(&mut self, slot: usize) -> Result<(), BevyError> {
-        let bloom = &self.bloom_settings;
-        self.bloom
-            .ubo(slot)
-            .write(
-                0,
-                &pack_bloom_params(&BloomParamsData {
-                    strength: bloom.strength,
-                    enabled: f32::from(bloom.enabled),
-                    tonemap: f32::from(bloom.tonemap),
-                    curve: bloom.curve.as_f32(),
-                    gain: bloom.gain,
-                }),
-            )
-            .or_fatal("Bloom 参数 UBO 写失败，渲染链无法继续")?;
-        let ldr = self.smaa.ldr_extent();
-        let (sw, sh) = (ldr.width.max(1), ldr.height.max(1));
-        let mut smaa_info = [0u8; 32];
-        put_f32s(
-            &mut smaa_info,
-            0,
-            &[
-                1.0 / sw as f32,
-                1.0 / sh as f32,
-                sw as f32,
-                sh as f32,
-                f32::from(self.smaa_settings.enabled),
-                0.0,
-                0.0,
-                0.0,
-            ],
-        );
-        self.smaa
-            .info_mut(slot)
-            .write(0, &smaa_info)
-            .or_fatal("SmaaInfo UBO 写失败，渲染链无法继续")
-    }
-}
-
-impl ClusterInput<'_> {
-    /// 写本帧槽的 cluster 均匀数据和光源常驻表脏行。调用时该槽 fence 已等过。
-    fn write_slot(
-        &mut self,
-        slot: usize,
-        view: &FrameView,
-        extent: vk::Extent2D,
-    ) -> Result<(), BevyError> {
-        let cluster_uniform = pack_cluster_uniforms(
-            &view.view_proj,
-            &view.inv_view_proj,
-            extent,
-            self.clusters.grid(),
-            self.lights.light_count(),
-        );
-        self.clusters
-            .uniform(slot)
-            .write(0, &cluster_uniform)
-            .or_fatal("cluster 均匀数据写失败，渲染链无法继续")?;
-        // 只写脏行；一行要在两个帧槽都写过才算清
-        self.lights
-            .write_dirty(slot)
-            .or_fatal("光源常驻表脏行写失败，渲染链无法继续")
-    }
-}
-
-impl TransparentInput<'_> {
-    /// 本帧槽透明行数清零，collect 在 GPU 上从 0 原子累加。
-    fn clear_slot_count(&mut self, slot: usize) -> Result<(), BevyError> {
-        self.targets
-            .count(slot)
-            .write(0, &0u32.to_le_bytes())
-            .or_fatal("透明行计数清零失败，渲染链无法继续")
-    }
-}
-
 /// 本帧 compute 段的共享输入。
 struct PassFrame<'a> {
     slot: usize,
@@ -888,179 +326,6 @@ struct PassFrame<'a> {
     screen: [f32; 2],
     /// 在场行实例槽号（诊断读数逐行计数的范围）。
     live: &'a [u32],
-}
-
-/// 准备本帧视锥剔除录制输入：主视图或阴影开启时生成 dispatch，否则 host 填全可见。
-/// 诊断读数只进计量；返回 (录制输入, 在场行可见数)。
-fn create_frustum_cull_draw(
-    pf: &PassFrame,
-    frustum_cull: &mut FrustumCullInput,
-    shadow_enabled: bool,
-    instances: &mut InstanceTables,
-    first: &mut OnceLog,
-) -> Result<(Option<CullDraw>, u32), BevyError> {
-    let bound = pf.bound;
-    if bound == 0 {
-        return Ok((None, 0));
-    }
-    // shadow 开启时剔除 dispatch 也要产出 shadow 标记，两侧全关才可跳过。主视图开关随
-    // push 进 shader：关 = marks 恒写 1，不覆盖下方 host 全可见填充的语义
-    let draw = (frustum_cull.settings.enabled || shadow_enabled).then(|| {
-        first.log(|| info!(
-            "视锥剔除 dispatch 首跑：bound {bound}，组 {}，平面随 112B push 进 compute",
-            bound.div_ceil(64),
-        ));
-        frustum_cull.pass.draw(&frustum_planes(&pf.view_proj), bound, frustum_cull.settings.enabled)
-    });
-    if !frustum_cull.settings.enabled {
-        fill_u32(instances.mark_ring(pf.slot), bound as usize, 1)
-            .or_fatal("剔除标记环全可见填充失败，渲染链无法继续")?;
-    }
-    let marks = read_ring(instances.mark_ring(pf.slot), bound as usize * MARK_SIZE as usize)
-        .or_fatal("剔除标记环读数失败，渲染链无法继续")?;
-    let visible = count_marked(&marks, pf.live);
-    frustum_cull.diag.enabled = frustum_cull.settings.enabled;
-    frustum_cull.diag.bound = bound;
-    frustum_cull.diag.marks_frame = pf.slot;
-    frustum_cull.diag.rows_compared = pf.live.len();
-    frustum_cull.diag.visible_count = visible;
-    Ok((draw, visible))
-}
-
-/// 遮挡 dispatch 判据（dispatch 与否和 fallback 原因同出一处）。
-enum OcclusionVerdict {
-    Dispatch,
-    /// 跳过 dispatch；原因取首个命中（空场 = None：无可判行，不算 fallback）。
-    Skip(Option<OcclusionFallback>),
-}
-
-impl OcclusionVerdict {
-    fn judge(
-        enabled: bool,
-        cull_enabled: bool,
-        bound: u32,
-        pyramid_ready: bool,
-        camera_jumped: bool,
-    ) -> Self {
-        if !enabled {
-            Self::Skip(Some(OcclusionFallback::Disabled))
-        } else if !cull_enabled {
-            Self::Skip(Some(OcclusionFallback::CullOff))
-        } else if bound == 0 {
-            Self::Skip(None)
-        } else if !pyramid_ready {
-            Self::Skip(Some(OcclusionFallback::PyramidWarmup))
-        } else if camera_jumped {
-            Self::Skip(Some(OcclusionFallback::CameraJump))
-        } else {
-            Self::Dispatch
-        }
-    }
-}
-
-/// 准备本帧遮挡剔除录制输入：判据任一命中 → 本帧跳过 dispatch——b3 保持视锥结果、
-/// b6 host 填全可见（读数 = 遮挡剔除量 0）。诊断读数 b6 = 本帧槽两帧前 compute 输出或
-/// host 填充。
-fn create_occlusion_draw(
-    pf: &PassFrame,
-    occlusion: &mut OcclusionInput,
-    cull_enabled: bool,
-    camera_jumped: bool,
-    instances: &mut InstanceTables,
-    first: &mut OnceLog,
-) -> Result<Option<OcclusionDraw>, BevyError> {
-    let bound = pf.bound;
-    let verdict = OcclusionVerdict::judge(
-        occlusion.settings.enabled,
-        cull_enabled,
-        bound,
-        occlusion.hiz.ready(),
-        camera_jumped,
-    );
-    let (dispatch, fallback) = match verdict {
-        OcclusionVerdict::Dispatch => {
-            first.log(|| info!(
-                "Hi-Z 遮挡测试 dispatch 首跑（复用视锥 compute 链）：bound {bound}，\
-                 组 {}，金字塔 {} 级（80B push：view_proj+screen+bound；b3=视锥∧遮挡，b6 遮挡独立标记）",
-                bound.div_ceil(64),
-                occlusion.hiz.levels(),
-            ));
-            let draw = occlusion.pass.draw(&pf.view_proj, pf.screen, bound, occlusion.hiz.occlusion_set(pf.slot));
-            (Some(draw), None)
-        }
-        OcclusionVerdict::Skip(reason) => {
-            if bound > 0 {
-                fill_u32(instances.occ_mark_ring(pf.slot), bound as usize, 1)
-                    .or_fatal("遮挡标记环全可见填充失败，渲染链无法继续")?;
-            }
-            (None, reason)
-        }
-    };
-    let mut visible = 0u32;
-    if bound > 0 {
-        let marks = read_ring(instances.occ_mark_ring(pf.slot), bound as usize * MARK_SIZE as usize)
-            .or_fatal("遮挡标记环读数失败，渲染链无法继续")?;
-        visible = count_marked(&marks, pf.live);
-    }
-    let diag = &mut occlusion.diag;
-    diag.enabled = occlusion.settings.enabled;
-    diag.dispatched = dispatch.is_some();
-    diag.fallback = fallback;
-    diag.bound = bound;
-    diag.marks_frame = pf.slot;
-    diag.rows_compared = pf.live.len();
-    diag.occlusion_visible_count = visible;
-    Ok(dispatch)
-}
-
-/// 准备本帧 GPU LOD 选档录制输入：开关决定 compute dispatch 或 host 档位环填 0（最细
-/// 档）。选档每帧按当前相机现算，档位环只是迟滞状态，无需 fallback。诊断：在场行的
-/// 档位分布（b8 = 本帧槽两帧前 compute 输出或 host 填 0）。
-fn create_lod_draw(
-    pf: &PassFrame,
-    lod: &mut LodInput,
-    instances: &mut InstanceTables,
-    first: &mut OnceLog,
-) -> Result<Option<LodDraw>, BevyError> {
-    let bound = pf.bound;
-    let dispatch = if lod.settings.enabled && bound > 0 {
-        first.log(|| info!(
-            "GPU LOD 选档 dispatch 首跑（复用视锥 compute 链）：bound {bound}，\
-             组 {}，{MAX_LOD_LEVELS} 档（96B push：view_proj+screen+bound+threshold+hysteresis；\
-             b7 变体表按档直址，b8 档位环 = 迟滞状态）",
-            bound.div_ceil(64),
-        ));
-        Some(lod.pass.draw(
-            &pf.view_proj,
-            pf.screen,
-            bound,
-            lod.settings.threshold_px,
-            lod.settings.hysteresis,
-        ))
-    } else {
-        if bound > 0 {
-            fill_u32(instances.lod_level_ring(pf.slot), bound as usize, 0)
-                .or_fatal("LOD 档位环全最细档填充失败，渲染链无法继续")?;
-        }
-        None
-    };
-    if bound > 0 {
-        let levels = read_ring(instances.lod_level_ring(pf.slot), bound as usize * LOD_LEVEL_SIZE as usize)
-            .or_fatal("LOD 档位环读数失败，渲染链无法继续")?;
-        let mut counts = [0u32; MAX_LOD_LEVELS as usize];
-        for slot in pf.live {
-            let Some(&level) = levels.get(*slot as usize) else { continue };
-            let index = (level as usize).min(counts.len() - 1);
-            counts[index] += 1;
-        }
-        lod.diag.enabled = lod.settings.enabled;
-        lod.diag.dispatched = dispatch.is_some();
-        lod.diag.bound = bound;
-        lod.diag.level_counts = counts;
-        lod.diag.rows_compared = pf.live.len();
-        lod.diag.marks_frame = pf.slot;
-    }
-    Ok(dispatch)
 }
 
 /// 缺口快照采样：帧起读缺口标记环（本帧槽 = 两帧前 compute 输出）。坑：驻留管理器
@@ -1093,160 +358,21 @@ fn sample_gaps(
     Ok(())
 }
 
-/// 准备本帧 indirect 命令组装录制输入：在场行数 = GPU 命令条数（来自账本，非可见集
-/// 回读）；空场 = None，场景绘制整段跳过。诊断读数只进计量。
-fn create_indirect_draw(
-    indirect: &mut IndirectInput,
-    count: u32,
-    visible: u32,
-    walk_rows: usize,
-    pending_rows: usize,
-    first: &mut OnceLog,
-) -> Result<Option<IndirectDraw>, BevyError> {
-    let dispatch = if count > 0 {
-        first.log(|| info!(
-            "indirect 提交首跑：在场行 {count}，命令环 {}B/条，\
-             图形侧一次 cmd_draw_indexed_indirect（图形 push range 归零，firstInstance 携带槽号）",
-            INDIRECT_COMMAND_SIZE,
-        ));
-        Some(
-            indirect
-                .pass
-                .draw(count)
-                .or_fatal("indirect dispatch 输入组装失败，渲染链无法继续")?,
-        )
-    } else {
-        None
-    };
-    let stats = &mut indirect.stats;
-    stats.draw_calls_recorded = u32::from(count > 0);
-    stats.command_count = count;
-    stats.zero_instance_count = count - visible;
-    stats.walk_rows = walk_rows;
-    stats.pending_rows = pending_rows;
-    Ok(dispatch)
-}
-
-/// 在场行 > 0 才录透明层；在场行数超过透明行容量时报错退出。
-fn transparent_draw(
-    transparent: &TransparentInput,
-    instances: &InstanceTables,
-    slot: usize,
-    count: u32,
-) -> Result<Option<TransparentFrame>, BevyError> {
-    if count == 0 {
-        return Ok(None);
-    }
-    let (targets, passes) = (&transparent.targets, &transparent.passes);
-    Ok(Some(TransparentFrame {
-        transparent_set: targets.frame_set(slot),
-        collect: Some(
-            passes
-                .collect(count)
-                .or_fatal("透明行收集 dispatch 输入组装失败，渲染链无法继续")?,
-        ),
-        gather: Some(passes.gather(count)),
-        sort: passes.sort_plan(),
-        set2: instances.frame_set2(slot),
-        pipeline: transparent.pipeline.rec(),
-        t_commands: targets.command_buffer(slot),
-        t_keys: targets.key_buffer(slot),
-        command_count: count,
-    }))
-}
-
-/// shadow depth pass 输入：在场行 > 0 且开关开才录四级联绘制；关 = composite
-/// 侧 shader 旁路 shadow 采样。
-fn shadow_write_draw(
-    shadow: &ShadowInput,
-    instances: &InstanceTables,
-    pool: &MeshPool,
-    slot: usize,
-    count: u32,
-) -> Result<Option<ShadowWriteDraw>, BevyError> {
-    if !(shadow.settings.enabled && count > 0) {
-        return Ok(None);
-    }
-    let targets = &shadow.targets;
-    Ok(Some(ShadowWriteDraw {
-        pipeline: shadow.pipeline.rec(),
-        set2: instances.frame_set2(slot),
-        shadow_set: targets.frame_set(slot),
-        views: std::array::from_fn(|c| targets.map_view(c)),
-        images: std::array::from_fn(|c| targets.map_image(c)),
-        commands: std::array::from_fn(|c| targets.command(slot, c)),
-        command_count: count,
-        vertex_buffer: pool
-            .vertex_buffer()
-            .ok_or_fatal("shadow 输入在场行非空但顶点池缺席——状态矛盾")?,
-        index_buffer: pool
-            .index_buffer()
-            .ok_or_fatal("shadow 输入在场行非空但索引池缺席——状态矛盾")?,
-    }))
-}
-
-/// Bloom 链录制输入：开关开才录九个全屏 pass；关 = None（tonemap 侧 shader
-/// 不采样 bloom，up0 陈旧无消费）。down 集从 level 1 起（level 0 由 prefilter 写）。
-fn bloom_draw(post: &PostInput, slot: usize) -> Option<BloomFrameDraw> {
-    if !post.bloom_settings.enabled {
-        return None;
-    }
-    let (targets, pipelines) = (&post.bloom, &post.bloom_pipelines);
-    Some(BloomFrameDraw {
-        prefilter: pipelines.prefilter_rec(),
-        down: pipelines.down_rec(),
-        up: pipelines.up_rec(),
-        gbuffer_set: post.gbuffer.targets.sampled_set(slot),
-        down_sets: std::array::from_fn(|i| targets.set_down(i + 1, slot)),
-        up_sets: std::array::from_fn(|i| targets.set_up(i, slot)),
-        images_down: std::array::from_fn(|i| targets.down_image(i)),
-        images_up: std::array::from_fn(|i| targets.up_image(i)),
-        views_down: std::array::from_fn(|i| targets.down_view(i)),
-        views_up: std::array::from_fn(|i| targets.up_view(i)),
-        extents: std::array::from_fn(|i| targets.level_extent(i)),
-    })
-}
-
-/// SMAA 录制输入：edge/blend 开关开 = Some；neighborhood 恒在（LDR → swapchain
-/// 的唯一出口）。
-fn smaa_draws(post: &PostInput, slot: usize) -> (Option<SmaaEdgeBlendDraw>, SmaaNbDraw) {
-    let (targets, pipelines) = (&post.smaa, &post.smaa_pipelines);
-    let edge_blend = post.smaa_settings.enabled.then(|| SmaaEdgeBlendDraw {
-        edge: pipelines.edge_rec(),
-        blend: pipelines.blend_rec(),
-        edge_set: targets.set_edge(slot),
-        blend_set: targets.set_blend(slot),
-        edges_view: targets.edges_view(slot),
-        edges_image: targets.edges_image(slot),
-        blend_view: targets.blend_view(slot),
-        blend_image: targets.blend_image(slot),
-        extent: targets.ldr_extent(),
-    });
-    let nb = SmaaNbDraw {
-        nb: pipelines.neighborhood_rec(),
-        nb_set: targets.set_nb(slot),
-        ldr_view: targets.ldr_view(slot),
-        ldr_image: targets.ldr_image(slot),
-        ldr_extent: targets.ldr_extent(),
-    };
-    (edge_blend, nb)
-}
-
 /// host 侧整段填充 u32 环：`count` 个小端 `value`（开关关闭时的全可见/全最细档）。
-fn fill_u32(ring: &mut GpuBuffer, count: usize, value: u32) -> Result<(), VulkanError> {
+pub(super) fn fill_u32(ring: &mut GpuBuffer, count: usize, value: u32) -> Result<(), VulkanError> {
     ring.write(0, &value.to_le_bytes().repeat(count))
 }
 
 /// 读 u32 环前 `len` 字节并按小端解包（标记/档位/缺口环同款）：尾部不足 4B 的
 /// 残字节丢弃，调用方按槽 `.get()` 取值，越界视同缺席。
-fn read_ring(ring: &mut GpuBuffer, len: usize) -> Result<Vec<u32>, VulkanError> {
+pub(super) fn read_ring(ring: &mut GpuBuffer, len: usize) -> Result<Vec<u32>, VulkanError> {
     let mut bytes = vec![0u8; len];
     ring.read(0, &mut bytes)?;
     Ok(bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect())
 }
 
 /// 在场行中标记 = 1 的行数（剔除/遮挡诊断读数）。
-fn count_marked(marks: &[u32], live: &[u32]) -> u32 {
+pub(super) fn count_marked(marks: &[u32], live: &[u32]) -> u32 {
     live.iter().filter(|&&slot| marks.get(slot as usize) == Some(&1)).count() as u32
 }
 
@@ -1254,42 +380,3 @@ fn count_marked(marks: &[u32], live: &[u32]) -> u32 {
 ///（render/frame/frame_draw.rs），调色时按线性直觉给值，不要拿 sRGB 十六进制直接换算。
 const CLEAR_COLOR: [f32; 4] = [0.02, 0.06, 0.14, 1.0];
 
-/// 灯光日志用的 vec4 格式。
-fn fmt_vec4(v: [f32; 4]) -> String {
-    format!("({:.1}, {:.1}, {:.1}, {:.1})", v[0], v[1], v[2], v[3])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::OcclusionGate;
-    use bevy::math::{Quat, Vec3};
-
-    /// 比较"本帧 vs 两帧前"，阈值作用于两帧累计量：历史不足、累计微动超阈、单帧大跳
-    /// 都触发，静止不触发。
-    #[test]
-    fn occlusion_gate_jump_thresholds() {
-        let mut gate = OcclusionGate::default();
-        let p0 = Vec3::new(4.0, 2.0, 6.0);
-        let r0 = Quat::IDENTITY;
-        // 机位历史不足（前两帧）= 未就绪 = 视同跳变（遮挡测试让路）
-        assert!(gate.push(Some((p0, r0))), "无历史");
-        assert!(gate.push(Some((p0, r0))), "只有一帧历史");
-        // 静止相机：不触发
-        assert!(!gate.push(Some((p0, r0))), "静止两帧 = 稳定");
-        // 单帧小位移（0.3 < 0.5，窗口累计 0.3）：不触发
-        assert!(!gate.push(Some((p0 + Vec3::new(0.3, 0.0, 0.0), r0))));
-        // 连续微动两帧窗口累计 0.6 > 0.5：触发（金字塔内容已落后累计量）
-        assert!(gate.push(Some((p0 + Vec3::new(0.6, 0.0, 0.0), r0))));
-        // 大位移（单帧 2.0 > 0.5）触发
-        assert!(gate.push(Some((p0 + Vec3::new(2.0, 0.0, 0.0), r0))));
-        // 大旋转（16° > 15°）触发
-        assert!(gate.push(Some((p0, Quat::from_rotation_y(16f32.to_radians())))));
-        // 历史对齐（同位姿再推两帧，清掉大位移残留，使比较基准 = 16° 姿态）
-        assert!(gate.push(Some((p0, Quat::from_rotation_y(16f32.to_radians())))));
-        assert!(!gate.push(Some((p0, Quat::from_rotation_y(16f32.to_radians())))));
-        // 小旋转（两帧窗累计 2° ≤ 15°）不触发
-        assert!(!gate.push(Some((p0, Quat::from_rotation_y(14f32.to_radians())))));
-        // 相机缺席帧（None = 场景装配问题）视同未就绪
-        assert!(gate.push(None));
-    }
-}
