@@ -313,8 +313,9 @@ pub(crate) fn draw_frame(
 
     // —— 组装 DrawList（增量）：实例槽缺/mesh 未驻留/材质缺席的行暂缓，就绪后自愈。
     let sources = DrawabilitySources::new(&scene.pool, &scene.std_materials, &scene.lod_groups, scene.residency_settings.floor_anchor);
-    drawlist::assemble_update(&mut scene.ledger, sources, &mut scene.verify);
+    drawlist::assemble_update(&mut scene.ledger, sources);
     watch.assemble_done();
+    scene.verify.verify_assembly(&scene.ledger, sources);
     // 奇偶脏集先于视图取走，此后 assembly 视图对账本共享借用
     let dirty = ParityDirty::take(&mut scene.ledger, slot);
     let ledger: &InstanceLedger = &scene.ledger;

@@ -77,21 +77,62 @@ impl<'a> DrawabilitySources<'a> {
 
 /// 组装 DrawList（增量）：触发账本组装缓存重估，产物经 `ledger.assembly_view()`
 /// 供帧循环只读。行集不变帧零走访，变更帧成本 O(重估行)。
-/// 尾随跑对照模式（BRP 开关，[`DrawListVerify`]）：开启时全量走访与增量结果
-/// 逐字段比对，只进计量；比对成本计入本段 assemble 计时（仅开启时存在）。
-pub(crate) fn assemble_update(
-    ledger: &mut InstanceLedger,
-    sources: DrawabilitySources,
-    verify: &mut DrawListVerify,
-) {
+pub(crate) fn assemble_update(ledger: &mut InstanceLedger, sources: DrawabilitySources) {
     ledger.assembly_update(
         &mut sources.eval(),
         sources.floor_anchor,
         sources.lod_groups.generation(),
     );
-    if verify.enabled {
-        let pending = ledger.assembly_pending();
-        verify_assembly(ledger, sources, pending, verify);
+}
+
+impl DrawListVerify {
+    /// 对照模式逐帧比对：开关关着直接返回；开着跑全量参照 vs 增量缓存
+    /// （槽号列表、暂缓数、材质集、alpha<1 计数）逐字段比对，不一致只记进
+    /// 账面，不中断渲染、不驱动绘制。
+    pub(crate) fn verify_assembly(&mut self, ledger: &InstanceLedger, sources: DrawabilitySources) {
+        if !self.enabled {
+            return;
+        }
+        let pending_rows = ledger.assembly_pending();
+        let (ref_slots, ref_materials, ref_pending, ref_alpha) = assemble_reference(ledger, sources);
+        let view = ledger.assembly_view();
+        self.frames_compared_total += 1;
+        let mut mismatch: Option<String> = None;
+        if view.slots != ref_slots.as_slice() {
+            let first_diff = view
+                .slots
+                .iter()
+                .zip(ref_slots.iter())
+                .position(|(a, b)| a != b)
+                .unwrap_or_else(|| view.slots.len().min(ref_slots.len()));
+            mismatch = Some(format!(
+                "槽号列表不一致（增量 {} 行 vs 全量 {} 行，首差异位 {first_diff}）",
+                view.slots.len(),
+                ref_slots.len(),
+            ));
+        } else if pending_rows != ref_pending {
+            mismatch = Some(format!("暂缓行数不一致（增量 {pending_rows} vs 全量 {ref_pending}）"));
+        } else {
+            let mut inc_mats = view.materials.to_vec();
+            inc_mats.sort_unstable();
+            let ref_mats: Vec<_> = ref_materials.into_iter().collect();
+            if inc_mats != ref_mats {
+                mismatch = Some(format!(
+                    "材质集不一致（增量 {} 个 vs 全量 {} 个）",
+                    inc_mats.len(),
+                    ref_mats.len(),
+                ));
+            } else if view.alpha_override != ref_alpha {
+                mismatch = Some(format!(
+                    "alpha<1 行数不一致（增量 {} vs 全量 {ref_alpha}）",
+                    view.alpha_override,
+                ));
+            }
+        }
+        if let Some(m) = mismatch {
+            self.mismatches_total += 1;
+            self.last_mismatch = Some(m);
+        }
     }
 }
 
@@ -119,55 +160,6 @@ fn assemble_reference(
         }
     }
     (slots, materials, pending_rows, alpha_override)
-}
-
-/// 对照模式逐帧比对：全量参照 vs 增量缓存（槽号列表、暂缓数、材质集、alpha<1 计数），
-/// 不一致只记进账面，不中断渲染。
-fn verify_assembly(
-    ledger: &InstanceLedger,
-    sources: DrawabilitySources,
-    pending_rows: usize,
-    verify: &mut DrawListVerify,
-) {
-    let (ref_slots, ref_materials, ref_pending, ref_alpha) = assemble_reference(ledger, sources);
-    let view = ledger.assembly_view();
-    verify.frames_compared_total += 1;
-    let mut mismatch: Option<String> = None;
-    if view.slots != ref_slots.as_slice() {
-        let first_diff = view
-            .slots
-            .iter()
-            .zip(ref_slots.iter())
-            .position(|(a, b)| a != b)
-            .unwrap_or_else(|| view.slots.len().min(ref_slots.len()));
-        mismatch = Some(format!(
-            "槽号列表不一致（增量 {} 行 vs 全量 {} 行，首差异位 {first_diff}）",
-            view.slots.len(),
-            ref_slots.len(),
-        ));
-    } else if pending_rows != ref_pending {
-        mismatch = Some(format!("暂缓行数不一致（增量 {pending_rows} vs 全量 {ref_pending}）"));
-    } else {
-        let mut inc_mats = view.materials.to_vec();
-        inc_mats.sort_unstable();
-        let ref_mats: Vec<_> = ref_materials.into_iter().collect();
-        if inc_mats != ref_mats {
-            mismatch = Some(format!(
-                "材质集不一致（增量 {} 个 vs 全量 {} 个）",
-                inc_mats.len(),
-                ref_mats.len(),
-            ));
-        } else if view.alpha_override != ref_alpha {
-            mismatch = Some(format!(
-                "alpha<1 行数不一致（增量 {} vs 全量 {ref_alpha}）",
-                view.alpha_override,
-            ));
-        }
-    }
-    if let Some(m) = mismatch {
-        verify.mismatches_total += 1;
-        verify.last_mismatch = Some(m);
-    }
 }
 
 /// 本帧槽的奇偶脏集（模型环/LOD 表环）：须在取组装视图之前从账本取走——此后
