@@ -16,7 +16,7 @@ use bevy::ecs::error::BevyError;
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
 use crate::common::syntax::ResultTierExt;
-use crate::render::core::record::barrier::{image_barrier, image_barrier_with_memory, ImageBarrier};
+use crate::render::core::record::barrier::{ImageBarrier, MemoryBarrierDesc};
 use crate::render::core::record::fullscreen::{
     record_fullscreen, record_fullscreen_open, record_fullscreen_sampled, FullscreenPass,
 };
@@ -24,17 +24,17 @@ use crate::render::core::record::graphics::{
     bind_graphics, bind_vertex_index, full_rect, set_viewport, set_viewport_scissor, PipelineRef,
 };
 use crate::render::core::binding::set_layout::DescSet;
-use crate::render::passes::visibility::cull::CullDraw;
-use crate::render::passes::visibility::hiz::HizPyramid;
-use crate::render::passes::visibility::indirect::IndirectDraw;
-use crate::render::passes::visibility::lod::LodDraw;
-use crate::render::passes::visibility::occlusion::OcclusionDraw;
-use crate::render::passes::shadow::shadow_build::ShadowBuildDraw;
-use crate::render::passes::shadow::shadow_map::ShadowWriteDraw;
+use crate::render::passes::lighting::cluster::{self, ClusterBuildDraw};
 use crate::render::passes::shadow::cascades::SHADOW_MAP_SIZE;
+use crate::render::passes::shadow::shadow_build::{self, ShadowBuildDraw};
+use crate::render::passes::shadow::shadow_map::ShadowWriteDraw;
+use crate::render::passes::transparent::{self, TransparentFrame};
+use crate::render::passes::visibility::cull::{self, CullDraw};
+use crate::render::passes::visibility::hiz::HizPyramid;
+use crate::render::passes::visibility::indirect::{self, IndirectDraw};
+use crate::render::passes::visibility::lod::{self, LodDraw};
+use crate::render::passes::visibility::occlusion::{self, OcclusionDraw};
 use crate::render::GBufferTargets;
-use crate::render::passes::lighting::cluster::ClusterBuildDraw;
-use crate::render::passes::transparent::TransparentFrame;
 use crate::render::passes::overlay::overlay_pipeline::{pack_ui_push, UiPaint};
 use crate::render::stats::perf::GpuTimer;
 use crate::render::{Context, BLOOM_LEVELS, INDIRECT_COMMAND_SIZE};
@@ -123,12 +123,12 @@ impl FramePool {
         &self,
         ctx: &Context,
         render_finished: vk::Semaphore,
-        image: vk::Image,
-        view: vk::ImageView,
+        swapchain_image: vk::Image,
+        swapchain_view: vk::ImageView,
         extent: vk::Extent2D,
         draw: &FrameDraw<'_>,
     ) -> Result<(), BevyError> {
-        self.record_frame_steps(ctx, render_finished, image, view, extent, draw)
+        self.record_frame_steps(ctx, render_finished, swapchain_image, swapchain_view, extent, draw)
             .or_fatal("录制/提交失败，渲染链无法继续")
     }
 
@@ -149,8 +149,8 @@ impl FramePool {
         &self,
         ctx: &Context,
         render_finished: vk::Semaphore,
-        image: vk::Image,
-        view: vk::ImageView,
+        swapchain_image: vk::Image,
+        swapchain_view: vk::ImageView,
         extent: vk::Extent2D,
         draw: &FrameDraw<'_>,
     ) -> Result<()> {
@@ -176,29 +176,23 @@ impl FramePool {
                 timer.reset_and_start(cb, slot);
             }
 
-            // —— 进场屏障一：颜色布局迁移。迁移本身是写，必须排在 acquire 对 image 的读之后：
+            // —— 进场屏障一：颜色布局迁移。迁移本身是写，必须排在 acquire 对 swapchain image 的读之后：
             // 提交在 COLOR_ATTACHMENT_OUTPUT 等 image_available，所以 srcStage 也取这里；
             // dst_access 含 COLOR_ATTACHMENT_WRITE，衔接后面的 loadOp 清屏。
-            image_barrier(
-                device,
-                cb,
-                &ImageBarrier::discard_to_color(image, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT),
-            );
+            ImageBarrier::discard_to_color(
+                swapchain_image,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            )
+            .record(device, cb);
 
             // —— 进场屏障二：深度 UNDEFINED→附件。src access 为空是合法的：本槽深度的上一轮使用
             // 已被 wait_for_slot 的 fence 等完，录制时没有并发引用。
-            image_barrier(device, cb, &ImageBarrier {
-                image: frame.depth.image,
-                aspect: vk::ImageAspectFlags::DEPTH,
-                old_layout: vk::ImageLayout::UNDEFINED,
-                new_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                src_stage: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+            ImageBarrier::discard_to_depth_attachment(
+                frame.depth.image,
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
                     | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                src_access: vk::AccessFlags::empty(),
-                dst_stage: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                dst_access: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            });
+            )
+            .record(device, cb);
 
             // —— 进场屏障三：G-buffer 三附件 + HDR 目标 UNDEFINED→附件。每帧 loadOp CLEAR 覆写全部
             // 像素，本槽上一轮使用已被 fence 等完（同进场屏障二），旧内容不要。
@@ -208,14 +202,11 @@ impl FramePool {
                 draw.gbuffer.matparam_image(slot),
                 draw.gbuffer.hdr_image(slot),
             ] {
-                image_barrier(
-                    device,
-                    cb,
-                    &ImageBarrier::discard_to_color(
-                        gbuffer_image,
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    ),
-                );
+                ImageBarrier::discard_to_color(
+                    gbuffer_image,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                )
+                .record(device, cb);
             }
 
             // 贴图不需要进场屏障：图像 CONCURRENT 双族共享，不做所有权转移；上传后的
@@ -225,53 +216,43 @@ impl FramePool {
             // —— 透明排序键预填 -inf：bitonic 全容量升序排序把真实条目推到尾部（gather 反向取），
             // 空位的键必须是 -inf。要在所有 compute dispatch 之前。
             if let Some(t) = draw.transparent.as_ref() {
-                device.cmd_fill_buffer(
-                    cb,
-                    t.t_keys,
-                    0,
-                    vk::WHOLE_SIZE,
-                    0xFF80_0000, // f32::NEG_INFINITY 位型
-                );
-                let fill_barrier = vk::MemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
-                device.cmd_pipeline_barrier(
-                    cb,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::DependencyFlags::empty(),
-                    slice::from_ref(&fill_barrier),
-                    &[],
-                    &[],
-                );
+                device.cmd_fill_buffer(cb, t.t_keys, 0, vk::WHOLE_SIZE, f32::NEG_INFINITY.to_bits());
+                // 填充是 transfer 写，后续 sort/collect 的 compute 读写前必须可见
+                MemoryBarrierDesc {
+                    src_stage: vk::PipelineStageFlags::TRANSFER,
+                    src_access: vk::AccessFlags::TRANSFER_WRITE,
+                    dst_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
+                    dst_access: vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+                }
+                .record(device, cb);
             }
 
             // —— ② compute 段，顺序即依赖：视锥剔除 → 遮挡测试（读视锥标记与两帧前的 Hi-Z 金字塔）
             // → LOD 选档 → indirect 命令组装 → shadow 命令组装 → 光源列表 → 透明层。
             // 各段之间的屏障都在各自的 record 内。
             if let Some(frustum_cull) = &draw.frustum_cull {
-                crate::render::passes::visibility::cull::record(device, cb, draw.set2, draw.shadow_set, frustum_cull);
+                cull::record(device, cb, draw.set2, draw.shadow_set, frustum_cull);
             }
             if let Some(occlusion) = &draw.occlusion {
-                crate::render::passes::visibility::occlusion::record(device, cb, draw.set2, occlusion);
+                occlusion::record(device, cb, draw.set2, occlusion);
             }
             if let Some(lod) = &draw.lod {
-                crate::render::passes::visibility::lod::record(device, cb, draw.set2, lod);
+                lod::record(device, cb, draw.set2, lod);
             }
             if let Some(indirect) = &draw.indirect {
-                crate::render::passes::visibility::indirect::record(device, cb, draw.set2, indirect);
+                indirect::record(device, cb, draw.set2, indirect);
             }
             if let Some(sb) = &draw.shadow_build {
-                crate::render::passes::shadow::shadow_build::record(device, cb, draw.set2, draw.shadow_set, sb);
+                shadow_build::record(device, cb, draw.set2, draw.shadow_set, sb);
             }
             // 光源列表必须在合成和透明前向之前算好
             if let Some(build) = &draw.cluster_build {
-                crate::render::passes::lighting::cluster::record_cluster_build(device, cb, draw.cluster_set, build);
+                cluster::record_cluster_build(device, cb, draw.cluster_set, build);
             }
             // 透明层：collect → sort → gather
             if let Some(t) = draw.transparent.as_ref() {
                 if let Some(collect) = &t.collect {
-                    crate::render::passes::transparent::record_transparent_collect(
+                    transparent::record_transparent_collect(
                         device,
                         cb,
                         draw.set2,
@@ -281,14 +262,9 @@ impl FramePool {
                     );
                 }
                 // 固定容量数组每个非空帧都重排，保证本帧新增的透明行不会以未排序状态进 gather
-                crate::render::passes::transparent::record_transparent_sort(
-                    device,
-                    cb,
-                    t.transparent_set,
-                    &t.sort,
-                );
+                transparent::record_transparent_sort(device, cb, t.transparent_set, &t.sort);
                 if let Some(gather) = &t.gather {
-                    crate::render::passes::transparent::record_transparent_gather(
+                    transparent::record_transparent_gather(
                         device,
                         cb,
                         draw.set2,
@@ -305,18 +281,9 @@ impl FramePool {
             // 总是绑定，布局必须始终是 SHADER_READ_ONLY。UNDEFINED 作 oldLayout 从任何状态都合法
             // （每帧 CLEAR 重写）。
             for &shadow_image in &draw.shadow_images {
-                image_barrier(device, cb, &ImageBarrier {
-                    image: shadow_image,
-                    aspect: vk::ImageAspectFlags::DEPTH,
-                    old_layout: vk::ImageLayout::UNDEFINED,
-                    new_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                    // 跨帧共享（不分帧槽）：等上一帧的片元采样读完再覆写（WAR）
-                    src_stage: vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    src_access: vk::AccessFlags::empty(),
-                    dst_stage: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                    dst_access: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                });
+                // 跨帧共享（不分帧槽）：等上一帧的片元采样读完再覆写（WAR）
+                ImageBarrier::discard_to_depth_attachment(shadow_image, vk::PipelineStageFlags::FRAGMENT_SHADER)
+                    .record(device, cb);
             }
             if let Some(shadow) = &draw.shadow {
                 let map_extent = vk::Extent2D {
@@ -364,16 +331,7 @@ impl FramePool {
             }
             // 出场：→ SHADER_READ_ONLY 供合成采样（同样每帧都录）
             for &shadow_image in &draw.shadow_images {
-                image_barrier(device, cb, &ImageBarrier {
-                    image: shadow_image,
-                    aspect: vk::ImageAspectFlags::DEPTH,
-                    old_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                    new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    src_stage: vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                    src_access: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                    dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    dst_access: vk::AccessFlags::SHADER_READ,
-                });
+                ImageBarrier::depth_attachment_to_sampled(shadow_image).record(device, cb);
             }
             mark(2); // T2：shadow 段结束
 
@@ -449,20 +407,9 @@ impl FramePool {
                 color_to_read(draw.gbuffer.normal_image(slot)),
                 // matparam：合成 pass 光照累积的 PBR 入参采样面
                 color_to_read(draw.gbuffer.matparam_image(slot)),
-                ImageBarrier {
-                    image: frame.depth.image,
-                    aspect: vk::ImageAspectFlags::DEPTH,
-                    old_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                    new_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-                    src_stage: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                    src_access: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                    dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER
-                        | vk::PipelineStageFlags::COMPUTE_SHADER,
-                    dst_access: vk::AccessFlags::SHADER_READ,
-                },
+                ImageBarrier::depth_attachment_to_read_only(frame.depth.image),
             ] {
-                image_barrier(device, cb, &barrier);
+                barrier.record(device, cb);
             }
 
             // —— 合成 pass（全屏，无深度附件）：读 G-buffer 算光照写 HDR 目标；depth==0（reverse-Z
@@ -484,29 +431,8 @@ impl FramePool {
                     .dst_access_mask(
                         vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
                     );
-                image_barrier_with_memory(
-                    device,
-                    cb,
-                    &ImageBarrier {
-                        image: frame.depth.image,
-                        aspect: vk::ImageAspectFlags::DEPTH,
-                        old_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-                        new_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                        // 合成对深度的采样读 + 深度写所在阶段 + 合成写 HDR
-                        src_stage: vk::PipelineStageFlags::FRAGMENT_SHADER
-                            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
-                            | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        // 含 WRITE：布局迁移本身是写，要排在 G-buffer pass 的深度 store 之后
-                        // （syncval WRITE_AFTER_WRITE）；透明 pass 本身只读深度
-                        src_access: vk::AccessFlags::SHADER_READ
-                            | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                        dst_stage: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
-                            | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        dst_access: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ,
-                    },
-                    slice::from_ref(&hdr_write_to_blend),
-                );
+                ImageBarrier::depth_read_only_to_attachment(frame.depth.image)
+                    .record_with_memory(device, cb, slice::from_ref(&hdr_write_to_blend));
                 let transparent_attachment = vk::RenderingAttachmentInfo::default()
                     .image_view(draw.gbuffer.hdr_view(slot))
                     .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -541,25 +467,21 @@ impl FramePool {
             }
 
             // —— HDR 目标 → 只读，供 Bloom 与 tonemap 采样
-            image_barrier(device, cb, &ImageBarrier::color_to_sampled(draw.gbuffer.hdr_image(slot)));
+            ImageBarrier::color_to_sampled(draw.gbuffer.hdr_image(slot)).record(device, cb);
 
             mark(4); // T4：合成段（含透明层）结束
 
             // —— ⑥ Hi-Z 段：透明层用过的深度转回只读，供 Hi-Z 归约（没有透明层时深度一直是只读）
             if draw.transparent.is_some() {
-                image_barrier(device, cb, &ImageBarrier {
-                    image: frame.depth.image,
-                    aspect: vk::ImageAspectFlags::DEPTH,
-                    old_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                    new_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-                    src_stage: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                    // 含 WRITE：理由同上，迁移要排在 G-buffer pass 的深度 store 之后
+                // 透明 pass 测深读过（src 加 READ）；dst 只等 compute（Hi-Z 归约读）。
+                // 含 WRITE：迁移要排在 G-buffer pass 的深度 store 之后
+                ImageBarrier {
                     src_access: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
                         | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
                     dst_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
-                    dst_access: vk::AccessFlags::SHADER_READ,
-                });
+                    ..ImageBarrier::depth_attachment_to_read_only(frame.depth.image)
+                }
+                .record(device, cb);
             }
 
             // —— Hi-Z 归约：逐级重写本帧槽金字塔（屏障在 record_reduction 内）
@@ -660,7 +582,7 @@ impl FramePool {
             // —— neighborhood 混合（终点）：LDR + blend → swapchain（SMAA 关闭时 shader 内直通）。
             // UI 在同一次渲染里接着画，按光栅序盖在场景之上。
             record_fullscreen_open(device, cb, &FullscreenPass {
-                view,
+                view: swapchain_view,
                 extent,
                 clear: None,
                 pipeline: draw.smaa_nb.nb,
@@ -714,8 +636,8 @@ impl FramePool {
             mark(6); // T6：tonemap/SMAA/neighborhood + UI 段结束
 
             // —— ⑨ 出场段：swapchain image → PRESENT_SRC_KHR
-            image_barrier(device, cb, &ImageBarrier {
-                image,
+            ImageBarrier {
+                image: swapchain_image,
                 aspect: vk::ImageAspectFlags::COLOR,
                 old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
@@ -723,7 +645,8 @@ impl FramePool {
                 src_access: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
                 dst_stage: vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                 dst_access: vk::AccessFlags::empty(),
-            });
+            }
+            .record(device, cb);
             mark(7); // T7：全帧结束
 
             device.end_command_buffer(cb)?;

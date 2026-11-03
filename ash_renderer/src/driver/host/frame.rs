@@ -223,8 +223,8 @@ pub(crate) fn draw_frame(
     // —— 录制 + 提交。上传票据在 GPU 侧等待（ALL_COMMANDS），CPU 不阻塞。
     // 坑：image_available 已被置位、image 已到手，从这里起任何失败都只能致命退出，
     // 不能 warn 后继续（理由见模块文档）。
-    let image = gpu.swapchain.images[index as usize];
-    let target_view = gpu.swapchain.views[index as usize];
+    let swapchain_image = gpu.swapchain.images[index as usize];
+    let swapchain_view = gpu.swapchain.views[index as usize];
     // 本帧的 render_finished 与 image 同号（按 image 分配），录制提交与 present 共用
     let render_finished = gpu.swapchain.render_finished[index as usize];
     let instances = &scene.instance_tables;
@@ -280,8 +280,8 @@ pub(crate) fn draw_frame(
         .record_frame(
             &gpu.ctx,
             render_finished,
-            image,
-            target_view,
+            swapchain_image,
+            swapchain_view,
             extent,
             &frame_draw,
         )?;

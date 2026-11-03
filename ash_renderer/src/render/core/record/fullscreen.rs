@@ -6,7 +6,7 @@ use std::slice;
 use ash::{vk, Device};
 
 use crate::render::core::binding::set_layout::DescSet;
-use crate::render::core::record::barrier::{image_barrier, ImageBarrier};
+use crate::render::core::record::barrier::ImageBarrier;
 use crate::render::core::record::graphics::{bind_graphics, full_rect, set_viewport_scissor, PipelineRef};
 
 /// 全屏三角形 pass 的参数：一个颜色附件（写完保留，无深度）、管线、从 set 0 起绑定的描述符集。
@@ -78,8 +78,8 @@ pub(crate) unsafe fn record_fullscreen_sampled(
     pass: &FullscreenPass<'_>,
 ) {
     unsafe {
-        image_barrier(device, cb, &ImageBarrier::discard_to_color(image, entry_src_stage));
+        ImageBarrier::discard_to_color(image, entry_src_stage).record(device, cb);
         record_fullscreen(device, cb, pass);
-        image_barrier(device, cb, &ImageBarrier::color_to_sampled(image));
+        ImageBarrier::color_to_sampled(image).record(device, cb);
     }
 }

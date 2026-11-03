@@ -4,6 +4,7 @@
 use ash::{vk, Device};
 
 use crate::render::core::binding::set_layout::{assert_set_sequence, DescSet, SetLayoutDesc};
+use crate::render::core::record::barrier::MemoryBarrierDesc;
 
 /// compute 管线的录制句柄（Copy）：Draw 输入束带它进录制层，录制不需要
 /// 持有方 Resource。
@@ -34,6 +35,18 @@ pub(crate) enum Handoff {
 }
 
 impl Handoff {
+    /// dispatch 写 → 下游消费的全局内存屏障。src 恒为 COMPUTE_SHADER + SHADER_WRITE，
+    /// 变体只定下游消费侧（dst stage + dst access）。
+    pub(crate) fn barrier(self) -> MemoryBarrierDesc {
+        let (dst_stage, dst_access) = self.dst();
+        MemoryBarrierDesc {
+            src_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
+            src_access: vk::AccessFlags::SHADER_WRITE,
+            dst_stage,
+            dst_access,
+        }
+    }
+
     fn dst(self) -> (vk::PipelineStageFlags, vk::AccessFlags) {
         use vk::{AccessFlags as A, PipelineStageFlags as S};
         match self {
@@ -69,24 +82,12 @@ impl ComputeHandles {
         groups: u32,
         handoff: Handoff,
     ) {
-        let (dst_stage, dst_access) = handoff.dst();
-        let barrier = vk::MemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-            .dst_access_mask(dst_access);
         unsafe {
             if !push.is_empty() {
                 device.cmd_push_constants(cb, self.layout, vk::ShaderStageFlags::COMPUTE, 0, push);
             }
             device.cmd_dispatch(cb, groups, 1, 1);
-            device.cmd_pipeline_barrier(
-                cb,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                dst_stage,
-                vk::DependencyFlags::empty(),
-                std::slice::from_ref(&barrier),
-                &[],
-                &[],
-            );
+            handoff.barrier().record(device, cb);
         }
     }
 

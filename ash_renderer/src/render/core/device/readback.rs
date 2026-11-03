@@ -5,6 +5,7 @@
 use ash::{vk, Device};
 
 use crate::common::error::{Result, VulkanError};
+use crate::render::core::record::barrier::MemoryBarrierDesc;
 
 use super::context::Context;
 
@@ -19,18 +20,13 @@ pub(crate) fn readback_buffer(ctx: &Context, src: vk::Buffer, out: &mut [u8]) ->
         let readback = OneShotReadback::begin(ctx, byte_size)?;
         // 源 buffer 的写者在前序提交（compute 写标记/索引、transfer 上传等）：
         // 全局内存屏障按提交序把它们纳入第一同步域，拷贝读才见得到写入
-        let before_copy = vk::MemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
-        device.cmd_pipeline_barrier(
-            readback.cb,
-            vk::PipelineStageFlags::ALL_COMMANDS,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(),
-            std::slice::from_ref(&before_copy),
-            &[],
-            &[],
-        );
+        MemoryBarrierDesc {
+            src_stage: vk::PipelineStageFlags::ALL_COMMANDS,
+            src_access: vk::AccessFlags::MEMORY_WRITE,
+            dst_stage: vk::PipelineStageFlags::TRANSFER,
+            dst_access: vk::AccessFlags::TRANSFER_READ,
+        }
+        .record(device, readback.cb);
         let region = vk::BufferCopy::default().size(byte_size);
         device.cmd_copy_buffer(readback.cb, src, readback.staging, std::slice::from_ref(&region));
         readback.finish_and_read(ctx, out)
@@ -119,18 +115,13 @@ impl<'a> OneShotReadback<'a> {
     pub(crate) unsafe fn finish_and_read(&self, ctx: &Context, out: &mut [u8]) -> Result<()> {
         let device = self.device;
         unsafe {
-            let to_host = vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::HOST_READ);
-            device.cmd_pipeline_barrier(
-                self.cb,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::HOST,
-                vk::DependencyFlags::empty(),
-                std::slice::from_ref(&to_host),
-                &[],
-                &[],
-            );
+            MemoryBarrierDesc {
+                src_stage: vk::PipelineStageFlags::TRANSFER,
+                src_access: vk::AccessFlags::TRANSFER_WRITE,
+                dst_stage: vk::PipelineStageFlags::HOST,
+                dst_access: vk::AccessFlags::HOST_READ,
+            }
+            .record(device, self.cb);
             device.end_command_buffer(self.cb)?;
             device.queue_submit(
                 ctx.queue,
