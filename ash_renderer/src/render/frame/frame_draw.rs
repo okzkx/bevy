@@ -81,8 +81,8 @@ pub struct FrameDraw<'a> {
     pub ui: Option<&'a UiPaint>,
     /// 本帧槽 UI 顶点/索引 buffer（`ui` 为 Some 时本帧已写入）。
     pub ui_buffers: (vk::Buffer, vk::Buffer),
-    /// 视锥剔除（空场或关闭为 None；关闭时 host 已把标记填全可见）。
-    pub cull: Option<CullDraw>,
+    /// 视锥剔除与阴影视锥标记（两者都关闭或空场为 None）。
+    pub frustum_cull: Option<CullDraw>,
     /// indirect 命令组装（空场为 None）。命令写 → 绘制读的屏障在 indirect::record 内。
     pub indirect: Option<IndirectDraw>,
     /// Hi-Z 遮挡测试（关闭/降级/空场为 None）。屏障在 occlusion::record 内。
@@ -235,8 +235,8 @@ impl FramePool {
             // —— compute 段，顺序即依赖：视锥剔除 → 遮挡测试（读视锥标记与两帧前的 Hi-Z 金字塔）
             // → LOD 选档 → indirect 命令组装 → shadow 命令组装 → 光源列表 → 透明层。
             // 各段之间的屏障都在各自的 record 内。
-            if let Some(cull) = &draw.cull {
-                crate::render::passes::visibility::cull::record(device, cb, draw.set2, draw.shadow_set, cull);
+            if let Some(frustum_cull) = &draw.frustum_cull {
+                crate::render::passes::visibility::cull::record(device, cb, draw.set2, draw.shadow_set, frustum_cull);
             }
             if let Some(occlusion) = &draw.occlusion {
                 crate::render::passes::visibility::occlusion::record(device, cb, draw.set2, occlusion);

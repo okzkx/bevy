@@ -112,9 +112,10 @@ type LightQuery<'w, 's> = Query<'w, 's, (&'static GlobalTransform, &'static Dire
 /// draw_frame 的参数束：按特性分子束，系统签名只剩本束 + 主线程标记。
 #[derive(SystemParam)]
 pub(crate) struct FrameInput<'w, 's> {
-    core: FrameCore<'w, 's>,
+    gpu: FrameGpuInput<'w, 's>,
+    timing: FrameTimingInput<'w>,
     scene: SceneInput<'w, 's>,
-    cull: CullInput<'w>,
+    frustum_cull: FrustumCullInput<'w>,
     indirect: IndirectInput<'w>,
     occlusion: OcclusionInput<'w>,
     lod: LodInput<'w>,
@@ -125,32 +126,38 @@ pub(crate) struct FrameInput<'w, 's> {
     /// GPU 缺口快照：帧起在 fence 保护内读缺口标记环的结果，驻留管理器 tick（Last，帧
     /// 提交后）与 BRP census 经此消费，不直读环。
     gap_snapshot: ResMut<'w, GapSnapshot>,
-    /// overlay 绘制半边资源束（None = overlay 未装，UI 段整段跳过）。
-    overlay: Option<UiDrawData<'w>>,
+    overlay: OverlayInput<'w, 's>,
     gate: Local<'s, ResizeGate>,
     logs: Local<'s, FrameLogs>,
     occlusion_gate: Local<'s, OcclusionGate>,
-    paint_log: Local<'s, OverlayLogState>,
 }
 
-/// 帧骨架：设备/交换链/帧槽/常驻表 + 场景与 overlay 管线 + 提交侧票号/计时/计量。
+/// 帧共享的设备、帧槽、描述符表与上传通道取用束。
 #[derive(SystemParam)]
-pub(crate) struct FrameCore<'w, 's> {
+pub(crate) struct FrameGpuInput<'w, 's> {
     ctx: Res<'w, Context>,
     swapchain: ResMut<'w, Swapchain>,
     frames: ResMut<'w, FramePool>,
     tables: ResMut<'w, BindlessTextureTable>,
     frame_uniform_table: ResMut<'w, FrameUniformTable>,
     resized: MessageReader<'w, 's, WindowResized>,
-    gbuffer_pipeline: Res<'w, GBufferPipeline>,
-    /// overlay 管线：UI 半边绑定用（init 链与场景管线同批创建）。
-    overlay_pipeline: Res<'w, OverlayPipeline>,
-    /// 上传器：普通帧只读票号，overlay 在场时图集整传要走它提交批次（独占写点）。
+    /// 普通帧只读票号，overlay 在场时还会提交图集上传。
     uploader: ResMut<'w, Uploader>,
-    /// GPU 帧计时器（停用时 enabled=false，GPU 区间读数缺席）。
+}
+
+/// GPU 时戳与 CPU 帧样本账的取用束。
+#[derive(SystemParam)]
+pub(crate) struct FrameTimingInput<'w> {
     timer: ResMut<'w, GpuTimer>,
-    /// 帧样本账（每帧 push 一份 CPU 分段 + GPU 区间 + 规模；只进计量）。
     perf: ResMut<'w, PerfLedger>,
+}
+
+/// overlay 绘制输入：UI 数据可缺席，管线仍是必需资源。
+#[derive(SystemParam)]
+pub(crate) struct OverlayInput<'w, 's> {
+    ui: Option<UiDrawData<'w>>,
+    pipeline: Res<'w, OverlayPipeline>,
+    paint_log: Local<'s, OverlayLogState>,
 }
 
 /// 场景侧输入：账本、资产容器与驻留、GPU 常驻绘制数据、相机与灯光。
@@ -178,7 +185,7 @@ pub(crate) struct SceneInput<'w, 's> {
 
 /// 视锥剔除：compute 管线 + 开关（egui/BRP 写，AshHostPlugin 恒插入）+ 诊断账面。
 #[derive(SystemParam)]
-pub(crate) struct CullInput<'w> {
+pub(crate) struct FrustumCullInput<'w> {
     pass: Res<'w, CullPass>,
     settings: Res<'w, CullSettings>,
     diag: ResMut<'w, CullDiagnostics>,
@@ -219,12 +226,19 @@ pub(crate) struct ShadowInput<'w> {
     diag: ResMut<'w, ShadowDiagnostics>,
 }
 
-/// 延迟光照与后处理：G-buffer 附件 + HDR 中间目标（随 resize 重建）、
+/// G-buffer 管线与附件（附件随帧槽深度重建）。
+#[derive(SystemParam)]
+pub(crate) struct GBufferInput<'w> {
+    pipeline: Res<'w, GBufferPipeline>,
+    targets: ResMut<'w, GBufferTargets>,
+}
+
+/// 延迟光照与后处理：G-buffer + HDR 中间目标（随 resize 重建）、
 /// 合成管线（G-buffer 光照 → HDR）、present tonemap（HDR + Bloom → ACES →
 /// LDR）、Bloom 链与 SMAA 的资源/管线/开关。
 #[derive(SystemParam)]
 pub(crate) struct PostInput<'w> {
-    gbuffer: ResMut<'w, GBufferTargets>,
+    gbuffer: GBufferInput<'w>,
     composite: Res<'w, CompositePipeline>,
     tonemap: Res<'w, PresentTonemapPipeline>,
     bloom: ResMut<'w, BloomTargets>,
@@ -258,9 +272,10 @@ pub(crate) fn draw_frame(
     _main_thread: NonSendMarker,
 ) -> Result<(), BevyError> {
     let FrameInput {
-        core,
+        gpu,
+        timing,
         scene,
-        cull,
+        frustum_cull,
         indirect,
         occlusion,
         lod,
@@ -273,24 +288,24 @@ pub(crate) fn draw_frame(
         gate,
         logs,
         occlusion_gate,
-        paint_log,
     } = &mut input;
-    gate.yield_minimized(&mut core.resized)?;
+    gate.yield_minimized(&mut gpu.resized)?;
     // pending 全部重建成功才清：失败帧让路或退出，下个帧首原样重试
-    gate.rebuild_if_pending(core.swapchain.pending_rebuild(), || rebuild_size_dependent(core, &mut occlusion.hiz, post, cluster))?;
+    gate.rebuild_if_pending(gpu.swapchain.pending_rebuild(), || rebuild_size_dependent(gpu, &mut occlusion.hiz, post, cluster))?;
 
     // —— 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在提交前一刻）。
-    let mut watch = FrameStopwatch::start(&mut core.perf);
-    core.frames.wait_for_slot()?;
-    let slot = core.frames.current_index();
-    watch.wait_slot_done(&mut core.timer, slot)?;
+    let mut watch = FrameStopwatch::start(&mut timing.perf);
+    gpu.frames.wait_for_slot()?;
+    let slot = gpu.frames.current_index();
+    watch.wait_slot_done(&mut timing.timer, slot)?;
 
     // —— acquire：OUT_OF_DATE = 这个 swapchain 已不可用（最小化/恢复/独占模式切换等），
     // 必须立即重建，等不得下一帧
     // —— acquire：OUT_OF_DATE/次优在 Swapchain::acquire_index 内消化（置位 + 让路），
     // 重建交给下个帧首（幂等）；次优照常画完本帧。
-    let index = core.swapchain.acquire_index(core.frames.current().image_available)?;
+    let index = gpu.swapchain.acquire_index(gpu.frames.current().image_available)?;
     watch.acquire_done();
+    let extent = gpu.swapchain.extent;
 
     // —— 组装 DrawList（增量）：实例槽缺/mesh 未驻留/材质缺席的行暂缓，就绪后自愈。
     let sources = DrawabilitySources::new(&scene.pool, &scene.std_materials, &scene.lod_groups, scene.residency_settings.floor_anchor);
@@ -316,12 +331,12 @@ pub(crate) fn draw_frame(
         ledger.is_empty(),
         logs,
     );
-    core.frame_uniform_table
+    gpu.frame_uniform_table
         .write_frame_ubo(slot, &view, &light, render_mode)?;
     let scene_aabb = scene_world_aabb(ledger, &scene.pool);
     shadow.write_ubo(slot, &view, &light, scene_aabb)?;
     post.write_slot_ubos(slot)?;
-    cluster.write_slot(slot, &view, core.swapchain.extent)?;
+    cluster.write_slot(slot, &view, extent)?;
     transparent.clear_slot_count(slot)?;
     // 四环写入：模型增量 + 材质全量 + 在场全量 + LOD 表增量，都落本帧槽的环
     // （wait_for_slot 之后，fence 证据同本帧 UBO）。
@@ -342,7 +357,6 @@ pub(crate) fn draw_frame(
     // —— compute 段：各半边按开关决定 dispatch 或 host 填充（A/B 对照），诊断读数在
     // 写入路径之后取，都在 wait_for_slot 的 fence 保护内。诊断只进计量，任何系统不得
     // 据此决定画什么。
-    let extent = core.swapchain.extent;
     let pass_frame = PassFrame {
         slot,
         bound: scene.instance_tables.used_object_slots(),
@@ -351,9 +365,9 @@ pub(crate) fn draw_frame(
         live: assembly.slots,
     };
     let instances = &mut scene.instance_tables;
-    let (cull_dispatch, visible_among_live) = cull_half(
+    let (frustum_cull_draw, visible_among_live) = create_frustum_cull_draw(
         &pass_frame,
-        cull,
+        frustum_cull,
         shadow.settings.enabled,
         instances,
         &mut logs.cull_first_dispatch,
@@ -363,13 +377,13 @@ pub(crate) fn draw_frame(
     let occl_dispatch = occlusion_half(
         &pass_frame,
         occlusion,
-        cull.settings.enabled,
+        frustum_cull.settings.enabled,
         camera_jumped,
         instances,
         &mut logs.occlusion_first_dispatch,
     )?;
     let lod_dispatch = lod_half(&pass_frame, lod, instances, &mut logs.lod_first_dispatch)?;
-    sample_gaps(&pass_frame, gap_snapshot, instances, cull_dispatch.is_none())?;
+    sample_gaps(&pass_frame, gap_snapshot, instances, frustum_cull_draw.is_none())?;
     let indirect_count = assembly.slots.len() as u32;
     let indirect_dispatch = indirect_half(
         indirect,
@@ -386,21 +400,21 @@ pub(crate) fn draw_frame(
 
     // —— overlay 绘制半边：图集整传（可能多一张 transfer 票据，所以本帧 wait_ticket 必须
     // 在此后取）→ 镶嵌 → 顶点环写入。overlay 未装 = 整段跳过。
-    let ui = match overlay.take() {
+    let ui = match overlay.ui.take() {
         Some(mut ui_data) => {
             let ui_buffers = ui_data.ring.buffers(slot);
             let paint = paint_overlay(
-                &core.ctx,
+                &gpu.ctx,
                 &ui_data.egui,
                 &mut ui_data.frame,
                 &ui_data.mirror,
                 &mut ui_data.gpu,
                 &mut ui_data.ring,
-                &mut core.tables,
-                &mut core.uploader,
+                &mut gpu.tables,
+                &mut gpu.uploader,
                 slot,
                 extent,
-                paint_log,
+                &mut overlay.paint_log,
             )?;
             paint.map(|p| (p, ui_buffers))
         }
@@ -410,17 +424,17 @@ pub(crate) fn draw_frame(
     // —— 录制 + 提交。上传票据在 GPU 侧等待（ALL_COMMANDS），CPU 不阻塞。
     // 坑：image_available 已被置位、image 已到手，从这里起任何失败都只能致命退出，
     // 不能 warn 后继续（理由见模块文档）。
-    let image = core.swapchain.images[index as usize];
-    let target_view = core.swapchain.views[index as usize];
+    let image = gpu.swapchain.images[index as usize];
+    let target_view = gpu.swapchain.views[index as usize];
     let instances = &scene.instance_tables;
     let transparent_frame =
         transparent_draw(transparent, instances, slot, indirect_count)?;
     let shadow_write = shadow_write_draw(shadow, instances, &scene.pool, slot, indirect_count)?;
     let (smaa_edge_blend, smaa_nb) = smaa_draws(post, slot);
     let frame_draw = FrameDraw {
-        pipeline: core.gbuffer_pipeline.rec(),
-        set0: core.tables.descriptor_set(),
-        set1: core.frame_uniform_table.frame_set(slot),
+        pipeline: post.gbuffer.pipeline.rec(),
+        set0: gpu.tables.descriptor_set(),
+        set1: gpu.frame_uniform_table.frame_set(slot),
         set2: instances.frame_set2(slot),
         vertex_buffer: scene.pool.vertex_buffer(),
         index_buffer: scene.pool.index_buffer(),
@@ -428,7 +442,7 @@ pub(crate) fn draw_frame(
         indirect_count,
         indirect_buffer: instances.indirect_buffer(slot),
         // FrameDraw 借 GBufferTargets 引用（record_frame 消费附件视图与采样集）
-        gbuffer: &post.gbuffer,
+        gbuffer: &post.gbuffer.targets,
         composite: post.composite.rec(),
         cluster_set: cluster.clusters.frame_set(slot),
         cluster_build: (indirect_count > 0)
@@ -438,17 +452,17 @@ pub(crate) fn draw_frame(
         bloom: bloom_draw(post, slot),
         smaa_edge_blend,
         smaa_nb,
-        overlay: core.overlay_pipeline.rec(),
+        overlay: overlay.pipeline.rec(),
         ui: ui.as_ref().map(|(paint, _)| paint),
         // ui 为 None 时这两个句柄不被读（record_frame 的 UI 段整段跳过）
         ui_buffers: ui
             .as_ref()
             .map(|(_, buffers)| *buffers)
             .unwrap_or((vk::Buffer::null(), vk::Buffer::null())),
-        wait_ticket: core.uploader.last_issued_ticket(),
-        ticket_semaphore: core.uploader.ticket_semaphore(),
+        wait_ticket: gpu.uploader.last_issued_ticket(),
+        ticket_semaphore: gpu.uploader.ticket_semaphore(),
         clear: CLEAR_COLOR,
-        cull: cull_dispatch,
+        frustum_cull: frustum_cull_draw,
         shadow_build: shadow_build_dispatch,
         shadow: shadow_write,
         shadow_set: shadow.targets.frame_set(slot),
@@ -459,12 +473,12 @@ pub(crate) fn draw_frame(
         transparent: transparent_frame,
         // 归约链恒录，warmup 走账与录制一一对应（录制后 note_reduced）
         hiz: Some(&*occlusion.hiz),
-        timer: core.timer.enabled.then_some(&*core.timer),
+        timer: timing.timer.enabled.then_some(&*timing.timer),
     };
-    core.frames
+    gpu.frames
         .record_frame(
-            &core.ctx,
-            core.swapchain.render_finished[index as usize],
+            &gpu.ctx,
+            gpu.swapchain.render_finished[index as usize],
             image,
             target_view,
             extent,
@@ -475,14 +489,14 @@ pub(crate) fn draw_frame(
     // —— present：等待的信号量按 acquire 的 image index 取（不按帧槽轮转）。
     // OUT_OF_DATE 只标 pending，交给下个帧首重建；其余真失败先暂存——提交已发生，
     // advance 必须照常推进保持帧槽账本一致，收尾后在系统末尾冒泡。
-    let present_failure = match core.swapchain.present(
-        core.ctx.queue,
-        core.swapchain.render_finished[index as usize],
+    let present_failure = match gpu.swapchain.present(
+        gpu.ctx.queue,
+        gpu.swapchain.render_finished[index as usize],
         index,
     ) {
         Ok(_) => None,
         Err(VulkanError::SwapchainOutOfDate) => {
-            core.swapchain.mark_out_of_date();
+            gpu.swapchain.mark_out_of_date();
             gate.request_rebuild();
             None
         }
@@ -491,10 +505,10 @@ pub(crate) fn draw_frame(
     watch.present_done();
 
     // —— 帧样本入账：只进计量。让路帧（最小化/acquire 过时）不经过此处。
-    watch.push(&mut core.perf, indirect_count, visible_among_live);
+    watch.push(&mut timing.perf, indirect_count, visible_among_live);
 
     occlusion.hiz.note_reduced();
-    core.frames.advance();
+    gpu.frames.advance();
     match present_failure {
         Some(e) => Err(fatal("present 失败，渲染链无法继续", e)),
         None => Ok(()),
@@ -506,28 +520,28 @@ pub(crate) fn draw_frame(
 /// 各自带 device_wait_idle，不会引用到在飞旧资源）。swapchain 重建失败让路下帧重试，
 /// 其余失败致命退出。
 fn rebuild_size_dependent(
-    core: &mut FrameCore,
+    gpu: &mut FrameGpuInput,
     hiz: &mut HizPyramid,
     post: &mut PostInput,
     cluster: &mut ClusterInput,
 ) -> Result<(), BevyError> {
-    let ctx: &Context = &core.ctx;
-    core.swapchain
+    let ctx: &Context = &gpu.ctx;
+    gpu.swapchain
         .rebuild(ctx)
         .or_warn("resize 后重建失败，下帧重试")?;
-    let extent = core.swapchain.extent;
-    core.frames
+    let extent = gpu.swapchain.extent;
+    gpu.frames
         .rebuild_depth(ctx, extent)
         .or_fatal("深度附件重建失败，渲染链无法继续")?;
     // Hi-Z 金字塔随深度附件同批重建（warmup 重置，遮挡测试让路到金字塔重新就绪）
-    hiz.rebuild(ctx, extent, &per_slot(|s| core.frames.depth_image(s)))
+    hiz.rebuild(ctx, extent, &per_slot(|s| gpu.frames.depth_image(s)))
         .or_fatal("Hi-Z 金字塔重建失败，渲染链无法继续")?;
     post.bloom
         .rebuild(ctx, extent)
         .or_fatal("Bloom 链重建失败，渲染链无法继续")?;
     // 依赖上面已重建的深度视图（G-buffer 采样集 b3）
-    post.gbuffer
-        .rebuild(ctx, extent, &per_slot(|s| core.frames.depth_view(s)))
+    post.gbuffer.targets
+        .rebuild(ctx, extent, &per_slot(|s| gpu.frames.depth_view(s)))
         .or_fatal("G-buffer 附件重建失败，渲染链无法继续")?;
     // 光源常驻表与尺寸无关不重建，只把它的 buffer 重新绑进新描述符集
     cluster
@@ -861,12 +875,11 @@ struct PassFrame<'a> {
     live: &'a [u32],
 }
 
-/// 视锥剔除半边：开关决定 compute dispatch 或 host 全可见填充。诊断读数：开 = 本帧槽
-/// 两帧前 compute 的输出；关 = host 填充后直读（未 dispatch 时 build_indirect 读的就是
-/// 这份填充，dispatch 时 shader 同写 1）。返回 (dispatch, 在场行可见数)。
-fn cull_half(
+/// 准备本帧视锥剔除录制输入：主视图或阴影开启时生成 dispatch，否则 host 填全可见。
+/// 诊断读数只进计量；返回 (录制输入, 在场行可见数)。
+fn create_frustum_cull_draw(
     pf: &PassFrame,
-    cull: &mut CullInput,
+    frustum_cull: &mut FrustumCullInput,
     shadow_enabled: bool,
     instances: &mut InstanceTables,
     first: &mut OnceLog,
@@ -877,26 +890,26 @@ fn cull_half(
     }
     // shadow 开启时剔除 dispatch 也要产出 shadow 标记，两侧全关才可跳过。主视图开关随
     // push 进 shader：关 = marks 恒写 1，不覆盖下方 host 全可见填充的语义
-    let dispatch = (cull.settings.enabled || shadow_enabled).then(|| {
+    let draw = (frustum_cull.settings.enabled || shadow_enabled).then(|| {
         first.log(|| info!(
             "视锥剔除 dispatch 首跑：bound {bound}，组 {}，平面随 112B push 进 compute",
             bound.div_ceil(64),
         ));
-        cull.pass.draw(&frustum_planes(&pf.view_proj), bound, cull.settings.enabled)
+        frustum_cull.pass.draw(&frustum_planes(&pf.view_proj), bound, frustum_cull.settings.enabled)
     });
-    if !cull.settings.enabled {
+    if !frustum_cull.settings.enabled {
         fill_u32(instances.mark_ring(pf.slot), bound as usize, 1)
             .or_fatal("剔除标记环全可见填充失败，渲染链无法继续")?;
     }
     let marks = read_ring(instances.mark_ring(pf.slot), bound as usize * MARK_SIZE as usize)
         .or_fatal("剔除标记环读数失败，渲染链无法继续")?;
     let visible = count_marked(&marks, pf.live);
-    cull.diag.enabled = cull.settings.enabled;
-    cull.diag.bound = bound;
-    cull.diag.marks_frame = pf.slot;
-    cull.diag.rows_compared = pf.live.len();
-    cull.diag.visible_count = visible;
-    Ok((dispatch, visible))
+    frustum_cull.diag.enabled = frustum_cull.settings.enabled;
+    frustum_cull.diag.bound = bound;
+    frustum_cull.diag.marks_frame = pf.slot;
+    frustum_cull.diag.rows_compared = pf.live.len();
+    frustum_cull.diag.visible_count = visible;
+    Ok((draw, visible))
 }
 
 /// shadow 标记半边：剔除 dispatch 跑了 → 标记 = compute 输出；shadow 关 → host 全可见
@@ -1197,7 +1210,7 @@ fn bloom_draw(post: &PostInput, slot: usize) -> Option<BloomFrameDraw> {
         prefilter: pipelines.prefilter_rec(),
         down: pipelines.down_rec(),
         up: pipelines.up_rec(),
-        gbuffer_set: post.gbuffer.sampled_set(slot),
+        gbuffer_set: post.gbuffer.targets.sampled_set(slot),
         down_sets: std::array::from_fn(|i| targets.set_down(i + 1, slot)),
         up_sets: std::array::from_fn(|i| targets.set_up(i, slot)),
         images_down: std::array::from_fn(|i| targets.down_image(i)),
