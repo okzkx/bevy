@@ -28,7 +28,7 @@ use ash_macros::system;
 use crate::render::{
     BloomSettings, Context, CullDiagnostics, CullSettings, FrameSyncSettings, IndirectStats,
     LodDiagnostics, LodSettings, OcclusionDiagnostics, OcclusionSettings, PerfLedger, RenderMode,
-    ShadowDiagnostics, ShadowSettings, SmaaSettings,
+    ShadowSettings, SmaaSettings,
 };
 use crate::scene::DrawListVerify;
 
@@ -66,7 +66,6 @@ impl Plugin for AshHostPlugin {
             .init_resource::<LodSettings>()
             .init_resource::<LodDiagnostics>()
             .init_resource::<ShadowSettings>()
-            .init_resource::<ShadowDiagnostics>()
             // Bloom 开关与参数：BRP bloom_set 直达
             .init_resource::<BloomSettings>()
             // SMAA 开关：BRP smaa_set 直达

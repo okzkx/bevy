@@ -50,7 +50,7 @@ use crate::{
         LightTable, LodDiagnostics, LodDraw, LodPass, LodSettings, MeshPool, OcclusionDiagnostics,
         OcclusionDraw, OcclusionFallback, OcclusionPass, OcclusionSettings, OverlayPipeline,
         PerfLedger, PresentTonemapPipeline, RenderMode, ShadowBuildPass, ShadowCascadeInput,
-        ShadowCascades, ShadowDiagnostics, ShadowPipeline, ShadowSettings, ShadowTargets,
+        ShadowCascades, ShadowPipeline, ShadowSettings, ShadowTargets,
         ShadowUniformsData, ShadowWriteDraw, SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines,
         SmaaSettings, SmaaTargets, Swapchain, TransparentFrame, TransparentPasses,
         TransparentPipeline, TransparentTargets, Uploader, GAP_MARK_SIZE, INDIRECT_COMMAND_SIZE,
@@ -216,14 +216,13 @@ pub(crate) struct LodInput<'w> {
 }
 
 /// 级联阴影：资源族（级联 UBO/标记/命令环 + 深度图 + 描述符）+ depth-only 绘制
-/// 管线 + 命令组装 compute + 开关 + 诊断账面（BRP shadow_stats 读数口）。
+/// 管线 + 命令组装 compute + 开关。
 #[derive(SystemParam)]
 pub(crate) struct ShadowInput<'w> {
     targets: ResMut<'w, ShadowTargets>,
     pipeline: Res<'w, ShadowPipeline>,
     build_pass: Res<'w, ShadowBuildPass>,
     settings: Res<'w, ShadowSettings>,
-    diag: ResMut<'w, ShadowDiagnostics>,
 }
 
 /// G-buffer 管线与附件（附件随帧槽深度重建）。
@@ -372,7 +371,6 @@ pub(crate) fn draw_frame(
         instances,
         &mut logs.cull_first_dispatch,
     )?;
-    shadow_marks_half(&pass_frame, shadow)?;
     let camera_jumped = occlusion_gate.push(view.camera.map(|c| (c.pos, c.rot)));
     let occl_dispatch = occlusion_half(
         &pass_frame,
@@ -910,36 +908,6 @@ fn create_frustum_cull_draw(
     frustum_cull.diag.rows_compared = pf.live.len();
     frustum_cull.diag.visible_count = visible;
     Ok((draw, visible))
-}
-
-/// shadow 标记半边：剔除 dispatch 跑了 → 标记 = compute 输出；shadow 关 → host 全可见
-/// 填充（composite 侧 shader 旁路，标记内容无消费）。诊断逐 cascade 计数（陈旧 ≤2 帧，
-/// 与主标记相同）。
-fn shadow_marks_half(pf: &PassFrame, shadow: &mut ShadowInput) -> Result<(), BevyError> {
-    let bound = pf.bound;
-    if bound == 0 {
-        return Ok(());
-    }
-    if !shadow.settings.enabled {
-        fill_u32(shadow.targets.mark_mut(pf.slot), bound as usize * SHADOW_CASCADES, 1)
-            .or_fatal("shadow 标记环全可见填充失败，渲染链无法继续")?;
-    }
-    let marks = read_ring(
-        shadow.targets.mark_mut(pf.slot),
-        bound as usize * SHADOW_CASCADES * MARK_SIZE as usize,
-    )
-    .or_fatal("shadow 标记环读数失败，渲染链无法继续")?;
-    let mut gpu_vis = [0u32; SHADOW_CASCADES];
-    for &slot in pf.live {
-        for (c, vis) in gpu_vis.iter_mut().enumerate() {
-            *vis += u32::from(marks.get(slot as usize * SHADOW_CASCADES + c) == Some(&1));
-        }
-    }
-    shadow.diag.enabled = shadow.settings.enabled;
-    shadow.diag.bound = bound;
-    shadow.diag.marks_frame = pf.slot;
-    shadow.diag.gpu_visible = gpu_vis;
-    Ok(())
 }
 
 /// 遮挡 dispatch 判据（dispatch 与否和 fallback 原因同出一处）。

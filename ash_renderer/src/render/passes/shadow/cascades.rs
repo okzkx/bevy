@@ -260,19 +260,6 @@ impl Default for ShadowSettings {
     }
 }
 
-/// 阴影诊断读数（draw_frame 每帧刷新，BRP 读）。只做计量。读数 = 本帧槽两帧前
-/// compute 输出。
-#[derive(Resource, Default)]
-pub struct ShadowDiagnostics {
-    pub enabled: bool,
-    /// dispatch 上界（实例槽 bump bound）。
-    pub bound: u32,
-    /// 逐 cascade GPU 可见标记数（在场可绘行中 mark=1）。
-    pub gpu_visible: [u32; SHADOW_CASCADES],
-    /// 读数所属帧槽（0/1，陈旧度 ≤2 帧的来源标注）。
-    pub marks_frame: usize,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

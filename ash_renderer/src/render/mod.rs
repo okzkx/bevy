@@ -114,7 +114,7 @@ pub use passes::post::smaa::{
 pub use passes::shadow::shadow_build::ShadowBuildPass;
 pub use passes::shadow::cascades::{
     cascade_matrices, pack_shadow_uniforms, ShadowCascadeInput,
-    ShadowCascades, ShadowDiagnostics, ShadowSettings, ShadowUniformsData, SHADOW_CASCADES,
+    ShadowCascades, ShadowSettings, ShadowUniformsData, SHADOW_CASCADES,
     SHADOW_MAP_SIZE, SHADOW_UBO_SIZE,
 };
 pub use self::core::device::memory::buffer::GpuBuffer;
