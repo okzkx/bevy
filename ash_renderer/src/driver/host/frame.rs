@@ -316,19 +316,25 @@ pub(crate) fn draw_frame(
         ledger.is_empty(),
         logs,
     );
-    write_frame_ubo(&mut core.frame_uniform_table, slot, &view, &light, render_mode)?;
+    core.frame_uniform_table
+        .write_frame_ubo(slot, &view, &light, render_mode)?;
     let scene_aabb = scene_world_aabb(ledger, &scene.pool);
-    write_shadow_ubo(shadow, slot, &view, &light, scene_aabb)?;
-    write_post_ubos(post, slot)?;
-    write_cluster_slot(cluster, slot, &view, core.swapchain.extent)?;
-    write_transparent_slot(transparent, slot)?;
-    drawlist::write_rings(
-        &mut scene.instance_tables,
+    shadow.write_ubo(slot, &view, &light, scene_aabb)?;
+    post.write_slot_ubos(slot)?;
+    cluster.write_slot(slot, &view, core.swapchain.extent)?;
+    transparent.clear_slot_count(slot)?;
+    // 四环写入：模型增量 + 材质全量 + 在场全量 + LOD 表增量，都落本帧槽的环
+    // （wait_for_slot 之后，fence 证据同本帧 UBO）。
+    scene.instance_tables.write_model_ring(ledger, &dirty.model, slot)?;
+    scene
+        .instance_tables
+        .write_material_ring(sources.std_materials, &scene.image_cache, assembly.materials, slot)?;
+    scene.instance_tables.write_presence_ring(assembly.slots, slot)?;
+    scene.instance_tables.write_lod_table_ring(
         ledger,
-        sources,
-        &scene.image_cache,
-        &dirty,
-        &assembly,
+        sources.pool,
+        sources.lod_groups,
+        &dirty.lod,
         slot,
     )?;
     watch.rings_done();
@@ -676,28 +682,31 @@ impl FrameLight {
 }
 
 /// 本帧槽主 UBO：相机矩阵 + 灯光 + 材质模式 + 相机世界位置（光照累积 V 向量）。
-fn write_frame_ubo(
-    frame_uniform_table: &mut FrameUniformTable,
-    slot: usize,
-    view: &FrameView,
-    light: &FrameLight,
-    render_mode: RenderMode,
-) -> Result<(), BevyError> {
-    frame_uniform_table
-        .ubo(slot)
-        .write(
-            0,
-            &pack_frame_uniforms(&FrameUniformsData {
-                view_proj: view.view_proj,
-                inv_view_proj: view.inv_view_proj,
-                dir_to_light: light.dir_to_light,
-                ambient_color: light.ambient_color,
-                light_color: light.light_color,
-                mode: render_mode.as_u32(),
-                camera_pos: view.camera_pos4(),
-            }),
-        )
-        .or_fatal("帧 UBO 写失败，渲染链无法继续")
+impl FrameUniformTable {
+    /// impl 留在 driver 层而非 frame_uniform_table.rs：方法消费本模块私有的
+    /// FrameView/FrameLight，放 render 侧会反向依赖（同四环写入的落位理由）。
+    fn write_frame_ubo(
+        &mut self,
+        slot: usize,
+        view: &FrameView,
+        light: &FrameLight,
+        render_mode: RenderMode,
+    ) -> Result<(), BevyError> {
+        self.ubo(slot)
+            .write(
+                0,
+                &pack_frame_uniforms(&FrameUniformsData {
+                    view_proj: view.view_proj,
+                    inv_view_proj: view.inv_view_proj,
+                    dir_to_light: light.dir_to_light,
+                    ambient_color: light.ambient_color,
+                    light_color: light.light_color,
+                    mode: render_mode.as_u32(),
+                    camera_pos: view.camera_pos4(),
+                }),
+            )
+            .or_fatal("帧 UBO 写失败，渲染链无法继续")
+    }
 }
 
 /// 场景世界 AABB 并集（级联 far 外扩与深度盒向太阳侧延伸的输入）。
@@ -716,125 +725,129 @@ fn scene_world_aabb(ledger: &InstanceLedger, pool: &MeshPool) -> Option<(Vec3, V
     scene_aabb
 }
 
-/// shadow UBO：级联矩阵（log 分割拟合）+ 四×六平面（cull 内联标记与 shadow_stats
-/// CPU 参照同源）+ 分割带/相机基（composite 选级联）。相机缺席帧 = identity 矩阵。
-fn write_shadow_ubo(
-    shadow: &mut ShadowInput,
-    slot: usize,
-    view: &FrameView,
-    light: &FrameLight,
-    scene_aabb: Option<(Vec3, Vec3)>,
-) -> Result<(), BevyError> {
-    let fit = match view.camera {
-        Some(cam) => cascade_matrices(&ShadowCascadeInput {
-            inv_view_proj: view.inv_view_proj,
-            camera_pos: cam.pos,
-            camera_forward: cam.forward(),
-            near: cam.near,
-            dir_to_light: Vec3::from_slice(&light.dir_to_light[..3]),
-            scene_aabb,
-        }),
-        None => ShadowCascades {
-            view_proj: [Mat4::IDENTITY; SHADOW_CASCADES],
-            splits: [f32::INFINITY; SHADOW_CASCADES],
-            texel_world: [1.0; SHADOW_CASCADES],
-            inv_span: [0.0; SHADOW_CASCADES],
-        },
-    };
-    let cascade_planes = fit.view_proj.map(|m| frustum_planes(&m));
-    let uniform = ShadowUniformsData {
-        cascade_view_proj: fit.view_proj,
-        planes: std::array::from_fn(|i| cascade_planes[i / 6][i % 6]),
-        splits: fit.splits,
-        camera_forward: view
-            .camera
-            .map(|c| c.forward().extend(0.0).to_array())
-            .unwrap_or([0.0; 4]),
-        camera_pos: view.camera_pos4(),
-        map_size: SHADOW_MAP_SIZE as f32,
-        enabled: f32::from(shadow.settings.enabled),
-        texel_world: fit.texel_world,
-        inv_span: fit.inv_span,
-    };
-    shadow
-        .targets
-        .ubo(slot)
-        .write(0, &pack_shadow_uniforms(&uniform))
-        .or_fatal("shadow UBO 写失败，渲染链无法继续")
-}
-
-/// 后处理帧槽 UBO：Bloom 五标量 + SmaaInfo（rt_metrics + 开关）。
-fn write_post_ubos(post: &mut PostInput, slot: usize) -> Result<(), BevyError> {
-    let bloom = &post.bloom_settings;
-    post.bloom
-        .ubo(slot)
-        .write(
-            0,
-            &pack_bloom_params(&BloomParamsData {
-                strength: bloom.strength,
-                enabled: f32::from(bloom.enabled),
-                tonemap: f32::from(bloom.tonemap),
-                curve: bloom.curve.as_f32(),
-                gain: bloom.gain,
+impl ShadowInput<'_> {
+    /// shadow UBO：级联矩阵（log 分割拟合）+ 四×六平面（cull 内联标记与 shadow_stats
+    /// CPU 参照同源）+ 分割带/相机基（composite 选级联）。相机缺席帧 = identity 矩阵。
+    fn write_ubo(
+        &mut self,
+        slot: usize,
+        view: &FrameView,
+        light: &FrameLight,
+        scene_aabb: Option<(Vec3, Vec3)>,
+    ) -> Result<(), BevyError> {
+        let fit = match view.camera {
+            Some(cam) => cascade_matrices(&ShadowCascadeInput {
+                inv_view_proj: view.inv_view_proj,
+                camera_pos: cam.pos,
+                camera_forward: cam.forward(),
+                near: cam.near,
+                dir_to_light: Vec3::from_slice(&light.dir_to_light[..3]),
+                scene_aabb,
             }),
-        )
-        .or_fatal("Bloom 参数 UBO 写失败，渲染链无法继续")?;
-    let ldr = post.smaa.ldr_extent();
-    let (sw, sh) = (ldr.width.max(1), ldr.height.max(1));
-    let mut smaa_info = [0u8; 32];
-    put_f32s(
-        &mut smaa_info,
-        0,
-        &[
-            1.0 / sw as f32,
-            1.0 / sh as f32,
-            sw as f32,
-            sh as f32,
-            f32::from(post.smaa_settings.enabled),
-            0.0,
-            0.0,
-            0.0,
-        ],
-    );
-    post.smaa
-        .info_mut(slot)
-        .write(0, &smaa_info)
-        .or_fatal("SmaaInfo UBO 写失败，渲染链无法继续")
+            None => ShadowCascades {
+                view_proj: [Mat4::IDENTITY; SHADOW_CASCADES],
+                splits: [f32::INFINITY; SHADOW_CASCADES],
+                texel_world: [1.0; SHADOW_CASCADES],
+                inv_span: [0.0; SHADOW_CASCADES],
+            },
+        };
+        let cascade_planes = fit.view_proj.map(|m| frustum_planes(&m));
+        let uniform = ShadowUniformsData {
+            cascade_view_proj: fit.view_proj,
+            planes: std::array::from_fn(|i| cascade_planes[i / 6][i % 6]),
+            splits: fit.splits,
+            camera_forward: view
+                .camera
+                .map(|c| c.forward().extend(0.0).to_array())
+                .unwrap_or([0.0; 4]),
+            camera_pos: view.camera_pos4(),
+            map_size: SHADOW_MAP_SIZE as f32,
+            enabled: f32::from(self.settings.enabled),
+            texel_world: fit.texel_world,
+            inv_span: fit.inv_span,
+        };
+        self.targets
+            .ubo(slot)
+            .write(0, &pack_shadow_uniforms(&uniform))
+            .or_fatal("shadow UBO 写失败，渲染链无法继续")
+    }
 }
 
-/// 写本帧槽的 cluster 均匀数据和光源常驻表脏行。调用时该槽 fence 已等过。
-fn write_cluster_slot(
-    cluster: &mut ClusterInput,
-    slot: usize,
-    view: &FrameView,
-    extent: vk::Extent2D,
-) -> Result<(), BevyError> {
-    let cluster_uniform = pack_cluster_uniforms(
-        &view.view_proj,
-        &view.inv_view_proj,
-        extent,
-        cluster.clusters.grid(),
-        cluster.lights.light_count(),
-    );
-    cluster
-        .clusters
-        .uniform(slot)
-        .write(0, &cluster_uniform)
-        .or_fatal("cluster 均匀数据写失败，渲染链无法继续")?;
-    // 只写脏行；一行要在两个帧槽都写过才算清
-    cluster
-        .lights
-        .write_dirty(slot)
-        .or_fatal("光源常驻表脏行写失败，渲染链无法继续")
+impl PostInput<'_> {
+    /// 后处理帧槽 UBO：Bloom 五标量 + SmaaInfo（rt_metrics + 开关）。
+    fn write_slot_ubos(&mut self, slot: usize) -> Result<(), BevyError> {
+        let bloom = &self.bloom_settings;
+        self.bloom
+            .ubo(slot)
+            .write(
+                0,
+                &pack_bloom_params(&BloomParamsData {
+                    strength: bloom.strength,
+                    enabled: f32::from(bloom.enabled),
+                    tonemap: f32::from(bloom.tonemap),
+                    curve: bloom.curve.as_f32(),
+                    gain: bloom.gain,
+                }),
+            )
+            .or_fatal("Bloom 参数 UBO 写失败，渲染链无法继续")?;
+        let ldr = self.smaa.ldr_extent();
+        let (sw, sh) = (ldr.width.max(1), ldr.height.max(1));
+        let mut smaa_info = [0u8; 32];
+        put_f32s(
+            &mut smaa_info,
+            0,
+            &[
+                1.0 / sw as f32,
+                1.0 / sh as f32,
+                sw as f32,
+                sh as f32,
+                f32::from(self.smaa_settings.enabled),
+                0.0,
+                0.0,
+                0.0,
+            ],
+        );
+        self.smaa
+            .info_mut(slot)
+            .write(0, &smaa_info)
+            .or_fatal("SmaaInfo UBO 写失败，渲染链无法继续")
+    }
 }
 
-/// 本帧槽透明行数清零，collect 在 GPU 上从 0 原子累加。
-fn write_transparent_slot(transparent: &mut TransparentInput, slot: usize) -> Result<(), BevyError> {
-    transparent
-        .targets
-        .count(slot)
-        .write(0, &0u32.to_le_bytes())
-        .or_fatal("透明行计数清零失败，渲染链无法继续")
+impl ClusterInput<'_> {
+    /// 写本帧槽的 cluster 均匀数据和光源常驻表脏行。调用时该槽 fence 已等过。
+    fn write_slot(
+        &mut self,
+        slot: usize,
+        view: &FrameView,
+        extent: vk::Extent2D,
+    ) -> Result<(), BevyError> {
+        let cluster_uniform = pack_cluster_uniforms(
+            &view.view_proj,
+            &view.inv_view_proj,
+            extent,
+            self.clusters.grid(),
+            self.lights.light_count(),
+        );
+        self.clusters
+            .uniform(slot)
+            .write(0, &cluster_uniform)
+            .or_fatal("cluster 均匀数据写失败，渲染链无法继续")?;
+        // 只写脏行；一行要在两个帧槽都写过才算清
+        self.lights
+            .write_dirty(slot)
+            .or_fatal("光源常驻表脏行写失败，渲染链无法继续")
+    }
+}
+
+impl TransparentInput<'_> {
+    /// 本帧槽透明行数清零，collect 在 GPU 上从 0 原子累加。
+    fn clear_slot_count(&mut self, slot: usize) -> Result<(), BevyError> {
+        self.targets
+            .count(slot)
+            .write(0, &0u32.to_le_bytes())
+            .or_fatal("透明行计数清零失败，渲染链无法继续")
+    }
 }
 
 /// 本帧 compute 段的共享输入。

@@ -6,7 +6,6 @@ mod ledger;
 mod lod_registry;
 mod residency;
 
-pub(crate) use assembly_cache::AssemblyView;
 pub use asset_events::{AshAssetEventPlugin, AssetInvalidations, AssetRetirements};
 pub(crate) use asset_events::material_texture_slots;
 pub use asset_readiness::{AshReadinessPlugin, AssetReadiness};

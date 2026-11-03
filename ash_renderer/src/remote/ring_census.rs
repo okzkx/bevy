@@ -66,7 +66,7 @@ fn decode_object_record(bytes: &[u8]) -> BrpResult {
 /// 并计入 `rows_mesh_not_resident`。
 #[expect(
     clippy::too_many_lines,
-    reason = "四族读回（对象表/模型环/材质环/在场环）直线展开，便于与写侧 write_rings/upload 逐段对照"
+    reason = "四族读回（对象表/模型环/材质环/在场环）直线展开，便于与写侧环写入/upload 逐段对照"
 )]
 #[system]
 pub(crate) fn ring_census(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
