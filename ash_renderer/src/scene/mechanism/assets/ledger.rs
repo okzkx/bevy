@@ -110,6 +110,8 @@ pub struct IncrementStats {
 /// [`crate::render::MeshPool`]/[`crate::render::ImageCache`] 现查。
 #[derive(Resource, Default)]
 pub struct InstanceLedger {
+    /// 跨帧行账，Entity 升序迭代。选 BTreeMap 是要保序：DrawList 组装、环写入、
+    /// 对照真值共用这个迭代序，逐帧稳定才可比（HashMap 无序做不到）。
     rows: BTreeMap<Entity, InstanceRow>,
     /// 新增/换柄置位，flush_uploads 盘点（驻留或登记重试）后清。
     dirty: BTreeSet<Entity>,
