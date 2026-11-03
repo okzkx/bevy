@@ -77,7 +77,7 @@ pub(crate) fn ring_census(In(params): In<Option<Value>>, world: &mut World) -> B
     }
     let p: P = parse_params_or_default(params)?;
 
-    // 期望半边：账本行 × 资产容器/池现读，按写侧逐字节同口径重打包。全程只读
+    // 期望侧：账本行 × 资产容器/池现读，按写侧逐字节同口径重打包。全程只读
     // 借用（账本/容器的共享借用不与环的可变借用并存）
     let std_materials = res::<Assets<StandardMaterial>>(world)?;
     let image_cache = res::<ImageCache>(world)?;
@@ -167,7 +167,7 @@ pub(crate) fn ring_census(In(params): In<Option<Value>>, world: &mut World) -> B
             .collect()
     };
 
-    // GPU 半边：对象表整表一次 staging 读回（DEVICE_LOCAL，依赖其 usage 含
+    // GPU 侧：对象表整表一次 staging 读回（DEVICE_LOCAL，依赖其 usage 含
     // TRANSFER_SRC）；逐行两个帧槽的模型环/材质环读后即比对；在场环/标记环按已用
     // 槽上界读回
     const FRAMES: usize = 2; // 帧槽数（双缓冲）

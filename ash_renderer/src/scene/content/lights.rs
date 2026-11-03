@@ -1,4 +1,4 @@
-//! 灯光组（业务半边）：方向光实体 spawn + 全局环境光资源覆盖，零 Vulkan 代码。
+//! 灯光组（业务侧）：方向光实体 spawn + 全局环境光资源覆盖，零 Vulkan 代码。
 //!
 //! 环境光是资源不是实体：灯光 UBO 组装读 [`GlobalAmbientLight`] 资源（相机组件
 //! AmbientLight 本项目不挂）。方向光沿实体 forward 照射，所以灯只写朝向不写位置。

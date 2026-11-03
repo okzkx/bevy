@@ -1,4 +1,4 @@
-//! 相机组（业务半边）：裸 Camera 三件套的 spawn 与就位核验，取景参数与官方
+//! 相机组（业务侧）：裸 Camera 三件套的 spawn 与就位核验，取景参数与官方
 //! 对照进程同源，零 Vulkan 代码。
 //!
 //! 宽高比补位由机制层的 [`crate::scene::AshCameraAspectPlugin`] 提供；

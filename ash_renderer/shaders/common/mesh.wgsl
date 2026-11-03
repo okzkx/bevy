@@ -1,4 +1,4 @@
-// 网格绘制公共半边（不透明 G-buffer 写入与透明前向共用）：顶点变换 + 材质
+// 网格绘制公共段（不透明 G-buffer 写入与透明前向共用）：顶点变换 + 材质
 // 参数换算。导入方须声明全局 `frame: FrameUniforms`、`objects: array<ObjectRecord>`、
 // `models: array<mat4x4f>`、`textures: binding_array<texture_2d<f32>>`、
 // `samplers: binding_array<sampler>`。

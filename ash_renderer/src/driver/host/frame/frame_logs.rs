@@ -1,5 +1,5 @@
 //! 帧循环日志状态：跨帧 `Local` 的告警去重与一次性里程碑。各 `OnceLog` 字段由
-//! frame 侧直接取 `&mut` 传给半边函数，组装状态日志走方法。
+//! frame 侧直接取 `&mut` 传给各准备函数，组装状态日志走方法。
 
 use bevy::prelude::*;
 
@@ -28,7 +28,7 @@ pub(super) struct FrameLogs {
 
 impl FrameLogs {
     /// DrawList 组装状态日志（暂缓行数由调用方推导：总行数 − 可绘槽号数，下游
-    /// indirect 半边还要用）。暂缓是可反复的状态，进入第一帧报一次、清零复位
+    /// indirect 组装还要用）。暂缓是可反复的状态，进入第一帧报一次、清零复位
     /// 重开（所以不用 [`OnceLog`]）；首个完整 DrawList 的材质覆盖说明只报一次
     /// ——流式加载中途计数残缺，等零暂缓再报。
     pub(super) fn log_assembly_status(&mut self, pending_rows: usize, total_rows: usize, alpha_override: usize) {

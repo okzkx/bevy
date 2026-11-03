@@ -100,7 +100,7 @@ pub(crate) fn cull_stats(In(_params): In<Option<Value>>, world: &mut World) -> B
         rows.push(row);
         slots.push(slot);
     }
-    // 遮挡分列：GPU 标记已是视锥与遮挡的合并结果，这里单独报遮挡半边，供 A/B
+    // 遮挡分列：GPU 标记已是视锥与遮挡的合并结果，这里单独报遮挡贡献，供 A/B
     // 归因（视锥剔除量/遮挡剔除量分列）。遮挡判可见数 = occ 标记为 1 的在场行
     let occ_frame = res::<OcclusionDiagnostics>(world)?.marks_frame;
     let occ_bytes = read_buffer(

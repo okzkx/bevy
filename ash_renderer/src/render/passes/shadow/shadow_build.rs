@@ -1,4 +1,4 @@
-//! shadow 命令组装的 compute 半边：管线与录制。命令环（×4）与标记环住在
+//! shadow 命令组装的 compute 段：管线与录制。命令环（×4）与标记环住在
 //! [`crate::render::ShadowTargets`]，组装语义见 `shadow_build.wgsl`。
 
 use ash::vk;

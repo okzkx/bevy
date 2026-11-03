@@ -288,8 +288,10 @@ pub(crate) fn draw_frame(
         logs,
         occlusion_gate,
     } = &mut input;
+
+    // —— 帧首：最小化让路 + 挂起重建（尺寸相关资源随新 extent 重建，幂等；pending
+    // 全部重建成功才清——失败帧让路或退出，下个帧首原样重试）。
     gate.yield_minimized(&mut gpu.resized)?;
-    // pending 全部重建成功才清：失败帧让路或退出，下个帧首原样重试
     gate.rebuild_if_pending(gpu.swapchain.pending_rebuild(), || rebuild_size_dependent(gpu, &mut occlusion.hiz, post, cluster))?;
 
     // —— 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在提交前一刻）。
@@ -337,6 +339,7 @@ pub(crate) fn draw_frame(
     post.write_slot_ubos(slot)?;
     cluster.write_slot(slot, &view, extent)?;
     transparent.clear_slot_count(slot)?;
+
     // 四环写入：模型增量 + 材质全量 + 在场全量 + LOD 表增量，都落本帧槽的环
     // （wait_for_slot 之后，fence 证据同本帧 UBO）。
     scene.instance_tables.write_model_ring(ledger, &dirty.model, slot)?;
@@ -353,7 +356,7 @@ pub(crate) fn draw_frame(
     )?;
     watch.rings_done();
 
-    // —— compute 段：各半边按开关决定 dispatch 或 host 填充（A/B 对照），诊断读数在
+    // —— compute 段：各步骤按开关决定 dispatch 或 host 填充（A/B 对照），诊断读数在
     // 写入路径之后取，都在 wait_for_slot 的 fence 保护内。诊断只进计量，任何系统不得
     // 据此决定画什么。
     let pass_frame = PassFrame {
@@ -364,6 +367,9 @@ pub(crate) fn draw_frame(
         live: assembly.slots,
     };
     let instances = &mut scene.instance_tables;
+
+    // 视锥剔除：GPU 一个 dispatch 兼产两份标记——主视图 marks + 四级阴影视锥
+    // shadow_marks；主视图标记受主开关控制（关 = 恒写全可见），阴影标记不受影响。
     let (frustum_cull_draw, visible_among_live) = create_frustum_cull_draw(
         &pass_frame,
         frustum_cull,
@@ -371,8 +377,12 @@ pub(crate) fn draw_frame(
         instances,
         &mut logs.cull_first_dispatch,
     )?;
+
+    // 遮挡剔除：读两帧前的 Hi-Z 金字塔做遮挡测试；相机跳变/金字塔未就绪等判据
+    // 任一命中则跳过 dispatch（b3 保持视锥结果、b6 host 填全可见）。跳变判定推入
+    // 本帧机位、对照两帧前——金字塔拍摄时的机位。
     let camera_jumped = occlusion_gate.push(view.camera.map(|c| (c.pos, c.rot)));
-    let occl_dispatch = occlusion_half(
+    let occl_dispatch = create_occlusion_draw(
         &pass_frame,
         occlusion,
         frustum_cull.settings.enabled,
@@ -380,10 +390,15 @@ pub(crate) fn draw_frame(
         instances,
         &mut logs.occlusion_first_dispatch,
     )?;
-    let lod_dispatch = lod_half(&pass_frame, lod, instances, &mut logs.lod_first_dispatch)?;
+
+    // LOD 选档：开关决定 dispatch 或 host 档位环填最细档（选档每帧现算，无 fallback）。
+    let lod_dispatch = create_lod_draw(&pass_frame, lod, instances, &mut logs.lod_first_dispatch)?;
+    // 缺口快照：读本槽缺口标记环（视锥剔除关闭帧 = host 全可见口径）。
     sample_gaps(&pass_frame, gap_snapshot, instances, frustum_cull_draw.is_none())?;
+
+    // indirect 命令组装：在场行数 = GPU 命令条数；空场 = None（场景绘制整段跳过）。
     let indirect_count = assembly.slots.len() as u32;
-    let indirect_dispatch = indirect_half(
+    let indirect_dispatch = create_indirect_draw(
         indirect,
         indirect_count,
         visible_among_live,
@@ -391,12 +406,13 @@ pub(crate) fn draw_frame(
         pending_rows,
         &mut logs.indirect_first_submit,
     )?;
-    // shadow 命令组装半边：读 shadow 标记 + LOD 档位环，逐在场行 × 每 cascade
+
+    // shadow 命令组装：读 shadow 标记 + LOD 档位环，逐在场行 × 每 cascade
     // 组装命令（无遮挡参与、LOD 再粗一档）。空场/关闭 = None（shadow pass 整段跳过）。
     let shadow_build_dispatch = (shadow.settings.enabled && indirect_count > 0)
         .then(|| shadow.build_pass.draw(indirect_count));
 
-    // —— overlay 绘制半边：图集整传（可能多一张 transfer 票据，所以本帧 wait_ticket 必须
+    // —— overlay 绘制：图集整传（可能多一张 transfer 票据，所以本帧 wait_ticket 必须
     // 在此后取）→ 镶嵌 → 顶点环写入。overlay 未装 = 整段跳过。
     let ui = match overlay.ui.take() {
         Some(mut ui_data) => {
@@ -429,6 +445,7 @@ pub(crate) fn draw_frame(
         transparent_draw(transparent, instances, slot, indirect_count)?;
     let shadow_write = shadow_write_draw(shadow, instances, &scene.pool, slot, indirect_count)?;
     let (smaa_edge_blend, smaa_nb) = smaa_draws(post, slot);
+
     let frame_draw = FrameDraw {
         pipeline: post.gbuffer.pipeline.rec(),
         set0: gpu.tables.descriptor_set(),
@@ -941,9 +958,10 @@ impl OcclusionVerdict {
     }
 }
 
-/// Hi-Z 遮挡半边：判据任一命中 → 本帧跳过 dispatch——b3 保持视锥结果、b6 host 填
-/// 全可见（读数 = 遮挡剔除量 0）。诊断读数 b6 = 本帧槽两帧前 compute 输出或 host 填充。
-fn occlusion_half(
+/// 准备本帧遮挡剔除录制输入：判据任一命中 → 本帧跳过 dispatch——b3 保持视锥结果、
+/// b6 host 填全可见（读数 = 遮挡剔除量 0）。诊断读数 b6 = 本帧槽两帧前 compute 输出或
+/// host 填充。
+fn create_occlusion_draw(
     pf: &PassFrame,
     occlusion: &mut OcclusionInput,
     cull_enabled: bool,
@@ -995,10 +1013,10 @@ fn occlusion_half(
     Ok(dispatch)
 }
 
-/// GPU LOD 选档半边：开关决定 compute dispatch 或 host 档位环填 0（最细档）。选档每帧
-/// 按当前相机现算，档位环只是迟滞状态，无需 fallback。诊断：在场行的档位分布（b8 =
-/// 本帧槽两帧前 compute 输出或 host 填 0）。
-fn lod_half(
+/// 准备本帧 GPU LOD 选档录制输入：开关决定 compute dispatch 或 host 档位环填 0（最细
+/// 档）。选档每帧按当前相机现算，档位环只是迟滞状态，无需 fallback。诊断：在场行的
+/// 档位分布（b8 = 本帧槽两帧前 compute 输出或 host 填 0）。
+fn create_lod_draw(
     pf: &PassFrame,
     lod: &mut LodInput,
     instances: &mut InstanceTables,
@@ -1075,9 +1093,9 @@ fn sample_gaps(
     Ok(())
 }
 
-/// indirect 命令组装半边：在场行数 = GPU 命令条数（来自账本，非可见集回读）；空场 =
-/// None，场景绘制整段跳过。诊断读数只进计量。
-fn indirect_half(
+/// 准备本帧 indirect 命令组装录制输入：在场行数 = GPU 命令条数（来自账本，非可见集
+/// 回读）；空场 = None，场景绘制整段跳过。诊断读数只进计量。
+fn create_indirect_draw(
     indirect: &mut IndirectInput,
     count: u32,
     visible: u32,

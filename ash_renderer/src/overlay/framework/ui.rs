@@ -1,13 +1,13 @@
-//! egui 框架半边："怎么跑"——Startup 建状态（Context/字体），Update 里按节拍跑
-//! egui pass（纯 CPU）、折入纹理增量，产 [`EguiFrame`] 交绘制半边；窗口内容
+//! egui 框架："怎么跑"——Startup 建状态（Context/字体），Update 里按节拍跑
+//! egui pass（纯 CPU）、折入纹理增量，产 [`EguiFrame`] 交绘制段；窗口内容
 //! "画什么"在 [`crate::overlay::tool_window`]（pass 只在 begin/end 之间调它的 `show`）。
 //!
 //! 节拍：pass 分两层——面板层（工具窗口）由输入事件、0.5s 快照、切页/折叠等
 //! 触发；gizmo 层（坐标轴指示器）由相机旋转驱动。其余帧不跑 pass，`EguiFrame`
-//! 两层代数保持，绘制半边按代数命中镶嵌缓存。
+//! 两层代数保持，绘制段按代数命中镶嵌缓存。
 //!
 //! pass 形状：`begin_pass(RawInput)` → 插件钩子（[`plugin_hooks_begin`]）→ 建窗口
-//! UI → `end_pass() -> FullOutput`。`FullOutput.shapes` 未镶嵌，镶嵌归绘制半边在
+//! UI → `end_pass() -> FullOutput`。`FullOutput.shapes` 未镶嵌，镶嵌归绘制段在
 //! `draw_frame` 内做（写顶点环须过 `wait_for_slot` 的 fence）。
 //!
 //! 字体：egui 默认字体 + Windows 微软雅黑（`msyh.ttc`）作 CJK 回退；读不到 warn 后
@@ -38,7 +38,7 @@ use crate::overlay::tool_window::{insert_tool_window_resources, ToolWindowParams
 
 use ash_macros::system;
 
-/// 调试 UI 插件：Startup 建状态，Update 跑 egui pass 并发布输入仲裁。绘制半边
+/// 调试 UI 插件：Startup 建状态，Update 跑 egui pass 并发布输入仲裁。绘制段
 ///（`paint_overlay`）由 `draw_frame` 调用，消费本插件产的 [`EguiFrame`]。
 pub struct OverlayPlugin;
 
@@ -73,7 +73,7 @@ pub struct EguiState {
     pub ctx: egui::Context,
 }
 
-/// 一帧 egui 输出（Update 产，`draw_frame` 内绘制半边消费）。
+/// 一帧 egui 输出（Update 产，`draw_frame` 内绘制段消费）。
 #[derive(Resource, Default)]
 pub struct EguiFrame {
     /// 面板层（工具窗口，输入与快照节拍驱动）。
@@ -88,12 +88,12 @@ pub struct EguiFrame {
 
 /// 一层 egui 产出：shapes 仅在本层 pass 运行帧填充（下一个绘制帧被
 /// paint_overlay 取走镶嵌），generation 只在本层 pass 重跑时 +1——跳过帧绘制
-/// 半边按代数复用镶嵌缓存（本宿主每帧 present，靠缓存而非"空闲不重绘"保画面）。
+/// 段按代数复用镶嵌缓存（本宿主每帧 present，靠缓存而非"空闲不重绘"保画面）。
 #[derive(Default)]
 pub struct EguiLayer {
     /// 未镶嵌的原始形状（左上原点 points 域）；跳过帧为空（已被取走或未跑）。
     pub shapes: Vec<egui::epaint::ClippedShape>,
-    /// 本层代数：本层 pass 重跑 +1。绘制半边据此判定镶嵌缓存命中。
+    /// 本层代数：本层 pass 重跑 +1。绘制段据此判定镶嵌缓存命中。
     pub generation: u64,
 }
 
@@ -220,7 +220,7 @@ struct PassGate<'w, 's> {
 
 /// Update：组 RawInput（每帧排水，桥簿记无条件）→ 触发判定 → 面板 pass 与
 /// gizmo pass 各自成对 begin/end → 落 [`EguiFrame`] 两层。跳过帧不跑 pass，
-/// `EguiFrame` 代数保持、shapes 由绘制半边的镶嵌缓存接住。
+/// `EguiFrame` 代数保持、shapes 由绘制段的镶嵌缓存接住。
 ///
 /// 面板层触发集：首帧 ∨ fps 快照到期（0.5s）∨ 窗口尺寸/ppp 变化 ∨ egui 请求立即
 /// 重绘 ∨ 加载弹窗显示中 ∨ 切页折叠/点选/树形态变化 ∨ 面板相关输入（键/滚轮/焦点/

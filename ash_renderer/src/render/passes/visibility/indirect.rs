@@ -1,4 +1,4 @@
-//! indirect 命令组装的 compute 半边：管线、录制、诊断账面。命令环与在场环住在
+//! indirect 命令组装的 compute 段：管线、录制、诊断账面。命令环与在场环住在
 //! [`crate::render::InstanceTables`]。
 //!
 //! - **分两步 compute**：cull 产标记、build_indirect 产命令，写职责不挤一个 shader，
