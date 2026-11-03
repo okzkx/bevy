@@ -47,12 +47,6 @@ impl ResizeGate {
         )
     }
 
-    /// 标记"尺寸相关资源待重建"（驱动报次优 / acquire 或 present 过时）。
-    /// 多设无害，帧首 rebuild 幂等。
-    pub(super) fn request_rebuild(&mut self) {
-        self.pending = true;
-    }
-
     /// pending 帧首按需重建（宿主 resize 消息 / swapchain 次优或过时都算）：
     /// 重建全部成功才清，失败原样保留，下个帧首重试。
     pub(super) fn rebuild_if_pending(

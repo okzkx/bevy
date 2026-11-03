@@ -72,4 +72,3 @@ pub(super) struct FrameTimingInput<'w> {
     pub(super) timer: ResMut<'w, GpuTimer>,
     pub(super) perf: ResMut<'w, PerfLedger>,
 }
-

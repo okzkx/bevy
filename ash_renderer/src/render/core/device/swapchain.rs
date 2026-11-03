@@ -330,9 +330,29 @@ impl Swapchain {
         }
     }
 
-    /// 等 `wait_semaphore`（该 image 的 render_finished）后把 image 交给显示。
+    /// 等 `wait_semaphore`（该 image 的 render_finished）后把 image 交给显示，并就地
+    /// 消化过时（与 [`Self::acquire_index`] 同款约定）：OUT_OF_DATE 置位 `out_of_date`
+    /// 后返回 None，重建交给下个帧首（`pending_rebuild` 驱动）；其余真失败原样返回
+    /// ——提交已发生，调用方保持帧槽账本推进后再冒泡。
+    pub fn present_digest(
+        &mut self,
+        queue: vk::Queue,
+        wait_semaphore: vk::Semaphore,
+        index: u32,
+    ) -> Option<VulkanError> {
+        match self.present(queue, wait_semaphore, index) {
+            Ok(_) => None,
+            Err(VulkanError::SwapchainOutOfDate) => {
+                self.mark_out_of_date();
+                None
+            }
+            Err(e) => Some(e),
+        }
+    }
+
+    /// 等 `wait_semaphore` 后把 image 交给显示。
     /// OUT_OF_DATE 返回 [`VulkanError::SwapchainOutOfDate`]。
-    pub fn present(
+    fn present(
         &self,
         queue: vk::Queue,
         wait_semaphore: vk::Semaphore,

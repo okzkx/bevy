@@ -228,6 +228,8 @@ pub(crate) fn draw_frame(
     // 不能 warn 后继续（理由见模块文档）。
     let image = gpu.swapchain.images[index as usize];
     let target_view = gpu.swapchain.views[index as usize];
+    // 本帧的 render_finished 与 image 同号（按 image 分配），录制提交与 present 共用
+    let render_finished = gpu.swapchain.render_finished[index as usize];
     let instances = &scene.instance_tables;
     let transparent_frame =
         transparent_draw(transparent, instances, slot, indirect_count)?;
@@ -280,7 +282,7 @@ pub(crate) fn draw_frame(
     gpu.frames
         .record_frame(
             &gpu.ctx,
-            gpu.swapchain.render_finished[index as usize],
+            render_finished,
             image,
             target_view,
             extent,
@@ -288,22 +290,9 @@ pub(crate) fn draw_frame(
         )?;
     watch.record_done();
 
-    // —— present：等待的信号量按 acquire 的 image index 取（不按帧槽轮转）。
-    // OUT_OF_DATE 只标 pending，交给下个帧首重建；其余真失败先暂存——提交已发生，
-    // advance 必须照常推进保持帧槽账本一致，收尾后在系统末尾冒泡。
-    let present_failure = match gpu.swapchain.present(
-        gpu.ctx.queue,
-        gpu.swapchain.render_finished[index as usize],
-        index,
-    ) {
-        Ok(_) => None,
-        Err(VulkanError::SwapchainOutOfDate) => {
-            gpu.swapchain.mark_out_of_date();
-            gate.request_rebuild();
-            None
-        }
-        Err(e) => Some(e),
-    };
+    // —— present：OUT_OF_DATE 已在 present_digest 内标过时（下个帧首重建）；真失败
+    // 先暂存——提交已发生，advance 必须照常推进保持帧槽账本一致，收尾后在系统末尾冒泡。
+    let present_failure = gpu.swapchain.present_digest(gpu.ctx.queue, render_finished, index);
     watch.present_done();
 
     // —— 帧样本入账：只进计量。让路帧（最小化/acquire 过时）不经过此处。
@@ -379,4 +368,3 @@ pub(super) fn count_marked(marks: &[u32], live: &[u32]) -> u32 {
 /// 清屏色：固定深蓝纯色。线性域值——SRGB view 在 ROP 写出时才做编码
 ///（render/frame/frame_draw.rs），调色时按线性直觉给值，不要拿 sRGB 十六进制直接换算。
 const CLEAR_COLOR: [f32; 4] = [0.02, 0.06, 0.14, 1.0];
-
