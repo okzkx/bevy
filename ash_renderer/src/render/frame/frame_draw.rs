@@ -132,6 +132,19 @@ impl FramePool {
             .or_fatal("录制/提交失败，渲染链无法继续")
     }
 
+    /// 录制体九段，顺序固定：
+    /// ① 进场（计时 + 进场屏障 + 透明排序键预填）
+    /// ② compute 前置
+    /// ③ shadow depth
+    /// ④ G-buffer
+    /// ⑤ 合成 + 透明前向
+    /// ⑥ Hi-Z 归约
+    /// ⑦ Bloom
+    /// ⑧ tonemap/SMAA/neighborhood + UI
+    /// ⑨ 出场 + 提交。段界 = image layout 迁移点，计时打点挂在段界；
+    /// ②~⑧ 一段对应一个业务模块，段内输入全部来自 `draw`，段间衔接只靠布局屏障；
+    /// ①⑨ 是槽基建段（cb/fence/等待列表），消费槽私有物，不属于业务模块。
+    /// 机制正本见笔记《整帧录制流程》。
     fn record_frame_steps(
         &self,
         ctx: &Context,
@@ -151,6 +164,7 @@ impl FramePool {
             }
         };
         unsafe {
+            // —— ① 进场段：cb 开始 → 帧计时 → 三组进场屏障 → 透明排序键预填
             device.begin_command_buffer(
                 cb,
                 &vk::CommandBufferBeginInfo::default()
@@ -162,7 +176,7 @@ impl FramePool {
                 timer.reset_and_start(cb, slot);
             }
 
-            // —— 进场 ①：颜色布局迁移。迁移本身是写，必须排在 acquire 对 image 的读之后：
+            // —— 进场屏障一：颜色布局迁移。迁移本身是写，必须排在 acquire 对 image 的读之后：
             // 提交在 COLOR_ATTACHMENT_OUTPUT 等 image_available，所以 srcStage 也取这里；
             // dst_access 含 COLOR_ATTACHMENT_WRITE，衔接后面的 loadOp 清屏。
             image_barrier(
@@ -171,7 +185,7 @@ impl FramePool {
                 &ImageBarrier::discard_to_color(image, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT),
             );
 
-            // —— 进场 ②：深度 UNDEFINED→附件。src access 为空是合法的：本槽深度的上一轮使用
+            // —— 进场屏障二：深度 UNDEFINED→附件。src access 为空是合法的：本槽深度的上一轮使用
             // 已被 wait_for_slot 的 fence 等完，录制时没有并发引用。
             image_barrier(device, cb, &ImageBarrier {
                 image: frame.depth.image,
@@ -186,8 +200,8 @@ impl FramePool {
                 dst_access: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             });
 
-            // —— 进场 ③：G-buffer 三附件 + HDR 目标 UNDEFINED→附件。每帧 loadOp CLEAR 覆写全部
-            // 像素，本槽上一轮使用已被 fence 等完（同进场 ②），旧内容不要。
+            // —— 进场屏障三：G-buffer 三附件 + HDR 目标 UNDEFINED→附件。每帧 loadOp CLEAR 覆写全部
+            // 像素，本槽上一轮使用已被 fence 等完（同进场屏障二），旧内容不要。
             for gbuffer_image in [
                 draw.gbuffer.albedo_image(slot),
                 draw.gbuffer.normal_image(slot),
@@ -232,7 +246,7 @@ impl FramePool {
                 );
             }
 
-            // —— compute 段，顺序即依赖：视锥剔除 → 遮挡测试（读视锥标记与两帧前的 Hi-Z 金字塔）
+            // —— ② compute 段，顺序即依赖：视锥剔除 → 遮挡测试（读视锥标记与两帧前的 Hi-Z 金字塔）
             // → LOD 选档 → indirect 命令组装 → shadow 命令组装 → 光源列表 → 透明层。
             // 各段之间的屏障都在各自的 record 内。
             if let Some(frustum_cull) = &draw.frustum_cull {
@@ -286,7 +300,7 @@ impl FramePool {
 
             mark(1); // T1：compute 段结束
 
-            // —— shadow depth pass（G-buffer 之前）：每个级联一次动态渲染 + 一次 indirect draw，
+            // —— ③ shadow depth pass（G-buffer 之前）：每个级联一次动态渲染 + 一次 indirect draw，
             // reverse-Z（clear 0）。进出屏障每帧都录，pass 跳过也一样：合成 pass 的 shadow 描述符
             // 总是绑定，布局必须始终是 SHADER_READ_ONLY。UNDEFINED 作 oldLayout 从任何状态都合法
             // （每帧 CLEAR 重写）。
@@ -363,7 +377,7 @@ impl FramePool {
             }
             mark(2); // T2：shadow 段结束
 
-            // —— G-buffer pass（不透明物体）：三色附件 + 深度，全部 loadOp CLEAR（背景像素内容无意义，
+            // —— ④ G-buffer pass（不透明物体）：三色附件 + 深度，全部 loadOp CLEAR（背景像素内容无意义，
             // 合成按 depth==0 判背景）；深度清 0（reverse-Z 远平面），STORE 供合成与 Hi-Z 采样。
             let color_attachment = |view: vk::ImageView, clear: [f32; 4]| {
                 vk::RenderingAttachmentInfo::default()
@@ -423,7 +437,7 @@ impl FramePool {
 
             mark(3); // T3：G-buffer 段结束
 
-            // —— G-buffer 三色附件 → SHADER_READ_ONLY，深度 → DEPTH_READ_ONLY，供合成采样；dst 含
+            // —— ⑤ 合成段：G-buffer 三色附件 → SHADER_READ_ONLY，深度 → DEPTH_READ_ONLY，供合成采样；dst 含
             // COMPUTE 是因为 Hi-Z 归约也读深度。透明层会在合成后把深度再转回附件。
             let color_to_read = |image| ImageBarrier {
                 dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER
@@ -531,7 +545,7 @@ impl FramePool {
 
             mark(4); // T4：合成段（含透明层）结束
 
-            // —— 透明层用过的深度转回只读，供 Hi-Z 归约（没有透明层时深度一直是只读）
+            // —— ⑥ Hi-Z 段：透明层用过的深度转回只读，供 Hi-Z 归约（没有透明层时深度一直是只读）
             if draw.transparent.is_some() {
                 image_barrier(device, cb, &ImageBarrier {
                     image: frame.depth.image,
@@ -555,7 +569,7 @@ impl FramePool {
 
             mark(5); // T5：Hi-Z 段结束
 
-            // —— Bloom 链（HDR）：prefilter（读 HDR 提取亮部 → down0）→ 逐级 down → 逐级 up（上采样
+            // —— ⑦ Bloom 段（HDR）：prefilter（读 HDR 提取亮部 → down0）→ 逐级 down → 逐级 up（上采样
             // 下一级 + 叠加同级 down）。各级目标每次 UNDEFINED→COLOR 进、→SHADER_READ_ONLY 出。
             if let Some(bloom) = &draw.bloom {
                 let prefilter = (
@@ -603,7 +617,7 @@ impl FramePool {
                 }
             }
 
-            // —— tonemap（HDR + Bloom → ACES → LDR）：LDR 是 UNORM 线性存储，sRGB 编码只在最后写
+            // —— ⑧ 后链 + UI 段：tonemap（HDR + Bloom → ACES → LDR）：LDR 是 UNORM 线性存储，sRGB 编码只在最后写
             // swapchain 的 SRGB view 时做一次。坑：LDR 上一轮停在 SHADER_READ_ONLY，不录 UNDEFINED
             // 进场屏障会触发 VUID-09592 布局不符。出场转只读供 SMAA 采样。
             record_fullscreen_sampled(
@@ -699,7 +713,7 @@ impl FramePool {
 
             mark(6); // T6：tonemap/SMAA/neighborhood + UI 段结束
 
-            // —— 出场：swapchain image → PRESENT_SRC_KHR
+            // —— ⑨ 出场段：swapchain image → PRESENT_SRC_KHR
             image_barrier(device, cb, &ImageBarrier {
                 image,
                 aspect: vk::ImageAspectFlags::COLOR,
