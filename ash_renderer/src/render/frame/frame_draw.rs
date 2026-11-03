@@ -170,19 +170,20 @@ impl FramePool {
                 timer.mark(cb, slot, point);
             }
         };
-        // —— ① 进场段：cb 开始 → 帧计时 → 三组进场屏障 → 透明排序键预填
+
+        // ---- ① 进场：cb 开始 → 帧计时 → 三组进场屏障 → 透明排序键预填 ----
         device.begin_command_buffer(
             cb,
             &vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
         )?;
 
-        // —— 帧计时：重置 query pool + T0
+        // 帧计时：重置 query pool + 原点
         if let Some(timer) = draw.timer {
             timer.reset_and_start(cb, slot);
         }
 
-        // —— 进场屏障一：颜色布局迁移。迁移本身是写，必须排在 acquire 对 swapchain image 的读之后：
+        // 进场屏障一：颜色布局迁移。迁移本身是写，必须排在 acquire 对 swapchain image 的读之后：
         // 提交在 COLOR_ATTACHMENT_OUTPUT 等 image_available，所以 srcStage 也取这里；
         // dst_access 含 COLOR_ATTACHMENT_WRITE，衔接后面的 loadOp 清屏。
         ImageBarrier::discard_to_color(
@@ -191,7 +192,7 @@ impl FramePool {
         )
         .record(device, cb);
 
-        // —— 进场屏障二：深度 UNDEFINED→附件。src access 为空是合法的：本槽深度的上一轮使用
+        // 进场屏障二：深度 UNDEFINED→附件。src access 为空是合法的：本槽深度的上一轮使用
         // 已被 wait_for_slot 的 fence 等完，录制时没有并发引用。
         ImageBarrier::discard_to_depth_attachment(
             frame.depth.image,
@@ -200,7 +201,7 @@ impl FramePool {
         )
         .record(device, cb);
 
-        // —— 进场屏障三：G-buffer 三附件 + HDR 目标 UNDEFINED→附件。每帧 loadOp CLEAR 覆写全部
+        // 进场屏障三：G-buffer 三附件 + HDR 目标 UNDEFINED→附件。每帧 loadOp CLEAR 覆写全部
         // 像素，本槽上一轮使用已被 fence 等完（同进场屏障二），旧内容不要。
         for gbuffer_image in [
             draw.gbuffer.albedo_image(slot),
@@ -219,7 +220,7 @@ impl FramePool {
         // TRANSFER_DST→SHADER_READ_ONLY 在 uploader 的 transfer 提交内完成，跨队列可见性
         // 由提交时的票据等待保证（EXCLUSIVE 方案的对照实验在 examples/image_probe 组 C）。
 
-        // —— 透明排序键预填 -inf：bitonic 全容量升序排序把真实条目推到尾部（gather 反向取），
+        // 透明排序键预填 -inf：bitonic 全容量升序排序把真实条目推到尾部（gather 反向取），
         // 空位的键必须是 -inf。要在所有 compute dispatch 之前。
         if let Some(t) = draw.transparent.as_ref() {
             device.cmd_fill_buffer(cb, t.t_keys, 0, vk::WHOLE_SIZE, f32::NEG_INFINITY.to_bits());
@@ -233,28 +234,34 @@ impl FramePool {
             .record(device, cb);
         }
 
-        // —— ② compute 段，顺序即依赖：视锥剔除 → 遮挡测试（读视锥标记与两帧前的 Hi-Z 金字塔）
-        // → LOD 选档 → indirect 命令组装 → shadow 命令组装 → 光源列表 → 透明层。
-        // 各段之间的屏障都在各自的 record 内。
+        // ---- ② compute 前置：剔除 → 遮挡 → LOD → indirect 组装 → shadow 组装 → 光源列表 → 透明层 ----
+        // 顺序即依赖，各步之间的屏障都在各自的 record 内。
         if let Some(frustum_cull) = &draw.frustum_cull {
             cull::record(device, cb, draw.set2, draw.shadow_set, frustum_cull);
         }
+
+        // 读视锥标记与两帧前的 Hi-Z 金字塔
         if let Some(occlusion) = &draw.occlusion {
             occlusion::record(device, cb, draw.set2, occlusion);
         }
+
         if let Some(lod) = &draw.lod {
             lod::record(device, cb, draw.set2, lod);
         }
+
         if let Some(indirect) = &draw.indirect {
             indirect::record(device, cb, draw.set2, indirect);
         }
+
         if let Some(sb) = &draw.shadow_build {
             shadow_build::record(device, cb, draw.set2, draw.shadow_set, sb);
         }
+
         // 光源列表必须在合成和透明前向之前算好
         if let Some(build) = &draw.cluster_build {
             cluster::record_cluster_build(device, cb, draw.cluster_set, build);
         }
+
         // 透明层：collect → sort → gather
         if let Some(t) = draw.transparent.as_ref() {
             if let Some(collect) = &t.collect {
@@ -282,13 +289,15 @@ impl FramePool {
 
         mark(TimestampPoint::Compute);
 
-        // —— ③ shadow depth pass（G-buffer 之前）：进场 → 逐级联 indirect draw → 出场，
+        // ---- ③ shadow depth：进场 → 逐级联 indirect draw → 出场 ----
         // 进出屏障每帧都录（合成 pass 的 shadow 描述符总是绑定）。
         shadow_map::record(device, cb, &draw.shadow_images, draw.shadow.as_ref());
+
         mark(TimestampPoint::Shadow);
 
-        // —— ④ G-buffer pass（不透明物体）：三色附件 + 深度，全部 loadOp CLEAR（背景像素内容无意义，
-        // 合成按 depth==0 判背景）；深度清 0（reverse-Z 远平面），STORE 供合成与 Hi-Z 采样。
+        // ---- ④ G-buffer：不透明物体写三色附件 + 深度 ----
+        // 全部 loadOp CLEAR（背景像素内容无意义，合成按 depth==0 判背景）；深度清 0（reverse-Z
+        // 远平面），STORE 供合成与 Hi-Z 采样。
         let color_attachment = |view: vk::ImageView, clear: [f32; 4]| {
             vk::RenderingAttachmentInfo::default()
                 .image_view(view)
@@ -325,7 +334,7 @@ impl FramePool {
                 .depth_attachment(&depth_attachment),
         );
 
-        // —— 场景绘制：一次 cmd_draw_indexed_indirect 消费命令环，draw 调用数不随对象数增长。
+        // 场景绘制：一次 cmd_draw_indexed_indirect 消费命令环，draw 调用数不随对象数增长。
         // 实例槽号经 firstInstance 进 VS（按 instance_index 读 set2）；不可见行 instanceCount=0。
         if draw.indirect_count > 0 {
             let (vertex_buffer, index_buffer) = draw.pool_buffers()?;
@@ -347,7 +356,8 @@ impl FramePool {
 
         mark(TimestampPoint::GBuffer);
 
-        // —— ⑤ 合成段：G-buffer 三色附件 → SHADER_READ_ONLY，深度 → DEPTH_READ_ONLY，供合成采样；dst 含
+        // ---- ⑤ 合成 + 透明前向：G-buffer 转只读 → 合成光照写 HDR → 透明层混合 → HDR 转只读 ----
+        // G-buffer 三色附件 → SHADER_READ_ONLY，深度 → DEPTH_READ_ONLY，供合成采样；dst 含
         // COMPUTE 是因为 Hi-Z 归约也读深度。透明层会在合成后把深度再转回附件。
         let color_to_read = |image| ImageBarrier {
             dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER
@@ -364,7 +374,7 @@ impl FramePool {
             barrier.record(device, cb);
         }
 
-        // —— 合成 pass（全屏，无深度附件）：读 G-buffer 算光照写 HDR 目标；depth==0（reverse-Z
+        // 合成 pass（全屏，无深度附件）：读 G-buffer 算光照写 HDR 目标；depth==0（reverse-Z
         // 远平面）的像素当背景。set0 帧 UBO（与场景管线 set1 同一 layout）、set1 G-buffer 采样集、
         // set2 光源分簇、set3 shadow。
         record_fullscreen(device, cb, &FullscreenPass {
@@ -375,7 +385,7 @@ impl FramePool {
             sets: &[draw.set1, draw.gbuffer.sampled_set(slot), draw.cluster_set, draw.shadow_set],
         });
 
-        // —— 透明前向层：合成之后在同一 HDR 目标上 LOAD + 混合，深度转回附件只测不写。
+        // 透明前向层：合成之后在同一 HDR 目标上 LOAD + 混合，深度转回附件只测不写。
         if let Some(t) = draw.transparent.as_ref() {
             // 两次动态渲染之间没有光栅序保证，合成写 HDR → 透明混合读写必须显式屏障
             let hdr_write_to_blend = vk::MemoryBarrier::default()
@@ -418,12 +428,13 @@ impl FramePool {
             device.cmd_end_rendering(cb);
         }
 
-        // —— HDR 目标 → 只读，供 Bloom 与 tonemap 采样
+        // HDR 目标 → 只读，供 Bloom 与 tonemap 采样
         ImageBarrier::color_to_sampled(draw.gbuffer.hdr_image(slot)).record(device, cb);
 
         mark(TimestampPoint::Lighting);
 
-        // —— ⑥ Hi-Z 段：透明层用过的深度转回只读，供 Hi-Z 归约（没有透明层时深度一直是只读）
+        // ---- ⑥ Hi-Z：深度转回只读 → 逐级归约金字塔 ----
+        // 透明层用过的深度转回只读，供 Hi-Z 归约（没有透明层时深度一直是只读）
         if draw.transparent.is_some() {
             // 透明 pass 测深读过（src 加 READ）；dst 只等 compute（Hi-Z 归约读）。
             // 含 WRITE：迁移要排在 G-buffer pass 的深度 store 之后
@@ -436,15 +447,16 @@ impl FramePool {
             .record(device, cb);
         }
 
-        // —— Hi-Z 归约：逐级重写本帧槽金字塔（屏障在 record_reduction 内）
+        // Hi-Z 归约：逐级重写本帧槽金字塔（屏障在 record_reduction 内）
         if let Some(hiz) = draw.hiz {
             hiz.record_reduction(device, cb, slot);
         }
 
         mark(TimestampPoint::HiZ);
 
-        // —— ⑦ Bloom 段（HDR）：prefilter（读 HDR 提取亮部 → down0）→ 逐级 down → 逐级 up（上采样
-        // 下一级 + 叠加同级 down）。各级目标每次 UNDEFINED→COLOR 进、→SHADER_READ_ONLY 出。
+        // ---- ⑦ Bloom：prefilter → 逐级 down → 逐级 up ----
+        // prefilter 读 HDR 提取亮部写 down0；up 上采样下一级并叠加同级 down。各级目标每次
+        // UNDEFINED→COLOR 进、→SHADER_READ_ONLY 出。
         if let Some(bloom) = &draw.bloom {
             let prefilter = (
                 bloom.images_down[0],
@@ -491,7 +503,8 @@ impl FramePool {
             }
         }
 
-        // —— ⑧ 后链 + UI 段：tonemap（HDR + Bloom → ACES → LDR）：LDR 是 UNORM 线性存储，sRGB 编码只在最后写
+        // ---- ⑧ 后链 + UI：tonemap → SMAA edge/blend → neighborhood + UI ----
+        // tonemap（HDR + Bloom → ACES → LDR）：LDR 是 UNORM 线性存储，sRGB 编码只在最后写
         // swapchain 的 SRGB view 时做一次。坑：LDR 上一轮停在 SHADER_READ_ONLY，不录 UNDEFINED
         // 进场屏障会触发 VUID-09592 布局不符。出场转只读供 SMAA 采样。
         record_fullscreen_sampled(
@@ -508,7 +521,7 @@ impl FramePool {
             },
         );
 
-        // —— SMAA edge → blend（关闭为 None）。中间目标按帧槽分配，同槽上一轮已被 fence 等完，
+        // SMAA edge → blend（关闭为 None）。中间目标按帧槽分配，同槽上一轮已被 fence 等完，
         // UNDEFINED 进场即可。
         if let Some(smaa) = &draw.smaa_edge_blend {
             for (target, target_view, rec, set) in [
@@ -531,7 +544,7 @@ impl FramePool {
             }
         }
 
-        // —— neighborhood 混合（终点）：LDR + blend → swapchain（SMAA 关闭时 shader 内直通）。
+        // neighborhood 混合（终点）：LDR + blend → swapchain（SMAA 关闭时 shader 内直通）。
         // UI 在同一次渲染里接着画，按光栅序盖在场景之上。
         record_fullscreen_open(device, cb, &FullscreenPass {
             view: swapchain_view,
@@ -541,6 +554,7 @@ impl FramePool {
             sets: &[draw.smaa_nb.nb_set],
         });
 
+        // UI：接在 neighborhood 的同一次渲染里画
         if let Some(ui) = draw.ui {
             // 描述符绑定跟随 pipeline layout：切到 overlay 管线后 set0 要按它的 layout 重绑
             bind_graphics(device, cb, &draw.overlay, &[draw.set0]);
@@ -587,7 +601,7 @@ impl FramePool {
 
         mark(TimestampPoint::PostUi);
 
-        // —— ⑨ 出场段：swapchain image → PRESENT_SRC_KHR
+        // ---- ⑨ 出场 + 提交：swapchain → PRESENT_SRC_KHR → 结束 cb → 重置 fence → 提交 ----
         ImageBarrier {
             image: swapchain_image,
             aspect: vk::ImageAspectFlags::COLOR,
@@ -599,6 +613,7 @@ impl FramePool {
             dst_access: vk::AccessFlags::empty(),
         }
         .record(device, cb);
+
         mark(TimestampPoint::FrameEnd);
 
         device.end_command_buffer(cb)?;
