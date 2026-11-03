@@ -38,6 +38,28 @@ fn wrapping_timestamp_delta(start: u64, end: u64, mask: u64) -> u64 {
 /// 每帧槽查询位数（T0..T7，见模块注释）。
 pub(crate) const QUERIES_PER_FRAME: u32 = 8;
 
+/// timestamp 采样点位：变体名 = 该点收尾的段，数值 = query pool 内槽位号。
+/// 各点位在录制体里的落位见模块注释表。
+#[derive(Clone, Copy, Debug)]
+pub enum TimestampPoint {
+    /// 原点：进场屏障前、compute 段前（TOP_OF_PIPE，见 [`GpuTimer::reset_and_start`]）。
+    FrameStart = 0,
+    /// compute 段（剔除/遮挡/LOD/组装/光源列表/透明）结束。
+    Compute = 1,
+    /// shadow depth pass 结束。
+    Shadow = 2,
+    /// G-buffer pass 结束。
+    GBuffer = 3,
+    /// 合成 + 透明层结束。
+    Lighting = 4,
+    /// Hi-Z 归约结束。
+    HiZ = 5,
+    /// 后处理 + UI（Bloom/tonemap/SMAA/neighborhood + UI）结束。
+    PostUi = 6,
+    /// 全帧结束（end_command_buffer 前，不入账；全帧取 FrameStart→FrameEnd）。
+    FrameEnd = 7,
+}
+
 /// 一帧的计量样本：CPU 分段 + GPU 区间 + 规模读数，全部毫秒。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameSample {
@@ -267,13 +289,13 @@ impl GpuTimer {
                 command_buffer,
                 vk::PipelineStageFlags::TOP_OF_PIPE,
                 self.pools[slot],
-                0,
+                TimestampPoint::FrameStart as u32,
             );
         }
     }
 
-    /// 段界采样 T1..T7（BOTTOM_OF_PIPE，理由见模块注释）。
-    pub fn mark(&self, command_buffer: vk::CommandBuffer, slot: usize, index: u32) {
+    /// 段界采样（BOTTOM_OF_PIPE，理由见模块注释）；点位见 [`TimestampPoint`]。
+    pub fn mark(&self, command_buffer: vk::CommandBuffer, slot: usize, point: TimestampPoint) {
         if !self.enabled {
             return;
         }
@@ -282,7 +304,7 @@ impl GpuTimer {
                 command_buffer,
                 vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                 self.pools[slot],
-                index,
+                point as u32,
             );
         }
     }
@@ -319,15 +341,19 @@ impl GpuTimer {
         let ticks_to_ms = |a: u64, b: u64| {
             wrapping_timestamp_delta(a, b, self.timestamp_mask) as f32 * self.period_ns / 1.0e6
         };
+        use TimestampPoint::*;
+        let seg = |a: TimestampPoint, b: TimestampPoint| {
+            ticks_to_ms(raw[a as usize], raw[b as usize])
+        };
         Ok(Some([
-            ticks_to_ms(raw[0], raw[1]),
-            ticks_to_ms(raw[1], raw[2]),
-            ticks_to_ms(raw[2], raw[3]),
-            ticks_to_ms(raw[3], raw[4]),
-            ticks_to_ms(raw[4], raw[5]),
-            ticks_to_ms(raw[5], raw[6]),
-            ticks_to_ms(raw[6], raw[7]),
-            ticks_to_ms(raw[0], raw[7]),
+            seg(FrameStart, Compute),
+            seg(Compute, Shadow),
+            seg(Shadow, GBuffer),
+            seg(GBuffer, Lighting),
+            seg(Lighting, HiZ),
+            seg(HiZ, PostUi),
+            seg(PostUi, FrameEnd),
+            seg(FrameStart, FrameEnd),
         ]))
     }
 }

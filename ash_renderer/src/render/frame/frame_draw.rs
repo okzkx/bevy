@@ -13,7 +13,6 @@ use super::frame_pool::FramePool;
 use ash::vk;
 use bevy::ecs::error::BevyError;
 
-use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
 use crate::common::syntax::ResultTierExt;
 use crate::render::core::record::barrier::{ImageBarrier, MemoryBarrierDesc};
@@ -25,9 +24,8 @@ use crate::render::core::record::graphics::{
 };
 use crate::render::core::binding::set_layout::DescSet;
 use crate::render::passes::lighting::cluster::{self, ClusterBuildDraw};
-use crate::render::passes::shadow::cascades::SHADOW_MAP_SIZE;
 use crate::render::passes::shadow::shadow_build::{self, ShadowBuildDraw};
-use crate::render::passes::shadow::shadow_map::ShadowWriteDraw;
+use crate::render::passes::shadow::shadow_map::{self, ShadowWriteDraw};
 use crate::render::passes::transparent::{self, TransparentFrame};
 use crate::render::passes::visibility::cull::{self, CullDraw};
 use crate::render::passes::visibility::hiz::HizPyramid;
@@ -36,7 +34,7 @@ use crate::render::passes::visibility::lod::{self, LodDraw};
 use crate::render::passes::visibility::occlusion::{self, OcclusionDraw};
 use crate::render::GBufferTargets;
 use crate::render::passes::overlay::overlay_pipeline::{pack_ui_push, UiPaint};
-use crate::render::stats::perf::GpuTimer;
+use crate::render::stats::perf::{GpuTimer, TimestampPoint};
 use crate::render::{Context, BLOOM_LEVELS, INDIRECT_COMMAND_SIZE};
 
 /// indirect draw 的命令步长（`VkDrawIndexedIndirectCommand` 20B，与命令环同一常量）。
@@ -107,7 +105,7 @@ pub struct FrameDraw<'a> {
     pub ticket_semaphore: vk::Semaphore,
     /// 清屏颜色（线性；SRGB view 写出时编码）。
     pub clear: [f32; 4],
-    /// GPU 帧计时：帧首 reset + T0，段界 T1..T7（点位见 `stats::perf`）；None = 队列族不支持
+    /// GPU 帧计时：帧首 reset + 原点，段界打点见 [`TimestampPoint`]；None = 队列族不支持
     /// timestamp。
     pub timer: Option<&'a GpuTimer>,
 }
@@ -158,7 +156,7 @@ impl FramePool {
         let device = &self.device;
         let slot = self.current;
         let cb = frame.command_buffer;
-        let mark = |point: u32| {
+        let mark = |point: TimestampPoint| {
             if let Some(timer) = draw.timer {
                 timer.mark(cb, slot, point);
             }
@@ -274,66 +272,12 @@ impl FramePool {
                 }
             }
 
-            mark(1); // T1：compute 段结束
+            mark(TimestampPoint::Compute);
 
-            // —— ③ shadow depth pass（G-buffer 之前）：每个级联一次动态渲染 + 一次 indirect draw，
-            // reverse-Z（clear 0）。进出屏障每帧都录，pass 跳过也一样：合成 pass 的 shadow 描述符
-            // 总是绑定，布局必须始终是 SHADER_READ_ONLY。UNDEFINED 作 oldLayout 从任何状态都合法
-            // （每帧 CLEAR 重写）。
-            for &shadow_image in &draw.shadow_images {
-                // 跨帧共享（不分帧槽）：等上一帧的片元采样读完再覆写（WAR）
-                ImageBarrier::discard_to_depth_attachment(shadow_image, vk::PipelineStageFlags::FRAGMENT_SHADER)
-                    .record(device, cb);
-            }
-            if let Some(shadow) = &draw.shadow {
-                let map_extent = vk::Extent2D {
-                    width: SHADOW_MAP_SIZE,
-                    height: SHADOW_MAP_SIZE,
-                };
-                for (c, map_view) in shadow.views.iter().enumerate() {
-                    let shadow_depth_attachment = vk::RenderingAttachmentInfo::default()
-                        .image_view(*map_view)
-                        .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                        .load_op(vk::AttachmentLoadOp::CLEAR)
-                        .store_op(vk::AttachmentStoreOp::STORE)
-                        .clear_value(vk::ClearValue {
-                            depth_stencil: vk::ClearDepthStencilValue { depth: 0.0, stencil: 0 },
-                        });
-                    device.cmd_begin_rendering(
-                        cb,
-                        &vk::RenderingInfo::default()
-                            .render_area(full_rect(map_extent))
-                            .layer_count(1)
-                            .depth_attachment(&shadow_depth_attachment),
-                    );
-                    bind_graphics(device, cb, &shadow.pipeline, &[shadow.set2, shadow.shadow_set]);
-                    bind_vertex_index(device, cb, shadow.vertex_buffer, shadow.index_buffer);
-                    set_viewport_scissor(device, cb, map_extent);
-                    // 4B push = 级联索引
-                    let mut cascade_push = [0u8; 4];
-                    put_u32(&mut cascade_push, 0, c as u32);
-                    device.cmd_push_constants(
-                        cb,
-                        shadow.pipeline.layout,
-                        vk::ShaderStageFlags::VERTEX,
-                        0,
-                        &cascade_push,
-                    );
-                    device.cmd_draw_indexed_indirect(
-                        cb,
-                        shadow.commands[c],
-                        0,
-                        shadow.command_count,
-                        INDIRECT_COMMAND_STRIDE,
-                    );
-                    device.cmd_end_rendering(cb);
-                }
-            }
-            // 出场：→ SHADER_READ_ONLY 供合成采样（同样每帧都录）
-            for &shadow_image in &draw.shadow_images {
-                ImageBarrier::depth_attachment_to_sampled(shadow_image).record(device, cb);
-            }
-            mark(2); // T2：shadow 段结束
+            // —— ③ shadow depth pass（G-buffer 之前）：进场 → 逐级联 indirect draw → 出场，
+            // 进出屏障每帧都录（合成 pass 的 shadow 描述符总是绑定）。
+            shadow_map::record(device, cb, &draw.shadow_images, draw.shadow.as_ref());
+            mark(TimestampPoint::Shadow);
 
             // —— ④ G-buffer pass（不透明物体）：三色附件 + 深度，全部 loadOp CLEAR（背景像素内容无意义，
             // 合成按 depth==0 判背景）；深度清 0（reverse-Z 远平面），STORE 供合成与 Hi-Z 采样。
@@ -393,7 +337,7 @@ impl FramePool {
 
             device.cmd_end_rendering(cb);
 
-            mark(3); // T3：G-buffer 段结束
+            mark(TimestampPoint::GBuffer);
 
             // —— ⑤ 合成段：G-buffer 三色附件 → SHADER_READ_ONLY，深度 → DEPTH_READ_ONLY，供合成采样；dst 含
             // COMPUTE 是因为 Hi-Z 归约也读深度。透明层会在合成后把深度再转回附件。
@@ -469,7 +413,7 @@ impl FramePool {
             // —— HDR 目标 → 只读，供 Bloom 与 tonemap 采样
             ImageBarrier::color_to_sampled(draw.gbuffer.hdr_image(slot)).record(device, cb);
 
-            mark(4); // T4：合成段（含透明层）结束
+            mark(TimestampPoint::Lighting);
 
             // —— ⑥ Hi-Z 段：透明层用过的深度转回只读，供 Hi-Z 归约（没有透明层时深度一直是只读）
             if draw.transparent.is_some() {
@@ -489,7 +433,7 @@ impl FramePool {
                 hiz.record_reduction(device, cb, slot);
             }
 
-            mark(5); // T5：Hi-Z 段结束
+            mark(TimestampPoint::HiZ);
 
             // —— ⑦ Bloom 段（HDR）：prefilter（读 HDR 提取亮部 → down0）→ 逐级 down → 逐级 up（上采样
             // 下一级 + 叠加同级 down）。各级目标每次 UNDEFINED→COLOR 进、→SHADER_READ_ONLY 出。
@@ -633,7 +577,7 @@ impl FramePool {
 
             device.cmd_end_rendering(cb);
 
-            mark(6); // T6：tonemap/SMAA/neighborhood + UI 段结束
+            mark(TimestampPoint::PostUi);
 
             // —— ⑨ 出场段：swapchain image → PRESENT_SRC_KHR
             ImageBarrier {
@@ -647,7 +591,7 @@ impl FramePool {
                 dst_access: vk::AccessFlags::empty(),
             }
             .record(device, cb);
-            mark(7); // T7：全帧结束
+            mark(TimestampPoint::FrameEnd);
 
             device.end_command_buffer(cb)?;
 

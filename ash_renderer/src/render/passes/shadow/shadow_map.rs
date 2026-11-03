@@ -1,4 +1,4 @@
-//! shadow 资源族与 depth-only 绘制管线：四张级联深度图、shadow UBO、标记环、命令环、
+//! shadow 资源族与 depth-only 绘制管线及其录制：四张级联深度图、shadow UBO、标记环、命令环、
 //! 描述符集。shadow 域的 binding 全收在本 set，不动 instance set2：b0 UBO、b1..4 级联
 //! 深度图（合成采样）、b5 交错标记环（cull 写/host 读）、b6..9 四 cascade 命令环
 //! （shadow_build 写/shadow draw 读）。
@@ -11,15 +11,19 @@
 use ash::{vk, Device};
 use bevy::log::info;
 
+use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::device::memory::buffer::GpuBuffer;
+use crate::render::core::record::barrier::ImageBarrier;
+use crate::render::core::record::graphics::{
+    bind_graphics, bind_vertex_index, full_rect, set_viewport_scissor, PipelineRef,
+};
 use crate::render::core::device::memory::role::BufferRole;
 use crate::render::passes::shadow::cascades::{SHADOW_CASCADES, SHADOW_MAP_SIZE, SHADOW_UBO_SIZE};
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
 use crate::render::core::target::depth::{DepthTarget, DEPTH_FORMAT};
 use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
-use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
@@ -327,5 +331,73 @@ impl ShadowPipeline {
     #[must_use]
     pub(crate) fn rec(&self) -> PipelineRef {
         self.handle.rec()
+    }
+}
+
+/// 录制 shadow depth 段（G-buffer 之前）：进场屏障 → 每个级联一次动态渲染 + 一次
+/// indirect draw（reverse-Z，clear 0）→ 出场屏障。进出屏障每帧都录，`shadow` 为
+/// None（pass 跳过）也一样：合成 pass 的 shadow 描述符总是绑定，布局必须始终是
+/// SHADER_READ_ONLY。UNDEFINED 作 oldLayout 从任何状态都合法（每帧 CLEAR 重写）。
+pub(crate) fn record(
+    device: &Device,
+    cb: vk::CommandBuffer,
+    images: &[vk::Image],
+    shadow: Option<&ShadowWriteDraw>,
+) {
+    unsafe {
+        // 进场：→ DEPTH_ATTACHMENT。深度图跨帧共享（不分帧槽）：等上一帧的片元
+        // 采样读完再覆写（WAR）
+        for &shadow_image in images {
+            ImageBarrier::discard_to_depth_attachment(
+                shadow_image,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+            )
+            .record(device, cb);
+        }
+        if let Some(shadow) = shadow {
+            let map_extent = vk::Extent2D { width: SHADOW_MAP_SIZE, height: SHADOW_MAP_SIZE };
+            for (c, map_view) in shadow.views.iter().enumerate() {
+                let shadow_depth_attachment = vk::RenderingAttachmentInfo::default()
+                    .image_view(*map_view)
+                    .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .clear_value(vk::ClearValue {
+                        depth_stencil: vk::ClearDepthStencilValue { depth: 0.0, stencil: 0 },
+                    });
+                device.cmd_begin_rendering(
+                    cb,
+                    &vk::RenderingInfo::default()
+                        .render_area(full_rect(map_extent))
+                        .layer_count(1)
+                        .depth_attachment(&shadow_depth_attachment),
+                );
+                bind_graphics(device, cb, &shadow.pipeline, &[shadow.set2, shadow.shadow_set]);
+                bind_vertex_index(device, cb, shadow.vertex_buffer, shadow.index_buffer);
+                set_viewport_scissor(device, cb, map_extent);
+                // 4B push = 级联索引
+                let mut cascade_push = [0u8; 4];
+                put_u32(&mut cascade_push, 0, c as u32);
+                device.cmd_push_constants(
+                    cb,
+                    shadow.pipeline.layout,
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    &cascade_push,
+                );
+                device.cmd_draw_indexed_indirect(
+                    cb,
+                    shadow.commands[c],
+                    0,
+                    shadow.command_count,
+                    INDIRECT_COMMAND_SIZE as u32,
+                );
+                device.cmd_end_rendering(cb);
+            }
+        }
+        // 出场：→ SHADER_READ_ONLY 供合成采样（同样每帧都录）
+        for &shadow_image in images {
+            ImageBarrier::depth_attachment_to_sampled(shadow_image).record(device, cb);
+        }
     }
 }
