@@ -72,3 +72,14 @@ pub(super) struct FrameTimingInput<'w> {
     pub(super) timer: ResMut<'w, GpuTimer>,
     pub(super) perf: ResMut<'w, PerfLedger>,
 }
+
+/// 本帧 compute 段的共享输入（备料单元的统一入参：槽位/上界/矩阵/在场行）。
+pub(super) struct PassFrame<'a> {
+    pub(super) slot: usize,
+    /// 对象表已用槽上界（dispatch 线程数与标记环读写长度）。
+    pub(super) bound: u32,
+    pub(super) view_proj: Mat4,
+    pub(super) screen: [f32; 2],
+    /// 在场行实例槽号（诊断读数逐行计数的范围）。
+    pub(super) live: &'a [u32],
+}

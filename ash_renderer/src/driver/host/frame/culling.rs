@@ -17,7 +17,8 @@ use crate::{
     },
 };
 
-use super::{count_marked, fill_u32, read_ring, PassFrame};
+use super::ring::{count_marked, fill_u32, read_ring};
+use super::PassFrame;
 
 /// 视锥剔除：compute 管线 + 开关（egui/BRP 写，AshHostPlugin 恒插入）+ 诊断账面。
 #[derive(SystemParam)]

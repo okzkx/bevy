@@ -21,7 +21,6 @@
 
 use bevy::{
     ecs::system::NonSendMarker,
-    math::Mat4,
     prelude::*,
 };
 
@@ -30,20 +29,16 @@ use ash::vk;
 use ash_macros::system;
 
 use crate::{
-    common::error::VulkanError,
-    common::syntax::{fatal, ResultTierExt},
-    scene::{GapSnapshot, InstanceLedger},
-    render::{
-        FrameDraw, GpuBuffer,
-        InstanceTables,
-        GAP_MARK_SIZE,
-    },
+    common::syntax::fatal,
+    scene::InstanceLedger,
+    render::FrameDraw,
 };
 
 use super::drawlist::{self, DrawabilitySources, ParityDirty};
 
 mod cluster;
 mod culling;
+mod gaps;
 mod indirect;
 mod input;
 mod lighting;
@@ -51,15 +46,17 @@ mod lod;
 mod overlay;
 mod post;
 mod resize_gate;
+mod ring;
 mod scene;
 mod shadow;
 mod stopwatch;
 mod transparent;
 mod frame_logs;
 
-use self::input::FrameInput;
+use self::input::{FrameInput, PassFrame};
 use self::cluster::create_cluster_build_draw;
 use self::culling::{create_frustum_cull_draw, create_occlusion_draw};
+use self::gaps::sample_gaps;
 use self::indirect::create_indirect_draw;
 use self::lighting::FrameLight;
 use self::lod::create_lod_draw;
@@ -304,65 +301,6 @@ pub(crate) fn draw_frame(
         Some(e) => Err(fatal("present 失败，渲染链无法继续", e)),
         None => Ok(()),
     }
-}
-
-/// 本帧 compute 段的共享输入。
-struct PassFrame<'a> {
-    slot: usize,
-    /// 对象表已用槽上界（dispatch 线程数与标记环读写长度）。
-    bound: u32,
-    view_proj: Mat4,
-    screen: [f32; 2],
-    /// 在场行实例槽号（诊断读数逐行计数的范围）。
-    live: &'a [u32],
-}
-
-/// 缺口快照采样：帧起读缺口标记环（本帧槽 = 两帧前 compute 输出）。坑：驻留管理器
-/// tick 在帧提交之后跑，直读环会与在飞 compute 写竞争，所以 tick 与 BRP census 都读
-/// 本快照。
-fn sample_gaps(
-    pf: &PassFrame,
-    gap: &mut GapSnapshot,
-    instances: &mut InstanceTables,
-    cull_skipped: bool,
-) -> Result<(), BevyError> {
-    if pf.bound > 0 {
-        let len = pf.bound as usize * GAP_MARK_SIZE as usize;
-        gap.bits = read_ring(instances.gap_mark_ring(pf.slot), len)
-            .or_fatal("缺口标记环读数失败，渲染链无法继续")?;
-        // 缺席槽清零由 cull dispatch 负责（覆盖全部 bound）；本帧未 dispatch（剔除与
-        // 阴影都关）时缺席槽会残留陈旧位图，由 host 补零（在场槽由本帧 build_indirect
-        // 照常写新值）。坑：补零必须在快照读数之后，先清会抹掉两帧前 build_indirect
-        // 写下的缺口，驻留管理器永远看不到
-        if cull_skipped {
-            instances
-                .gap_mark_ring(pf.slot)
-                .write(0, &vec![0u8; len])
-                .or_fatal("缺口标记环零填充失败，渲染链无法继续")?;
-        }
-    } else {
-        gap.bits.clear();
-    }
-    gap.bound = pf.bound;
-    Ok(())
-}
-
-/// host 侧整段填充 u32 环：`count` 个小端 `value`（开关关闭时的全可见/全最细档）。
-pub(super) fn fill_u32(ring: &mut GpuBuffer, count: usize, value: u32) -> Result<(), VulkanError> {
-    ring.write(0, &value.to_le_bytes().repeat(count))
-}
-
-/// 读 u32 环前 `len` 字节并按小端解包（标记/档位/缺口环同款）：尾部不足 4B 的
-/// 残字节丢弃，调用方按槽 `.get()` 取值，越界视同缺席。
-pub(super) fn read_ring(ring: &mut GpuBuffer, len: usize) -> Result<Vec<u32>, VulkanError> {
-    let mut bytes = vec![0u8; len];
-    ring.read(0, &mut bytes)?;
-    Ok(bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect())
-}
-
-/// 在场行中标记 = 1 的行数（剔除/遮挡诊断读数）。
-pub(super) fn count_marked(marks: &[u32], live: &[u32]) -> u32 {
-    live.iter().filter(|&&slot| marks.get(slot as usize) == Some(&1)).count() as u32
 }
 
 /// 清屏色：固定深蓝纯色。线性域值——SRGB view 在 ROP 写出时才做编码

@@ -8,7 +8,8 @@ use crate::{
     render::{InstanceTables, LodDiagnostics, LodDraw, LodPass, LodSettings, LOD_LEVEL_SIZE, MAX_LOD_LEVELS},
 };
 
-use super::{fill_u32, read_ring, PassFrame};
+use super::ring::{fill_u32, read_ring};
+use super::PassFrame;
 
 /// GPU LOD 选档：compute 管线 + 开关与判据参数 + 诊断账面。
 #[derive(SystemParam)]
