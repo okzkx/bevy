@@ -1,22 +1,17 @@
-//! Hi-Z 遮挡测试 compute 半边：管线 + push 排布 + CPU 参照投屏 +
-//! 诊断账面。第二 compute pass——在视锥剔除之后、indirect 组装之前（标记的
-//! 合并语义：遮挡把视锥标记清零，b3 = 视锥 ∧ 遮挡，build_indirect 消费形状
-//! 不变；遮挡独立标记 b6 只进计量通道，判定线 4 的 A/B 归因读数口）。
+//! Hi-Z 遮挡测试的 compute 半边：管线、push 排布、CPU 参照投屏、诊断账面。在视锥
+//! 剔除之后、indirect 组装之前运行：遮挡把视锥标记清零（b3 = 视锥 ∧ 遮挡），
+//! build_indirect 读法不变；遮挡独立标记 b6 只进诊断读数。
 //!
-//! 机制（对应 occlusion.wgsl 头注，此处只记 Rust 侧契约）：
-//! - **fallback 判据**（判定线 2）：相机跳变 / 金字塔 warmup 未就绪 / 开关
-//!   关闭 / 视锥剔除关闭（A/B 面保持干净）→ 本帧整段跳过 dispatch，b3 保持
-//!   视锥纯结果、b6 host 填全可见——跳过本身进诊断账（fallback 帧计数）。
-//!   相机跳变阈值：位移 > 0.5 世界单位或旋转 > 15°/帧（钉明：连续缓慢环绕
-//!   不触发——2 帧滞后的短暂误剔除由判定线 2"数帧内恢复"兜底，只对离散
-//!   跳变显式让路）。
-//! - **push**：view_proj（64B）+ screen（2×f32 像素）+ bound（u32）= 80B，
-//!   布局断言与 WGSL `PushOcclusion` 静态互证（cull 112B 同款纪律）。
+//! 判定语义见 occlusion.wgsl 头注，这里只记 Rust 侧约定：
+//! - **fallback**：相机跳变 / 金字塔未就绪 / 开关关闭 / 视锥剔除关闭 → 本帧跳过
+//!   dispatch，b3 保持视锥纯结果、b6 host 填全可见，原因记入诊断。相机跳变 = 与两帧
+//!   前机位比位移 > 0.5 世界单位或旋转 > 15°（金字塔正是两帧前的深度）；连续缓慢环绕
+//!   不触发，2 帧滞后的短暂误剔除数帧内自行恢复，只对离散跳变让路。
 //! - **CPU 参照**：`aabb_screen_rect` 投屏（8 角点 → 像素矩形 + NDC z max，
-//!   w ≤ 0 → None）——`occluded_reverse_z`/`occlusion_mip_level`（hiz 模块
-//!   纯函数）拼出完整判定，供库测试与对照读数（不进绘制路径）。
-//! - **标记环纪律**：b3/b6 读写都在 `wait_for_slot` fence 内（host 诊断读数
-//!   = 本帧槽两帧前输出）；dispatch 上界 = 实例槽 bump bound（cull 同款）。
+//!   w ≤ 0 → None），与 hiz 模块的 `occluded_reverse_z`/`occlusion_mip_level` 拼出
+//!   完整判定，供库测试与 BRP 对照（不进绘制路径）。
+//! - b3/b6 host 读写都在 `wait_for_slot` 之后（读数 = 本帧槽两帧前输出）；dispatch
+//!   上界 = 实例槽 bump bound。
 
 use ash::vk;
 use bevy::math::{Mat4, Vec2, Vec4};
@@ -34,7 +29,6 @@ use crate::render::passes::visibility::hiz::HIZ_OCCLUSION_SET_DESC;
 use crate::render::resident::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 
-/// shader 模块字节（build.rs 产物，spirv-val 已过）。
 pub(crate) static OCCLUSION_PIPELINE: PipelineDesc = PipelineDesc {
     label: "occlusion",
     shader: &shader_abi::OCCLUSION,
@@ -47,10 +41,10 @@ pub(crate) static OCCLUSION_PIPELINE: PipelineDesc = PipelineDesc {
 
 /// compute push 总长（layout 声明 + WGSL `PushOcclusion` 同源）：
 /// mat4（64B）+ screen（8B @64）+ bound（u32 @72）+ 垫（到 16 对齐）= 80B。
-pub(crate) const OCCLUSION_PUSH_SIZE: u32 = 80;
+const OCCLUSION_PUSH_SIZE: u32 = 80;
 
 /// [`pack_occlusion_push`] 的 WGSL 布局镜像（与 `occlusion.wgsl::PushOcclusion`
-/// 静态互证）。
+/// 对照）。
 #[repr(C)]
 struct OcclusionPushLayout {
     view_proj: [[f32; 4]; 4],
@@ -66,9 +60,9 @@ const _: () = {
 };
 
 /// view_proj + 屏幕尺寸 + dispatch 上界 → 80B compute push 字节（偏移按
-/// [`OcclusionPushLayout`] 静态断言表排布，标量小端走 [`crate::common::bytes`]）。
+/// [`OcclusionPushLayout`] 静态断言表排布）。
 #[must_use]
-pub(crate) fn pack_occlusion_push(view_proj: &Mat4, screen: [f32; 2], bound: u32) -> [u8; OCCLUSION_PUSH_SIZE as usize] {
+fn pack_occlusion_push(view_proj: &Mat4, screen: [f32; 2], bound: u32) -> [u8; OCCLUSION_PUSH_SIZE as usize] {
     let mut out = [0u8; OCCLUSION_PUSH_SIZE as usize];
     put_mat4(&mut out, 0, view_proj);
     put_f32s(&mut out, 64, &screen);
@@ -116,8 +110,7 @@ pub fn aabb_screen_rect(
 }
 
 /// 遮挡开关（egui checkbox 与 BRP `occlusion_set_enabled` 写，draw_frame 读）。
-/// 关 = 不 dispatch 遮挡测试，b3 保持视锥纯结果、b6 host 填全可见——数据层
-/// A/B 的 B 面（判定线 4）；与 `CullSettings` 分立（两个开关独立成组）。
+/// 关 = 不 dispatch，b3 保持视锥纯结果、b6 host 填全可见。
 #[derive(Resource)]
 pub struct OcclusionSettings {
     pub enabled: bool,
@@ -129,25 +122,24 @@ impl Default for OcclusionSettings {
     }
 }
 
-/// 遮挡测试 fallback 原因（诊断读数口径；单帧可叠加，取首个命中）。
+/// 遮挡测试 fallback 原因（单帧可叠加，取首个命中）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OcclusionFallback {
-    /// 开关关闭（用户 A/B）。
+    /// 开关关闭。
     Disabled,
-    /// 视锥剔除关闭（A/B 面保持干净：遮挡不独立于视锥开启）。
+    /// 视锥剔除关闭（遮挡不独立于视锥开启）。
     CullOff,
-    /// 金字塔 warmup 未就绪（首建/resize 后前 2 帧）。
+    /// 金字塔未就绪（首建/resize 后前 2 帧）。
     PyramidWarmup,
-    /// 相机跳变（平移 > 0.5 或旋转 > 15°，钉明见模块注释）。
+    /// 相机跳变（阈值见模块注释）。
     CameraJump,
 }
 
-/// 遮挡诊断账面（每帧 draw_frame 刷新，egui 面板/BRP 读数口；只进计量，
-/// 任何系统不得读它决定画什么——同剔除诊断边界）。读数 = 本帧槽两帧前 compute
-/// 的输出（HOST_VISIBLE 直读，fence 纪律内）。
+/// 遮挡诊断读数（draw_frame 每帧刷新，egui 面板/BRP 读）。只做计量，不得用它决定
+/// 画什么。读数 = 本帧槽两帧前 compute 的输出（host 直读，在 fence 之后）。
 #[derive(Resource, Default)]
 pub struct OcclusionDiagnostics {
-    /// 遮挡开关快照（与 [`OcclusionSettings`] 同步）。
+    /// 遮挡开关快照。
     pub enabled: bool,
     /// 本帧是否实际 dispatch（enabled ∧ 视锥开 ∧ 金字塔就绪 ∧ 相机稳定）。
     pub dispatched: bool,
@@ -155,7 +147,7 @@ pub struct OcclusionDiagnostics {
     pub fallback: Option<OcclusionFallback>,
     /// dispatch 上界（实例槽 bump bound）。
     pub bound: u32,
-    /// 遮挡判可见数（occ=1 的在场行——视锥可见 ∧ 未被挡）。
+    /// 遮挡判可见数（b6 = 1 的在场行；b6 只看遮挡，不含视锥结果）。
     pub occlusion_visible_count: u32,
     /// 参与统计的行数（= 本帧 DrawList 可绘行数）。
     pub rows_compared: usize,
@@ -167,7 +159,7 @@ pub struct OcclusionDiagnostics {
 #[derive(Clone, Copy)]
 pub struct OcclusionDraw {
     pub pass: ComputeHandles,
-    /// 80B push：view_proj + screen + bound（[`pack_occlusion_push`] 产物）。
+    /// [`pack_occlusion_push`] 产物。
     pub push: [u8; OCCLUSION_PUSH_SIZE as usize],
     /// dispatch 组数 = bound 取整到 workgroup（64）。
     pub groups: u32,
@@ -176,7 +168,7 @@ pub struct OcclusionDraw {
 }
 
 /// 遮挡 compute 管线（[set2, hiz] 双集 + 80B push）。
-#[derive(bevy::prelude::Resource)]
+#[derive(Resource)]
 pub struct OcclusionPass {
     pipeline: ComputePipeline,
 }
@@ -187,8 +179,7 @@ impl OcclusionPass {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        let pipeline = ComputePipeline::new(ctx, &OCCLUSION_PIPELINE, layouts)?;
-        Ok(Self { pipeline })
+        Ok(Self { pipeline: ComputePipeline::new(ctx, &OCCLUSION_PIPELINE, layouts)? })
     }
 
     /// 组一帧 dispatch 输入。draw_frame 消费，录制走 [`record`]。
@@ -209,10 +200,8 @@ impl OcclusionPass {
     }
 }
 
-/// 录制一帧遮挡 dispatch（视锥剔除之后、build_indirect 之前）：绑管线 →
-/// [set2, hiz] 双集 → push → dispatch → 交接屏障。合并标记写 → build_indirect
-/// 读：cull::record 的屏障只覆盖视锥段，本段的写需要自己的收口；dst 超集盖
-/// 图形 VS 读与计算组装读两种消费形态。
+/// 录制一帧遮挡 dispatch（视锥剔除之后、build_indirect 之前）。交接屏障罩住合并标记
+/// 写 → build_indirect 读；cull::record 的屏障只覆盖视锥段，本段的写要自己收口。
 pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,

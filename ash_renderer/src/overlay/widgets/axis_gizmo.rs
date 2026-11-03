@@ -1,6 +1,6 @@
-//! 右上角坐标轴指示器：世界三轴在视空间的正交投影（Unity Scene 视图右上角
-//! 同款），随相机旋转实时转动。纯显示 widget——零写路径、零新 GPU 资源，
-//! 形状走既有 `EguiFrame` shapes 通道，字母用已有拉丁字形（零纹理增量）。
+//! 右上角坐标轴指示器：世界三轴在视空间的正交投影，随相机旋转实时转动。纯显示
+//! widget——零写路径、零新 GPU 资源，形状走 `EguiFrame` shapes 通道，字母用已有
+//! 拉丁字形（零纹理增量）。
 
 use bevy::prelude::*;
 
@@ -30,7 +30,7 @@ impl AxisGizmo<'_> {
             egui::Order::Foreground,
             egui::Id::new("axis_gizmo"),
         ));
-        painter.circle_filled(center, RADIUS, egui::Color32::from_black_alpha(150));
+        painter.circle_filled(center, RADIUS, egui::Color32::from_black_alpha(150)); // 半透明底盘
         painter.circle_stroke(
             center,
             RADIUS,
@@ -39,24 +39,22 @@ impl AxisGizmo<'_> {
 
         // 世界→视空间：相机旋转取逆；视空间 -Z 朝屏幕里。背向轴先画，近轴压在上层。
         let view_rot = cam_rot.inverse();
-        let mut axes: Vec<(Vec3, &'static str, egui::Color32)> = [
+        let mut axes = [
             (Vec3::X, "X", egui::Color32::from_rgb(226, 76, 76)),
             (Vec3::Y, "Y", egui::Color32::from_rgb(101, 202, 82)),
             (Vec3::Z, "Z", egui::Color32::from_rgb(88, 138, 235)),
         ]
-        .map(|(a, label, color)| (view_rot * a, label, color))
-        .into_iter()
-        .collect();
+        .map(|(a, label, color)| (view_rot * a, label, color));
         axes.sort_by(|a, b| a.0.z.total_cmp(&b.0.z));
         for (d, label, color) in axes {
-            // egui y 向下、视空间 y 向上：屏幕投影 (d.x, -d.y)。**不做归一化**：
-            // 前缩短线正是"轴指向观察者"的表达，归一化会抹掉深度信息，小转角
-            // 下三轴恒满长，指示器看起来不随相机转。
+            // egui y 向下、视空间 y 向上：屏幕投影 (d.x, -d.y)。坑：不做归一化——
+            // 前缩短线正是"轴指向观察者"的表达，归一化后小转角下三轴恒满长，
+            // 指示器看起来不随相机转。
             let dir = egui::vec2(d.x, -d.y);
             let len = dir.length();
             // 深度 k∈[0,1]：背向 0 → 侧向 0.5 → 朝观察者 1，明暗/线宽随动
             let k = d.z * 0.5 + 0.5;
-            let color = darken(color, 0.35 + 0.65 * k);
+            let color = darken(color, 0.35 + 0.65 * k); // 最背向也保留 35% 亮度
             if len < 0.05 {
                 // 轴正对/正背观察者：投影缩成点，点径代替线宽表达远近
                 painter.circle_filled(center, 3.0 + 1.5 * k, color);

@@ -11,7 +11,6 @@ use ash::{vk, Device};
 
 use crate::common::error::{Result, VulkanError};
 
-
 use super::set_layout::{DescKind, SetLayoutDesc};
 
 /// 一条待提交的写入（句柄值拷贝，不借用外部数据；提交时再组装 WriteDescriptorSet）。
@@ -19,6 +18,15 @@ use super::set_layout::{DescKind, SetLayoutDesc};
 enum Write {
     Buffer { binding: u32, element: u32, info: vk::DescriptorBufferInfo },
     Image { binding: u32, element: u32, info: vk::DescriptorImageInfo },
+}
+
+impl Write {
+    /// `(binding, 数组元素)`。
+    fn target(&self) -> (u32, u32) {
+        match *self {
+            Self::Buffer { binding, element, .. } | Self::Image { binding, element, .. } => (binding, element),
+        }
+    }
 }
 
 /// 按声明校验的描述符写入器。一次收集、一次提交；`check` 不通过整批拒写。
@@ -33,7 +41,7 @@ impl DescriptorWriter {
         Self { desc, set, writes: Vec::new() }
     }
 
-    /// 写单个 buffer（整段）。种类须是 uniform/storage buffer。
+    /// 写单个 buffer。种类须是 uniform/storage buffer。
     pub(crate) fn buffer(
         &mut self,
         binding: u32,
@@ -45,7 +53,7 @@ impl DescriptorWriter {
     }
 
     /// 写 buffer 数组的单个元素（bindless 按槽发布）。
-    pub fn buffer_at(&mut self, binding: u32, element: u32, buffer: vk::Buffer, offset: u64, range: u64) -> &mut Self {
+    pub(crate) fn buffer_at(&mut self, binding: u32, element: u32, buffer: vk::Buffer, offset: u64, range: u64) -> &mut Self {
         self.writes.push(Write::Buffer {
             binding,
             element,
@@ -54,8 +62,8 @@ impl DescriptorWriter {
         self
     }
 
-    /// 采样一张图（sampled/storage image；种类按声明核对）。
-    pub fn image(&mut self, binding: u32, view: vk::ImageView, layout: vk::ImageLayout) -> &mut Self {
+    /// 写一张图（sampled/storage image；种类按声明核对）。
+    pub(crate) fn image(&mut self, binding: u32, view: vk::ImageView, layout: vk::ImageLayout) -> &mut Self {
         self.image_at(binding, 0, view, layout)
     }
 
@@ -69,7 +77,7 @@ impl DescriptorWriter {
     }
 
     /// 写一个采样器（独立 binding 或数组元素）。
-    pub fn sampler(&mut self, binding: u32, sampler: vk::Sampler) -> &mut Self {
+    pub(crate) fn sampler(&mut self, binding: u32, sampler: vk::Sampler) -> &mut Self {
         self.sampler_at(binding, 0, sampler)
     }
 
@@ -87,12 +95,11 @@ impl DescriptorWriter {
     fn write_problems(&self) -> Vec<String> {
         let mut out = Vec::new();
         for write in &self.writes {
-            let (binding, element, shape) = match *write {
-                Write::Buffer { binding, element, .. } => (binding, element, "buffer"),
-                Write::Image { binding, element, info } => {
-                    let shape = if info.sampler != vk::Sampler::null() { "sampler" } else { "image" };
-                    (binding, element, shape)
-                }
+            let (binding, element) = write.target();
+            let shape = match write {
+                Write::Buffer { .. } => "buffer",
+                Write::Image { info, .. } if info.sampler != vk::Sampler::null() => "sampler",
+                Write::Image { .. } => "image",
             };
             let Some(b) = self.desc.binding(binding) else {
                 out.push(format!("b{binding}：{} 里没有这个 binding", self.desc.name));
@@ -125,11 +132,7 @@ impl DescriptorWriter {
                 continue;
             }
             let mut covered = vec![false; b.count as usize];
-            for w in &self.writes {
-                let (wb, we) = match *w {
-                    Write::Buffer { binding, element, .. } => (binding, element),
-                    Write::Image { binding, element, .. } => (binding, element),
-                };
+            for (wb, we) in self.writes.iter().map(Write::target) {
                 if wb == b.binding && we < b.count {
                     covered[we as usize] = true;
                 }
@@ -142,11 +145,10 @@ impl DescriptorWriter {
         out
     }
 
-    /// 只校验不提交（单测与诊断用；库内写入走 `submit`）。
+    /// 只校验不提交（写入项 + 完备性）；`submit` 先过这一步。
     ///
     /// # Errors
     /// 任一写入不合法，或完备性不满足。
-    #[cfg_attr(not(test), expect(dead_code, reason = "生产路径走 submit，check 只被契约测试调用"))]
     pub(crate) fn check(&self) -> Result<()> {
         let mut problems = self.write_problems();
         problems.extend(self.coverage_problems());
@@ -161,66 +163,35 @@ impl DescriptorWriter {
         }
     }
 
-    /// 校验（写入项 + 完备性）后整批提交。
+    /// 校验后整批提交。
     ///
     /// # Errors
     /// 任一写入不合法，或完备性不满足。
     pub(crate) fn submit(self, device: &Device) -> Result<()> {
-        let mut problems = self.write_problems();
-        problems.extend(self.coverage_problems());
-        if !problems.is_empty() {
-            return Err(VulkanError::Init(format!(
-                "声明 {} 的描述符写入对不上：{}",
-                self.desc.name,
-                problems.join("；")
-            )));
-        }
-        // 描述符类型以声明为准（种类匹配已在上面核对），不由写入形状猜
-        let kinds: Vec<vk::DescriptorType> = self
+        self.check()?;
+        let writes = self
             .writes
             .iter()
             .map(|w| {
-                let binding = match *w {
-                    Write::Buffer { binding, .. } => binding,
-                    Write::Image { binding, .. } => binding,
-                };
-                self.desc.binding(binding).expect("write_problems 已核对过存在性").kind.vk()
+                let (binding, element) = w.target();
+                // 描述符类型以声明为准（种类匹配已在 check 核对），不由写入形状猜
+                let ty = self
+                    .desc
+                    .binding(binding)
+                    .ok_or_else(|| VulkanError::Init(format!("b{binding}：{} 里没有这个 binding", self.desc.name)))?
+                    .kind
+                    .vk();
+                let write = vk::WriteDescriptorSet::default()
+                    .dst_set(self.set)
+                    .dst_binding(binding)
+                    .dst_array_element(element)
+                    .descriptor_type(ty);
+                Ok(match w {
+                    Write::Buffer { info, .. } => write.buffer_info(std::slice::from_ref(info)),
+                    Write::Image { info, .. } => write.image_info(std::slice::from_ref(info)),
+                })
             })
-            .collect();
-        let mut kind_i = kinds.iter();
-        let buffer_infos: Vec<vk::DescriptorBufferInfo> =
-            self.writes.iter().filter_map(|w| match *w {
-                Write::Buffer { info, .. } => Some(info),
-                _ => None,
-            }).collect();
-        let image_infos: Vec<vk::DescriptorImageInfo> =
-            self.writes.iter().filter_map(|w| match *w {
-                Write::Image { info, .. } => Some(info),
-                _ => None,
-            }).collect();
-        let mut infos_b = buffer_infos.iter();
-        let mut infos_i = image_infos.iter();
-        let writes: Vec<vk::WriteDescriptorSet> = self
-            .writes
-            .iter()
-            .map(|w| {
-                let ty = *kind_i.next().unwrap();
-                match *w {
-                    Write::Buffer { binding, element, .. } => vk::WriteDescriptorSet::default()
-                        .dst_set(self.set)
-                        .dst_binding(binding)
-                        .dst_array_element(element)
-                        .descriptor_type(ty)
-                        .buffer_info(std::slice::from_ref(infos_b.next().unwrap())),
-                    Write::Image { binding, element, .. } => vk::WriteDescriptorSet::default()
-                        .dst_set(self.set)
-                        .dst_binding(binding)
-                        .dst_array_element(element)
-                        .descriptor_type(ty)
-                        .image_info(std::slice::from_ref(infos_i.next().unwrap())),
-                }
-            })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         unsafe { device.update_descriptor_sets(&writes, &[]) };
         Ok(())
     }

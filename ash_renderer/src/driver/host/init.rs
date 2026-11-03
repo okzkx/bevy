@@ -57,7 +57,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
     let ctx = Context::new(wrapper)?;
     let swapchain = Swapchain::new(&ctx)?;
 
-    // ---- ② 帧级执行件：按在飞帧数各开一份，每帧轮换 ----
+    // ---- 帧级执行件：按在飞帧数各开一份，每帧轮换 ----
     let frames = FramePool::new(&ctx, swapchain.extent)?;
     let mut uploader = Uploader::new(
         &ctx.device,
@@ -129,18 +129,17 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         hiz.occlusion_layout(),
     ])?;
     layouts.name_all(&ctx);
-    // 图形管线（PipelineHandle）——附件格式由各管线配方声明（VUID-08914 对齐
-    // 实际附件；swapchain 输出格式已由 Swapchain::new 闸门钉为常量）
+    // 图形管线（PipelineHandle）：swapchain 输出格式已由 Swapchain::new 固定为常量
     let gbuffer_pipeline = GBufferPipeline::new(&ctx, &layouts)?;
     let shadow_pipeline = ShadowPipeline::new(&ctx, &layouts)?;
     let transparent_pipeline = TransparentPipeline::new(&ctx, &layouts)?;
-    // overlay 不用深度，但深度格式仍在配方里声明（同上 VUID-08914）
+    // overlay 不用深度，但深度格式仍在配方里声明
     let overlay_pipeline = OverlayPipeline::new(&ctx, &layouts)?;
     // 全屏管线（FullscreenPipeline）
     let composite_pipeline = CompositePipeline::new(&ctx, &layouts)?;
     let bloom_pipelines = BloomPipelines::new(&ctx, &layouts)?;
-    // tonemap 输出存线性值，最后写屏幕时由 SRGB 视图做唯一一次 sRGB 编码
     let smaa_pipelines = SmaaPipelines::new(&ctx, &layouts)?;
+    // tonemap 输出存线性值，最后写屏幕时由 SRGB 视图做唯一一次 sRGB 编码
     let tonemap_pipeline = PresentTonemapPipeline::new(&ctx, &layouts)?;
     // Compute 管线（ComputePipeline）
     let cull_pass = CullPass::new(&ctx, &layouts)?;
@@ -199,7 +198,7 @@ pub(super) fn teardown_vulkan(world: &mut World) {
     if let Some(ctx) = world.get_resource::<Context>() {
         match unsafe { ctx.device.device_wait_idle() } {
             Ok(()) => info!("退出排空：device_wait_idle 完成，队列无在飞工作"),
-            Err(e) => bevy::log::warn!("退出排空失败（设备丢失？），继续按反序拆除: {e}"),
+            Err(e) => warn!("退出排空失败（设备丢失？），继续按反序拆除: {e}"),
         }
     }
     // 初始化失败时资源从未插入，这里的移除都是空操作

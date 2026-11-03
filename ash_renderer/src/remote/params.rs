@@ -1,15 +1,47 @@
-//! BRP handler 公共标准件：请求参数解析与主相机矩阵。协议层错误一律回
-//! [`BrpError`]（参数类 = INVALID_PARAMS，相机缺席 = COMPONENT_ERROR），不 panic。
+//! BRP handler 公共标准件：请求参数解析、资源取用与协议错误构造。协议层错误
+//! 一律回 [`BrpError`]（参数类 = INVALID_PARAMS，内部失败与资源缺席 =
+//! INTERNAL_ERROR），不 panic。
+
+use std::fmt::Display;
 
 use bevy::{
-    camera::{Camera, Projection},
+    ecs::component::Mutable,
     prelude::*,
-    remote::{builtin_methods::parse, BrpError},
+    remote::{builtin_methods::parse, error_codes, BrpError},
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::invalid_params;
+/// 参数缺失/不合法的统一错误（JSON-RPC 标准段 -32602）。
+pub(crate) fn invalid_params(message: impl Into<String>) -> BrpError {
+    BrpError {
+        code: error_codes::INVALID_PARAMS,
+        message: message.into(),
+        data: None,
+    }
+}
+
+/// 内部失败 → internal 协议错误，供 `map_err(internal_err("xx 读失败"))` 一行
+/// 收口；消息 = `"{what}: {err}"`。
+pub(crate) fn internal_err<E: Display>(what: &str) -> impl FnOnce(E) -> BrpError + '_ {
+    move |e| BrpError::internal(format!("{what}: {e}"))
+}
+
+/// 取资源只读引用；缺席（如禁渲染宿主未插入）回 internal，不 panic。
+pub(crate) fn res<T: Resource>(world: &World) -> Result<&T, BrpError> {
+    world.get_resource::<T>().ok_or_else(missing::<T>)
+}
+
+/// 取资源可变引用；缺席回 internal，同 [`res`]。
+pub(crate) fn res_mut<T: Resource<Mutability = Mutable>>(
+    world: &mut World,
+) -> Result<Mut<'_, T>, BrpError> {
+    world.get_resource_mut::<T>().ok_or_else(missing::<T>)
+}
+
+fn missing<T>() -> BrpError {
+    BrpError::internal(format!("资源缺席：{}", std::any::type_name::<T>()))
+}
 
 /// 必填参数：缺失回 `hint`（写明需要哪些字段），反序列化失败回 serde 原文。
 pub(crate) fn parse_params<T: DeserializeOwned>(
@@ -29,26 +61,11 @@ pub(crate) fn parse_params_or_default<T: DeserializeOwned + Default>(
     }
 }
 
-/// 场景无唯一相机的统一错误；`consequence` 写明哪项读数因此算不出。
-pub(crate) fn no_camera(consequence: &str) -> BrpError {
-    BrpError::component_error(format!("World 里没有相机——{consequence}"))
-}
-
-/// 主相机 view_proj（clip_from_view × view_from_world，与 draw_frame 同一乘序），
-/// 供 CPU 参照现算视锥/投屏。相机缺席或不唯一回 [`no_camera`]。
-pub(crate) fn brp_view_proj(world: &mut World, consequence: &str) -> Result<Mat4, BrpError> {
-    let mut cameras = world.query_filtered::<(&Projection, &GlobalTransform), With<Camera>>();
-    let (projection, global) = cameras.single(world).map_err(|_| no_camera(consequence))?;
-    Ok(projection.get_clip_from_view() * global.affine().inverse())
-}
-
-/// 投屏矩形钳进 `[0, screen]`，与 lod_select.wgsl / occlusion.wgsl 同式（离屏
-/// 部分不渲染，完全离屏 → 零尺寸）。
-///
-/// 坑：[`crate::render::aabb_screen_rect`] 返回未钳制矩形（其他调用方依赖该
-/// 语义），CPU 参照拿它算尺寸/选 mip 前必须先过本函数，否则离屏/半离屏物体
-/// 尺寸偏大，与 GPU 判档/选层对不上。
-pub(crate) fn clamp_rect_to_screen(px_min: Vec2, px_max: Vec2, screen: [f32; 2]) -> (Vec2, Vec2) {
-    let screen = Vec2::from_array(screen);
-    (px_min.clamp(Vec2::ZERO, screen), px_max.clamp(Vec2::ZERO, screen))
+/// 开关写方法共用的 `{"enabled": bool}` 参数。
+pub(crate) fn parse_enabled(params: Option<Value>) -> Result<bool, BrpError> {
+    #[derive(serde::Deserialize)]
+    struct EnabledParams {
+        enabled: bool,
+    }
+    parse_params::<EnabledParams>(params, "params 缺失：需要 enabled").map(|p| p.enabled)
 }

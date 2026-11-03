@@ -26,13 +26,41 @@ pub enum ObjectOpError {
 }
 
 /// 先用 `try_parse` 校验动态路径，避免非法输入在转换时 panic；失败作为操作错误返回。
-///
-/// # Errors
-/// 路径解析失败（含空标签、坏 source 段）。
-pub fn parse_asset_path(path: &str) -> Result<AssetPath<'static>, ObjectOpError> {
+fn parse_asset_path(path: &str) -> Result<AssetPath<'static>, ObjectOpError> {
     AssetPath::try_parse(path)
         .map(AssetPath::into_owned)
         .map_err(|e| ObjectOpError::InvalidAssetPath(format!("{path}: {e}")))
+}
+
+/// 目标实体须在 World。
+fn ensure_entity(world: &World, entity: Entity) -> Result<(), ObjectOpError> {
+    world
+        .get_entity(entity)
+        .map(|_| ())
+        .map_err(|_| ObjectOpError::EntityMissing(entity))
+}
+
+/// 克隆源的三件套（mesh/材质柄 + Transform），供克隆与批量生成共用。
+///
+/// # Errors
+/// 源缺 Mesh3d/MeshMaterial3d（`SourceNotPrimitive`）或缺 Transform。
+pub(crate) fn primitive_parts(
+    world: &World,
+    source: Entity,
+) -> Result<(Mesh3d, MeshMaterial3d<StandardMaterial>, Transform), ObjectOpError> {
+    let mesh = world
+        .get::<Mesh3d>(source)
+        .cloned()
+        .ok_or(ObjectOpError::SourceNotPrimitive(source))?;
+    let material = world
+        .get::<MeshMaterial3d<StandardMaterial>>(source)
+        .cloned()
+        .ok_or(ObjectOpError::SourceNotPrimitive(source))?;
+    let transform = world
+        .get::<Transform>(source)
+        .copied()
+        .ok_or(ObjectOpError::ComponentMissing("Transform", source))?;
+    Ok((mesh, material, transform))
 }
 
 /// 复制源实体的 mesh/material 句柄和 Transform，并按 offset 平移；新实体与源共享资产。
@@ -45,15 +73,7 @@ pub fn spawn_primitive_clone(
     offset: Vec3,
     name_suffix: &str,
 ) -> Result<Entity, ObjectOpError> {
-    let Some(mesh) = world.get::<Mesh3d>(source).cloned() else {
-        return Err(ObjectOpError::SourceNotPrimitive(source));
-    };
-    let Some(material) = world.get::<MeshMaterial3d<StandardMaterial>>(source).cloned() else {
-        return Err(ObjectOpError::SourceNotPrimitive(source));
-    };
-    let Some(mut transform) = world.get::<Transform>(source).cloned() else {
-        return Err(ObjectOpError::ComponentMissing("Transform", source));
-    };
+    let (mesh, material, mut transform) = primitive_parts(world, source)?;
     transform.translation += offset;
     let name = world
         .get::<Name>(source)
@@ -65,7 +85,7 @@ pub fn spawn_primitive_clone(
     Ok(spawned.id())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct HandleSwapReadback {
     pub mesh: Option<AssetId<Mesh>>,
     pub material: Option<AssetId<StandardMaterial>>,
@@ -81,38 +101,32 @@ pub fn replace_handles(
     mesh_from: Option<Entity>,
     material_from: Option<Entity>,
 ) -> Result<HandleSwapReadback, ObjectOpError> {
-    if world.get_entity(target).is_err() {
-        return Err(ObjectOpError::EntityMissing(target));
-    }
-    let mut readback = HandleSwapReadback {
-        mesh: None,
-        material: None,
-    };
+    ensure_entity(world, target)?;
     if mesh_from.is_none() && material_from.is_none() {
         return Err(ObjectOpError::NothingToDo);
     }
+    let mut readback = HandleSwapReadback::default();
     if let Some(source) = mesh_from {
-        let Some(handle) = world.get::<Mesh3d>(source).map(|m| m.0.clone()) else {
-            return Err(ObjectOpError::SourceNotPrimitive(source));
-        };
-        let Some(mut slot) = world.get_mut::<Mesh3d>(target) else {
-            return Err(ObjectOpError::ComponentMissing("Mesh3d", target));
-        };
-        slot.0 = handle.clone();
+        let handle = world
+            .get::<Mesh3d>(source)
+            .map(|m| m.0.clone())
+            .ok_or(ObjectOpError::SourceNotPrimitive(source))?;
+        let mut slot = world
+            .get_mut::<Mesh3d>(target)
+            .ok_or(ObjectOpError::ComponentMissing("Mesh3d", target))?;
         readback.mesh = Some(handle.id());
+        slot.0 = handle;
     }
     if let Some(source) = material_from {
-        let Some(handle) = world
+        let handle = world
             .get::<MeshMaterial3d<StandardMaterial>>(source)
             .map(|m| m.0.clone())
-        else {
-            return Err(ObjectOpError::SourceNotPrimitive(source));
-        };
-        let Some(mut slot) = world.get_mut::<MeshMaterial3d<StandardMaterial>>(target) else {
-            return Err(ObjectOpError::ComponentMissing("MeshMaterial3d", target));
-        };
-        slot.0 = handle.clone();
+            .ok_or(ObjectOpError::SourceNotPrimitive(source))?;
+        let mut slot = world
+            .get_mut::<MeshMaterial3d<StandardMaterial>>(target)
+            .ok_or(ObjectOpError::ComponentMissing("MeshMaterial3d", target))?;
         readback.material = Some(handle.id());
+        slot.0 = handle;
     }
     Ok(readback)
 }
@@ -124,6 +138,21 @@ pub struct LoadedMeshReadback {
     pub mesh: AssetId<Mesh>,
 }
 
+/// 发起异步加载并把加载中句柄写进 `entity` 的 `Mesh3d`。
+fn bind_loaded_mesh(
+    world: &mut World,
+    entity: Entity,
+    path: AssetPath<'static>,
+) -> Result<LoadedMeshReadback, ObjectOpError> {
+    let handle: Handle<Mesh> = world.resource::<AssetServer>().load(path);
+    let mut slot = world
+        .get_mut::<Mesh3d>(entity)
+        .ok_or(ObjectOpError::ComponentMissing("Mesh3d", entity))?;
+    let mesh = handle.id();
+    slot.0 = handle;
+    Ok(LoadedMeshReadback { entity, mesh })
+}
+
 /// 异步加载 mesh 并换绑到既有实体；立即写入加载中句柄，路径先经 [`parse_asset_path`] 校验。
 ///
 /// # Errors
@@ -133,25 +162,14 @@ pub fn load_mesh_rebind(
     target: Entity,
     path: &str,
 ) -> Result<LoadedMeshReadback, ObjectOpError> {
-    if world.get_entity(target).is_err() {
-        return Err(ObjectOpError::EntityMissing(target));
-    }
+    ensure_entity(world, target)?;
     let path = parse_asset_path(path)?;
-    let handle = world.resource::<AssetServer>().load(path);
-    let Some(mut slot) = world.get_mut::<Mesh3d>(target) else {
-        return Err(ObjectOpError::ComponentMissing("Mesh3d", target));
-    };
-    slot.0 = handle.clone();
-    Ok(LoadedMeshReadback {
-        entity: target,
-        mesh: handle.id(),
-    })
+    bind_loaded_mesh(world, target, path)
 }
 
 /// 异步加载 mesh 并挂到新实体上：克隆 `source` 的结构（材质柄/
 /// 变换/Name，语义同 [`spawn_primitive_clone`]），`Mesh3d` 换成加载中柄——
-/// 账本立即入行、画面在到货帧出现新对象（"动态加载新资产"的驱动面）。
-/// 失败语义同 [`load_mesh_rebind`]。
+/// 账本立即入行、画面在到货帧出现新对象。失败语义同 [`load_mesh_rebind`]。
 ///
 /// # Errors
 /// 源实体缺席、非 primitive 或缺 `Transform`（经克隆封装上抛）。
@@ -164,15 +182,7 @@ pub fn spawn_with_loaded_mesh(
 ) -> Result<LoadedMeshReadback, ObjectOpError> {
     let path = parse_asset_path(path)?;
     let entity = spawn_primitive_clone(world, source, offset, name_suffix)?;
-    let handle = world.resource::<AssetServer>().load(path);
-    let Some(mut slot) = world.get_mut::<Mesh3d>(entity) else {
-        return Err(ObjectOpError::ComponentMissing("Mesh3d", entity));
-    };
-    slot.0 = handle.clone();
-    Ok(LoadedMeshReadback {
-        entity,
-        mesh: handle.id(),
-    })
+    bind_loaded_mesh(world, entity, path)
 }
 
 /// 异步加载贴图并写入目标材质的 base_color_texture 槽；资产事件通知读侧。
@@ -185,21 +195,17 @@ pub fn load_image_slot(
     target: Entity,
     path: &str,
 ) -> Result<AssetId<Image>, ObjectOpError> {
-    if world.get_entity(target).is_err() {
-        return Err(ObjectOpError::EntityMissing(target));
-    }
-    let Some(material) = world
+    ensure_entity(world, target)?;
+    let material = world
         .get::<MeshMaterial3d<StandardMaterial>>(target)
         .map(|m| m.0.clone())
-    else {
-        return Err(ObjectOpError::ComponentMissing("MeshMaterial3d", target));
-    };
+        .ok_or(ObjectOpError::ComponentMissing("MeshMaterial3d", target))?;
     let path = parse_asset_path(path)?;
     let handle = world.resource::<AssetServer>().load(path);
     let mut assets = world.resource_mut::<Assets<StandardMaterial>>();
-    let Some(mut asset) = assets.get_mut(&material) else {
-        return Err(ObjectOpError::MaterialAssetMissing(target));
-    };
+    let mut asset = assets
+        .get_mut(&material)
+        .ok_or(ObjectOpError::MaterialAssetMissing(target))?;
     asset.base_color_texture = Some(handle.clone());
     Ok(handle.id())
 }

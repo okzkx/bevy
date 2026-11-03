@@ -15,7 +15,7 @@ pub(crate) type AssemblyEval<'a> = &'a mut dyn FnMut(&InstanceRow) -> Option<Dra
 /// 可绘行集合的增量缓存；首帧、锚开关变化或 LOD 登记换代时全量重建。
 #[derive(Default)]
 pub(crate) struct AssemblyCache {
-    /// 首帧全量播种旗（重建后复位重估通道照常）。
+    /// 是否已做过首帧全量播种。
     seeded: bool,
     /// 上次组装的锚开关（翻转 = 锚解析换形，全量重建）。
     last_floor_anchor: Option<bool>,
@@ -28,7 +28,7 @@ pub(crate) struct AssemblyCache {
     material_refs: HashMap<AssetId<StandardMaterial>, usize>,
     /// 待重估行集（各变更点的输入侧，[`Self::update`] 消费后清空）。
     stale: BTreeSet<Entity>,
-    /// 产物缓存（行宇宙稳定帧零重建，容量复用）。
+    /// 产物缓存（可绘集不变的帧不重建，容量复用）。
     slots: Vec<u32>,
     materials: Vec<AssetId<StandardMaterial>>,
     /// alpha<1 的可绘行数（不透明覆盖收账日志用，随可绘行增删增量维护）。
@@ -112,7 +112,7 @@ impl AssemblyCache {
         }
     }
 
-        #[must_use]
+    #[must_use]
     pub(super) fn view(&self) -> AssemblyView<'_> {
         AssemblyView {
             slots: &self.slots,
@@ -121,7 +121,7 @@ impl AssemblyCache {
         }
     }
 
-        #[must_use]
+    #[must_use]
     pub(super) fn drawable_len(&self) -> usize {
         self.drawable.len()
     }

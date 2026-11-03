@@ -10,13 +10,13 @@ use super::set_layout::SetLayoutDesc;
 
 /// 建 pool 并逐槽分配、写入描述符集：`slots[i][b]` 写进第 i 集的 binding b。
 /// pool 尺寸从声明推导；`desc` 必须是 0..N 连续单个 storage 的形状（[`SetLayoutDesc::dense_storage`]），
-/// 且 `N` 与 `slots` 的行宽一致。分配失败时 pool 当场销毁，不留半成品。
+/// 且 `N` 与 `slots` 的行宽一致。分配或写入失败时 pool 当场销毁，不留半成品。
 ///
 /// # Safety
 /// `layout` 未销毁且由 `desc.create` 建出；buffer 句柄须合法。
 ///
 /// # Errors
-/// `desc` 不是 dense storage 形状，或 pool 创建、描述符集分配失败。
+/// `desc` 不是 dense storage 形状，或 pool 创建、描述符集分配、写入校验失败。
 pub(crate) unsafe fn create_sets<const N: usize>(
     device: &Device,
     desc: &'static SetLayoutDesc,
@@ -60,7 +60,10 @@ pub(crate) unsafe fn create_sets<const N: usize>(
             for (b, buffer) in buffers.iter().enumerate() {
                 writer.buffer(b as u32, *buffer, 0, vk::WHOLE_SIZE);
             }
-            writer.submit(device)?;
+            if let Err(e) = writer.submit(device) {
+                device.destroy_descriptor_pool(pool, None);
+                return Err(e);
+            }
         }
         Ok((pool, sets))
     }

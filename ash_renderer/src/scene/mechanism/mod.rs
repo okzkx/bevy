@@ -18,23 +18,25 @@ mod host;
 mod interaction;
 
 pub use assets::{
-    anchor_level, gap_asset_ids, AshAssetEventPlugin, AshLedgerPlugin, AshReadinessPlugin,
-    AshResidencyPlugin, AssetInvalidations, AssetReadiness, AssetRetirements, DrawListVerify,
-    GapMode, GapSnapshot, IncrementStats, InstanceLedger, InstanceRow, LodDemand, LodGroups,
-    LodLadderReadback, ReadinessStats, RecycleStats, ResidencySet, ResidencySettings,
+    anchor_level, AshAssetEventPlugin, AshLedgerPlugin, AshReadinessPlugin, AshResidencyPlugin,
+    AssetInvalidations, AssetReadiness, AssetRetirements, DrawListVerify, GapMode, GapSnapshot,
+    InstanceLedger, InstanceRow, LodDemand, LodGroups, ResidencySet, ResidencySettings,
     ResidencyStats, spawn_lod_ladder,
 };
-pub(crate) use assets::{update_ledger, AssemblyView};
+pub(crate) use assets::{material_texture_slots, update_ledger, AssemblyView};
 pub use editing::{
     apply_transform_edit, load_image_slot, load_mesh_rebind, mutate_asset, replace_handles,
     spawn_primitive_clone, spawn_with_loaded_mesh, AssetOpError, MutateAsset, TransformEdit,
     TransformEditError, TransformEditQueue,
 };
-pub(crate) use editing::apply_transform_edits;
-pub(crate) use editing::{EntityRow, HandleSwapReadback, ObjectOpError, SceneTreeIndex, SceneTreeNode, TREE_MAX_DEPTH};
-pub use generation::{spawn_test_shape, TestShape, AshWorkloadPlugin, WorkloadSettings,
-    chunk_census, despawn_chunk, generate_chunks, generate_instances, ChunkGenParams, SceneGenParams};
-pub use generation::scene_gen;
+pub(crate) use editing::{
+    apply_transform_edits, euler_deg_yxz, primitive_parts, EntityRow, HandleSwapReadback,
+    ObjectOpError, SceneTreeIndex, SceneTreeNode, TREE_MAX_DEPTH,
+};
+pub use generation::{
+    chunk_census, despawn_chunk, generate_chunks, generate_instances, spawn_test_shape,
+    AshWorkloadPlugin, ChunkGenParams, SceneChunk, SceneGenParams, TestShape, WorkloadSettings,
+};
 pub use host::{
     AshCameraAspectPlugin, AshCameraGuardPlugin, AshMaterialHookPlugin,
     AshVisibilityExemptPlugin,

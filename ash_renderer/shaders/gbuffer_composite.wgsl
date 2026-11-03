@@ -1,17 +1,14 @@
 // 延迟光照累积（全屏）：读 G-buffer（albedo/normal/matparam/depth），逐像素查
-// 3D cluster 列表（索引域 = 光源常驻表槽号）逐灯累加 Filament BRDF，叠加方向光
-//（乘 PCSS 阴影可见性）与环境光，输出 HDR。BRDF 函数族与照抄口径见 common/brdf.wgsl。
-// 组织形态与 Filament 的差异（参考篇 §7）：Filament 是 forward 逐片元查 froxel，
-// 本 pass 是 deferred 累积；"逐光源累加到 inout color"的循环形状同构。
+// 3D cluster 列表（索引 = 光源常驻表槽号）逐灯累加 BRDF（common/brdf.wgsl），叠加
+// 方向光（乘 PCSS 阴影可见性）与环境光，输出 HDR。
 //
 // 模式（frame.mode，FRAME_MODE_*）：
-// - 0 Shading：Filament BRDF 光照累积（未知值同样走此分支）
+// - 0 Shading：BRDF 光照累积（未知值同样走此分支）
 // - 1 Unlit / 2 Normal / 3 Position：反照率 / 世界法线 / 深度重建世界位置直出
-// - 4..8 G-buffer 调试仪器：matparam 单通道灰度直出（metallic/roughness/AO/
-//   reflectance——材质热改的写后读验收口）+ reverse-Z 深度线性化灰度
+// - 4..8 调试显示：matparam 单通道灰度直出（metallic/roughness/AO/reflectance）
+//   + reverse-Z 深度线性化灰度
 //
-// 背景判定：reverse-Z 深度清 0 = 远平面 → 输出清屏色。间接光注入项（indirect）
-// 的累加位已留在 ambient 旁，目前恒 0。
+// 背景判定：reverse-Z 深度清 0 = 远平面 → 输出清屏色。
 enable wgpu_binding_array;
 // #import frame
 // #import cluster_lighting
@@ -27,16 +24,15 @@ enable wgpu_binding_array;
 @group(2) @binding(0) var<storage, read> cluster_params: ClusterParams;
 @group(2) @binding(1) var<storage, read> lights: array<LightRecord>;
 @group(2) @binding(2) var<storage, read> clusters: array<ClusterRecord>;
-// shadow 域（set3）：b0 shadow UBO（级联矩阵/分割带/开关旗标）+ b1..4 四级联
-// 深度图（D32 textureLoad 自写滤波——non-filterable 路线，不引 compare sampler）。
-// shadow 关 = shadow_visibility 恒 1（UBO 旗标）。
+// set3 阴影：b0 阴影 UBO（级联矩阵/分割带/开关）+ b1..4 四级联深度图（D32 不可
+// 过滤，用 textureLoad 自写滤波，不用 compare sampler）。阴影关时可见性恒 1。
 @group(3) @binding(0) var<uniform> shadow: ShadowUniforms;
 @group(3) @binding(1) var shadow_map0: texture_2d<f32>;
 @group(3) @binding(2) var shadow_map1: texture_2d<f32>;
 @group(3) @binding(3) var shadow_map2: texture_2d<f32>;
 @group(3) @binding(4) var shadow_map3: texture_2d<f32>;
 
-const MODE_SHADING: u32 = 0u;   // FRAME_MODE_LAMBERT（值不变，语义为 BRDF 光照）
+const MODE_SHADING: u32 = 0u;   // 宿主侧名为 FRAME_MODE_LAMBERT
 const MODE_UNLIT: u32 = 1u;
 const MODE_NORMAL: u32 = 2u;
 const MODE_POSITION: u32 = 3u;
@@ -46,14 +42,14 @@ const MODE_AO: u32 = 6u;
 const MODE_REFLECTANCE: u32 = 7u;
 const MODE_DEPTH: u32 = 8u;
 
-// 清屏色（与 host 侧 CLEAR_COLOR 同值——线性域，SRGB 编码在最终 ROP 一次）
+// 清屏色（线性域），须与宿主侧 CLEAR_COLOR 同值
 const CLEAR_COLOR: vec3f = vec3f(0.02, 0.06, 0.14);
 
 // —— PCSS 软阴影（textureLoad 路线）：
 // 按视深选级联；法线抬升后的投影点落出本级盒（含采样核余量）就退到更粗
 // 一级，四级都出盒才判无影。深度比较 reverse-Z：更近太阳 = 值更大。
 // bias / 法线抬升 / 半影都按米计算（texel_world、inv_span 换算），换级联
-// 世界尺度一致。开关旗标（UBO map_size.y）= 全链旁路面。
+// 世界尺度一致。UBO map_size.y < 0.5 表示阴影关闭。
 
 // 半影宽度 / 遮挡体到接收面距离（米/米），约等于把太阳当成有面积的光源
 const SHADOW_PENUMBRA_SCALE: f32 = 0.02;
@@ -170,8 +166,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     if frame.mode == MODE_POSITION {
         return vec4f(world_from_depth(in.uv, depth.r) * 0.0625 + vec3f(0.5), 1.0);
     }
-    // —— G-buffer 调试仪器：matparam 单通道灰度直出。8bit 量化面如实呈现
-    //（写入端 clamp/域换算一并可见）；背景已在上方清屏色早退。
+    // —— 调试显示：matparam 单通道灰度直出（8bit 量化后的原值）
     if (frame.mode == MODE_METALLIC || frame.mode == MODE_ROUGHNESS
         || frame.mode == MODE_AO || frame.mode == MODE_REFLECTANCE) {
         let m = textureSampleLevel(matparam_tex, gbuf_sampler, in.uv, 0.0);
@@ -183,47 +178,42 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
         return vec4f(vec3f(c), 1.0);
     }
     if frame.mode == MODE_DEPTH {
-        // reverse-Z 深度线性化。坑点：片段阶段 @builtin(position).w = 1/clip.w，
-        // 不能直读当视深——走反投影重建世界位置，再经 view_proj 取 clip.w =
-        // 视空间深度（透视 w = 正距离），除 far 归一。far 取 cluster 参数面（同帧同相机）。
+        // reverse-Z 深度线性化。坑：片段阶段 @builtin(position).w = 1/clip.w，不能直接
+        // 当视深——先反投影重建世界位置，再经 view_proj 取 clip.w（透视下即正的视深），
+        // 除以 far 归一（far 取 cluster 参数，同帧同相机）。
         let world = world_from_depth(in.uv, depth.r);
         let view_depth = (frame.view_proj * vec4f(world, 1.0)).w;
         let t = saturate(view_depth / max(cluster_params.far, 1e-4));
         return vec4f(vec3f(t), 1.0);
     }
 
-    // —— Shading（mode 0 及未知值兜底）：Filament BRDF 光照累积
+    // —— Shading（mode 0 及未知值）：BRDF 光照累积
     // matparam：r = metallic / g = AO / b = perceptualRoughness / a = reflectance 原值
     let matparam = textureSampleLevel(matparam_tex, gbuf_sampler, in.uv, 0.0);
     let world_pos = world_from_depth(in.uv, depth.r);
     let V = normalize(frame.camera_pos.xyz - world_pos);
     let NoV = clampNoV(saturate(dot(n, V)));
     let pixel = getStandardPixelParams(albedo.rgb, matparam.r, matparam.b, matparam.a);
-    // AO 乘光源贡献尾部（参考篇 §4 occlusion 语义）；环境 AO（multiBounceAO）
-    // 归间接光
+    // AO 乘在直接光贡献上
     let occlusion = matparam.g;
 
     // 点光源先累加、方向光后加（累加顺序即浮点结果，保持不变）
     var light_sum = accumulate_cluster_lights(
         vec3f(0.0), cluster_params, in.clip.xy, pixel, world_pos, V, n, NoV, occlusion);
 
-    // —— 方向光（set0 UBO 单光，不进灯表）：Filament 方向光形状 = NoL ×
-    // colorIntensity，无 attenuation。
+    // —— 方向光（帧 UBO 里的单光，不进灯表）：NoL × 颜色强度，无衰减
     let l = safe_light_dir(frame.dir_to_light.xyz);
     let dir_NoL = saturate(dot(n, l));
     if (dir_NoL > 0.0) {
-        // 方向光项乘阴影可见性（透明层/环境项不接影）
+        // 只有方向光乘阴影可见性（透明层/环境项不接影）
         let shadow = shadow_visibility(world_pos, n);
-        // 强度已折进 rgb（bevy 同款 illuminance 预乘，w 传 1.0——Filament 的
-        // colorIntensity.w 预曝光位由 rgb 内含强度承担）
+        // 强度已预乘进 rgb，w 传 1.0
         light_sum = light_sum + surfaceShading(
             pixel, l, vec4f(frame.light_color.rgb, 1.0), 1.0, dir_NoL, V, n, NoV, occlusion)
             * shadow;
     }
 
-    // 环境光项在光源循环外（参考篇 §6.4）：albedo × ambient
+    // 环境光：albedo × ambient
     let ambient = albedo.rgb * frame.ambient_color.rgb;
-    // 间接光注入项：空接口，恒 0
-    let indirect = vec3f(0.0);
-    return vec4f((light_sum + ambient + indirect) * EXPOSURE, 1.0);
+    return vec4f((light_sum + ambient) * EXPOSURE, 1.0);
 }

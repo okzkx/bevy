@@ -1,10 +1,9 @@
-//! 帧率同步：宿主帧循环节奏可观察可控制——[`apply_frame_sync`] 每帧读主窗所在显示器的刷新率回填
-//! [`FrameSyncSettings::refresh_millihertz`]（设置契约住 render），并按同步开关改写
-//! `WinitSettings` 两档 update mode（bevy_winit 每轮循环重提取
-//! update_mode，写后下轮循环生效）。
+//! 帧率同步：[`apply_frame_sync`] 每帧读主窗所在显示器的刷新率回填
+//! [`FrameSyncSettings::refresh_millihertz`]，并按同步开关改写 `WinitSettings` 两档
+//! update mode（bevy_winit 每轮循环重新读取，写后下轮生效）。
 //!
-//! 边界：只动 winit update 节流，不动 swapchain present mode（MAILBOX 保持）
-//! ——"同步 vsync"= 帧循环节奏对齐显示器刷新率，不是 present mode 切换。
+//! 边界：只动 winit update 节流，不动 swapchain present mode（保持 MAILBOX）——
+//! "同步"指帧循环节奏对齐显示器刷新率，不是切 present mode。
 
 use std::time::Duration;
 
@@ -16,15 +15,17 @@ use ash_macros::system;
 
 use crate::render::FrameSyncSettings;
 
-/// 帧率同步应用系统（Update）：读刷新率 → 回填读数 → 按开关算两档目标
-/// update mode → 与当前 `WinitSettings` 逐位不等才写（避免逐帧 insert 的
-/// change detection 噪声）。
+/// 刷新率读数缺席时的 update 间隔。
+pub(super) fn fallback_wait() -> Duration {
+    Duration::from_secs_f64(1.0 / 60.0)
+}
+
+/// 读刷新率 → 回填读数 → 算两档目标 update mode → 与当前 `WinitSettings` 不等才写
+/// （避免逐帧写入触发 change detection）。
 ///
-/// 目标两档：同步开（有刷新率读数）聚焦/非聚焦都取 1/刷新率 wait，非聚焦
-/// 保持 reactive_low_power 的节能形态；
-/// 同步关联焦 `Continuous` 跑满（MAILBOX 无背压）、非聚焦保
-/// reactive_low_power(1/60) 节能。刷新率不可用（None）时同步开档位退回
-/// 现状 1/60，与"保持现状"分支同值。
+/// 同步开：聚焦 reactive、非聚焦 reactive_low_power，间隔都取 1/刷新率（无读数用
+/// [`fallback_wait`]）。同步关：聚焦 `Continuous` 跑满（MAILBOX 无背压），非聚焦
+/// reactive_low_power([`fallback_wait`]) 节能。
 #[system]
 pub(crate) fn apply_frame_sync(
     mut settings: ResMut<FrameSyncSettings>,
@@ -33,25 +34,14 @@ pub(crate) fn apply_frame_sync(
     monitors: Query<(Has<PrimaryMonitor>, &Monitor)>,
 ) {
     settings.refresh_millihertz = read_refresh_millihertz(&window, &monitors);
-    let (focused, unfocused) = if !settings.enabled {
-        (
-            UpdateMode::Continuous,
-            UpdateMode::reactive_low_power(Duration::from_secs_f64(1.0 / 60.0)),
-        )
+    let (focused, unfocused) = if settings.enabled {
+        let wait = settings
+            .refresh_millihertz
+            .filter(|mhz| *mhz > 0)
+            .map_or_else(fallback_wait, |mhz| Duration::from_secs_f64(1000.0 / f64::from(mhz)));
+        (UpdateMode::reactive(wait), UpdateMode::reactive_low_power(wait))
     } else {
-        match settings.refresh_millihertz.filter(|mhz| *mhz > 0) {
-            Some(mhz) => {
-                let wait = Duration::from_secs_f64(1000.0 / f64::from(mhz));
-                (
-                    UpdateMode::reactive(wait),
-                    UpdateMode::reactive_low_power(wait),
-                )
-            }
-            None => (
-                UpdateMode::reactive(Duration::from_secs_f64(1.0 / 60.0)),
-                UpdateMode::reactive_low_power(Duration::from_secs_f64(1.0 / 60.0)),
-            ),
-        }
+        (UpdateMode::Continuous, UpdateMode::reactive_low_power(fallback_wait()))
     };
     if winit.focused_mode != focused || winit.unfocused_mode != unfocused {
         winit.focused_mode = focused;

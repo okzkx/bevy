@@ -1,29 +1,21 @@
 // overlay 绘制着色器（vertex + fragment 双入口）：egui 镶嵌顶点直出调试 UI。
 //
-// 接口 = 主管线 set0 表 + overlay 专用 16B push（无 set1——UI 无 UBO）：
+// 接口 = 常驻表 set0 + overlay 专用 16B push（UI 无 UBO，没有 set1）：
 // - set0 b0/b1：纹理数组 + sampler 数组，runtime array（build.rs 补丁器补
-//   capability），与 gbuffer_write.wgsl 同一契约；overlay 管线 layout 只声明 set0。
-// - push constant：整帧 UI 一次的 16B，偏移 0/8/12——与 Rust 镜像
-//   `src/render/pipeline/overlay_pipeline.rs::UiPushLayout`（offset_of! 静态互证）
-//   和 pipeline layout 的 push constant range 三方一致。
+//   capability），与 gbuffer_write.wgsl 同一布局。
+// - push constant：整帧 UI 一次的 16B，偏移 0/8/12，须与
+//   src/render/passes/overlay/overlay_pipeline.rs 的 UiPushLayout（offset_of! 断言）
+//   和管线的 push 范围一致。
 //
-// 色彩约定（判据 = egui 官方 wgpu 后端 0.36.2 源码）：
-// - 顶点色与图集采样值都在 gamma 域且已预乘，相乘不拆预乘（官方同款非理想
-//   数学；保真目标 = 与官方 egui 视觉一致，不是理论最优线性预乘）。
-// - rgb 做 gamma→linear（sRGB 解码曲线），alpha 原样带过 → ROP（SRGB view）
-//   编码恰好一次，blend 落在线性域——与场景管线"着色器全程线性、编码只在
-//   输出端"同构。图集是 R8G8B8A8_UNORM（非 sRGB 采样解码），gamma 值原样
-//   采进来。
-// - 官方 shader 的 dithering 与可预测滤波分支不搬（项目全管线无 dithering，
-//   显式边界）。
-// - mip 钉 level 0（图集静态 mip0，与采样器 max_lod=0 双保险）。
+// 色彩（与 egui 官方 wgpu 后端一致，目标是视觉相同而非理论最优）：
+// - 顶点色与图集采样值都在 gamma 域且已预乘，直接相乘。
+// - rgb 做 sRGB 解码、alpha 原样输出：写 SRGB view 时编码一次，混合落在线性域。
+//   图集是 R8G8B8A8_UNORM，采样拿到的就是 gamma 值。
+// - 不做 dithering；mip 固定 level 0。
 //
-// NDC：pos 是 points（左上原点、y 向下；tessellate 不按 ppp 缩放顶点——ppp 只
-// 进字形栅格化/像素取整/圆半径，points 换算成像素是渲染目标的职责），照
-// egui-wgpu 的 webgpu 约定（Y-up）写 pos→clip，screen_size 同为 points 域
-//（官方 0.36.2 uniform 字段即 screen_size_in_points = size_in_pixels / ppp）；
-// naga ADJUST_COORDINATE_SPACE 注入的 gl_Position.y 翻转照旧生效（与场景管线
-// 同一编译路径，翻转恰好一次）。
+// 坐标：pos 与 screen_size 都是 points（左上原点、y 向下），按 Y-up NDC 写 clip；
+// Vulkan 侧的 Y 翻转由 naga ADJUST_COORDINATE_SPACE 注入（与场景管线同一路径，
+// 只翻一次）。
 enable wgpu_binding_array;
 
 struct PushParams {
@@ -40,7 +32,7 @@ var<immediate> push: PushParams;
 struct VsOut {
     @builtin(position) clip: vec4f,
     @location(0) uv: vec2f,
-    // gamma 预乘 sRGBA（Color32 字节经 UNORM 属性解包 /255）
+    // gamma 域预乘 sRGBA（Color32 字节经 UNORM 属性解成 0..1）
     @location(1) color: vec4f,
 }
 
@@ -51,8 +43,7 @@ fn vs_main(
     @location(2) color: vec4f,
 ) -> VsOut {
     var out: VsOut;
-    // egui-wgpu 同款公式：左上原点（y 向下）的逻辑点 → webgpu Y-up NDC；
-    // Vulkan 侧翻转由 naga 注入承担（与场景管线同一路径，恰好一次）
+    // 左上原点的 points → Y-up NDC（Vulkan 翻转见文件头）
     out.clip = vec4f(
         pos.x * 2.0 / push.screen_size.x - 1.0,
         1.0 - pos.y * 2.0 / push.screen_size.y,
@@ -64,21 +55,19 @@ fn vs_main(
     return out;
 }
 
-// sRGB 解码（egui-wgpu fs_main_linear_framebuffer 同款曲线）：
-// ≤0.04045 走 12.92 线性段，否则 (x+0.055)/1.055 的 2.4 幂
+// sRGB 解码：≤0.04045 走 /12.92 线性段，否则 ((x+0.055)/1.055)^2.4
 fn srgb_to_linear(rgb: vec3f) -> vec3f {
     return select(rgb / 12.92, pow((rgb + 0.055) / 1.055, vec3f(2.4)), rgb > vec3f(0.04045));
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
-    // 两侧都在 gamma 域且已预乘：乘法不拆预乘（官方保真）
+    // 两侧都在 gamma 域且已预乘，直接相乘
     let rgba = in.color * textureSampleLevel(
         textures[push.tex_index],
         samplers[push.sampler_index],
         in.uv,
         0.0,
     );
-    // rgb gamma→linear、alpha 直过：ROP 编码恰好一次，blend 在线性域
     return vec4f(srgb_to_linear(rgba.rgb), rgba.a);
 }

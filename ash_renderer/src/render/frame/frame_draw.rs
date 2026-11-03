@@ -1,15 +1,10 @@
 //! 整帧录制：[`FrameDraw`] 收齐一帧的全部输入，`FramePool::record_frame` 按固定顺序
 //! 录完所有 pass 并提交。
 //!
-//! 清屏+绘制走 Vulkan 1.3 动态渲染（feature 在 `crate::render::core::device::context` 设备创建时已开）：
-//! 无 RenderPass/Framebuffer，`loadOp=CLEAR` 就是清屏。每帧的布局纪律：
-//! - 颜色：acquire 后布局不确定 → UNDEFINED→COLOR_ATTACHMENT_OPTIMAL（进场），
-//!   画完 → PRESENT_SRC_KHR（出场）；
-//! - 深度：每帧 UNDEFINED→DEPTH_STENCIL_ATTACHMENT_OPTIMAL（UNDEFINED 作 oldLayout
-//!   = 声明"旧内容不要了"，与 loadOp CLEAR 配套）。**storeOp STORE**：深度在本帧
-//!   渲染后由合成与 Hi-Z 归约采样（hiz 模块），
-//!   采完即弃——下帧 UNDEFINED 进场照常丢弃，深度内容不跨帧持久，金字塔才是
-//!   持久层；出场屏障仍不存在（消费发生在同一条命令缓冲内）。
+//! 全程用 Vulkan 1.3 动态渲染（无 RenderPass/Framebuffer，`loadOp=CLEAR` 即清屏）。每帧布局：
+//! - 颜色：acquire 后内容不要 → UNDEFINED→COLOR_ATTACHMENT_OPTIMAL 进场，画完 → PRESENT_SRC_KHR；
+//! - 深度：每帧 UNDEFINED 进场（旧内容丢弃，配 loadOp CLEAR）；storeOp STORE 是因为本帧
+//!   合成与 Hi-Z 归约还要采样它，采完即弃，不跨帧保留（跨帧的是 Hi-Z 金字塔），也就没有出场屏障。
 
 use std::slice;
 
@@ -24,10 +19,9 @@ use crate::render::core::record::fullscreen::{
     record_fullscreen, record_fullscreen_open, record_fullscreen_sampled, FullscreenPass,
 };
 use crate::render::core::record::graphics::{
-    bind_graphics, bind_vertex_index, full_rect, set_viewport, set_viewport_scissor,
+    bind_graphics, bind_vertex_index, full_rect, set_viewport, set_viewport_scissor, PipelineRef,
 };
 use crate::render::core::binding::set_layout::DescSet;
-use crate::render::core::pipeline::graphics::PipelineRef;
 use crate::render::passes::visibility::cull::CullDraw;
 use crate::render::passes::visibility::hiz::HizPyramid;
 use crate::render::passes::visibility::indirect::IndirectDraw;
@@ -41,118 +35,90 @@ use crate::render::passes::lighting::cluster::ClusterBuildDraw;
 use crate::render::passes::transparent::TransparentFrame;
 use crate::render::passes::overlay::overlay_pipeline::{pack_ui_push, UiPaint};
 use crate::render::stats::perf::GpuTimer;
-use crate::render::{Context, BLOOM_LEVELS};
+use crate::render::{Context, BLOOM_LEVELS, INDIRECT_COMMAND_SIZE};
 
+/// indirect draw 的命令步长（`VkDrawIndexedIndirectCommand` 20B，与命令环同一常量）。
+const INDIRECT_COMMAND_STRIDE: u32 = INDIRECT_COMMAND_SIZE as u32;
 
-/// indirect 命令字节步长（`VkDrawIndexedIndirectCommand` = 20B，instance_table
-/// 的 `INDIRECT_COMMAND_SIZE` 同源——draw 端 stride 与命令环步长钉同值）。
-pub const INDIRECT_COMMAND_STRIDE: u32 = 20;
-
-/// 一次绘制帧录制的全部输入（draw_frame 组装，`record_frame` 消费）。
+/// 一帧录制的全部输入（draw_frame 组装，`record_frame` 消费）。`None` 的可选段整段跳过。
 pub struct FrameDraw<'a> {
     pub pipeline: PipelineRef,
-    /// set0 常驻表（bindless 双表，整帧绑一次）。
+    /// set0 bindless 表，整帧绑一次。
     pub set0: DescSet,
-    /// set1 本帧槽的 UBO 集（内容 = 相机 view_proj，后续扩灯光）。
+    /// set1 本帧槽的每帧 UBO。
     pub set1: DescSet,
-    /// set2 本帧槽的表集（对象表 + 本帧模型/材质环，instance_table 契约）。
+    /// set2 本帧槽的实例表（对象表 + 本帧各环）。
     pub set2: DescSet,
     pub vertex_buffer: Option<vk::Buffer>,
     pub index_buffer: Option<vk::Buffer>,
-    /// 在场行数（= GPU 侧命令条数；0 = 空场/全暂缓，场景绘制整段跳过）。
-    /// 逐对象参数在 GPU 常驻表——录制层零逐对象参数，判定线 1 的代码面。
+    /// 在场行数（= GPU 侧命令条数；0 = 空场，场景绘制整段跳过）。
     pub indirect_count: u32,
-    /// 本帧槽命令环 buffer（build_indirect 每帧重写，`count > 0` 时消费）。
+    /// 本帧槽命令环（build_indirect 每帧写）。
     pub indirect_buffer: vk::Buffer,
-    /// G-buffer 附件 + HDR 中间目标（多 pass 帧编排的附件面，采样集
-    /// 也在其上——合成 pass 与 present tonemap 消费）。
+    /// G-buffer 附件 + HDR 中间目标，以及合成/tonemap 用的采样集。
     pub gbuffer: &'a GBufferTargets,
-    /// 合成管线（G-buffer 光照累积 → HDR 中间目标；全屏，无深度/混合）。
+    /// 合成管线（G-buffer 光照累积 → HDR；全屏，无深度/混合）。
     pub composite: PipelineRef,
     /// 光源分簇集，合成与透明前向都绑。
     pub cluster_set: DescSet,
     /// 空场为 None：没东西要画，不用算光源列表。
     pub cluster_build: Option<ClusterBuildDraw>,
-    /// present tonemap 管线（HDR + Bloom → ACES → LDR 目标）。
+    /// tonemap 管线（HDR + Bloom → ACES → LDR）。
     pub tonemap: PipelineRef,
-    /// SMAA 录制输入：edge/blend 两 pass（关 = None，neighborhood
-    /// 直通）+ neighborhood 输入（恒 Some——swapchain 终点）。
+    /// SMAA edge/blend 两 pass（关闭为 None，neighborhood 直通）。
     pub smaa_edge_blend: Option<crate::render::passes::post::smaa::SmaaEdgeBlendDraw>,
+    /// neighborhood 混合（终点，写 swapchain，总是录）。
     pub smaa_nb: crate::render::passes::post::smaa::SmaaNbDraw,
-    /// bloom 参数集（tonemap set2——up0 + 采样器 + 参数 UBO；恒 Some，
-    /// 关闭帧 shader 内旁路 bloom 采样）。
+    /// tonemap 的 bloom 参数集（总是绑；bloom 关闭时 shader 内不采样）。
     pub bloom_params_set: DescSet,
-    /// Bloom 链录制输入（关闭 = None——链整段跳过，up0 内容陈旧但
-    /// tonemap 不采样）。
+    /// Bloom 链（关闭为 None）。
     pub bloom: Option<crate::render::passes::post::bloom::BloomFrameDraw>,
-    /// overlay 管线（UI 半边的绘制入口；深度格式与实例对齐声明，读/写全关）。
-    /// 自有 layout（只借 set0，无 set1）——换管线后描述符绑定不延续，set0 须重绑。
+    /// overlay 管线。自有 layout（只有 set0），切到它之后 set0 要重绑。
     pub overlay: PipelineRef,
-    /// 本帧 UI 绘制产物（无 UI 帧为 None：首 pass 前空帧/超容丢弃/图集缺席）。
+    /// 本帧 UI 绘制产物（无 UI 为 None）。
     pub ui: Option<&'a UiPaint>,
-    /// 本帧槽 UI 顶点/索引 buffer（`ui` 为 Some 时必有当帧写入）。
+    /// 本帧槽 UI 顶点/索引 buffer（`ui` 为 Some 时本帧已写入）。
     pub ui_buffers: (vk::Buffer, vk::Buffer),
-    /// 视锥剔除 dispatch（空场或开关关闭为 None——关闭时 host 已把本帧
-    /// 槽标记填全可见，诊断读数仍有语义）。录制在渲染进场之前（compute 写 →
-    /// 屏障 → 图形读的依赖形状）。
+    /// 视锥剔除（空场或关闭为 None；关闭时 host 已把标记填全可见）。
     pub cull: Option<CullDraw>,
-    /// indirect 命令组装 dispatch（在场行数为 0 为 None——空场无命令可
-    /// 组装，场景绘制整段跳过）。录制在 cull dispatch 之后（标记写 → 组装读
-    /// 的依赖由 cull::record 的预置屏障收口），命令 → 绘制的依赖由组装自带
-    /// 屏障收口（indirect::record）。
+    /// indirect 命令组装（空场为 None）。命令写 → 绘制读的屏障在 indirect::record 内。
     pub indirect: Option<IndirectDraw>,
-    /// Hi-Z 遮挡测试 dispatch（fallback/关闭/空场为 None——b3 保持视锥
-    /// 纯结果，b6 host 填全可见）。录制在视锥剔除之后、indirect 组装之前
-    ///（视锥标记 → 遮挡合并 → 命令组装的依赖链，occlusion::record 自带屏障）。
+    /// Hi-Z 遮挡测试（关闭/降级/空场为 None）。屏障在 occlusion::record 内。
     pub occlusion: Option<OcclusionDraw>,
-    /// GPU LOD 选档 dispatch（关闭/空场为 None——档位环 host 填 0 =
-    /// 最细档，命令引脚回到对象记录基准）。录制在遮挡测试之后、indirect
-    /// 组装之前（档位写 → 组装读的依赖由 lod::record 自带屏障收口）。
+    /// GPU LOD 选档（关闭/空场为 None；关闭时 host 已把档位环填 0）。屏障在 lod::record 内。
     pub lod: Option<LodDraw>,
-    /// shadow 命令组装 dispatch（关闭/空场为 None）。录制在 LOD 之后、
-    /// 透明三 dispatch 之前（shadow 标记读依赖由 cull::record 预置屏障承担，
-    /// 命令 → 绘制的依赖由 shadow_build::record 自带 DRAW_INDIRECT 屏障收口）。
+    /// shadow 命令组装（关闭/空场为 None）。屏障在 shadow_build::record 内。
     pub shadow_build: Option<ShadowBuildDraw>,
-    /// shadow depth pass 输入（关闭/空场为 None——四级联 render pass +
-    /// indirect draw，在 G-buffer pass 之前录制；关 = 画面与无 shadow 基线一致）。
+    /// shadow depth pass（关闭/空场为 None）。
     pub shadow: Option<ShadowWriteDraw>,
-    /// shadow 域描述符集（合成 pass 的 shadow 采样取数面——b0 UBO +
-    /// b1..4 级联深度图；恒 Some，关闭帧 shader 内旁路 shadow 采样）。
+    /// shadow 描述符集（合成 pass 总是绑；关闭时 shader 内不采样）。
     pub shadow_set: DescSet,
-    /// 级联深度图本体：布局屏障恒录的面——composite 的 shadow 描述符
-    /// 恒绑定（空场/关闭帧也在集内），四张图的布局必须始终合法。
+    /// 级联深度图。shadow 描述符总是绑定，所以每帧都录布局屏障，哪怕 pass 跳过。
     pub shadow_images: [vk::Image; 4],
-    /// 透明 Clustered Forward 层：cluster 构建/收集/组装三 dispatch
-    ///（compute 区间录制）+ 透明绘制输入（合成 pass 之后、Hi-Z 之前）。
-    /// `transparent = None` = 空场（无在场行，三 dispatch 与绘制整段跳过）。
+    /// 透明层：收集/排序/组装 dispatch + 透明绘制（空场为 None）。
     pub transparent: Option<TransparentFrame>,
-    /// Hi-Z 金字塔归约链：渲染后逐级重写本帧槽（Some = 恒 Some，
-    /// 重建窗口期也录——warmup 由 hiz 内部走账）。深度屏障（附件 → 只读）
-    /// 与进场/级间屏障在 hiz::record_reduction 内收口。
+    /// Hi-Z 金字塔归约，渲染后重写本帧槽；屏障在 hiz::record_reduction 内。
     pub hiz: Option<&'a HizPyramid>,
-    /// 上传票据等待值：图形提交在 GPU 侧等 timeline ≥ 此值——"上传完成才可使用"
-    /// 的执法点（0 = 无上传过，跳过等待）。该等待同时收口 transfer 写的跨队列
-    /// 内存可见性（池/贴图 CONCURRENT 双族共享，无所有权屏障，定案）。
+    /// 图形提交在 GPU 侧等上传 timeline ≥ 此值（0 = 从未上传，不等）。这个等待同时保证 transfer
+    /// 写的跨队列可见性（池/贴图 CONCURRENT 共享，没有所有权屏障）。
     pub wait_ticket: u64,
     pub ticket_semaphore: vk::Semaphore,
-    /// 清屏颜色（线性域；SRGB view 的 ROP 编码在写出时做）。
+    /// 清屏颜色（线性；SRGB view 写出时编码）。
     pub clear: [f32; 4],
-    /// GPU 帧计时（七段区间）：Some = 帧首 reset+T0、段界 T1..T6
-    /// 采样（compute/G-buffer/合成/Hi-Z/blit/全帧）；None = 计时器停用
-    ///（队列族无 timestamp）。
+    /// GPU 帧计时：帧首 reset + T0，段界 T1..T7（点位见 `stats::perf`）；None = 队列族不支持
+    /// timestamp。
     pub timer: Option<&'a GpuTimer>,
 }
 
 impl FramePool {
-    /// 录制并提交一帧：进场屏障（颜色+深度+G-buffer）→ compute 区间（剔除/遮挡/
-    /// LOD/indirect 与 shadow 命令组装/透明三 dispatch）→ shadow depth pass →
-    /// G-buffer pass → 合成 + 透明层 → Hi-Z 归约 → Bloom → tonemap → SMAA →
-    /// neighborhood + UI → 出场屏障（颜色）→ queue_submit。提交等 acquire 的
-    /// image_available + 上传票据（GPU 侧），完成时发 render_finished + fence。
-    /// `render_finished` 按 acquire 的 image index 从 Swapchain 取，不按帧槽轮转。
+    /// 录制并提交一帧：进场屏障（颜色+深度+G-buffer）→ compute 段（剔除/遮挡/LOD/indirect 与
+    /// shadow 命令组装/光源列表/透明）→ shadow depth → G-buffer → 合成 + 透明层 → Hi-Z 归约 →
+    /// Bloom → tonemap → SMAA → neighborhood + UI → 出场屏障 → queue_submit。提交在 GPU 侧等
+    /// image_available 与上传票据，完成时 signal render_finished 与 fence。`render_finished`
+    /// 由调用方按 acquire 的 image index 从 Swapchain 取，不按帧槽轮转。
     ///
     /// # Errors
-    /// 命令缓冲重置/录制/提交任一失败（调用方 driver 的帧循环按 Tier② 退出）。
+    /// 录制或提交任一步失败。
     pub fn record_frame(
         &self,
         ctx: &Context,
@@ -166,7 +132,6 @@ impl FramePool {
         let device = &self.device;
         let slot = self.current;
         let cb = frame.command_buffer;
-        // 帧计时段界点位（None = 计时器停用）
         let mark = |point: u32| {
             if let Some(timer) = draw.timer {
                 timer.mark(cb, slot, point);
@@ -179,28 +144,24 @@ impl FramePool {
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
 
-            // —— 帧计时：query pool 重置 + T0（进场后原点位）。
+            // —— 帧计时：重置 query pool + T0
             if let Some(timer) = draw.timer {
                 timer.reset_and_start(cb, slot);
             }
 
-            // —— 进场 ①：颜色布局迁移。布局迁移是一次写访问，必须
-            // 排在 acquire 对 image 的读之后——提交在 COLOR_ATTACHMENT_OUTPUT 阶段等
-            // image_available（等待点语义见下方提交段），屏障 srcStage 就提到这里；
-            // dst_access 带上 COLOR_ATTACHMENT_WRITE，与后续 loadOp 清屏写收口。
+            // —— 进场 ①：颜色布局迁移。迁移本身是写，必须排在 acquire 对 image 的读之后：
+            // 提交在 COLOR_ATTACHMENT_OUTPUT 等 image_available，所以 srcStage 也取这里；
+            // dst_access 含 COLOR_ATTACHMENT_WRITE，衔接后面的 loadOp 清屏。
             image_barrier(
                 device,
                 cb,
                 &ImageBarrier::discard_to_color(image, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT),
             );
 
-            // —— 进场 ②：深度 UNDEFINED→附件布局（UNDEFINED = 旧内容不要，与
-            // loadOp CLEAR 配套；storeOp STORE 的消费在同一命令缓冲内，故无出场
-            // 屏障）。src 作用域为空的合法性：本槽深度图的上一轮使用已被
-            // wait_for_slot 的 fence 等完（模块注释的同步证据②），录制时不存在
-            // 并发引用。
+            // —— 进场 ②：深度 UNDEFINED→附件。src access 为空是合法的：本槽深度的上一轮使用
+            // 已被 wait_for_slot 的 fence 等完，录制时没有并发引用。
             image_barrier(device, cb, &ImageBarrier {
-                image: frame.depth_image(),
+                image: frame.depth.image,
                 aspect: vk::ImageAspectFlags::DEPTH,
                 old_layout: vk::ImageLayout::UNDEFINED,
                 new_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -212,10 +173,8 @@ impl FramePool {
                 dst_access: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             });
 
-            // —— 进场 ③：G-buffer 附件（albedo/normal/matparam）+ HDR 中间目标
-            // UNDEFINED→附件布局，逐张一条屏障。每帧 loadOp CLEAR 覆写全部像素，
-            // 本槽上一轮的使用已被 fence 等完（同深度进场②的证据），无需旧内容
-            // 语义；HDR 的 UNDEFINED 进场即丢弃上一轮 SHADER_READ_ONLY 内容。
+            // —— 进场 ③：G-buffer 三附件 + HDR 目标 UNDEFINED→附件。每帧 loadOp CLEAR 覆写全部
+            // 像素，本槽上一轮使用已被 fence 等完（同进场 ②），旧内容不要。
             for gbuffer_image in [
                 draw.gbuffer.albedo_image(slot),
                 draw.gbuffer.normal_image(slot),
@@ -232,15 +191,12 @@ impl FramePool {
                 );
             }
 
-            // —— 进场 ④：无——跨族贴图不走 release/acquire 让渡
-            //（图像 CONCURRENT 双族共享，与池同款）；上传批次的图像布局收尾
-            // （TRANSFER_DST→SHADER_READ_ONLY，IGNORED 族）由 uploader 图像段
-            // 在 transfer 提交内完成，跨队列可见性由下方票据等待收口。
-            // EXCLUSIVE 成对语义保留在 image_probe 组 C 作机制实证。
+            // 贴图不需要进场屏障：图像 CONCURRENT 双族共享，不做所有权转移；上传后的
+            // TRANSFER_DST→SHADER_READ_ONLY 在 uploader 的 transfer 提交内完成，跨队列可见性
+            // 由提交时的票据等待保证（EXCLUSIVE 方案的对照实验在 examples/image_probe 组 C）。
 
-            // —— 透明键 -inf 预填充：bitonic 全容量升序排把真实条目推到数组
-            // 尾部（gather 反向取）——padding 键必须是 -inf。fill 在所有 compute
-            // dispatch 之前（TRANSFER 写 → compute 读屏障收口）。
+            // —— 透明排序键预填 -inf：bitonic 全容量升序排序把真实条目推到尾部（gather 反向取），
+            // 空位的键必须是 -inf。要在所有 compute dispatch 之前。
             if let Some(t) = draw.transparent.as_ref() {
                 device.cmd_fill_buffer(
                     cb,
@@ -263,48 +219,29 @@ impl FramePool {
                 );
             }
 
-            // —— 视锥剔除 dispatch（渲染进场之前）：compute 读 set2 三表 + push
-            // 平面，写标记环本帧槽；随后的屏障是 compute 写→图形读的依赖形状。
-            // 空场/关闭 = None（host 已把本帧槽标记填全可见，诊断语义不断）。
+            // —— compute 段，顺序即依赖：视锥剔除 → 遮挡测试（读视锥标记与两帧前的 Hi-Z 金字塔）
+            // → LOD 选档 → indirect 命令组装 → shadow 命令组装 → 光源列表 → 透明层。
+            // 各段之间的屏障都在各自的 record 内。
             if let Some(cull) = &draw.cull {
                 crate::render::passes::visibility::cull::record(device, cb, draw.set2, draw.shadow_set, cull);
             }
-
-            // —— Hi-Z 遮挡测试 dispatch（视锥之后）：读 set2 三表 + 视锥标记 +
-            // 本帧槽金字塔（两帧前归约输出，fence 纪律内），合并写回标记并落
-            // 遮挡独立标记。fallback/关闭 = None。
             if let Some(occlusion) = &draw.occlusion {
                 crate::render::passes::visibility::occlusion::record(device, cb, draw.set2, occlusion);
             }
-
-            // —— GPU LOD 选档 dispatch（遮挡之后）：读 set2 三表（对象表/模型环）
-            // 做 AABB 投屏，写档位环 b8（迟滞状态读旧写新，2 帧滞后由迟滞带
-            // 吸收）。关闭/空场 = None（host 已把本帧槽档位环填 0 = 最细档）。
             if let Some(lod) = &draw.lod {
                 crate::render::passes::visibility::lod::record(device, cb, draw.set2, lod);
             }
-
-            // —— indirect 命令组装 dispatch：compute 读在场环（host 每帧写）+
-            // 标记（cull 写或 host 全可见填充）+ 对象表，逐在场行组装
-            // VkDrawIndexedIndirectCommand 进命令环本帧槽；随后自带屏障是命令写 →
-            // DRAW_INDIRECT 读的依赖形状。空场 = None。
             if let Some(indirect) = &draw.indirect {
                 crate::render::passes::visibility::indirect::record(device, cb, draw.set2, indirect);
             }
-
-            // —— shadow 命令组装 dispatch：读在场环 + shadow 标记 + LOD 档位环，
-            // 逐在场行 × 每 cascade 组装命令（两枚语义钉的执行面见
-            // shadow_build.wgsl）。空场/关闭 = None。
             if let Some(sb) = &draw.shadow_build {
                 crate::render::passes::shadow::shadow_build::record(device, cb, draw.set2, draw.shadow_set, sb);
             }
-
-            // —— 光源列表：必须在合成和透明前向之前算好。
+            // 光源列表必须在合成和透明前向之前算好
             if let Some(build) = &draw.cluster_build {
                 crate::render::passes::lighting::cluster::record_cluster_build(device, cb, draw.cluster_set, build);
             }
-
-            // —— 透明层：collect → sort → gather。空场为 None，透明 dispatch 与绘制都跳过。
+            // 透明层：collect → sort → gather
             if let Some(t) = draw.transparent.as_ref() {
                 if let Some(collect) = &t.collect {
                     crate::render::passes::transparent::record_transparent_collect(
@@ -316,8 +253,7 @@ impl FramePool {
                         collect,
                     );
                 }
-                // bitonic 排序链（collect 与 gather 之间）：固定容量数组每个非空帧
-                // 都重排，确保本帧新增长的透明行不会从未排序尾部进入 gather。
+                // 固定容量数组每个非空帧都重排，保证本帧新增的透明行不会以未排序状态进 gather
                 crate::render::passes::transparent::record_transparent_sort(
                     device,
                     cb,
@@ -335,17 +271,12 @@ impl FramePool {
                 }
             }
 
-            // —— 帧计时 T1：compute 区间结束点位。
-            mark(1);
+            mark(1); // T1：compute 段结束
 
-            // —— shadow depth pass（G-buffer 之前）：四级联各一个小 render pass
-            //（D32 reverse-Z clear 0 + GREATER 与主链成套），一次
-            // cmd_draw_indexed_indirect 消费各自命令环——CPU 只发矩阵与在场行数
-            // 上界，剔除/决策归 GPU。深度图固定尺寸（viewport 2048²，不随
-            // swapchain）。布局纪律：进出屏障恒录（pass 关/空场帧也要把地图送回
-            // SHADER_READ_ONLY——composite 的 shadow 描述符恒绑定，布局必须始终
-            // 合法）；UNDEFINED 作 oldLayout = 声明旧内容可丢弃，从任意终态都合法
-            //（loadOp CLEAR 每帧重写，depth 内容不跨帧持久）。
+            // —— shadow depth pass（G-buffer 之前）：每个级联一次动态渲染 + 一次 indirect draw，
+            // reverse-Z（clear 0）。进出屏障每帧都录，pass 跳过也一样：合成 pass 的 shadow 描述符
+            // 总是绑定，布局必须始终是 SHADER_READ_ONLY。UNDEFINED 作 oldLayout 从任何状态都合法
+            // （每帧 CLEAR 重写）。
             for &shadow_image in &draw.shadow_images {
                 image_barrier(device, cb, &ImageBarrier {
                     image: shadow_image,
@@ -382,10 +313,9 @@ impl FramePool {
                             .depth_attachment(&shadow_depth_attachment),
                     );
                     bind_graphics(device, cb, &shadow.pipeline, &[shadow.set2, shadow.shadow_set]);
-                    // 池整绑（与主管线同一契约——命令引脚在 GPU 侧定位）
                     bind_vertex_index(device, cb, shadow.vertex_buffer, shadow.index_buffer);
                     set_viewport_scissor(device, cb, map_extent);
-                    // 4B push = cascade 索引（帧级全局量的本职，cull 112B 同款理由）
+                    // 4B push = 级联索引
                     let mut cascade_push = [0u8; 4];
                     put_u32(&mut cascade_push, 0, c as u32);
                     device.cmd_push_constants(
@@ -405,8 +335,7 @@ impl FramePool {
                     device.cmd_end_rendering(cb);
                 }
             }
-            // 出场：ATTACHMENT→SHADER_READ_ONLY（合成 pass 采样）——恒录
-            //（pass 跳过帧也送回，保持描述符布局合法）
+            // 出场：→ SHADER_READ_ONLY 供合成采样（同样每帧都录）
             for &shadow_image in &draw.shadow_images {
                 image_barrier(device, cb, &ImageBarrier {
                     image: shadow_image,
@@ -419,53 +348,30 @@ impl FramePool {
                     dst_access: vk::AccessFlags::SHADER_READ,
                 });
             }
-            // —— 帧计时 T2：shadow 区间结束点位。
-            mark(2);
+            mark(2); // T2：shadow 段结束
 
-            // —— G-buffer pass（不透明 deferred 写入，多 color 附件）：
-            // albedo/normal/matparam 三 color + 深度，loadOp 全 CLEAR（附件清 0——
-            // 背景像素内容无语义，合成端以 depth==0 判背景）；深度 loadOp CLEAR
-            // 清 0（reverse-Z 近平面），storeOp STORE（合成采样 + Hi-Z 归约消费）。
+            // —— G-buffer pass（不透明物体）：三色附件 + 深度，全部 loadOp CLEAR（背景像素内容无意义，
+            // 合成按 depth==0 判背景）；深度清 0（reverse-Z 远平面），STORE 供合成与 Hi-Z 采样。
+            let color_attachment = |view: vk::ImageView, clear: [f32; 4]| {
+                vk::RenderingAttachmentInfo::default()
+                    .image_view(view)
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .clear_value(vk::ClearValue {
+                        color: vk::ClearColorValue { float32: clear },
+                    })
+            };
+            // 附件数必须与管线声明一致（VUID-06179：colorAttachmentCount 相等）
             let gbuffer_attachments = [
-                vk::RenderingAttachmentInfo::default()
-                    .image_view(draw.gbuffer.albedo_view(slot))
-                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .load_op(vk::AttachmentLoadOp::CLEAR)
-                    .store_op(vk::AttachmentStoreOp::STORE)
-                    .clear_value(vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.0, 0.0, 0.0, 0.0],
-                        },
-                    }),
-                vk::RenderingAttachmentInfo::default()
-                    .image_view(draw.gbuffer.normal_view(slot))
-                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .load_op(vk::AttachmentLoadOp::CLEAR)
-                    .store_op(vk::AttachmentStoreOp::STORE)
-                    .clear_value(vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.0, 0.0, 0.0, 0.0],
-                        },
-                    }),
-                // matparam（材质标量）：附件计数与主管线声明面一致
-                //（VUID-06179——管线 colorAttachmentCount = 实例 colorAttachmentCount）
-                vk::RenderingAttachmentInfo::default()
-                    .image_view(draw.gbuffer.matparam_view(slot))
-                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .load_op(vk::AttachmentLoadOp::CLEAR)
-                    .store_op(vk::AttachmentStoreOp::STORE)
-                    .clear_value(vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.0, 0.0, 0.0, 1.0],
-                        },
-                    }),
+                color_attachment(draw.gbuffer.albedo_view(slot), [0.0, 0.0, 0.0, 0.0]),
+                color_attachment(draw.gbuffer.normal_view(slot), [0.0, 0.0, 0.0, 0.0]),
+                color_attachment(draw.gbuffer.matparam_view(slot), [0.0, 0.0, 0.0, 1.0]),
             ];
             let depth_attachment = vk::RenderingAttachmentInfo::default()
                 .image_view(frame.depth.view)
                 .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
-                // STORE：本帧深度渲染后由合成（世界位置）与 Hi-Z 归约采样（同一条
-                // 命令缓冲内）——采完即弃，下帧 UNDEFINED 进场照常丢弃
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue {
                     depth_stencil: vk::ClearDepthStencilValue {
@@ -482,23 +388,15 @@ impl FramePool {
                     .depth_attachment(&depth_attachment),
             );
 
-            // —— 场景绘制（indirect 闭环）：一次 cmd_draw_indexed_indirect 消费
-            // 命令环——绘制调用数不随在场对象数增长。逐对象标识走 firstInstance
-            //（VS 按 @builtin(instance_index) 读 set2），录制层零逐对象参数。
-            // UI 不在本 pass（在 neighborhood 实例接画）。
+            // —— 场景绘制：一次 cmd_draw_indexed_indirect 消费命令环，draw 调用数不随对象数增长。
+            // 实例槽号经 firstInstance 进 VS（按 instance_index 读 set2）；不可见行 instanceCount=0。
             if draw.indirect_count > 0 {
                 let (vertex_buffer, index_buffer) = draw.pool_buffers()?;
-                // 常驻三集整帧绑一次：set0 = bindless 表（槽位在飞更新即生效），
-                // set1 = 本帧槽 UBO（内容 = 相机 view_proj），set2 = GPU 常驻
-                // 绘制数据（对象表 + 本帧模型/材质环，instance_table 契约）
                 bind_graphics(device, cb, &draw.pipeline, &[draw.set0, draw.set1, draw.set2]);
                 // 坑：viewport 正高度，原因见 set_viewport
                 set_viewport_scissor(device, cb, extent);
-                // 池整绑一次，逐命令在 GPU 侧定位（vertexOffset/firstIndex 已进命令）
+                // 整池绑一次，每条命令自带 vertexOffset/firstIndex
                 bind_vertex_index(device, cb, vertex_buffer, index_buffer);
-                // 一次 indirect 提交：count = 在场行数（CPU 在账信息，非可见集
-                // 回读）；不可见行 instanceCount=0，GPU 零工作。stride = 20B
-                //（VkDrawIndexedIndirectCommand，命令环步长同源）。
                 device.cmd_draw_indexed_indirect(
                     cb,
                     draw.indirect_buffer,
@@ -510,14 +408,10 @@ impl FramePool {
 
             device.cmd_end_rendering(cb);
 
-            // —— 帧计时 T3：G-buffer 区间结束点位。
-            mark(3);
+            mark(3); // T3：G-buffer 段结束
 
-            // —— 附件转只读屏障，逐张一条：albedo/normal/matparam（COLOR_ATTACHMENT
-            // →SHADER_READ_ONLY，合成采样）与深度（附件→DEPTH_READ_ONLY，合成世界
-            // 位置采样 + Hi-Z 归约）。dst 含 COMPUTE（Hi-Z 归约读深度）。消费发生
-            // 在同一条命令缓冲内，无出场屏障；透明层在合成之后把深度转回
-            // ATTACHMENT（附件重绑形态）。
+            // —— G-buffer 三色附件 → SHADER_READ_ONLY，深度 → DEPTH_READ_ONLY，供合成采样；dst 含
+            // COMPUTE 是因为 Hi-Z 归约也读深度。透明层会在合成后把深度再转回附件。
             let color_to_read = |image| ImageBarrier {
                 dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER
                     | vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -544,13 +438,9 @@ impl FramePool {
                 image_barrier(device, cb, &barrier);
             }
 
-            // —— 合成 pass（延迟合成，全屏）：读 G-buffer 出光照——HDR 中间目标
-            //（tone mapping 插在本目标与 swapchain 之间；透明层混入同目标）。
-            // 背景判定（depth==0 = reverse-Z 远平面）在 shader 内承接 forward
-            // 直出的清屏语义。无深度附件。
-            // set0 = 帧 UBO（与场景管线 set1 同一 layout 对象），set1 = G-buffer
-            // 采样集，set2 = cluster 集（光照累积取数），set3 = shadow 域（级联
-            // 深度图 + shadow UBO——PCSS 采样取数面）
+            // —— 合成 pass（全屏，无深度附件）：读 G-buffer 算光照写 HDR 目标；depth==0（reverse-Z
+            // 远平面）的像素当背景。set0 帧 UBO（与场景管线 set1 同一 layout）、set1 G-buffer 采样集、
+            // set2 光源分簇、set3 shadow。
             record_fullscreen(device, cb, &FullscreenPass {
                 view: draw.gbuffer.hdr_view(slot),
                 extent,
@@ -559,12 +449,9 @@ impl FramePool {
                 sets: &[draw.set1, draw.gbuffer.sampled_set(slot), draw.cluster_set, draw.shadow_set],
             });
 
-            // —— 透明前向层（合成之后同目标接画）：深度附件重绑回 ATTACHMENT
-            //（READ_ONLY→ATTACHMENT，loadOp LOAD 只测不写），HDR 目标维持
-            // COLOR_ATTACHMENT 布局继续写（loadOp LOAD 混合）。
+            // —— 透明前向层：合成之后在同一 HDR 目标上 LOAD + 混合，深度转回附件只测不写。
             if let Some(t) = draw.transparent.as_ref() {
-                // HDR 目标：合成写 → 透明 LOAD+混合读写。两个 rendering 实例之间
-                // 没有光栅序保证，颜色写后读必须显式收口（与深度屏障同一次录出）。
+                // 两次动态渲染之间没有光栅序保证，合成写 HDR → 透明混合读写必须显式屏障
                 let hdr_write_to_blend = vk::MemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
                     .dst_access_mask(
@@ -574,17 +461,16 @@ impl FramePool {
                     device,
                     cb,
                     &ImageBarrier {
-                        image: frame.depth_image(),
+                        image: frame.depth.image,
                         aspect: vk::ImageAspectFlags::DEPTH,
                         old_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
                         new_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                        // src：FRAGMENT_SHADER（合成对深度的采样读）+ LATE_FRAGMENT_TESTS
-                        //（深度写访问位的支撑阶段）+ COLOR_ATTACHMENT_OUTPUT（合成写 HDR）
+                        // 合成对深度的采样读 + 深度写所在阶段 + 合成写 HDR
                         src_stage: vk::PipelineStageFlags::FRAGMENT_SHADER
                             | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
                             | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        // src 含 WRITE：布局迁移本身是写，须覆盖前序 pass 的深度
-                        // store（syncval WRITE_AFTER_WRITE 执法面；透明 pass 本身只读）
+                        // 含 WRITE：布局迁移本身是写，要排在 G-buffer pass 的深度 store 之后
+                        // （syncval WRITE_AFTER_WRITE）；透明 pass 本身只读深度
                         src_access: vk::AccessFlags::SHADER_READ
                             | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
                         dst_stage: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
@@ -616,8 +502,7 @@ impl FramePool {
                 set_viewport_scissor(device, cb, extent);
                 let (vertex_buffer, index_buffer) = draw.pool_buffers()?;
                 bind_vertex_index(device, cb, vertex_buffer, index_buffer);
-                // 一次 indirect 提交消费透明命令环（count = 在场行数上界，
-                // 非透明行 instanceCount=0）——透明 draw 调用数恒 ≤ 1
+                // 一次 indirect 消费透明命令环（非透明行 instanceCount=0）
                 device.cmd_draw_indexed_indirect(
                     cb,
                     t.t_commands,
@@ -628,23 +513,21 @@ impl FramePool {
                 device.cmd_end_rendering(cb);
             }
 
-            // —— HDR 目标转只读（合成 + 透明写 → Bloom prefilter / tonemap 采样）。
+            // —— HDR 目标 → 只读，供 Bloom 与 tonemap 采样
             image_barrier(device, cb, &ImageBarrier::color_to_sampled(draw.gbuffer.hdr_image(slot)));
 
-            // —— 帧计时 T4：合成区间（含透明层）结束点位。
-            mark(4);
+            mark(4); // T4：合成段（含透明层）结束
 
-            // —— 透明层深度重绑归还：ATTACHMENT→READ_ONLY（Hi-Z 归约采样；
-            // transparent None 时深度已在 READ_ONLY，跳过）
+            // —— 透明层用过的深度转回只读，供 Hi-Z 归约（没有透明层时深度一直是只读）
             if draw.transparent.is_some() {
                 image_barrier(device, cb, &ImageBarrier {
-                    image: frame.depth_image(),
+                    image: frame.depth.image,
                     aspect: vk::ImageAspectFlags::DEPTH,
                     old_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                     new_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
                     src_stage: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
                         | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                    // src 含 WRITE：同上——迁移写须覆盖 G-buffer pass 的深度 store
+                    // 含 WRITE：理由同上，迁移要排在 G-buffer pass 的深度 store 之后
                     src_access: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
                         | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
                     dst_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -652,21 +535,15 @@ impl FramePool {
                 });
             }
 
-            // —— Hi-Z 归约链：深度已在 READ_ONLY，逐级 dispatch 重写本帧槽金字塔
-            //（进场/级间屏障在 hiz::record_reduction 内）。采完即弃，下帧
-            // UNDEFINED 进场照常丢弃。
+            // —— Hi-Z 归约：逐级重写本帧槽金字塔（屏障在 record_reduction 内）
             if let Some(hiz) = draw.hiz {
                 hiz.record_reduction(device, cb, slot);
             }
 
-            // —— 帧计时 T5：Hi-Z 归约区间结束点位。
-            mark(5);
+            mark(5); // T5：Hi-Z 段结束
 
-            // —— Bloom 链（HDR 域）：prefilter（读 HDR，软膝阈值提亮部 → down0）
-            // → 逐级 down（dual-Kawase 13 tap，读上一级）→ 逐级 up（tent 上采样
-            // 下一级 + 对应级 down 直加）。关 = None（链整段跳过，up0 陈旧但
-            // tonemap 侧 shader 不采样）；各级目标每轮 UNDEFINED→COLOR 进 /
-            // COLOR→SHADER_READ_ONLY 出。
+            // —— Bloom 链（HDR）：prefilter（读 HDR 提取亮部 → down0）→ 逐级 down → 逐级 up（上采样
+            // 下一级 + 叠加同级 down）。各级目标每次 UNDEFINED→COLOR 进、→SHADER_READ_ONLY 出。
             if let Some(bloom) = &draw.bloom {
                 let prefilter = (
                     bloom.images_down[0],
@@ -700,7 +577,7 @@ impl FramePool {
                         device,
                         cb,
                         target,
-                        // 跨帧共享（不分帧槽）：等上一帧的片元采样读完再覆写（WAR）
+                        // bloom 目标不分帧槽：等上一帧的片元采样读完再覆写（WAR）
                         vk::PipelineStageFlags::FRAGMENT_SHADER,
                         &FullscreenPass {
                             view: target_view,
@@ -713,12 +590,9 @@ impl FramePool {
                 }
             }
 
-            // —— present tonemap（HDR + Bloom → ACES → LDR 目标）：LDR 为 UNORM
-            // 线性存储，编码仍在 swapchain SRGB view 恰好一次（neighborhood 混合
-            // 后经终点编码）。loadOp DON'T CARE（覆写全部像素）。
-            // 进场屏障：LDR 上一轮（同槽，fence 等完）停在 SHADER_READ_ONLY，
-            // UNDEFINED 进 = 内容可弃，无屏障则是 VUID-09592 布局竞争
-            //（UNDEFINED/SHADER_READ_ONLY 实抓）。出场转只读供 edge/neighborhood 采样。
+            // —— tonemap（HDR + Bloom → ACES → LDR）：LDR 是 UNORM 线性存储，sRGB 编码只在最后写
+            // swapchain 的 SRGB view 时做一次。坑：LDR 上一轮停在 SHADER_READ_ONLY，不录 UNDEFINED
+            // 进场屏障会触发 VUID-09592 布局不符。出场转只读供 SMAA 采样。
             record_fullscreen_sampled(
                 device,
                 cb,
@@ -733,9 +607,8 @@ impl FramePool {
                 },
             );
 
-            // —— SMAA edge/blend（开 = Some）：LDR → edges → blend，两 pass 中间
-            // 目标进出屏障恒录（UNDEFINED 进 = 内容可弃；目标按帧槽分配，同槽
-            // 上一轮已被 fence 等完）。
+            // —— SMAA edge → blend（关闭为 None）。中间目标按帧槽分配，同槽上一轮已被 fence 等完，
+            // UNDEFINED 进场即可。
             if let Some(smaa) = &draw.smaa_edge_blend {
                 for (target, target_view, rec, set) in [
                     (smaa.edges_image, smaa.edges_view, smaa.edge, smaa.edge_set),
@@ -757,9 +630,8 @@ impl FramePool {
                 }
             }
 
-            // —— neighborhood 混合（终点）：LDR + blend → swapchain（SRGB view
-            // 编码恰好一次）；关 = shader 权重清零直通。loadOp DON'T CARE（全像素
-            // 覆写）。UI 在本实例接画（raster order 保证 UI 盖在场景之上）。
+            // —— neighborhood 混合（终点）：LDR + blend → swapchain（SMAA 关闭时 shader 内直通）。
+            // UI 在同一次渲染里接着画，按光栅序盖在场景之上。
             record_fullscreen_open(device, cb, &FullscreenPass {
                 view,
                 extent,
@@ -769,16 +641,15 @@ impl FramePool {
             });
 
             if let Some(ui) = draw.ui {
-                // overlay 管线只声明 set0（UI 无 UBO），管线切换后 set0 须按 overlay
-                // 自己的 layout 对象重绑——描述符绑定随 layout，不随句柄。
+                // 描述符绑定跟随 pipeline layout：切到 overlay 管线后 set0 要按它的 layout 重绑
                 bind_graphics(device, cb, &draw.overlay, &[draw.set0]);
-                // 全屏 viewport：场景分支不必然跑过，UI 段自带 viewport/scissor 状态
+                // 场景分支不一定跑过，UI 自己设 viewport
                 set_viewport(device, cb, extent);
                 bind_vertex_index(device, cb, draw.ui_buffers.0, draw.ui_buffers.1);
-                // push 对全帧 UI 恒定（screen_size + 图集双槽位），循环外打包一次
+                // push 常量整帧不变，循环外打包一次
                 let ui_push = pack_ui_push(ui.screen_pt, ui.atlas_texture, ui.atlas_sampler);
                 for call in &ui.draws {
-                    // scissor 逐 clip 设（egui 镶嵌的 clip 即裁剪边界；零尺寸 = 全裁）
+                    // 每个 clip 设一次 scissor（零尺寸 = 全裁）
                     device.cmd_set_scissor(
                         cb,
                         0,
@@ -813,11 +684,9 @@ impl FramePool {
 
             device.cmd_end_rendering(cb);
 
-            // —— 帧计时 T6：tonemap/SMAA/neighborhood + UI 区间结束点位。
-            mark(6);
+            mark(6); // T6：tonemap/SMAA/neighborhood + UI 段结束
 
-            // —— 出场：颜色画完到 present 引擎接管之间必须收口；PRESENT_SRC 是
-            // present 专用布局。深度无出场（采完即弃 + 下帧 UNDEFINED 重进）。
+            // —— 出场：swapchain image → PRESENT_SRC_KHR
             image_barrier(device, cb, &ImageBarrier {
                 image,
                 aspect: vk::ImageAspectFlags::COLOR,
@@ -828,27 +697,21 @@ impl FramePool {
                 dst_stage: vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                 dst_access: vk::AccessFlags::empty(),
             });
-            // —— 帧计时 T7：全帧区间（T0→T7）结束点位，end_command_buffer 之前。
-            mark(7);
+            mark(7); // T7：全帧结束
 
             device.end_command_buffer(cb)?;
 
-            // fence 在提交前一刻才重置。此处到 queue_submit 之间没有任何提前
-            // return：reset 失败 → fence 保持 signaled，下帧等待照常通过；
-            // submit 失败 → 无任何提交负责 signal 这个 fence，帧循环按 Tier② 退出
-            //（host.rs），不会带着残局回来等待——"等无人 signal 的 fence"死锁面关闭。
+            // 坑：fence 在提交前一刻才重置，这里到 queue_submit 之间不能有提前 return。reset 失败
+            // 时 fence 仍 signaled，下帧照常通过；submit 失败则没人 signal 它，帧循环直接报错退出，
+            // 不会回来死等（见 `wait_for_slot`）。
             device.reset_fences(slice::from_ref(&frame.in_flight))?;
 
-            // 等待点语义：
-            // ① COLOR_ATTACHMENT_OUTPUT 起才真正需要 image 已到手——之前的顶点处理等
-            //    可以和 acquire 重叠；
-            // ② ALL_COMMANDS 起等上传票据（timeline，值 = 已发出最高票据）——"上传
-            //    完成才可使用"的等待发生在 GPU 执行依赖处，CPU 不先阻塞（探针组 D
-            //    同款形状）。该内存依赖同时把 transfer 写对池/贴图的
-            //    可见性收口（CONCURRENT 池不设所有权屏障，可见性全靠这里）。
-            // 票据值 0（从未有上传提交，VUID-03242 族禁止等待 0 值）只在等待列表里
-            // 留 acquire——fallback 批在 init 就提交，实际到达不了这个分支，留作
-            // 形状完备。
+            // 等待点：
+            // ① image_available 在 COLOR_ATTACHMENT_OUTPUT 才需要，之前的工作可与 acquire 重叠；
+            // ② 上传票据（timeline）在 ALL_COMMANDS 等，CPU 不阻塞；这个内存依赖同时保证
+            //    transfer 写池/贴图的跨队列可见性（CONCURRENT 共享没有所有权屏障，全靠这里）。
+            // 票据 0 表示从未上传，不能等 0 值（VUID-03242），只等 acquire。fallback 白图在初始化时
+            // 就上传了，实际走不到这个分支。
             let (wait_semaphores, wait_dst_stage, wait_values): (
                 Vec<vk::Semaphore>,
                 Vec<vk::PipelineStageFlags>,
@@ -887,15 +750,14 @@ impl FramePool {
 }
 
 impl FrameDraw<'_> {
-    /// 顶点/索引池句柄。在场行非空时池 buffer 必在（upload 链先于帧循环驻留
-    /// 成功才会有在场行），None 是状态矛盾——返回 Err 经统一通道按 Tier② 优雅
-    /// 退出（比静默跳过整个场景诚实）。
+    /// 顶点/索引池句柄。有在场行时池必然已建，缺席说明上传与绘制状态矛盾，报错退出而不是
+    /// 静默跳过整个场景。
     fn pool_buffers(&self) -> Result<(vk::Buffer, vk::Buffer)> {
         let vertex_buffer = self.vertex_buffer.ok_or_else(|| {
-            VulkanError::Upload("在场行非空但顶点池缺席——上传链与绘制链的状态矛盾".into())
+            VulkanError::Contract("在场行非空但顶点池缺席——上传链与绘制链的状态矛盾".into())
         })?;
         let index_buffer = self.index_buffer.ok_or_else(|| {
-            VulkanError::Upload("在场行非空但索引池缺席——上传链与绘制链的状态矛盾".into())
+            VulkanError::Contract("在场行非空但索引池缺席——上传链与绘制链的状态矛盾".into())
         })?;
         Ok((vertex_buffer, index_buffer))
     }

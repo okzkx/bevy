@@ -12,7 +12,7 @@ use std::ffi::CStr;
 use ash::vk;
 
 use crate::common::error::{Result, VulkanError};
-use crate::render::Context;
+use crate::render::core::device::context::Context;
 
 use super::set_layout::{SetLayoutDesc, SetLayouts};
 use super::shader_abi::{ArrayShape, Shader};
@@ -128,7 +128,7 @@ impl PipelineDesc {
     ///
     /// # Errors
     /// 对账不过、有声明没登记，或创建失败。
-    pub(crate) fn create_layout(&self, ctx: &Context, layouts: &SetLayouts) -> Result<vk::PipelineLayout> {
+    fn create_layout(&self, ctx: &Context, layouts: &SetLayouts) -> Result<vk::PipelineLayout> {
         self.check()?;
         let device = &ctx.device;
         let set_layouts = self.sets.iter().map(|d| layouts.get(d)).collect::<Result<Vec<_>>>()?;

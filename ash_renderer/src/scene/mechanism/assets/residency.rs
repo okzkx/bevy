@@ -30,7 +30,7 @@ use crate::{
     },
 };
 
-use super::asset_events::AssetRetirements;
+use super::asset_events::{material_texture_slots, AssetRetirements};
 
 const LEVELS: usize = MAX_LOD_LEVELS as usize;
 /// 保底档位（组尾档，即最粗变体）。
@@ -221,9 +221,9 @@ pub struct GapSnapshot {
 ///（level 0 = 基准；越界位忽略——环内容异常不放大）。调用方做驻留复核/
 /// 冷却/裁决。
 #[must_use]
-pub fn gap_asset_ids(
+fn gap_asset_ids(
     bits: u32,
-    levels: &[Option<Handle<Mesh>>; MAX_LOD_LEVELS as usize],
+    levels: &[Option<Handle<Mesh>>; LEVELS],
     base: AssetId<Mesh>,
 ) -> Vec<AssetId<Mesh>> {
     let mut out = Vec::new();
@@ -231,18 +231,17 @@ pub fn gap_asset_ids(
         if bits >> level & 1 == 0 {
             continue;
         }
-        let id = handle.as_ref().map(|h| h.id()).unwrap_or(base);
-        out.push(id);
+        out.push(handle.as_ref().map_or(base, Handle::id));
     }
     out
 }
 
-/// 全静闸门输入键：tick 输出的全部决定量——机位/投影（view_proj 一并覆盖
+/// 全静早退的判定键：tick 输出的全部决定量——机位/投影（view_proj 一并覆盖
 /// FOV/宽高比变化）、屏尺寸、LOD 判据、管理器预算/半径/开关。浮点量按位比较
-///（NaN 不静——非数参数不通过闸门）。键全同 ∧ 账本无脏 ∧ 缺口全零 = 本 tick
+///（NaN 永不相等，非数参数不会早退）。键全同 ∧ 账本无脏 ∧ 缺口全零 = 本 tick
 /// 输出与上 tick 逐字段相同。
 #[derive(Clone, PartialEq)]
-pub(crate) struct TickGateKey {
+struct TickGateKey {
     view_proj: Mat4,
     extent: [u32; 2],
     threshold_bits: u32,
@@ -257,7 +256,7 @@ pub(crate) struct TickGateKey {
 
 /// 按 mesh 与贴图身份分别记录剩余冷却帧数。
 #[derive(Resource, Default)]
-pub(crate) struct EjectCooldown {
+struct EjectCooldown {
     meshes: HashMap<AssetId<Mesh>, u32>,
     images: HashMap<AssetId<Image>, u32>,
 }
@@ -265,20 +264,21 @@ pub(crate) struct EjectCooldown {
 impl EjectCooldown {
     /// 递减剩余帧数，并移除已到期的冷却项。
     fn tick(&mut self) {
-        self.meshes.retain(|_, frames| {
-            *frames = frames.saturating_sub(1);
-            *frames > 0
-        });
-        self.images.retain(|_, frames| {
-            *frames = frames.saturating_sub(1);
-            *frames > 0
-        });
+        count_down(&mut self.meshes);
+        count_down(&mut self.images);
     }
+}
+
+fn count_down<K>(frames_left: &mut HashMap<K, u32>) {
+    frames_left.retain(|_, frames| {
+        *frames = frames.saturating_sub(1);
+        *frames > 0
+    });
 }
 
 /// tick 使用的只读资源束。
 #[derive(SystemParam)]
-pub(crate) struct TickResources<'w> {
+struct TickResources<'w> {
     pool: Res<'w, MeshPool>,
     image_cache: Res<'w, ImageCache>,
     lod_settings: Res<'w, LodSettings>,
@@ -292,7 +292,7 @@ pub(crate) struct TickResources<'w> {
     reason = "bevy 系统的参数表即依赖注入清单（设置/读数/冷却/账本/回收账/相机），逐项声明是框架惯例"
 )]
 #[system]
-pub(crate) fn residency_tick(
+fn residency_tick(
     settings: ResMut<ResidencySettings>,
     mut stats: ResMut<ResidencyStats>,
     mut cooldown: ResMut<EjectCooldown>,
@@ -307,7 +307,7 @@ pub(crate) fn residency_tick(
     mut prev_active: Local<bool>,
     // 锚切换沿检测：floor_anchor 翻转 = 需求集与锚腿整体换形
     mut prev_floor: Local<bool>,
-    // 全静闸门的相机键历史：None = 无历史（首激活 tick 必全量）
+    // 全静早退的判定键历史：None = 无历史（首激活 tick 必全量）
     mut prev_cam_key: Local<Option<TickGateKey>>,
 ) {
     let TickResources {
@@ -353,20 +353,23 @@ pub(crate) fn residency_tick(
         stats.floor_groups_resident = 0;
         stats.over_budget = false;
         stats.over_budget_image = false;
-            // 管理器关闭时不筛选 flush 盘点，并清空需求位图。
+        // 管理器关闭时不筛选 flush 盘点，并清空需求位图。
         lod_demand.active = false;
         lod_demand.levels.clear();
         return; // 管理器关闭或场景为空时不执行驻留决策。
     }
     let was_active = *prev_active;
     *prev_active = true;
-    // —— 全静早退闸门（"输出不变才早退"）：tick 输出的全部决定输入（相机键）
+    // —— 全静早退（"输出不变才早退"）：tick 输出的全部决定输入（判定键）
     // 与上 tick 全同 ∧ 账本无脏 ∧ 缺口快照无新增 ∧ 冷却表空 → 全量段整段跳过，
     // 输出与全量路径逐字段相同（lod_demand 沿用上 tick 位图——输入全同则位图
     // 逐位相同）。冷却表非空禁止早退（见模块文档坑点）；首个激活 tick
-    //（was_active=false 或相机键无历史）不走闸门——需求位图必须先发布一次。
-    let cam_key = cameras.single().ok().map(|(projection, global)| TickGateKey {
-        view_proj: projection.get_clip_from_view() * global.affine().inverse(),
+    //（was_active=false 或判定键无历史）不早退——需求位图必须先发布一次。
+    let view = cameras.single().ok().map(|(projection, global)| {
+        (global.translation(), projection.get_clip_from_view() * global.affine().inverse())
+    });
+    let cam_key = view.map(|(_, view_proj)| TickGateKey {
+        view_proj,
         extent: [swapchain.extent.width, swapchain.extent.height],
         threshold_bits: lod_settings.threshold_px.to_bits(),
         hysteresis_bits: lod_settings.hysteresis.to_bits(),
@@ -397,11 +400,9 @@ pub(crate) fn residency_tick(
     // 激活帧：过滤激活态随 floor_anchor 走，位图逐组重算（LOD 档位段）
     lod_demand.active = settings.floor_anchor;
     lod_demand.levels.clear();
-    let Ok((projection, cam_global)) = cameras.single() else {
+    let Some((cam_pos, view_proj)) = view else {
         return; // 相机缺席：场景装配问题，整帧让路不动作
     };
-    let cam_pos = cam_global.translation();
-    let view_proj = projection.get_clip_from_view() * cam_global.affine().inverse();
     let groups = aggregate_groups(&ledger, pool, cam_pos, &frustum_planes(&view_proj));
     cooldown.tick();
     let screen = [swapchain.extent.width as f32, swapchain.extent.height as f32];
@@ -485,7 +486,7 @@ struct LodView<'a> {
     threshold_px: f32,
 }
 
-/// 全量 tick 的段间共享账：闸门之后各段共用的设置/读源与写入目标。
+/// 全量 tick 的段间共享账：早退判定之后各段共用的设置/读源与写入目标。
 struct FullPass<'a> {
     settings: &'a ResidencySettings,
     pool: &'a MeshPool,
@@ -601,8 +602,8 @@ impl FullPass<'_> {
                     break;
                 }
                 // 出账进卸载回收账：flush 下帧开头出驻留条目 → 停尸房 → 排空后
-                // 区间归还 free list；引用行此后 DrawList 暂缓（mesh 未驻留 = 不进
-                // 在场环——先撤引用后回收的幽灵防线）
+                // 区间归还 free list；引用行此后不进 DrawList（mesh 未驻留），
+                // 先撤引用再回收区间
                 self.retirements.eject_mesh(id);
                 self.cooldown.meshes.insert(id, self.settings.eject_cooldown_frames);
                 used = used.saturating_sub(bytes);
@@ -831,20 +832,11 @@ fn image_groups(
     let mut image_groups: HashMap<AssetId<Image>, (f32, Vec<Entity>)> = HashMap::new();
     for (mat_id, (dist, rows)) in &mat_dist {
         let Some(material) = std_materials.get(*mat_id) else { continue };
-        for handle in [
-            &material.base_color_texture,
-            &material.metallic_roughness_texture,
-            &material.occlusion_texture,
-            &material.normal_map_texture,
-            &material.emissive_texture,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if image_cache.resident(handle.id()).is_none() {
+        for id in material_texture_slots(material) {
+            if image_cache.resident(id).is_none() {
                 continue;
             }
-            let e = image_groups.entry(handle.id()).or_insert((f32::INFINITY, Vec::new()));
+            let e = image_groups.entry(id).or_insert((f32::INFINITY, Vec::new()));
             e.0 = e.0.min(*dist);
             e.1.extend(rows.iter().copied());
         }

@@ -1,27 +1,23 @@
-//! ash 帧循环：一次 update = 一帧——resize 闸门 → 等帧槽位空出 → acquire →
+//! ash 帧循环：一次 update = 一帧——处理 resize → 等帧槽位空出 → acquire →
 //! 组装 DrawList → 帧槽 UBO 与环写入 → compute 段 dispatch 与诊断回读 →
-//! 录制（清屏+绘制）并提交 → present。
+//! overlay 绘制 → 录制并提交 → present。
 //!
 //! 资源内聚在各模块：本模块只做编排和错误分流（OUT_OF_DATE 是"重试"不是"失败"）。
-//! 系统注册与禁渲染补位在 [`super::host`]（AshHostPlugin），初始化与拆除链在
-//! [`super::init`]。
+//! 系统注册与禁渲染补位在 [`super`]（AshHostPlugin），初始化与拆除链在 [`super::init`]。
 //!
-//! 住址：`Last`，与采集同帧闭环——Update 变更 → PostUpdate 传播+采集
-//!（`scene::ledger` 账本对账）→ Last 消费账本：DrawList 槽位枚举与双环写入
-//!（[`super::drawlist`]，逐对象参数在 GPU 常驻表）→ 录制提交。
-//! GPU 执行异步——上传票据在 GPU 侧等待，CPU 不阻塞；材质按不透明调试
-//! 策略覆盖（详见 draw_frame 收账日志）。
+//! 调度：`Last`，与采集同帧闭环——Update 变更 → PostUpdate 传播 + `scene::ledger`
+//! 账本对账 → Last 消费账本：DrawList 槽位枚举与环写入（[`super::drawlist`]）→ 录制
+//! 提交。上传票据在 GPU 侧等待，CPU 不阻塞。
 //!
 //! 帧槽：`frames.current_index()` 只在系统末尾的 `advance` 处推进，draw_frame 在
 //! `wait_for_slot` 后取一次为 `slot`，本帧全部帧槽环/UBO/描述符集按它定位。
 //!
-//! 帧内错误走统一错误通道（[`crate::common::error::tier_handler`]）：错误点一行
-//! `or_warn/or_fatal`（挂 context 负载 + 标 Severity）后 `?` 直冒泡，日志在 handler
-//! 统一打、退出裁决在看门 system——Tier① Warning 本帧让路（下帧自愈）；Tier②
-//! 优雅退出。两处保持显式分支、不走 `?`：OUT_OF_DATE 是"重试"不是失败（控制流）；
-//! present 真失败先暂存，advance 照常跑保持帧槽账本一致后再冒泡。
-//! Tier② 的红线：acquire 成功之后的 Vulkan 真失败必须优雅退出——那时同步状态
-//! 已无法恢复，warn 后继续会等一个永远无人 signal 的 fence，直接死锁。
+//! 错误：错误点一行 `or_warn`/`or_fatal` 后 `?` 冒泡进统一错误通道，本系统只管控制流。
+//! 两处保持显式分支、不走 `?`：OUT_OF_DATE 是控制流；present 真失败先暂存，`advance`
+//! 照常跑保持帧槽账本一致后再冒泡。
+//!
+//! 坑：acquire 成功之后的 Vulkan 真失败必须致命退出——同步状态已无法恢复，warn 后
+//! 继续会等一个永远无人 signal 的 fence，直接死锁。
 
 use std::time::Instant;
 
@@ -47,59 +43,52 @@ use crate::{
         DrawListVerify, GapSnapshot, InstanceLedger, LodGroups, ResidencySettings,
     },
     render::{
-        conservative_world_aabb, frustum_planes, pack_frame_uniforms, AcquireOutcome,
-        BindlessTextureTable, Context, CullDiagnostics, CullDraw, CullPass, CullSettings, FrameDraw,
-        FramePool, FrameSample, FrameUniformTable, FrameUniformsData, GpuBuffer, GBufferPipeline, GpuTimer,
-        HizPyramid, ImageCache, IndirectDraw, IndirectPass, IndirectStats, InstanceTables,
-        LOD_LEVEL_SIZE, LodDiagnostics, LodDraw, LodPass, LodSettings, MAX_LOD_LEVELS, MeshPool,
-        OcclusionDiagnostics, OcclusionDraw, OcclusionFallback, OcclusionPass,
-        OcclusionSettings, OverlayPipeline, PerfLedger, RenderMode, Swapchain, Uploader,
-        GAP_MARK_SIZE, MAX_FRAMES_IN_FLIGHT, MARK_SIZE,
+        cascade_matrices, conservative_world_aabb, frustum_planes, pack_bloom_params,
+        pack_cluster_uniforms, pack_frame_uniforms, pack_shadow_uniforms, AcquireOutcome,
+        BindlessTextureTable, BloomFrameDraw, BloomParamsData, BloomPipelines, BloomSettings,
+        BloomTargets, ClusterBuildPass, CompositePipeline, Context, CullDiagnostics, CullDraw,
+        CullPass, CullSettings, FrameDraw, FramePool, FrameSample, FrameUniformTable,
+        FrameUniformsData, GBufferPipeline, GBufferTargets, GpuBuffer, GpuTimer, HizPyramid,
+        ImageCache, IndirectDraw, IndirectPass, IndirectStats, InstanceTables, LightClusters,
+        LightTable, LodDiagnostics, LodDraw, LodPass, LodSettings, MeshPool, OcclusionDiagnostics,
+        OcclusionDraw, OcclusionFallback, OcclusionPass, OcclusionSettings, OverlayPipeline,
+        PerfLedger, PresentTonemapPipeline, RenderMode, ShadowBuildPass, ShadowCascadeInput,
+        ShadowCascades, ShadowDiagnostics, ShadowPipeline, ShadowSettings, ShadowTargets,
+        ShadowUniformsData, ShadowWriteDraw, SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines,
+        SmaaSettings, SmaaTargets, Swapchain, TransparentFrame, TransparentPasses,
+        TransparentPipeline, TransparentTargets, Uploader, GAP_MARK_SIZE, INDIRECT_COMMAND_SIZE,
+        LOD_LEVEL_SIZE, MARK_SIZE, MAX_FRAMES_IN_FLIGHT, MAX_LOD_LEVELS,
+        PLACEHOLDER_DIR_TO_LIGHT, SHADOW_CASCADES, SHADOW_MAP_SIZE,
     },
 };
 
 use super::drawlist::{self, DrawabilitySources, ParityDirty};
-use crate::render::{
-    cascade_matrices, pack_cluster_uniforms, pack_shadow_uniforms, ClusterBuildPass, LightClusters,
-    BloomFrameDraw, BloomPipelines, BloomSettings, BloomTargets, CompositePipeline,
-    GBufferTargets, LightTable,
-    SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
-    PresentTonemapPipeline, ShadowBuildPass,
-    ShadowCascadeInput, ShadowCascades, ShadowDiagnostics, ShadowPipeline, ShadowSettings,
-    ShadowTargets,
-    ShadowUniformsData, ShadowWriteDraw, TransparentFrame, TransparentPasses,
-    TransparentPipeline, TransparentTargets,
-    SHADOW_CASCADES, SHADOW_MAP_SIZE,
-};
 
-/// resize 闸门状态（`draw_frame` 的 `Local`，跨帧保持）。
+/// resize 状态（`draw_frame` 的 `Local`，跨帧保持）。
 ///
-/// Windows 宿主的两个坑：
-/// ① 最小化即发 `Resized(0,0)`，此后对 stale swapchain 的 `acquire` 无限阻塞——
-///    阻塞点在 runner 的 `app.update()` 里，消息泵冻死，任务栏"还原"永远点不到。
-///    对策：最小化整帧让路（闸门②），不碰 Vulkan，让消息泵活着。
-/// ② FIFO present mode 下 acquire 会在显示队列满/表面失配时阻塞，拖拽中尤甚；
-///    MAILBOX 让 present 直接替换未上屏帧、acquire 永不排队。
+/// 坑：Windows 最小化即发 `Resized(0,0)`，此后对旧 swapchain 的 `acquire` 无限阻塞，
+/// 而阻塞点在 runner 的 `app.update()` 里——消息泵冻死，任务栏"还原"永远点不到。
+/// 对策：最小化整帧让路，不碰 Vulkan。
+/// 坑：FIFO present mode 下 acquire 在显示队列满/表面失配时会阻塞，拖拽中尤甚；
+/// MAILBOX 下 present 直接替换未上屏帧，acquire 不排队。
 ///
-/// 尺寸变化只标 pending、帧首按需重建（rebuild 幂等）——acquire 永远落在新
-/// swapchain 上，拖拽中帧循环持续流动（宁可渲染卡顿，不要冻结）。
+/// 尺寸变化只标 pending、帧首按需重建——acquire 永远落在新 swapchain 上，拖拽中帧循环
+/// 持续流动（宁可渲染卡顿，不要冻结）。
 #[derive(Default)]
-pub(crate) struct ResizeGate {
-    /// 最新一条 resize 消息是 (0,0) = 窗口最小化中；恢复尺寸的非零消息重开闸门
+struct ResizeGate {
+    /// 最新一条 resize 消息是 (0,0) = 窗口最小化中
     minimized: bool,
     /// 尺寸变了 / 驱动报次优，下个帧首按需重建（多设无害，rebuild 幂等）
     pending: bool,
-    /// 状态转移日志去重：minimized 闸门的开关各报一次，不逐帧刷屏
+    /// 上次日志报告的最小化状态：进入/退出各报一次，不逐帧刷屏
     logged_minimized: bool,
 }
 
 impl ResizeGate {
-    /// 闸门①②：吸收本帧 resize 消息，返回"本帧整帧让路"（最小化中）。
+    /// 吸收本帧 resize 消息，返回"本帧整帧让路"（最小化中）。
     ///
     /// 一次 update 可能积压多条消息（拖拽 125Hz 输入 vs 60fps 帧），逐条刷状态，
-    /// 最新一条定生死：非零尺寸 = 正常/恢复，(0,0) = 最小化。最小化时 surface
-    /// 没有 presentable 尺寸，任何 acquire/present 都可能无限阻塞——调用方直接
-    /// 返回、不碰 Vulkan，runner 继续泵消息，还原点击才能被处理。
+    /// 以最新一条为准。
     fn yield_minimized(&mut self, resized: &mut MessageReader<WindowResized>) -> bool {
         for msg in resized.read() {
             if msg.width == 0.0 || msg.height == 0.0 {
@@ -109,27 +98,23 @@ impl ResizeGate {
                 self.pending = true;
             }
         }
-        if self.minimized {
-            if !self.logged_minimized {
-                self.logged_minimized = true;
+        if self.minimized != self.logged_minimized {
+            self.logged_minimized = self.minimized;
+            if self.minimized {
                 info!("窗口最小化：帧循环整帧让路（不碰 swapchain），消息泵保持存活");
+            } else {
+                info!("窗口脱离最小化：恢复渲染");
             }
-            return true;
         }
-        if self.logged_minimized {
-            self.logged_minimized = false;
-            info!("窗口脱离最小化：闸门重开");
-        }
-        false
+        self.minimized
     }
 }
 
-/// 遮挡 fallback 的相机历史（`draw_frame` 的 `Local`，跨帧保持）：跳变判定
-/// 用"当前 vs 两帧前"——遮挡读的金字塔正是两帧前的深度（同帧槽 fence 纪律），
-/// 对两帧前的机位判稳语义才对齐（阈值钉明见 occlusion 模块注释：位移 0.5 /
-/// 旋转 15°，连续缓慢环绕不触发）。
+/// 遮挡 fallback 的相机历史（`draw_frame` 的 `Local`，跨帧保持）：跳变判定用
+/// "当前 vs 两帧前"——遮挡读的金字塔正是两帧前的深度。阈值见 occlusion 模块文档，
+/// 连续缓慢环绕不触发。
 #[derive(Default)]
-pub(crate) struct OcclusionGate {
+struct OcclusionGate {
     prev: Option<(Vec3, Quat)>,
     prev_prev: Option<(Vec3, Quat)>,
 }
@@ -139,9 +124,10 @@ impl OcclusionGate {
     fn push(&mut self, now: Option<(Vec3, Quat)>) -> bool {
         let jump = match (self.prev_prev, now) {
             (Some((p0, r0)), Some((p1, r1))) => {
-                (p1 - p0).length() > 0.5 || Quat::angle_between(r0, r1) > 15f32.to_radians()
+                (p1 - p0).length() > 0.5 // 世界单位
+                    || Quat::angle_between(r0, r1) > 15f32.to_radians()
             }
-            _ => true, // 机位历史不足（启动/相机缺席帧）= 未就绪
+            _ => true, // 启动/相机缺席帧
         };
         self.prev_prev = self.prev.take();
         self.prev = now;
@@ -177,8 +163,8 @@ pub(crate) struct FrameInput<'w, 's> {
     post: PostInput<'w>,
     cluster: ClusterInput<'w>,
     transparent: TransparentInput<'w>,
-    /// GPU 缺口快照：帧起在 fence 纪律内读缺口标记环的采样落点——驻留管理器
-    /// tick（Last，帧提交后）与 BRP census 经此消费，不直读环。
+    /// GPU 缺口快照：帧起在 fence 保护内读缺口标记环的结果，驻留管理器 tick（Last，帧
+    /// 提交后）与 BRP census 经此消费，不直读环。
     gap_snapshot: ResMut<'w, GapSnapshot>,
     /// overlay 绘制半边资源束（None = overlay 未装，UI 段整段跳过）。
     overlay: Option<UiDrawData<'w>>,
@@ -274,7 +260,7 @@ pub(crate) struct ShadowInput<'w> {
     diag: ResMut<'w, ShadowDiagnostics>,
 }
 
-/// 延迟光照与后处理：G-buffer 附件 + HDR 中间目标（闸门③随 swapchain 重建）、
+/// 延迟光照与后处理：G-buffer 附件 + HDR 中间目标（随 resize 重建）、
 /// 合成管线（G-buffer 光照 → HDR）、present tonemap（HDR + Bloom → ACES →
 /// LDR）、Bloom 链与 SMAA 的资源/管线/开关。
 #[derive(SystemParam)]
@@ -306,74 +292,62 @@ pub(crate) struct TransparentInput<'w> {
     pipeline: Res<'w, TransparentPipeline>,
 }
 
-/// 帧循环日志状态（跨帧 `Local`）：缺资源/相机告警去重 + 一次性收账。
+/// 帧循环日志状态（跨帧 `Local`）：缺资源/相机告警去重 + 一次性里程碑日志。
 #[derive(Default)]
-pub(crate) struct FrameLogs {
-    /// "快照未全部可画（缺驻留/缺材质）"已 warn 过（下帧自愈，不逐帧刷屏）。
-    /// 可逆旗标：pending 清零时复位重开（区别于一次性收账的 [`OnceLog`]）。
+struct FrameLogs {
+    /// "快照未全部可画（缺驻留/缺材质）"已报过（下帧自愈，不逐帧刷屏）。
+    /// 可逆旗标：pending 清零时复位重开（所以不用 [`OnceLog`]）。
     warned_pending: bool,
-    /// 相机缺席告警只报一次。
     warned_no_camera: OnceLog,
-    /// 环境光缺席告警只报一次。
     warned_no_ambient: OnceLog,
-    /// 不透明调试覆盖策略报一次（首个完整 DrawList 时）。
+    /// 首个完整 DrawList 的材质日志。
     override_logged: OnceLog,
-    /// 灯光数据收账报一次（首个取到灯光的帧；值随帧可变，只报"链路已通"）。
+    /// 首个取到灯光的帧（值随帧可变，只报"链路已通"）。
     lights_logged: OnceLog,
-    /// 多方向光/无方向光的状态告警去重。
+    /// 多方向光/无方向光的状态告警。
     warned_light_count: OnceLog,
-    /// 各 compute 段首个 dispatch 帧收账一次（零 VUID 由验证层执法）。
+    /// 各 compute 段首个 dispatch 帧。
     cull_first_dispatch: OnceLog,
     occlusion_first_dispatch: OnceLog,
     lod_first_dispatch: OnceLog,
     indirect_first_submit: OnceLog,
 }
 
-/// ash 帧循环系统（注册与排序在 [`super::host`]）：resize 闸门 → 等帧槽位 →
-/// acquire → 组装 DrawList → 帧槽 UBO 与环写入 → compute 段 → overlay 绘制
-/// 半边 → 录制提交 → present。
-///
-/// 失败不设壳：错误点 `or_warn/or_fatal` 挂负载标级后 `?` 直冒泡——Err 上交统一
-/// 错误通道（[`crate::common::error::tier_handler`] 分流：Warning 本帧让路，其余
-/// 置位看门优雅退出），日志在 handler 统一打，本系统只管控制流。
+/// ash 帧循环系统（注册与排序在 [`super`]；流程与错误分流见模块文档）。
 #[system]
 pub(crate) fn draw_frame(
     mut input: FrameInput,
     _main_thread: NonSendMarker,
 ) -> Result<(), BevyError> {
-    // overlay 束按值消费（take 后本帧留 None；SystemParam 每帧重建，无残留）
-    let overlay = input.overlay.take();
     let FrameInput {
-        ref mut core,
-        ref mut scene,
-        ref mut cull,
-        ref mut indirect,
-        ref mut occlusion,
-        ref mut lod,
-        ref mut shadow,
-        ref mut post,
-        ref mut cluster,
-        ref mut transparent,
-        ref mut gap_snapshot,
-        ref mut gate,
-        ref mut logs,
-        ref mut occlusion_gate,
-        ref mut paint_log,
-        ..
-    } = input;
+        core,
+        scene,
+        cull,
+        indirect,
+        occlusion,
+        lod,
+        shadow,
+        post,
+        cluster,
+        transparent,
+        gap_snapshot,
+        overlay,
+        gate,
+        logs,
+        occlusion_gate,
+        paint_log,
+    } = &mut input;
     if gate.yield_minimized(&mut core.resized) {
         return Ok(());
     }
-    // pending 保持置位、全部重建成功才清：重建失败的帧在 or_warn/or_fatal 处
-    // 让路或退出，下个帧首原样重试
+    // pending 全部重建成功才清：失败帧让路或退出，下个帧首原样重试
     if gate.pending {
         rebuild_size_dependent(core, &mut occlusion.hiz, post, cluster)?;
         gate.pending = false;
     }
 
     // —— 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在提交前一刻）。
-    // 失败 = 等待/重置层面坏掉（设备丢失、内存枯竭），继续帧循环只会撞上未知的
-    // fence 状态——Tier②
+    // 失败 = 设备丢失/内存枯竭类，继续只会撞上未知的 fence 状态
     let frame_wall_ms = core.perf.mark_frame_start();
     let frame_clock = Instant::now();
     core.frames
@@ -381,31 +355,27 @@ pub(crate) fn draw_frame(
         .or_fatal("帧槽等待/重置失败，渲染链无法继续")?;
     let wait_slot_ms = ms_since(frame_clock);
     let slot = core.frames.current_index();
-    // —— GPU 帧计时取回：本槽 fence 已等完 = 上轮提交执行完毕，timestamp 可读。
-    // 混合口径如实标注：GPU 区间是本槽上轮（两帧前）的提交，稳态下与当前帧
-    // 同构；停用时恒 0。
+    // —— GPU 帧计时取回：本槽 fence 已等完，timestamp 可读。读数是本槽上轮（两帧前）
+    // 的提交，稳态下与当前帧同构；停用时恒 0
     let gpu_sections = core
         .timer
         .fetch(slot)
         .or_fatal("GPU 帧计时取回失败，渲染链无法继续")?
         .unwrap_or([0.0; 8]);
 
-    // —— acquire：拿到一张可画的 image；OUT_OF_DATE = 这个 swapchain 已不可用
-    //（最小化/恢复/独占模式切换等），必须立即重建——等不得下一帧
+    // —— acquire：OUT_OF_DATE = 这个 swapchain 已不可用（最小化/恢复/独占模式切换等），
+    // 必须立即重建，等不得下一帧
     let acquire_clock = Instant::now();
     let index = match core.swapchain.acquire(core.frames.current().image_available) {
         Ok(AcquireOutcome::Ready(index)) => index,
         Ok(AcquireOutcome::Suboptimal(index)) => {
-            // 拿得到图但尺寸不理想：照常画完这帧，标 pending——下个帧首重建
+            // 拿得到图但尺寸不理想：照常画完这帧，下个帧首重建
             gate.pending = true;
             index
         }
         Err(VulkanError::SwapchainOutOfDate) => {
-            // 无论重建成败，本帧作废（acquire 没拿到图）；重建失败 warn 后让路，
-            // 下帧 acquire 再过时就地重试重建。重建后必须置 pending——
-            // rebuild 对"尺寸没变"的表面失配（显示器模式切换/热插拔类）幂等
-            // 早退，不置位则本分支每帧空转重试、渲染不自愈；置位后帧首闸门③
-            // 接管（rebuild 幂等，重复调用无成本）
+            // 本帧作废（没拿到图）。重建失败让路，下帧 acquire 再过时就地重试；重建后
+            // 置 pending，帧首按新 extent 重建其余尺寸相关资源
             core.swapchain.rebuild(&core.ctx).or_warn("acquire 过时后重建失败")?;
             gate.pending = true;
             return Ok(());
@@ -414,10 +384,7 @@ pub(crate) fn draw_frame(
     };
     let acquire_ms = ms_since(acquire_clock);
 
-    // —— 组装 DrawList（增量维护）：账本组装缓存消费重估集（变更点 = 行增删/
-    // 换绑/置脏/槽位交接/驻留出账的各钩子），行宇宙稳定帧零走访。可绘判定：
-    // 实例槽缺/mesh 未驻留/材质缺席 = 暂缓（Tier① 自愈）。暂缓行数 = 行总数 −
-    // 可绘数（缓存维护后恒成立）。
+    // —— 组装 DrawList（增量）：实例槽缺/mesh 未驻留/材质缺席的行暂缓，就绪后自愈。
     let sources = DrawabilitySources {
         pool: &scene.pool,
         std_materials: &scene.std_materials,
@@ -427,14 +394,12 @@ pub(crate) fn draw_frame(
     let assemble_clock = Instant::now();
     drawlist::assemble_update(&mut scene.ledger, sources);
     let assemble_ms = ms_since(assemble_clock);
-    // 对照模式：BRP 开关开启时逐帧跑全量参照走访与增量缓存逐字段比对——只进
-    // 计量，不驱动绘制。
+    // 对照模式（BRP 开关）：全量走访与增量缓存逐字段比对，只进计量，不驱动绘制
     if scene.verify.enabled {
         let pending = scene.ledger.assembly_pending();
         drawlist::verify_assembly(&scene.ledger, sources, pending, &mut scene.verify);
     }
-    // —— 奇偶集先于视图取走（写侧的账本可变消费点收口），此后 assembly
-    // 视图对账本共享借用，环写入与诊断读数全程零可变访问。
+    // 奇偶脏集先于视图取走，此后 assembly 视图对账本共享借用
     let dirty = ParityDirty::take(&mut scene.ledger, slot);
     let ledger: &InstanceLedger = &scene.ledger;
     let assembly = ledger.assembly_view();
@@ -453,14 +418,14 @@ pub(crate) fn draw_frame(
     }
     if !ledger.is_empty() && pending_rows == 0 {
         logs.override_logged.log(|| info!(
-            "材质调试覆盖：{} 个 primitive 全部按不透明绘制——blend 关闭（alpha<1 的 {} 行照常画出，glTF BLEND 镜片在此列）；材质参数/贴图槽走材质环（每帧从容器现读）；着色模式按 ASH_RENDER_MODE（三态，见灯光收账日志）",
+            "材质调试覆盖：{} 个 primitive 全部按不透明绘制——blend 关闭（alpha<1 的 {} 行照常画出，glTF BLEND 镜片在此列）；材质参数/贴图槽走材质环（每帧从容器现读）；着色模式按 ASH_RENDER_MODE（三态，见灯光 UBO 日志）",
             ledger.len(),
             assembly.alpha_override,
         ));
     }
 
-    // —— 帧槽 UBO 与环写入：复用安全 = wait_for_slot 的 fence——写发生在本槽上一轮
-    // 使用完成之后（帧槽轮转只是定位，安全证据是 fence）。
+    // —— 帧槽 UBO 与环写入：复用安全靠 wait_for_slot 的 fence——写发生在本槽上一轮
+    // 使用完成之后（帧槽轮转只是定位）。
     let render_mode = *scene.render_mode;
     let view = FrameView::from_camera(&scene.cameras, logs);
     let light = FrameLight::gather(
@@ -477,8 +442,6 @@ pub(crate) fn draw_frame(
     write_post_ubos(post, slot)?;
     write_cluster_slot(cluster, slot, &view, core.swapchain.extent)?;
     write_transparent_slot(transparent, slot)?;
-    // 双环写入：模型环增量 + 材质环全量 + 在场环 + LOD 表增量（hazard 纪律表见
-    // instance_table 模块文档）。
     let rings_clock = Instant::now();
     drawlist::write_rings(
         &mut scene.instance_tables,
@@ -492,9 +455,9 @@ pub(crate) fn draw_frame(
     .or_fatal("模型/材质/在场/LOD 环写失败，渲染链无法继续")?;
     let rings_ms = ms_since(rings_clock);
 
-    // —— compute 段：各半边按开关决定 dispatch 或 host 填充（数据层 A/B），诊断
-    // 读数在写入路径之后取，标记环读写都在 wait_for_slot 的 fence 纪律内。诊断
-    // 只进计量（任何系统不得读它决定画什么）。
+    // —— compute 段：各半边按开关决定 dispatch 或 host 填充（A/B 对照），诊断读数在
+    // 写入路径之后取，都在 wait_for_slot 的 fence 保护内。诊断只进计量，任何系统不得
+    // 据此决定画什么。
     let extent = core.swapchain.extent;
     let pass_frame = PassFrame {
         slot,
@@ -537,11 +500,9 @@ pub(crate) fn draw_frame(
     let shadow_build_dispatch = (shadow.settings.enabled && indirect_count > 0)
         .then(|| shadow.build_pass.draw(indirect_count));
 
-    // —— overlay 绘制半边：图集整传（可能多出一张 transfer 票据——本帧图形提交的
-    // wait_ticket 在此后快照，flush_uploads 批与图集批都被等待）→ 镶嵌 → 顶点环
-    // 写入 → UiPaint + 本帧槽 buffer 句柄（record_frame 的 UI 段接画）。资源束
-    // 缺席 = overlay 未装，整段跳过（收账日志在 paint_overlay 内）。
-    let ui = match overlay {
+    // —— overlay 绘制半边：图集整传（可能多一张 transfer 票据，所以本帧 wait_ticket 必须
+    // 在此后取）→ 镶嵌 → 顶点环写入。overlay 未装 = 整段跳过。
+    let ui = match overlay.take() {
         Some(mut ui_data) => {
             let ui_buffers = ui_data.ring.buffers(slot);
             let paint = paint_overlay(
@@ -563,10 +524,9 @@ pub(crate) fn draw_frame(
         None => None,
     };
 
-    // —— 录制 + 提交。此刻 image_available 已被 present engine 置位、image 已到手
-    //——从这里起任何失败都让同步状态无法原样恢复（signal 无人等 / fence 已 reset
-    // 无人 signal），按 Tier② 冒泡退出（不得 warn 后继续——那是"等无人 signal
-    // 的 fence"死锁面）。上传票据在 GPU 侧等待（ALL_COMMANDS），CPU 不阻塞。
+    // —— 录制 + 提交。上传票据在 GPU 侧等待（ALL_COMMANDS），CPU 不阻塞。
+    // 坑：image_available 已被置位、image 已到手，从这里起任何失败都只能 or_fatal 退出，
+    // 不能 warn 后继续（理由见模块文档）。
     let image = core.swapchain.images[index as usize];
     let target_view = core.swapchain.views[index as usize];
     let instances = &scene.instance_tables;
@@ -613,10 +573,8 @@ pub(crate) fn draw_frame(
         indirect: indirect_dispatch,
         occlusion: occl_dispatch,
         lod: lod_dispatch,
-        // 在场行 > 0 才录透明三 dispatch 与透明绘制；cluster 构建与场景规模无关
-        //（按 cluster 网格），在场为 0 时整段跳过。
         transparent: transparent_frame,
-        // 归约链恒录（见 FrameDraw.hiz），warmup 走账与录制一一对应
+        // 归约链恒录，warmup 走账与录制一一对应（录制后 note_reduced）
         hiz: Some(&*occlusion.hiz),
         timer: core.timer.enabled.then_some(&*core.timer),
     };
@@ -633,10 +591,9 @@ pub(crate) fn draw_frame(
         .or_fatal("录制/提交失败，渲染链无法继续")?;
     let record_submit_ms = ms_since(record_clock);
 
-    // —— present：把画好的 image 交给 present engine，等它的信号量按 acquire 的
-    // image index 取（不按帧槽轮转）。SUBOPTIMAL/OUT_OF_DATE 都只是标记 pending
-    //（同 acquire 的次优），重建交给下个帧首的闸门③；其余真失败先暂存——提交
-    // 已发生，advance 必须照常推进保持帧槽账本一致，收尾后在系统末尾 Tier② 冒泡。
+    // —— present：等待的信号量按 acquire 的 image index 取（不按帧槽轮转）。
+    // OUT_OF_DATE 只标 pending，交给下个帧首重建；其余真失败先暂存——提交已发生，
+    // advance 必须照常推进保持帧槽账本一致，收尾后在系统末尾冒泡。
     let present_clock = Instant::now();
     let present_failure = match core.swapchain.present(
         core.ctx.queue,
@@ -652,8 +609,7 @@ pub(crate) fn draw_frame(
     };
     let present_ms = ms_since(present_clock);
 
-    // —— 帧样本入账：CPU 分段 + GPU 区间 + 规模读数，环形窗口逐帧 push；只进计量。
-    // 让路帧（最小化/acquire 过时）不经过此处，不进样本。
+    // —— 帧样本入账：只进计量。让路帧（最小化/acquire 过时）不经过此处。
     let cpu_total_ms = wait_slot_ms + acquire_ms + assemble_ms + rings_ms + record_submit_ms + present_ms;
     core.perf.push(FrameSample {
         frame_wall_ms,
@@ -670,12 +626,11 @@ pub(crate) fn draw_frame(
         gpu_lighting_ms: gpu_sections[3],
         gpu_hiz_ms: gpu_sections[4],
         gpu_present_ms: gpu_sections[5],
-        gpu_total_ms: gpu_sections[7],
+        gpu_total_ms: gpu_sections[7], // [6] = 尾段，不入账
         instance_rows: indirect_count,
         visible_rows: visible_among_live,
     });
 
-    // 归约链已录（见 FrameDraw.hiz），warmup 走账与录制一一对应
     occlusion.hiz.note_reduced();
     core.frames.advance();
     match present_failure {
@@ -684,11 +639,10 @@ pub(crate) fn draw_frame(
     }
 }
 
-/// 闸门③：尺寸变化 → 帧首按需重建，时机在 acquire 之前。rebuild 幂等（尺寸
-/// 没变就空手而归），拖拽中每步一建、帧循环不断流——acquire 永远落在新
-/// swapchain 上。其余尺寸相关资源随其后按新 extent 重建（同样幂等；各自带
-/// device_wait_idle，在飞旧资源不可能被引用）。swapchain 重建失败 Tier①
-/// 让路下帧重试，其余失败 Tier②。
+/// 尺寸变化 → 帧首按需重建，时机在 acquire 之前。rebuild 幂等（尺寸没变就空手而归），
+/// 拖拽中每步一建、帧循环不断流。其余尺寸相关资源随其后按新 extent 重建（同样幂等；
+/// 各自带 device_wait_idle，不会引用到在飞旧资源）。swapchain 重建失败让路下帧重试，
+/// 其余失败致命退出。
 fn rebuild_size_dependent(
     core: &mut FrameCore,
     hiz: &mut HizPyramid,
@@ -703,14 +657,13 @@ fn rebuild_size_dependent(
     core.frames
         .rebuild_depth(ctx, extent)
         .or_fatal("深度附件重建失败，渲染链无法继续")?;
-    // Hi-Z 金字塔随深度附件同批重建（重建后 warmup 重置——遮挡测试 fallback
-    // 到金字塔重新就绪）
+    // Hi-Z 金字塔随深度附件同批重建（warmup 重置，遮挡测试让路到金字塔重新就绪）
     hiz.rebuild(ctx, extent, &per_slot(|s| core.frames.depth_image(s)))
         .or_fatal("Hi-Z 金字塔重建失败，渲染链无法继续")?;
     post.bloom
         .rebuild(ctx, extent)
         .or_fatal("Bloom 链重建失败，渲染链无法继续")?;
-    // 深度视图已按新尺寸重建——G-buffer 采样集 b3 的重建依赖
+    // 依赖上面已重建的深度视图（G-buffer 采样集 b3）
     post.gbuffer
         .rebuild(ctx, extent, &per_slot(|s| core.frames.depth_view(s)))
         .or_fatal("G-buffer 附件重建失败，渲染链无法继续")?;
@@ -719,12 +672,10 @@ fn rebuild_size_dependent(
         .clusters
         .rebuild(ctx, extent, &per_slot(|s| cluster.lights.ring_buffer(s)))
         .or_fatal("光源分簇 cluster 表重建失败，渲染链无法继续")?;
-    // SMAA 三目标（LDR/edges/blend；描述符集随 build_descriptors 重写）——resize
-    // 后 tonemap/edge/blend 的 renderArea 与附件尺寸必须同帧对齐
+    // tonemap/edge/blend 的 renderArea 与附件尺寸必须同帧对齐
     post.smaa
         .rebuild(ctx, extent)
-        .or_fatal("SMAA 三目标重建失败，渲染链无法继续")?;
-    Ok(())
+        .or_fatal("SMAA 三目标重建失败，渲染链无法继续")
 }
 
 /// 逐帧槽收集（重建入参：深度 image/view、光源环 buffer）。
@@ -821,7 +772,6 @@ struct FrameLight {
 
 impl FrameLight {
     /// 方向光取第一盏（多灯告警一次，多灯支持未实现）；环境光相机覆盖优先。
-    /// 首个取到灯光的帧收账一次。
     fn gather(
         lights: &LightQuery,
         view: &FrameView,
@@ -840,31 +790,29 @@ impl FrameLight {
                     [r * light.illuminance, g * light.illuminance, b * light.illuminance, a],
                 )
             }
-            // 无灯：直射项归零，方向留合法占位（共享常量见 frame_uniform_table.rs）
-            None => (crate::render::PLACEHOLDER_DIR_TO_LIGHT, [0.0; 4]),
+            None => (PLACEHOLDER_DIR_TO_LIGHT, [0.0; 4]),
         };
         if light_count != 1 && !ledger_empty {
             logs.warned_light_count.log(|| {
                 warn!("方向光 {light_count} 盏（取第一盏/无灯直射项归零），多灯支持未实现")
             });
         }
-        let ambient_color = match view.ambient_override {
-            Some(a) => LinearRgba::from(a.color).to_f32_array().map(|c| c * a.brightness),
-            None => match global_ambient {
-                Some(global) => {
-                    LinearRgba::from(global.color).to_f32_array().map(|c| c * global.brightness)
-                }
-                None => {
-                    logs.warned_no_ambient.log(|| {
-                        warn!("环境光缺席：GlobalAmbientLight 资源与相机 AmbientLight 均无，环境项归零")
-                    });
-                    [0.0; 4]
-                }
-            },
+        let ambient = view
+            .ambient_override
+            .map(|a| (a.color, a.brightness))
+            .or(global_ambient.map(|g| (g.color, g.brightness)));
+        let ambient_color = match ambient {
+            Some((color, brightness)) => LinearRgba::from(color).to_f32_array().map(|c| c * brightness),
+            None => {
+                logs.warned_no_ambient.log(|| {
+                    warn!("环境光缺席：GlobalAmbientLight 资源与相机 AmbientLight 均无，环境项归零")
+                });
+                [0.0; 4]
+            }
         };
         if light_count > 0 {
             logs.lights_logged.log(|| info!(
-                "灯光 UBO 收账：方向光 {light_count} 盏（dir_to_light = back()，light = {}）；\
+                "灯光 UBO 汇总：方向光 {light_count} 盏（dir_to_light = back()，light = {}）；\
                  环境 = {}（来源 {}）；材质模式 = {}（ASH_RENDER_MODE）",
                 fmt_vec4(light_color),
                 fmt_vec4(ambient_color),
@@ -901,8 +849,7 @@ fn write_frame_ubo(
         .or_fatal("帧 UBO 写失败，渲染链无法继续")
 }
 
-/// 场景世界 AABB 并集（级联 far 外扩 + 深度盒向太阳侧延伸到场景顶的输入）：
-/// 账本行 × 驻留局部包围盒 → 世界保守盒（cull_stats CPU 参照同款走访）。
+/// 场景世界 AABB 并集（级联 far 外扩与深度盒向太阳侧延伸的输入）。
 fn scene_world_aabb(ledger: &InstanceLedger, pool: &MeshPool) -> Option<(Vec3, Vec3)> {
     let mut scene_aabb: Option<(Vec3, Vec3)> = None;
     for (_, row) in ledger.rows() {
@@ -918,9 +865,8 @@ fn scene_world_aabb(ledger: &InstanceLedger, pool: &MeshPool) -> Option<(Vec3, V
     scene_aabb
 }
 
-/// shadow UBO（帧槽环与主 UBO 同一 fence 证据）：级联矩阵（log 分割拟合）+
-/// 四×六平面（cull 内联标记与 shadow_stats CPU 参照同源）+ 分割带/相机基
-///（composite cascade 选择）。相机缺席帧 = identity 矩阵（与帧 UBO 兜底同口径）。
+/// shadow UBO：级联矩阵（log 分割拟合）+ 四×六平面（cull 内联标记与 shadow_stats
+/// CPU 参照同源）+ 分割带/相机基（composite 选级联）。相机缺席帧 = identity 矩阵。
 fn write_shadow_ubo(
     shadow: &mut ShadowInput,
     slot: usize,
@@ -966,15 +912,14 @@ fn write_shadow_ubo(
         .or_fatal("shadow UBO 写失败，渲染链无法继续")
 }
 
-/// 后处理帧槽 UBO（同一 fence 证据）：Bloom 五标量（BRP bloom_set 直达）+
-/// SmaaInfo（rt_metrics + 开关）。
+/// 后处理帧槽 UBO：Bloom 五标量 + SmaaInfo（rt_metrics + 开关）。
 fn write_post_ubos(post: &mut PostInput, slot: usize) -> Result<(), BevyError> {
     let bloom = &post.bloom_settings;
     post.bloom
         .ubo(slot)
         .write(
             0,
-            &crate::render::pack_bloom_params(&crate::render::BloomParamsData {
+            &pack_bloom_params(&BloomParamsData {
                 strength: bloom.strength,
                 enabled: f32::from(bloom.enabled),
                 tonemap: f32::from(bloom.tonemap),
@@ -1029,8 +974,7 @@ fn write_cluster_slot(
     cluster
         .lights
         .write_dirty(slot)
-        .or_fatal("光源常驻表脏行写失败，渲染链无法继续")?;
-    Ok(())
+        .or_fatal("光源常驻表脏行写失败，渲染链无法继续")
 }
 
 /// 本帧槽透明行数清零，collect 在 GPU 上从 0 原子累加。
@@ -1039,8 +983,7 @@ fn write_transparent_slot(transparent: &mut TransparentInput, slot: usize) -> Re
         .targets
         .count(slot)
         .write(0, &0u32.to_le_bytes())
-        .or_fatal("透明行计数清零失败，渲染链无法继续")?;
-    Ok(())
+        .or_fatal("透明行计数清零失败，渲染链无法继续")
 }
 
 /// 本帧 compute 段的共享输入。
@@ -1050,14 +993,13 @@ struct PassFrame<'a> {
     bound: u32,
     view_proj: Mat4,
     screen: [f32; 2],
-    /// 在场行实例槽号（诊断读数逐行计数的行宇宙）。
+    /// 在场行实例槽号（诊断读数逐行计数的范围）。
     live: &'a [u32],
 }
 
-/// 视锥剔除半边：开关决定 compute dispatch 或 host 全可见填充。诊断读数：
-/// 开 = 本帧槽两帧前 compute 的输出（最新确定值）；关 = host 全可见填充后直读
-///（A/B 的 B 面基准；未 dispatch 时 build_indirect 读的就是这份填充，dispatch
-/// 时 shader 同写 1）。返回 (dispatch, 在场行可见数)。
+/// 视锥剔除半边：开关决定 compute dispatch 或 host 全可见填充。诊断读数：开 = 本帧槽
+/// 两帧前 compute 的输出；关 = host 填充后直读（未 dispatch 时 build_indirect 读的就是
+/// 这份填充，dispatch 时 shader 同写 1）。返回 (dispatch, 在场行可见数)。
 fn cull_half(
     pf: &PassFrame,
     cull: &mut CullInput,
@@ -1066,63 +1008,64 @@ fn cull_half(
     first: &mut OnceLog,
 ) -> Result<(Option<CullDraw>, u32), BevyError> {
     let bound = pf.bound;
-    // shadow 开启时剔除 dispatch 也承担 shadow 标记产出——即使主视锥 A/B 关，
-    // dispatch 仍要跑（写 shadow 标记）；两侧全关才可跳过。主视图开关随 push
-    // 进 shader：关 = marks 恒写 1，不覆盖下方 host 全可见填充的语义
-    let dispatch = if (cull.settings.enabled || shadow_enabled) && bound > 0 {
+    if bound == 0 {
+        return Ok((None, 0));
+    }
+    // shadow 开启时剔除 dispatch 也要产出 shadow 标记，两侧全关才可跳过。主视图开关随
+    // push 进 shader：关 = marks 恒写 1，不覆盖下方 host 全可见填充的语义
+    let dispatch = (cull.settings.enabled || shadow_enabled).then(|| {
         first.log(|| info!(
-            "视锥剔除 dispatch 首跑（前置闸门④）：bound {bound}，组 {}，平面随 112B push 进 compute",
+            "视锥剔除 dispatch 首跑：bound {bound}，组 {}，平面随 112B push 进 compute",
             bound.div_ceil(64),
         ));
-        Some(cull.pass.draw(&frustum_planes(&pf.view_proj), bound, cull.settings.enabled))
-    } else {
-        None
-    };
-    if !cull.settings.enabled && bound > 0 {
+        cull.pass.draw(&frustum_planes(&pf.view_proj), bound, cull.settings.enabled)
+    });
+    if !cull.settings.enabled {
         fill_u32(instances.mark_ring(pf.slot), bound as usize, 1)
             .or_fatal("剔除标记环全可见填充失败，渲染链无法继续")?;
     }
-    let mut visible = 0u32;
-    if bound > 0 {
-        let marks = read_ring(instances.mark_ring(pf.slot), bound as usize * MARK_SIZE as usize)
-            .or_fatal("剔除标记环读数失败，渲染链无法继续")?;
-        visible = count_marked(&marks, pf.live);
-        cull.diag.enabled = cull.settings.enabled;
-        cull.diag.bound = bound;
-        cull.diag.marks_frame = pf.slot;
-        cull.diag.rows_compared = pf.live.len();
-        cull.diag.visible_count = visible;
-    }
+    let marks = read_ring(instances.mark_ring(pf.slot), bound as usize * MARK_SIZE as usize)
+        .or_fatal("剔除标记环读数失败，渲染链无法继续")?;
+    let visible = count_marked(&marks, pf.live);
+    cull.diag.enabled = cull.settings.enabled;
+    cull.diag.bound = bound;
+    cull.diag.marks_frame = pf.slot;
+    cull.diag.rows_compared = pf.live.len();
+    cull.diag.visible_count = visible;
     Ok((dispatch, visible))
 }
 
-/// shadow 标记半边：剔除 dispatch 跑了 → 标记 = compute 输出；没跑（shadow 关
-/// 或空场）→ host 全可见填充（读数语义 = 剔除量 0；composite 侧 shadow 关 =
-/// shader 旁路，标记内容无消费）。诊断逐 cascade 计数（陈旧 ≤2 帧与主标记同款）。
+/// shadow 标记半边：剔除 dispatch 跑了 → 标记 = compute 输出；shadow 关 → host 全可见
+/// 填充（composite 侧 shader 旁路，标记内容无消费）。诊断逐 cascade 计数（陈旧 ≤2 帧，
+/// 与主标记相同）。
 fn shadow_marks_half(pf: &PassFrame, shadow: &mut ShadowInput) -> Result<(), BevyError> {
     let bound = pf.bound;
-    if !(shadow.settings.enabled && bound > 0) {
+    if bound == 0 {
+        return Ok(());
+    }
+    if !shadow.settings.enabled {
         fill_u32(shadow.targets.mark_mut(pf.slot), bound as usize * SHADOW_CASCADES, 1)
             .or_fatal("shadow 标记环全可见填充失败，渲染链无法继续")?;
     }
-    if bound > 0 {
-        let marks = read_ring(shadow.targets.mark_mut(pf.slot), bound as usize * SHADOW_CASCADES * 4)
-            .or_fatal("shadow 标记环读数失败，渲染链无法继续")?;
-        let mut gpu_vis = [0u32; SHADOW_CASCADES];
-        for &slot in pf.live {
-            for (c, vis) in gpu_vis.iter_mut().enumerate() {
-                *vis += u32::from(marks.get(slot as usize * SHADOW_CASCADES + c) == Some(&1));
-            }
+    let marks = read_ring(
+        shadow.targets.mark_mut(pf.slot),
+        bound as usize * SHADOW_CASCADES * MARK_SIZE as usize,
+    )
+    .or_fatal("shadow 标记环读数失败，渲染链无法继续")?;
+    let mut gpu_vis = [0u32; SHADOW_CASCADES];
+    for &slot in pf.live {
+        for (c, vis) in gpu_vis.iter_mut().enumerate() {
+            *vis += u32::from(marks.get(slot as usize * SHADOW_CASCADES + c) == Some(&1));
         }
-        shadow.diag.enabled = shadow.settings.enabled;
-        shadow.diag.bound = bound;
-        shadow.diag.marks_frame = pf.slot;
-        shadow.diag.gpu_visible = gpu_vis;
     }
+    shadow.diag.enabled = shadow.settings.enabled;
+    shadow.diag.bound = bound;
+    shadow.diag.marks_frame = pf.slot;
+    shadow.diag.gpu_visible = gpu_vis;
     Ok(())
 }
 
-/// 遮挡 dispatch 判据（单源：dispatch 与否和 fallback 原因同出一处）。
+/// 遮挡 dispatch 判据（dispatch 与否和 fallback 原因同出一处）。
 enum OcclusionVerdict {
     Dispatch,
     /// 跳过 dispatch；原因取首个命中（空场 = None：无可判行，不算 fallback）。
@@ -1130,7 +1073,6 @@ enum OcclusionVerdict {
 }
 
 impl OcclusionVerdict {
-    /// fallback 判据逐项核对（occlusion 模块注释钉明的四条 + 空场）。
     fn judge(
         enabled: bool,
         cull_enabled: bool,
@@ -1154,10 +1096,8 @@ impl OcclusionVerdict {
     }
 }
 
-/// Hi-Z 遮挡半边：判据任一命中 → 本帧跳过 dispatch——b3 保持视锥纯结果、b6 host
-/// 填全可见（读数语义 = 遮挡剔除量 0，A/B 的 B 面同口径）。跳变判定用"当前 vs
-/// 两帧前"机位（[`OcclusionGate`]）。诊断读数 b6 = 本帧槽两帧前 compute 输出或
-/// host 全可见填充。
+/// Hi-Z 遮挡半边：判据任一命中 → 本帧跳过 dispatch——b3 保持视锥结果、b6 host 填
+/// 全可见（读数 = 遮挡剔除量 0）。诊断读数 b6 = 本帧槽两帧前 compute 输出或 host 填充。
 fn occlusion_half(
     pf: &PassFrame,
     occlusion: &mut OcclusionInput,
@@ -1177,7 +1117,7 @@ fn occlusion_half(
     let (dispatch, fallback) = match verdict {
         OcclusionVerdict::Dispatch => {
             first.log(|| info!(
-                "Hi-Z 遮挡测试 dispatch 首跑（前置闸门复用视锥 compute 链）：bound {bound}，\
+                "Hi-Z 遮挡测试 dispatch 首跑（复用视锥 compute 链）：bound {bound}，\
                  组 {}，金字塔 {} 级（80B push：view_proj+screen+bound；b3=视锥∧遮挡，b6 遮挡独立标记）",
                 bound.div_ceil(64),
                 occlusion.hiz.levels(),
@@ -1210,9 +1150,9 @@ fn occlusion_half(
     Ok(dispatch)
 }
 
-/// GPU LOD 选档半边：开关决定 compute dispatch 或 host 档位环填 0（选档每帧从
-/// 当前相机现算，无 fallback 专段——档位环只是迟滞状态不是真值，lod 模块注释
-/// 钉明）。诊断：档位分布逐在场行统计（b8 = 本帧槽两帧前 compute 输出或 host 填 0）。
+/// GPU LOD 选档半边：开关决定 compute dispatch 或 host 档位环填 0（最细档）。选档每帧
+/// 按当前相机现算，档位环只是迟滞状态，无需 fallback。诊断：在场行的档位分布（b8 =
+/// 本帧槽两帧前 compute 输出或 host 填 0）。
 fn lod_half(
     pf: &PassFrame,
     lod: &mut LodInput,
@@ -1222,7 +1162,7 @@ fn lod_half(
     let bound = pf.bound;
     let dispatch = if lod.settings.enabled && bound > 0 {
         first.log(|| info!(
-            "GPU LOD 选档 dispatch 首跑（前置闸门复用视锥 compute 链）：bound {bound}，\
+            "GPU LOD 选档 dispatch 首跑（复用视锥 compute 链）：bound {bound}，\
              组 {}，{MAX_LOD_LEVELS} 档（96B push：view_proj+screen+bound+threshold+hysteresis；\
              b7 变体表按档直址，b8 档位环 = 迟滞状态）",
             bound.div_ceil(64),
@@ -1260,9 +1200,9 @@ fn lod_half(
     Ok(dispatch)
 }
 
-/// 缺口快照采样：帧起读缺口标记环（本帧槽 = 两帧前 compute 输出，fence 纪律同
-/// 档位环诊断）——驻留管理器 tick 挂 Last 在帧提交之后，直读环会与在飞 compute
-/// 写竞争，消费口统一走本快照（tick 与 BRP census）。
+/// 缺口快照采样：帧起读缺口标记环（本帧槽 = 两帧前 compute 输出）。坑：驻留管理器
+/// tick 在帧提交之后跑，直读环会与在飞 compute 写竞争，所以 tick 与 BRP census 都读
+/// 本快照。
 fn sample_gaps(
     pf: &PassFrame,
     gap: &mut GapSnapshot,
@@ -1273,10 +1213,10 @@ fn sample_gaps(
         let len = pf.bound as usize * GAP_MARK_SIZE as usize;
         gap.bits = read_ring(instances.gap_mark_ring(pf.slot), len)
             .or_fatal("缺口标记环读数失败，渲染链无法继续")?;
-        // 缺席槽清零归 cull dispatch（bound 全覆盖）；本帧未 dispatch（剔除与
-        // 阴影都关）时缺席槽会残留陈旧位图——host 补零（在场槽由本帧
-        // build_indirect 照常写新鲜值）。补零必须在快照读数之后：先清会抹掉两帧前
-        // build_indirect 写下的在场槽缺口，驻留管理器永远看不到缺口
+        // 缺席槽清零由 cull dispatch 负责（覆盖全部 bound）；本帧未 dispatch（剔除与
+        // 阴影都关）时缺席槽会残留陈旧位图，由 host 补零（在场槽由本帧 build_indirect
+        // 照常写新值）。坑：补零必须在快照读数之后，先清会抹掉两帧前 build_indirect
+        // 写下的缺口，驻留管理器永远看不到
         if cull_skipped {
             instances
                 .gap_mark_ring(pf.slot)
@@ -1290,9 +1230,8 @@ fn sample_gaps(
     Ok(())
 }
 
-/// indirect 命令组装半边：在场行数 = GPU 命令条数（CPU 在账信息，非可见集回读）；
-/// count > 0 才有命令可组装（空场 = None，场景绘制整段跳过）。诊断读数（draw
-/// 调用数/命令条数/instanceCount=0 条数）只进计量。
+/// indirect 命令组装半边：在场行数 = GPU 命令条数（来自账本，非可见集回读）；空场 =
+/// None，场景绘制整段跳过。诊断读数只进计量。
 fn indirect_half(
     indirect: &mut IndirectInput,
     count: u32,
@@ -1303,9 +1242,9 @@ fn indirect_half(
 ) -> Result<Option<IndirectDraw>, BevyError> {
     let dispatch = if count > 0 {
         first.log(|| info!(
-            "indirect 提交首跑（前置闸门②）：在场行 {count}，命令环 {}B/条，\
+            "indirect 提交首跑：在场行 {count}，命令环 {}B/条，\
              图形侧一次 cmd_draw_indexed_indirect（图形 push range 归零，firstInstance 携带槽号）",
-            crate::render::INDIRECT_COMMAND_SIZE,
+            INDIRECT_COMMAND_SIZE,
         ));
         Some(
             indirect
@@ -1430,7 +1369,7 @@ fn smaa_draws(post: &PostInput, slot: usize) -> (Option<SmaaEdgeBlendDraw>, Smaa
     (edge_blend, nb)
 }
 
-/// host 侧整段填充 u32 环：`count` 个小端 `value`（A/B 的 B 面全可见/全最细档）。
+/// host 侧整段填充 u32 环：`count` 个小端 `value`（开关关闭时的全可见/全最细档）。
 fn fill_u32(ring: &mut GpuBuffer, count: usize, value: u32) -> Result<(), VulkanError> {
     ring.write(0, &value.to_le_bytes().repeat(count))
 }
@@ -1452,7 +1391,7 @@ fn count_marked(marks: &[u32], live: &[u32]) -> u32 {
 ///（render/frame/frame_draw.rs），调色时按线性直觉给值，不要拿 sRGB 十六进制直接换算。
 const CLEAR_COLOR: [f32; 4] = [0.02, 0.06, 0.14, 1.0];
 
-/// [f32; 4] 的收账日志格式（灯光 UBO 的 rgb 分量可读性）。
+/// 灯光日志用的 vec4 格式。
 fn fmt_vec4(v: [f32; 4]) -> String {
     format!("({:.1}, {:.1}, {:.1}, {:.1})", v[0], v[1], v[2], v[3])
 }
@@ -1462,10 +1401,8 @@ mod tests {
     use super::OcclusionGate;
     use bevy::math::{Quat, Vec3};
 
-    /// fallback 判据的阈值语义（显式 fallback 判据，钉死）：比较"本帧 vs 两帧前"
-    ///（与遮挡读数滞后同窗——金字塔正是两帧前的深度），阈值作用于两帧累计量：
-    /// 历史不足 = 未就绪、静止不触发、累计微动/单帧大跳超阈（位移 0.5 / 旋转
-    /// 15°，钉明见 occlusion 模块注释）都触发。
+    /// 比较"本帧 vs 两帧前"，阈值作用于两帧累计量：历史不足、累计微动超阈、单帧大跳
+    /// 都触发，静止不触发。
     #[test]
     fn occlusion_gate_jump_thresholds() {
         let mut gate = OcclusionGate::default();
@@ -1478,8 +1415,7 @@ mod tests {
         assert!(!gate.push(Some((p0, r0))), "静止两帧 = 稳定");
         // 单帧小位移（0.3 < 0.5，窗口累计 0.3）：不触发
         assert!(!gate.push(Some((p0 + Vec3::new(0.3, 0.0, 0.0), r0))));
-        // 连续微动两帧窗口累计 0.6 > 0.5：触发——滞后窗语义下金字塔内容
-        // 已落后累计量，让路是诚实行为（不是单帧阈值）
+        // 连续微动两帧窗口累计 0.6 > 0.5：触发（金字塔内容已落后累计量）
         assert!(gate.push(Some((p0 + Vec3::new(0.6, 0.0, 0.0), r0))));
         // 大位移（单帧 2.0 > 0.5）触发
         assert!(gate.push(Some((p0 + Vec3::new(2.0, 0.0, 0.0), r0))));

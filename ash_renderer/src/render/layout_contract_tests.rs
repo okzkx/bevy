@@ -4,10 +4,10 @@
 
 use ash::vk::{self, Handle};
 
-use super::pipeline_layout::{PipelineDesc, PushRange};
-use super::shader_abi;
-use super::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
 use super::layout_registry::{ALL_PIPELINES, ALL_SETS, PROBE_ONLY};
+use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::binding::shader_abi;
+use crate::render::core::binding::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::passes::gbuffer::gbuffer_pipeline::GBUFFER_WRITE_PIPELINE;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
 use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET_DESC;
@@ -21,6 +21,7 @@ use crate::render::passes::visibility::cull::CULL_PIPELINE;
 use crate::render::resident::bindless_texture_table::{BINDLESS_TEXTURE_SET_DESC, TABLE_CAPACITY};
 use crate::render::resident::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
 use crate::render::resident::instance_table::INSTANCE_SET_DESC;
+
 const ALL_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::ALL;
 
 /// 静态的 set 列表（数组字面量里取 static 的地址不会被提升成 'static）。
@@ -229,7 +230,6 @@ fn pool_sizes_and_flags_derive_from_declarations() {
 fn writer_validates_writes_against_declaration() {
     use crate::common::error::VulkanError;
     use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-    use crate::render::passes::shadow::shadow_map::SHADOW_SET_DESC;
 
     // 合法写入：shadow 集 b0 UBO + 4 张图 + 5 storage，一次写满
     let set = vk::DescriptorSet::from_raw(7);

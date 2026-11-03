@@ -1,7 +1,7 @@
 //! 运行期场景生成：共享资产句柄批量生成实例，或按空间块生成并管理实例。
 //! 生成位置由 seed 和实例索引确定；相同参数可重现相同位置。
 
-use crate::scene::mechanism::ObjectOpError;
+use crate::scene::mechanism::{primitive_parts, ObjectOpError};
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
 
@@ -51,32 +51,16 @@ pub fn generate_instances(
             "count/columns 须 > 0（空场景直接不生成，删除走 chunk_despawn）".into(),
         ));
     }
-    if p.spacing <= 0.0 || p.jitter < 0.0 {
-        return Err(ObjectOpError::InvalidParams(format!(
-            "spacing({}) 须 > 0、jitter({}) 须 ≥ 0",
-            p.spacing, p.jitter
-        )));
-    }
-    let Some(mesh) = world.get::<Mesh3d>(p.source).cloned() else {
-        return Err(ObjectOpError::SourceNotPrimitive(p.source));
-    };
-    let Some(material) = world
-        .get::<MeshMaterial3d<StandardMaterial>>(p.source)
-        .cloned()
-    else {
-        return Err(ObjectOpError::SourceNotPrimitive(p.source));
-    };
-    let Some(base) = world.get::<Transform>(p.source).cloned() else {
-        return Err(ObjectOpError::ComponentMissing("Transform", p.source));
-    };
+    check_layout(p.spacing, p.jitter)?;
+    let (mesh, material, base) = primitive_parts(world, p.source)?;
     let source_name = world
         .get::<Name>(p.source)
         .map(|n| n.as_str().to_owned())
         .unwrap_or_default();
-    let first = spawn_one(world, &mesh, &material, &base, &source_name, 0, &p)?;
+    let first = spawn_one(world, &mesh, &material, &base, &source_name, 0, &p);
     let mut last = first;
     for i in 1..p.count {
-        last = spawn_one(world, &mesh, &material, &base, &source_name, i, &p)?;
+        last = spawn_one(world, &mesh, &material, &base, &source_name, i, &p);
     }
     Ok(SceneGenReadback {
         spawned: p.count,
@@ -87,8 +71,33 @@ pub fn generate_instances(
     })
 }
 
-/// 铺一个实例：第 `i` 行列 = `(i % columns, i / columns)`，位置加种子抖动
-///（纯函数散列，见模块注释）。克隆 = 共享柄，不产生新资产。
+/// 布局参数校验：spacing 须为正、jitter 不得为负。
+fn check_layout(spacing: f32, jitter: f32) -> Result<(), ObjectOpError> {
+    if spacing <= 0.0 || jitter < 0.0 {
+        return Err(ObjectOpError::InvalidParams(format!(
+            "spacing({spacing}) 须 > 0、jitter({jitter}) 须 ≥ 0"
+        )));
+    }
+    Ok(())
+}
+
+/// 网格第 `i` 格的偏移：列行 = `(i % columns, i / columns)`。
+/// 索引很大时转换为 f32 可能失去整数精度。
+fn grid_offset(i: u32, columns: u32, spacing: f32) -> Vec3 {
+    let col = (i % columns) as f32;
+    let row = (i / columns) as f32;
+    Vec3::new(col * spacing, 0.0, row * spacing)
+}
+
+/// 按种子散列给 x/z 加 [-jitter, jitter) 的确定性抖动；jitter 为 0 时不动。
+fn add_jitter(v: &mut Vec3, seed: u64, index: u32, jitter: f32) {
+    if jitter > 0.0 {
+        v.x += (hash01(seed, index, 0) - 0.5) * 2.0 * jitter;
+        v.z += (hash01(seed, index, 1) - 0.5) * 2.0 * jitter;
+    }
+}
+
+/// 铺一个实例：网格位置加种子抖动（见 [`hash01`]）。克隆 = 共享柄，不产生新资产。
 fn spawn_one(
     world: &mut World,
     mesh: &Mesh3d,
@@ -97,22 +106,15 @@ fn spawn_one(
     source_name: &str,
     i: u32,
     p: &SceneGenParams,
-) -> Result<Entity, ObjectOpError> {
-    // 索引很大时转换为 f32 可能失去整数精度。
-    let col = (i % p.columns) as f32;
-    let row = (i / p.columns) as f32;
-    let mut translation = base.translation + Vec3::new(col * p.spacing, 0.0, row * p.spacing);
-    if p.jitter > 0.0 {
-        translation.x += (hash01(p.seed, i, 0) - 0.5) * 2.0 * p.jitter;
-        translation.z += (hash01(p.seed, i, 1) - 0.5) * 2.0 * p.jitter;
-    }
+) -> Entity {
+    let mut translation = base.translation + grid_offset(i, p.columns, p.spacing);
+    add_jitter(&mut translation, p.seed, i, p.jitter);
     let mut transform = *base;
     transform.translation = translation;
     let name = format!("{source_name}#gen{i:05}");
-    let entity = world
+    world
         .spawn((mesh.clone(), material.clone(), transform, Name::new(name)))
-        .id();
-    Ok(entity)
+        .id()
 }
 
 /// 按 seed、实例索引和通道生成 [0,1) 的确定性散列值。
@@ -182,25 +184,9 @@ pub fn generate_chunks(
             "chunk_grid/instances_per_chunk 须 > 0".into(),
         ));
     }
-    if p.spacing <= 0.0 || p.jitter < 0.0 {
-        return Err(ObjectOpError::InvalidParams(format!(
-            "spacing({}) 须 > 0、jitter({}) 须 ≥ 0",
-            p.spacing, p.jitter
-        )));
-    }
-    let Some(mesh) = world.get::<Mesh3d>(p.source).cloned() else {
-        return Err(ObjectOpError::SourceNotPrimitive(p.source));
-    };
-    let Some(material) = world
-        .get::<MeshMaterial3d<StandardMaterial>>(p.source)
-        .cloned()
-    else {
-        return Err(ObjectOpError::SourceNotPrimitive(p.source));
-    };
-    let Some(base) = world.get::<Transform>(p.source).cloned() else {
-        return Err(ObjectOpError::ComponentMissing("Transform", p.source));
-    };
-        // 块内按近似方阵排列。
+    check_layout(p.spacing, p.jitter)?;
+    let (mesh, material, base) = primitive_parts(world, p.source)?;
+    // 块内按近似方阵排列。
     let cols = (p.instances_per_chunk as f32).sqrt().ceil() as u32;
     let extent = cols as f32 * p.spacing;
     // 总量溢出 u32 = 参数非法（spawn 前拒绝，不产出半批实体）
@@ -235,13 +221,8 @@ pub fn generate_chunks(
             first_root.get_or_insert(root);
             last_root = Some(root);
             for i in 0..p.instances_per_chunk {
-                let col = (i % cols) as f32;
-                let row = (i / cols) as f32;
-                let mut local = Vec3::new(col * p.spacing, 0.0, row * p.spacing);
-                if p.jitter > 0.0 {
-                    local.x += (hash01(p.seed, flat, 0) - 0.5) * 2.0 * p.jitter;
-                    local.z += (hash01(p.seed, flat, 1) - 0.5) * 2.0 * p.jitter;
-                }
+                let mut local = grid_offset(i, cols, p.spacing);
+                add_jitter(&mut local, p.seed, flat, p.jitter);
                 flat += 1;
                 let mut transform = base;
                 // 坑：块原点由父级传播，子实体 translation 必须保持块内坐标。

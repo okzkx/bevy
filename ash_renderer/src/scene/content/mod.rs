@@ -32,8 +32,8 @@ impl Plugin for SceneEntryPlugin {
             Update,
             (
                 world_asset::report_scene_arrival,
-                camera::report_camera_setup,
-                lights::report_lights_setup,
+                camera::report_camera_setup.run_if(run_once),
+                lights::report_lights_setup.run_if(run_once),
             ),
         )
         .add_systems(
@@ -41,4 +41,30 @@ impl Plugin for SceneEntryPlugin {
             collect_report::report_scene_collected.after(update_ledger),
         );
     }
+}
+
+/// 等待型核验的超时（秒）：超时 warn 一次后不再核验。
+const REPORT_TIMEOUT_SECS: f32 = 10.0;
+
+/// 等待型一次性核验的进度：报一次即歇；等不到时超时 warn 一次后不再打扰。
+#[derive(Default)]
+struct PendingReport {
+    done: bool,
+    waited_secs: f32,
+}
+
+impl PendingReport {
+    /// 累计本帧等待；超过 [`REPORT_TIMEOUT_SECS`] 时收账并返回 true（调用方 warn 一次）。
+    fn timed_out(&mut self, delta_secs: f32) -> bool {
+        self.waited_secs += delta_secs;
+        if self.waited_secs > REPORT_TIMEOUT_SECS {
+            self.done = true;
+        }
+        self.done
+    }
+}
+
+/// 三维向量格式化：日志里统一两位小数，位置/前向数值一眼可比。
+fn fmt_vec3(v: Vec3) -> String {
+    format!("({:.2}, {:.2}, {:.2})", v.x, v.y, v.z)
 }

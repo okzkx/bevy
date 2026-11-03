@@ -3,12 +3,12 @@
 //! [`SetLayoutDesc::create`] 建成 Vulkan 布局。同一份声明还是管线组装 pipeline layout
 //! 和 shader ABI 对账的依据（见 `pipeline_layout`）。
 //!
-//! 布局句柄仍归声明它的资源族持有和销毁；管线通过 [`SetLayouts`] 按声明名取句柄，
-//! 不再按位置接收裸句柄。
+//! 布局句柄归声明它的资源族持有和销毁；管线通过 [`SetLayouts`] 按声明取句柄。
 
 use ash::{vk, Device};
 
 use crate::common::error::{Result, VulkanError};
+use crate::render::core::device::context::Context;
 
 /// 描述符种类（WGSL 资源类型与 Vulkan 描述符类型的公共子集）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,8 +113,8 @@ impl SetLayoutDesc {
         out
     }
 
-    /// 布局带 UPDATE_AFTER_BIND binding 时，配套的 pool 必须带 UPDATE_AFTER_BIND 旗标
-    ///（VUID-03000 三层配套的第三层，pool 侧由这里推导，不再手写）。
+    /// 布局带 UPDATE_AFTER_BIND_POOL 时，配套的 pool 也必须带 UPDATE_AFTER_BIND 旗标
+    ///（VUID-03000 三层配套的 pool 层，由声明推导）。
     pub(crate) const fn needs_uab_pool(&self) -> bool {
         self.flags.contains(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
     }
@@ -238,7 +238,7 @@ impl DescSet {
     }
 }
 
-/// 绑定序校验：第 i 个集的声明必须是 expected[i]，数量也一并核对。
+/// 绑定序校验：第 i 个集的声明必须是 `expected[i]`，数量也一并核对。
 /// 绑错顺序在 debug 构建当场 panic（声明名写进报错），release 零成本。
 #[track_caller]
 pub(crate) fn assert_set_sequence(expected: &[&'static SetLayoutDesc], sets: &[DescSet]) {
@@ -281,7 +281,7 @@ impl SetLayouts {
     }
 
     /// 给登记的全部布局挂调试名（验证层报错与 RenderDoc 按名字显示；best-effort）。
-    pub(crate) fn name_all(&self, ctx: &crate::render::Context) {
+    pub(crate) fn name_all(&self, ctx: &Context) {
         for e in &self.entries {
             ctx.name_object(e.raw, &format!("set_layout: {}", e.desc.name));
         }

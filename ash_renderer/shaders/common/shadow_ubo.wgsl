@@ -1,5 +1,5 @@
-// shadow UBO（736B）：与 src/render/shading/shadow.rs 的 ShadowUniformsLayout
-// offset_of! 静态断言同序，SHADOW_UBO_SIZE 为宿主正本。
+// shadow UBO（736B）：字段序与 src/render/passes/shadow/cascades.rs 的
+// ShadowUniformsLayout 对照，尺寸以 SHADOW_UBO_SIZE 为准。
 struct ShadowUniforms {
     cascade_view_proj: array<mat4x4f, 4>,
     // 4 cascade × 6 视锥平面（384B 超 push 上限，故走 UBO）

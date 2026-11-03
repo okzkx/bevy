@@ -5,11 +5,9 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 
 use super::mib;
 use crate::render::{AtlasGpu, BindlessTextureTable, ImageCache, MeshPool, PerfLedger, Uploader};
-use crate::scene::mechanism::scene_gen::SceneChunk;
-use crate::scene::mechanism::WorkloadSettings;
+use crate::scene::{SceneChunk, WorkloadSettings};
 
-/// vulkan 侧统计三项的只读束（帧统计页取数）。打成 SystemParam 是因为函数系统的
-/// 参数上限 16 个（FrameInput/UiDrawData 同款式样）。
+/// 帧统计页的渲染器读数束（常驻表/上传器/图集）。
 #[derive(SystemParam)]
 pub(in crate::overlay) struct RendererStats<'w> {
     tables: Res<'w, BindlessTextureTable>,
@@ -19,7 +17,7 @@ pub(in crate::overlay) struct RendererStats<'w> {
 
 /// 逐帧 delta 抖动大，直接显示 fps 数字每帧都在跳——累计一个更新间隔的帧数
 /// 与时长，到点出一次平均快照。
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub(in crate::overlay) struct FpsMeter {
     acc_secs: f32,
     acc_frames: u32,
@@ -28,16 +26,10 @@ pub(in crate::overlay) struct FpsMeter {
 }
 
 /// 一次帧率显示快照：fps 与平均帧耗时（毫秒）。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(in crate::overlay) struct FpsSnapshot {
     pub(in crate::overlay) fps: f32,
     pub(in crate::overlay) ms: f32,
-}
-
-impl Default for FpsMeter {
-    fn default() -> Self {
-        Self { acc_secs: 0.0, acc_frames: 0, snapshot: FpsSnapshot { fps: 0.0, ms: 0.0 } }
-    }
 }
 
 impl FpsMeter {
@@ -61,9 +53,8 @@ impl FpsMeter {
     }
 }
 
-/// 分位数面板缓存：跟 fps 快照同节奏（0.5s）重算三分位数 × 三字段，
-/// 每帧只读展示——逐帧九次全量 sort 已随 [`PerfLedger::percentiles`] 收敛为
-/// 每字段一趟，且文本 0.5s 才变一次（egui galley 缓存可命中，不再逐帧重塑）。
+/// 分位数面板缓存：跟 fps 快照同节奏（0.5s）重算，每帧只读展示——文本 0.5s 才变
+/// 一次，egui 文字排版缓存可命中。
 #[derive(Resource, Default)]
 pub(in crate::overlay) struct PerfPanelCache {
     /// (p50, p95, p99, 样本数) 逐字段。
@@ -72,6 +63,7 @@ pub(in crate::overlay) struct PerfPanelCache {
     pub(in crate::overlay) gpu_lighting: (f32, f32, f32, usize),
 }
 
+/// 面板展示的分位点：p50/p95/p99。
 const PANEL_PS: [f32; 3] = [0.50, 0.95, 0.99];
 
 impl PerfPanelCache {
@@ -96,7 +88,6 @@ impl PerfPanelCache {
 /// 直接子实体数。生成期归属原样报出（不按当前位置重算）。
 pub(in crate::overlay) type ChunkRows<'w, 's> =
     Query<'w, 's, (&'static SceneChunk, Option<&'static Children>)>;
-
 
 /// 帧统计页的一次构建输入：框架 pass 每帧组好、字段名逐项交给页面。
 pub(in crate::overlay) struct FrameStatsPage<'a> {
@@ -155,7 +146,7 @@ impl FrameStatsPage<'_> {
             mib(i_cap),
         ));
         ui.monospace(format!(
-            "贴图 {} 张 {:.1}MB（停尸房 {}）",
+            "贴图 {} 张 {:.1}MB（待回收 {}）",
             image_cache.resident_count(),
             mib(image_cache.resident_bytes()),
             image_cache.graveyard_len(),

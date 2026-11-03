@@ -1,11 +1,10 @@
 //! UI 顶点环：每帧槽一对固定容量顶点/索引 buffer（宿主直写 HOST_VISIBLE，
 //! `BufferRole::DynamicDraw`），以及 epaint 顶点的 GPU 侧镜像 [`UiVertex`]。
-//! 生产方是 overlay 的绘制半边（`paint_overlay` 镶嵌后写入）；`draw_frame`
-//! 取 [`UiVertexRing::buffers`] 交录制层绑定。
+//! overlay 绘制侧（`paint_overlay`）镶嵌后写入；`draw_frame` 取
+//! [`UiVertexRing::buffers`] 交录制层绑定。
 //!
-//! 不走 MeshPool：池是 DEVICE_LOCAL 资产级 bump，写入走 staging+transfer——
-//! 每帧整换的 UI 数据直写更诚实。复用安全与帧 UBO 同一条 fence 纪律：写入
-//! 发生在 `wait_for_slot` 之后 = 本槽上一轮提交完成之后。
+//! 不走 MeshPool：池在 DEVICE_LOCAL 显存里、经 staging 上传，适合资产；UI 每帧整换，
+//! 直写更省事。复用安全：写入发生在 `wait_for_slot` 之后，即本槽上一轮提交已完成。
 
 use ash::vk;
 use bevy::prelude::*;
@@ -15,28 +14,26 @@ use crate::render::{BufferRole, Context, GpuBuffer, MAX_FRAMES_IN_FLIGHT};
 
 use super::overlay_pipeline::UI_VERTEX_STRIDE;
 
-/// 单槽 UI 顶点容量（个数；×20B = 1.25MB/槽）。调试 UI 单帧数百万顶点不可能，
-/// 超容 = Tier① 丢当帧 UI（可交互性损失不拦帧循环）。
+/// 单槽 UI 顶点容量（个数；×20B = 1.25MB/槽）。超容时调用方丢弃当帧 UI，不拦帧循环。
 const UI_VERTEX_CAPACITY: usize = 64 * 1024;
 /// 单槽 UI 索引容量（个数；×4B = 384KB/槽）。
 const UI_INDEX_CAPACITY: usize = 96 * 1024;
 
-/// epaint 顶点的 Rust 镜像：与 overlay_draw.wgsl 的顶点输入同一契约
-/// （pos vec2f + uv vec2f + color 4×u8 打包，20B 步长）。epaint 默认布局同款
-/// 字段序（非 unity feature）；镜像类型切断对 epaint 字段序的依赖。
+/// epaint 顶点的 Rust 镜像，与 overlay_draw.wgsl 的顶点输入一致（pos vec2f + uv vec2f +
+/// color 4×u8，20B 步长）。字段序同 epaint 默认布局；用镜像类型免得依赖 epaint 的字段序。
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(crate) struct UiVertex {
     pub(crate) pos: [f32; 2],
     pub(crate) uv: [f32; 2],
-    /// sRGBA 预乘（gamma 域）——Color32 字节原样直通 GPU。
+    /// gamma 域预乘 sRGBA，Color32 字节原样传给 GPU。
     pub(crate) color: [u8; 4],
 }
 
 const _: () = assert!(std::mem::size_of::<UiVertex>() == UI_VERTEX_STRIDE as usize);
 
-/// UI 顶点环：每帧槽一对固定容量顶点/索引 buffer（`MAX_FRAMES_IN_FLIGHT` 组），
-/// 宿主按帧直写。写入安全契约 = 调用方（draw_frame）先过 `wait_for_slot`。
+/// 每帧槽一对 buffer（`MAX_FRAMES_IN_FLIGHT` 组）。调用方（draw_frame）须先过
+/// `wait_for_slot` 再写。
 #[derive(Resource)]
 pub struct UiVertexRing {
     slots: Vec<UiRingSlot>,
@@ -51,7 +48,7 @@ impl UiVertexRing {
     /// 建环：每帧槽一对 buffer（创建失败全有或全无，`GpuBuffer::create` 自回收）。
     ///
     /// # Errors
-    /// 任一 buffer 创建/分配/绑定/映射失败（Tier②，初始化链冒泡）。
+    /// 任一 buffer 创建/分配/绑定/映射失败。
     pub fn new(ctx: &Context) -> Result<Self> {
         let mut slots = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
@@ -82,7 +79,7 @@ impl UiVertexRing {
     /// 写本帧槽：整帧 UI 顶点/索引从头直写（offset 0）。容量在调用方先判。
     ///
     /// # Errors
-    /// 底层写/flush 失败（Tier② 冒泡）。
+    /// 底层写/flush 失败。
     pub(crate) fn write(
         &mut self,
         slot: usize,
@@ -90,7 +87,7 @@ impl UiVertexRing {
         indices: &[u32],
     ) -> Result<()> {
         // # Safety:UiVertex/u32 均 repr 紧排、无填充（上方 const 断言 20B），
-        // 字节视图只在 write 调用内存活
+        // 字节视图只在本调用内存活
         let vbytes = unsafe {
             std::slice::from_raw_parts(vertices.as_ptr().cast(), std::mem::size_of_val(vertices))
         };

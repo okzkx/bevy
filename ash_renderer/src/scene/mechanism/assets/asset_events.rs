@@ -17,7 +17,7 @@ use bevy::{
 
 use ash_macros::system;
 
-use super::ledger::{IncrementStats, InstanceLedger};
+use super::ledger::InstanceLedger;
 
 /// 待换内容的 mesh/image 身份；flush 成功提交新内容后清除，失败时保留供重试。
 /// 材质没有驻留内容，变化通过引用行重挂处理。
@@ -52,14 +52,14 @@ impl AssetInvalidations {
     }
 }
 
-/// 卸载回收计量（判定线证据口径）：事件数与出账数分开报。
+/// 卸载回收计量：事件数与出账数分开报。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RecycleStats {
     /// mesh `Removed` 事件累计。
     pub removed_meshes_total: u64,
     /// 贴图 `Removed` 事件累计。
     pub removed_images_total: u64,
-    /// `Unused` 事件累计（mesh+image+材质；探针口径：本宿主是否触发过）。
+    /// `Unused` 事件累计（mesh+image+材质；只观察本宿主是否触发过）。
     pub unused_events_total: u64,
     /// flush 实际出账的驻留条目累计（mesh+image，幂等去重后）。
     pub resident_reclaimed_total: u64,
@@ -103,7 +103,7 @@ impl AssetRetirements {
         self.images.insert(id);
     }
 
-    /// `Unused` 事件计数（只观察不动作——本宿主是否触发是探针口径）。
+    /// `Unused` 事件计数（只观察不动作）。
     pub fn note_unused(&mut self) {
         self.stats.unused_events_total += 1;
     }
@@ -133,7 +133,7 @@ impl Plugin for AshAssetEventPlugin {
 
 /// 三类资产的事件与加载失败事件 reader。
 #[derive(SystemParam)]
-pub(crate) struct AssetEventReaders<'w, 's> {
+struct AssetEventReaders<'w, 's> {
     mesh_events: MessageReader<'w, 's, AssetEvent<Mesh>>,
     material_events: MessageReader<'w, 's, AssetEvent<StandardMaterial>>,
     image_events: MessageReader<'w, 's, AssetEvent<Image>>,
@@ -145,11 +145,9 @@ pub(crate) struct AssetEventReaders<'w, 's> {
 /// 事件读侧本体（单一入口）：三类资产的 `Modified` 进失效集、复活
 /// 并引用行重挂脏标；`Removed` 进卸载回收账 + 失败记录出清；`Unused`
 /// 计数 + 失败记录出清；`Added` 无条件参与复活/重挂；三类
-/// `AssetLoadFailedEvent` 进 failed 集 + 计量 + 一次可见告警。系统内固定次序
-/// = 先失败记账、后 AssetEvent 复活/重挂（同帧"失败+复活"确定性裁决，
-/// 不依赖两个无序系统）。无引用者的失败也计数（事件不误伤的镜像面）。
+/// `AssetLoadFailedEvent` 进 failed 集 + 计量 + 一次可见告警。无引用者的失败也计数。
 #[system]
-pub(crate) fn propagate_asset_changes(
+fn propagate_asset_changes(
     mut readers: AssetEventReaders,
     mut invalidations: ResMut<AssetInvalidations>,
     mut retirements: ResMut<AssetRetirements>,
@@ -184,7 +182,7 @@ pub(crate) fn propagate_asset_changes(
         warn!("资产加载失败贴图 {:?}（{}），出重试队列不再重试", event.id, event.error);
     }
     if failures > 0 {
-        info!("资产失败读侧:本帧 {failures} 个身份进 failed 集，行出队由 flush 盘点裁决");
+        info!("资产失败读侧:本帧 {failures} 个身份进 failed 集，行是否出队由 flush 盘点决定");
     }
     let mut modified_count = 0usize;
     let mut invalidating_count = 0usize; // mesh+image 的 Modified（进失效集，计量口径）
@@ -193,11 +191,9 @@ pub(crate) fn propagate_asset_changes(
     let asset_events_frame =
         mesh_events.len() + material_events.len() + image_events.len();
     let mut modified_materials: HashSet<AssetId<StandardMaterial>> = HashSet::new();
-    // 复活联动集（无条件参与）：failed 身份有新内容进场
-    //（文件修复后重载的 Added）或同身份重插（卸载后 `Assets::insert`）——
-    // 出 failed 集 + 引用行重挂脏标。失败的行在 flush 盘点时已出队（清脏标
-    // ），无联动则修复后的资产永不重试；卸载重插的行驻留已回收且行干净，
-    // 无联动则新内容永不上传。
+    // 复活联动集（无条件参与）：failed 身份有新内容进场（修复后重载的 Added）或
+    // 同身份重插（卸载后 `Assets::insert`）——出 failed 集 + 引用行重挂脏标。不联动
+    // 则失败行（flush 已清脏标）永不重试、卸载重插的干净行新内容永不上传。
     let mut revived_meshes: HashSet<AssetId<Mesh>> = HashSet::new();
     let mut revived_images: HashSet<AssetId<Image>> = HashSet::new();
 
@@ -314,11 +310,10 @@ pub(crate) fn propagate_asset_changes(
         ledger.mark_dirty(entity);
     }
 
-    let stats: &mut IncrementStats = &mut ledger.stats;
-    stats.asset_dirty_rows = requeued;
+    ledger.stats.asset_dirty_rows = requeued;
     info!(
         "资产事件:Modified {modified_count} / 忽略 {ignored_count},失效凭据 mesh {} + 贴图 {},\
-         关联重挂脏标 {requeued} 行;卸载回收账 mesh {} + 贴图 {} 待出账,Unused 累计 {}",
+         关联重挂脏标 {requeued} 行;卸载待回收 mesh {} + 贴图 {},Unused 累计 {}",
         invalidations.meshes.len(),
         invalidations.images.len(),
         retirements.meshes.len(),
@@ -328,8 +323,8 @@ pub(crate) fn propagate_asset_changes(
 }
 
 /// 材质五槽的资产身份（与 upload.rs 的 `TEXTURE_SLOTS` 同清单——槽清单是
-/// 两处共享的口径，改动必须同步）。
-fn material_texture_slots(m: &StandardMaterial) -> impl Iterator<Item = AssetId<Image>> + '_ {
+/// 共享口径，改动必须同步）。
+pub(crate) fn material_texture_slots(m: &StandardMaterial) -> impl Iterator<Item = AssetId<Image>> + '_ {
     [
         &m.base_color_texture,
         &m.metallic_roughness_texture,

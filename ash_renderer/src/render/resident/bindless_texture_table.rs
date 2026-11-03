@@ -203,13 +203,7 @@ impl BindlessTextureTable {
     /// 槽容量用完、采样器创建失败（已分的槽原样归还）。
     pub fn publish(&mut self, view: vk::ImageView, key: &SamplerKey) -> Result<SlotBinding> {
         let texture = self.texture_slots.alloc().ok_or_else(|| capacity_error("贴图", &self.texture_slots))?;
-        let (sampler, handle) = match self.acquire_sampler(key) {
-            Ok(acquired) => acquired,
-            Err(e) => {
-                self.texture_slots.release(texture);
-                return Err(e);
-            }
-        };
+        let (sampler, handle) = self.acquire_sampler(key).inspect_err(|_| self.texture_slots.release(texture))?;
         // 写入和声明对不上才会失败，属于代码错误，不回滚槽位
         let mut writer = DescriptorWriter::new(&BINDLESS_TEXTURE_SET_DESC, self.set);
         writer.image_at(0, texture, view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
@@ -260,13 +254,7 @@ impl BindlessTextureTable {
             return Ok((slot, shared.handle));
         }
         let slot = self.sampler_slots.alloc().ok_or_else(|| capacity_error("采样器", &self.sampler_slots))?;
-        let handle = match key.create_sampler(&self.device) {
-            Ok(handle) => handle,
-            Err(e) => {
-                self.sampler_slots.release(slot);
-                return Err(e);
-            }
-        };
+        let handle = key.create_sampler(&self.device).inspect_err(|_| self.sampler_slots.release(slot))?;
         self.sampler_slot_by_key.insert(*key, slot);
         self.samplers.insert(slot, SharedSampler { key: *key, handle, users: 1 });
         Ok((slot, handle))
@@ -316,7 +304,7 @@ fn check_uab_limits(instance: &Instance, physical_device: vk::PhysicalDevice) ->
         ("全池总额", di_props.max_update_after_bind_descriptors_in_all_pools, need * 2),
     ];
     let report: Vec<String> = checks.iter().map(|(name, have, need)| format!("{name} {have}/{need}")).collect();
-    info!("UAB 限额对账(实测/需要):{}", report.join(" | "));
+    info!("UAB 限额核对(实测/需要):{}", report.join(" | "));
     if let Some((name, have, need)) = checks.iter().find(|(_, have, need)| u64::from(*have) < *need) {
         return Err(VulkanError::Init(format!(
             "UAB 限额不够布局长度 {TABLE_CAPACITY}:{name} 实测 {have} < 需要 {need}"
@@ -361,7 +349,7 @@ fn upload_fallback(
             // CONCURRENT 共享，不需要队列族所有权转移
             ..Default::default()
         })?
-        .ok_or_else(|| VulkanError::Upload("内部矛盾:fallback 批次非空却未产生提交".into()))?;
+        .ok_or_else(|| VulkanError::Contract("内部矛盾:fallback 批次非空却未产生提交".into()))?;
     // 坑：必须当场等完。GpuImage 的 Drop 不等 GPU，建表后面任一步失败丢掉它时拷贝可能还在写
     uploader.wait_until(ticket)?;
     Ok(image)

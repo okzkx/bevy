@@ -1,4 +1,4 @@
-//! 定长 GPU 记录的字节打包标准件：标量一律小端（`to_le_bytes`），矩阵按列主序
+//! 定长 GPU 记录的字节打包：标量一律小端（`to_le_bytes`），矩阵按列主序
 //! （`Mat4::to_cols_array`）展平，与 WGSL storage/uniform/push 的读法一致。
 //!
 //! 偏移由调用方按各自布局镜像（`offset_of!` 静态断言表）给出；`out` 是定长记录
@@ -6,12 +6,10 @@
 
 use bevy::math::Mat4;
 
-/// `out[off..off + 4]` ← `v`（小端）。
 pub fn put_u32(out: &mut [u8], off: usize, v: u32) {
     out[off..off + 4].copy_from_slice(&v.to_le_bytes());
 }
 
-/// `out[off..off + 4]` ← `v`（小端）。
 pub fn put_f32(out: &mut [u8], off: usize, v: f32) {
     out[off..off + 4].copy_from_slice(&v.to_le_bytes());
 }
@@ -30,12 +28,11 @@ pub fn put_f32s(out: &mut [u8], off: usize, vs: &[f32]) {
     }
 }
 
-/// `out[off..off + 16]` ← vec4。
 pub fn put_vec4(out: &mut [u8], off: usize, v: &[f32; 4]) {
     put_f32s(out, off, v);
 }
 
-/// `out[off..off + 64]` ← mat4x4f（列主序：flat = col * 4 + row）。
+/// 写 64B，列主序：flat = col * 4 + row。
 pub fn put_mat4(out: &mut [u8], off: usize, m: &Mat4) {
     put_f32s(out, off, &m.to_cols_array());
 }

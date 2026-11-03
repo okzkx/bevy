@@ -1,4 +1,4 @@
-//! 8.3 CSM 级联阴影宿主半边：级联矩阵计算、shadow UBO 打包、开关与诊断账面。
+//! CSM 级联阴影的宿主半边：级联矩阵计算、shadow UBO 打包、开关与诊断账面。
 //!
 //! 机制：
 //!
@@ -16,36 +16,36 @@
 //!   ——越靠近太阳值越大，与主深度链 reverse-Z（清 0 + GREATER）同一方向。
 //! - **bias 世界量纲**：UBO 附带逐级 texel 世界尺寸与盒深倒数，合成端的法线
 //!   抬升、深度 bias、半影半径都按米算再折回 texel / NDC，换级联不失真。
-//! - **平面族**：宿主 Gribb-Hartmann 从各 cascade_view_proj 提取六平面进
-//!   shadow UBO（4×6=24 平面 384B 超 push 上限，故走 UBO）——`cull.wgsl`
-//!   内联四 cascade 标记与本 CPU 参照同源同款。
-//! - **时序**：shadow UBO 帧槽环（wait_for_slot fence 纪律）；GPU shadow
-//!   标记诊断读数 = 本帧槽两帧前 compute 输出（与主标记同款）。
+//! - **平面族**：宿主从各 cascade_view_proj 提取六平面进 shadow UBO（4×6=24 平面
+//!   384B 超 push 上限，故走 UBO），`cull.wgsl` 内联四 cascade 标记。
+//! - **时序**：shadow UBO 是帧槽环（host 写在 `wait_for_slot` 之后）；GPU shadow
+//!   标记诊断读数 = 本帧槽两帧前 compute 输出。
 
 use bevy::math::{Mat4, Vec3, Vec4};
 use bevy::prelude::Resource;
 
+use crate::common::bytes::{put_f32, put_f32s, put_mat4, put_vec4};
 
 /// 级联数量。
-/// ShadowUniformsLayout 的 Vulkan uniform buffer 总长（宿主打包与资源 range 共用）。
-pub const SHADOW_UBO_SIZE: u32 = 736;
 pub const SHADOW_CASCADES: usize = 4;
+/// `ShadowUniformsLayout` 的 Vulkan uniform buffer 总长（宿主打包与资源 range 共用）。
+pub const SHADOW_UBO_SIZE: u32 = 736;
 /// shadow map 边长（D32_SFLOAT，正方形）。
 pub const SHADOW_MAP_SIZE: u32 = 2048;
 /// 级联覆盖近端（米；主相机 near 以内不进 shadow 覆盖面）。
-pub(crate) const SHADOW_NEAR_DISTANCE: f32 = 0.5;
+const SHADOW_NEAR_DISTANCE: f32 = 0.5;
 /// 级联覆盖远端下限（米）：场景很小或无场景时也保证这么远有阴影。
-pub(crate) const SHADOW_FAR_MIN: f32 = 80.0;
+const SHADOW_FAR_MIN: f32 = 80.0;
 /// 级联覆盖远端上限（米）：防超大地面把末级 texel 拉到米级。
-pub(crate) const SHADOW_FAR_MAX: f32 = 400.0;
+const SHADOW_FAR_MAX: f32 = 400.0;
 /// PSSM 混合系数：1 = 纯 log（近级极窄），0 = 均匀（近处分辨率不足）。
-pub const SHADOW_SPLIT_LAMBDA: f32 = 0.75;
+const SHADOW_SPLIT_LAMBDA: f32 = 0.75;
 
 /// 级间视深（升序，含首尾：`s[0]=near` … `s[4]=far`，长度 = 级数+1）。
 /// split_i = λ·near·(far/near)^(i/n) + (1−λ)·(near + (far−near)·i/n)；
 /// n=4 的 log 公比用双平方根展开。
 #[must_use]
-pub(crate) fn cascade_slice_boundaries(near: f32, far: f32) -> [f32; SHADOW_CASCADES + 1] {
+fn cascade_slice_boundaries(near: f32, far: f32) -> [f32; SHADOW_CASCADES + 1] {
     let step = (far / near).max(1.0).sqrt().sqrt();
     let mut bounds = [0.0_f32; SHADOW_CASCADES + 1];
     let mut log = near;
@@ -88,7 +88,7 @@ pub struct ShadowCascades {
 
 /// 视深 → 无限反向透视的 NDC z（z_ndc = near/d，d ≤ near 时夹到 1）。
 #[must_use]
-pub fn view_depth_to_ndc_z(near: f32, d: f32) -> f32 {
+fn view_depth_to_ndc_z(near: f32, d: f32) -> f32 {
     (near / d.max(near)).min(1.0)
 }
 
@@ -180,7 +180,7 @@ pub fn cascade_matrices(input: &ShadowCascadeInput) -> ShadowCascades {
 /// shadow UBO 的宿主侧取数产物（draw_frame 组装，[`pack_shadow_uniforms`] 排布）。
 pub struct ShadowUniformsData {
     pub cascade_view_proj: [Mat4; SHADOW_CASCADES],
-    /// 4×6 平面（Gribb-Hartmann，半空间 dot(p,plane)≥0 内侧——与 5.2 同款）。
+    /// 4×6 平面（半空间 dot(p,plane)≥0 为内侧）。
     pub planes: [Vec4; SHADOW_CASCADES * 6],
     /// 各 cascade 远端视深（分割带；cascade i 的近端 = i==0 ? near : splits[i-1]）。
     pub splits: [f32; SHADOW_CASCADES],
@@ -190,8 +190,7 @@ pub struct ShadowUniformsData {
     pub camera_pos: [f32; 4],
     /// shadow map 边长（PCSS 采样核的 texel 归一）。
     pub map_size: f32,
-    /// 开关旗标（0/1，composite 采样旁路面——BRP shadow_set 直达帧 UBO，
-    /// 关 = shadow_visibility 恒 1）。
+    /// 开关旗标（0/1，合成端读：关 = shadow_visibility 恒 1）。
     pub enabled: f32,
     /// 逐级联 texel 世界边长（米）。
     pub texel_world: [f32; SHADOW_CASCADES],
@@ -199,8 +198,8 @@ pub struct ShadowUniformsData {
     pub inv_span: [f32; SHADOW_CASCADES],
 }
 
-/// [`pack_shadow_uniforms`] 的 WGSL 布局镜像（`shadow_write.wgsl`/`shadow_build.wgsl`/
-/// `gbuffer_composite.wgsl` 的 `ShadowUniforms` 同序静态互证）。
+/// [`pack_shadow_uniforms`] 的 WGSL 布局镜像（与 `common/shadow_ubo.wgsl` 的
+/// `ShadowUniforms` 对照；WGSL 侧 `enabled` 落在 `map_size.y`）。
 #[repr(C)]
 struct ShadowUniformsLayout {
     cascade_view_proj: [[f32; 4]; 4 * 4],
@@ -209,7 +208,8 @@ struct ShadowUniformsLayout {
     camera_forward: [f32; 4],
     camera_pos: [f32; 4],
     map_size: f32,
-    _pad: [f32; 3],
+    enabled: f32,
+    _pad: [f32; 2],
     texel_world: [f32; 4],
     inv_span: [f32; 4],
 }
@@ -220,50 +220,35 @@ const _: () = {
     assert!(std::mem::offset_of!(ShadowUniformsLayout, camera_forward) == 656);
     assert!(std::mem::offset_of!(ShadowUniformsLayout, camera_pos) == 672);
     assert!(std::mem::offset_of!(ShadowUniformsLayout, map_size) == 688);
+    assert!(std::mem::offset_of!(ShadowUniformsLayout, enabled) == 692);
     assert!(std::mem::offset_of!(ShadowUniformsLayout, texel_world) == 704);
     assert!(std::mem::offset_of!(ShadowUniformsLayout, inv_span) == 720);
     assert!(std::mem::size_of::<ShadowUniformsLayout>() as u32 == SHADOW_UBO_SIZE);
 };
 
-/// mat4 列主序展平（与 pack_frame_uniforms 的 to_cols_array 同一约定）。
+/// 按 [`ShadowUniformsLayout`] 偏移排布 736B UBO 字节。
 #[must_use]
 pub fn pack_shadow_uniforms(d: &ShadowUniformsData) -> [u8; SHADOW_UBO_SIZE as usize] {
     let mut out = [0u8; SHADOW_UBO_SIZE as usize];
-    let mut put = |o: usize, b: &[u8]| out[o..o + b.len()].copy_from_slice(b);
     for (i, m) in d.cascade_view_proj.iter().enumerate() {
-        for (k, v) in m.to_cols_array().iter().enumerate() {
-            put(i * 64 + k * 4, &v.to_le_bytes());
-        }
+        put_mat4(&mut out, i * 64, m);
     }
     for (i, p) in d.planes.iter().enumerate() {
-        for (k, v) in p.to_array().iter().enumerate() {
-            put(256 + i * 16 + k * 4, &v.to_le_bytes());
-        }
+        put_vec4(&mut out, 256 + i * 16, &p.to_array());
     }
-    for (k, v) in d.splits.iter().enumerate() {
-        put(640 + k * 4, &v.to_le_bytes());
-    }
-    for (k, v) in d.camera_forward.iter().enumerate() {
-        put(656 + k * 4, &v.to_le_bytes());
-    }
-    for (k, v) in d.camera_pos.iter().enumerate() {
-        put(672 + k * 4, &v.to_le_bytes());
-    }
-    put(688, &d.map_size.to_le_bytes());
-    put(692, &d.enabled.to_le_bytes());
-    for (k, v) in d.texel_world.iter().enumerate() {
-        put(704 + k * 4, &v.to_le_bytes());
-    }
-    for (k, v) in d.inv_span.iter().enumerate() {
-        put(720 + k * 4, &v.to_le_bytes());
-    }
+    put_f32s(&mut out, 640, &d.splits);
+    put_vec4(&mut out, 656, &d.camera_forward);
+    put_vec4(&mut out, 672, &d.camera_pos);
+    put_f32(&mut out, 688, d.map_size);
+    put_f32(&mut out, 692, d.enabled);
+    put_f32s(&mut out, 704, &d.texel_world);
+    put_f32s(&mut out, 720, &d.inv_span);
     out
 }
 
 /// 阴影开关（egui 与 BRP `shadow_set` 写，draw_frame/录制链读）。
-/// 关 = shadow 剔除标记/命令/绘制/采样全链旁路：cull 不写 shadow 标记
-///（host 填全可见保读数语义）、shadow_build/shadow pass/composite 采样整段跳过，
-/// 画面与 8.2 基线一致。
+/// 关 = shadow_build、shadow pass 整段跳过，合成端旁路采样，host 把标记环填全可见
+/// （读数语义），画面与无阴影一致。
 #[derive(Resource)]
 pub struct ShadowSettings {
     pub enabled: bool,
@@ -275,12 +260,12 @@ impl Default for ShadowSettings {
     }
 }
 
-/// 阴影诊断账面（每帧 draw_frame 刷新，BRP 读数口；只进计量——诊断性
-/// 回读边界照 5.2 拍板）。读数 = 本帧槽两帧前 compute 输出。
+/// 阴影诊断读数（draw_frame 每帧刷新，BRP 读）。只做计量。读数 = 本帧槽两帧前
+/// compute 输出。
 #[derive(Resource, Default)]
 pub struct ShadowDiagnostics {
     pub enabled: bool,
-    /// dispatch 上界（实例槽 bump bound，与主标记同款）。
+    /// dispatch 上界（实例槽 bump bound）。
     pub bound: u32,
     /// 逐 cascade GPU 可见标记数（在场可绘行中 mark=1）。
     pub gpu_visible: [u32; SHADOW_CASCADES],

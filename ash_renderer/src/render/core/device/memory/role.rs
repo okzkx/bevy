@@ -22,7 +22,7 @@ pub enum BufferRole {
     Staging,
     /// 回读：transfer 写，宿主读。
     Readback,
-    /// 每帧 UBO（set1 的载体）：宿主每帧写，着色器读；每帧槽一个 buffer。
+    /// 每帧 UBO（frame 描述符集的载体）：宿主每帧写，着色器读；每帧槽一个 buffer。
     FrameUniform,
     /// 宿主可见的 storage：帧槽环、探针参数表这类宿主直写/直读、GPU 按索引读写的数据。
     Storage,
@@ -36,8 +36,8 @@ pub enum BufferRole {
 }
 
 impl BufferRole {
-    /// 角色规格。三个 `TRANSFER_SRC` 是给内容抽查用的：池迁移/扩容、回读校验和 BRP 环
-    /// 对账都要把这些 buffer 当拷贝源。
+    /// 角色规格。Staging 以外的 `TRANSFER_SRC` 是给内容抽查用的：池迁移/扩容、回读校验
+    /// 和 BRP 环对账都要把这些 buffer 当拷贝源。
     #[must_use]
     pub fn spec(self) -> RoleSpec {
         use vk::BufferUsageFlags as U;

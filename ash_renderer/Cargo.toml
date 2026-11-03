@@ -5,21 +5,14 @@ edition = "2024"
 publish = false
 license = "MIT OR Apache-2.0"
 
-# 自研 ash Vulkan 渲染器（lib）+ 宿主壳（bin）。
-# 落位决策与施工记录：.agents/docs/2-宿主壳/
-# bevy 用默认 feature，对齐 step1《DefaultPlugins分类》"默认 feature 下 34 条插件"的审计口径；
-# 渲染族插件在运行时 disable（step2 施工项②，实测后再评估是否收窄 feature 面）。
-# 3.11 起加开 debug：ComponentInfo::name()/DebugName 实名（官方 local_inspector 同款口径），
-# 组件全清单展示依赖它；只影响类型名字符串，无行为差异。
-# 3.12 起加开 bevy_remote：BRP 远程直控通道（AI 免开 UI 查询/改值/推拉相机），
-# 官方内置方法随 RemotePlugin 默认注册，宿主再补三个场景语义自定义方法（src/remote.rs）。
-# 4.4 起加开 file_watcher：热重载链的自动通道（notify-debouncer 监听 assets 目录，
-# 文件变更 → AssetServer 重载 → AssetEvent 链路；watch_for_changes_override 缺省
-# = cfg!("watch")，feature 开启即默认监听）。依赖面：notify-debouncer-full 进 lock
-# （multi_threaded 本就在 bevy 默认特征面内，无新增执行器）。
-# 7.1 起加开 jpeg：bevy 默认特征面只开 png/hdr，真实资产包贴图常为 .jpg
-#（Sponza 69 张全 jpg）——缺 feature 时 loader 按 invalid image extension 拒载，
-# 材质贴图槽挂着永不到货的 Handle，画面静默回退。
+# 自研 ash Vulkan 渲染器（lib）+ 宿主壳（bin）。设计资料：.agents/docs/2-宿主壳/
+# bevy 用默认 feature，渲染族插件在运行时 disable。额外 feature：
+# - debug：ComponentInfo::name()/DebugName 给实名，组件全清单展示依赖它；只影响类型名字符串。
+# - bevy_remote：BRP 远程直控通道（宿主再补场景语义自定义方法，见 src/remote/）。
+# - file_watcher：热重载的自动通道，监听 assets 目录，文件变更 → AssetServer 重载 →
+#   AssetEvent；feature 开启即默认监听。
+# - jpeg：默认只开 png/hdr。坑：缺它时 loader 按 invalid image extension 拒载 .jpg，
+#   材质贴图槽挂着永不到货的 Handle，画面静默回退（如 Sponza 69 张全 jpg）。
 [[bin]]
 name = "ash_renderer"
 path = "src/main.rs"
@@ -36,15 +29,15 @@ raw-window-handle = "0.6"
 # 类型化错误：帧循环要对 ERROR_OUT_OF_DATE_KHR 做"重建重试"分支，String 无法 match
 thiserror = "2"
 # bevy_image 的 TextureFormat/TextureDimension/Extent3d 真身（bevy_image 私有 use
-# 不再出口；3.3.1 图像映射按格式名核对 sRGB/线性角色），版本对齐 lock
+# 不再出口；图像映射按格式名核对 sRGB/线性角色），版本对齐 lock
 wgpu-types = { version = "30.0.1", default-features = false }
 egui = { version = "0.36.2", default-features = false, features = ["default_fonts"] }
 # #[system] 透明标注：具名系统函数的阅读路标 + 编译期校验（不能带 self），零运行时成本
 ash_macros = { path = "../ash_macros" }
 
-# 7.5 持续监控的进程/系统内存读数（Windows 专用）：GetProcessMemoryInfo +
-# GlobalMemoryStatusEx，按最小 feature 面声明（Foundation = HANDLE、Threading =
-# GetCurrentProcess）。版本对齐 lock（bevy 传递依赖已带 0.62）。
+# 进程/系统内存读数（Windows 专用）：GetProcessMemoryInfo + GlobalMemoryStatusEx，按
+# 最小 feature 面声明（Foundation = HANDLE、Threading = GetCurrentProcess）。版本对齐
+# lock（bevy 传递依赖已带 0.62）。
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",
@@ -53,11 +46,9 @@ windows = { version = "0.62", features = [
     "Win32_System_Threading",
 ] }
 
-# WGSL → SPIR-V 编译（3.3 前置闸门）：精确锁版锁行为（选型记录 2026-09-24），
-# lock 内已有 30.0.1（wgpu 传递依赖），features 恰为 wgsl-in/spv-out 两个方向。
-# build-dependencies = 正式编译路径（build.rs 编译 shaders/*.wgsl，3.3.3
-# 起兑现"runtime+capability 补丁器"定案）；dev-dependencies = bindless_probe 的
-# 内联编译路径（闸门探针保持自含）。
+# WGSL → SPIR-V 编译：精确锁版锁行为，lock 内已有 30.0.1（wgpu 传递依赖），features
+# 恰为 wgsl-in/spv-out 两个方向。build-dependencies = 正式路径（build.rs 编译
+# shaders/*.wgsl）；dev-dependencies = bindless_probe 的内联编译（探针保持自含）。
 [build-dependencies]
 naga = { version = "=30.0.1", features = ["wgsl-in", "spv-out"] }
 

@@ -14,6 +14,8 @@ use bevy::{
 
 use ash_macros::system;
 
+use super::PendingReport;
+
 /// 默认场景：Sponza 在 assets/ 下的相对路径（1 gltf + 1 bin + 69 贴图；节点
 /// scale 0.008 把 ~3700 单位的源模型缩到 ~30×12×18 米世界尺寸；1 mesh 拆
 /// 103 primitive，25 材质全带 baseColor+metallicRoughness，69 张贴图全部被引用）。
@@ -47,17 +49,11 @@ pub(super) fn load_scene(mut commands: Commands, server: Res<AssetServer>) {
 }
 
 /// 到货报告（Update，报一次即歇）：primitive 实体出现 = 实体树已展开，
-/// 此刻的容器统计就是三钩子的实际触发证据。10s 未见实体按 Tier① warn 一次
+/// 此刻的容器统计就是三个补位的实际生效证据。超时未见实体 warn 一次
 ///（加载失败不是本系统可修的，根因看资产侧错误日志），帧循环照常。
-#[derive(Default)]
-pub(super) struct ArrivalState {
-    done: bool,
-    waited_secs: f32,
-}
-
 #[system]
 pub(super) fn report_scene_arrival(
-    mut state: Local<ArrivalState>,
+    mut state: Local<PendingReport>,
     time: Res<Time>,
     meshes: Res<Assets<Mesh>>,
     std_materials: Res<Assets<StandardMaterial>>,
@@ -70,17 +66,15 @@ pub(super) fn report_scene_arrival(
     }
     let total = primitives.iter().count();
     if total == 0 {
-        state.waited_secs += time.delta_secs();
-        if state.waited_secs > 10.0 {
+        if state.timed_out(time.delta_secs()) {
             warn!("场景进场 10s 未见 primitive 实体——资产路径/loader/依赖链有问题，根因看上方加载错误日志");
-            state.done = true;
         }
         return;
     }
     let with_material = with_material.iter().count();
     if scene_override().is_some() {
         info!(
-            "场景进场到货（--scene 自定义，无期望值口径）：primitive 实体 {total}，带 MeshMaterial3d {with_material}/{total}；容器——Mesh {}、StandardMaterial {}、Image {}",
+            "场景进场到货（--scene 自定义，无期望值）：primitive 实体 {total}，带 MeshMaterial3d {with_material}/{total}；容器——Mesh {}、StandardMaterial {}、Image {}",
             meshes.len(),
             std_materials.len(),
             images.len(),

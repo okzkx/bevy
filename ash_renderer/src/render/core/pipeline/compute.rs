@@ -4,9 +4,9 @@
 use ash::{vk, Device};
 
 use crate::common::error::{Result, VulkanError};
-use crate::render::Context;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
+use crate::render::core::device::context::Context;
 use crate::render::core::record::compute::ComputeHandles;
 
 /// 单入口 compute 管线 + pipeline layout。set layouts 是借用（归各自持有方
@@ -54,8 +54,8 @@ impl ComputePipeline {
 
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
-        // 契约边界：不等 GPU——退出排空由 teardown_vulkan 的 device_wait_idle
-        // 先于一切资源 Drop 完成。先拆管线再拆 layout。
+        // 不等 GPU：退出时 teardown_vulkan 的 device_wait_idle 先于一切资源 Drop。
+        // 先拆管线再拆 layout。
         unsafe {
             self.device.destroy_pipeline(self.handles.pipeline, None);
             self.device.destroy_pipeline_layout(self.handles.layout, None);

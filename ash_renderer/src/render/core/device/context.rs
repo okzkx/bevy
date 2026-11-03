@@ -18,6 +18,8 @@ use raw_window_handle::RawWindowHandle;
 
 use crate::common::error::{Result, VulkanError};
 
+use super::memory::contract::MemoryContract;
+
 const VALIDATION_LAYER: &std::ffi::CStr = c"VK_LAYER_KHRONOS_validation";
 
 #[cfg(windows)]
@@ -117,24 +119,11 @@ pub struct Context {
     pub transfer_queue_family_index: u32,
     pub transfer_queue: vk::Queue,
     /// 内存类型/堆表与 nonCoherentAtomSize，建设备时查一次；内存选型都从这里取，不各自重查。
-    memory_contract: crate::render::MemoryContract,
+    memory_contract: MemoryContract,
     /// VK_EXT_debug_utils 的设备侧 loader（对象命名用；扩展常开）。
     debug_device: debug_utils::Device,
     /// 是否启用了 VK_EXT_memory_budget（设备支持才启用）。
     budget_enabled: bool,
-}
-
-impl Context {
-    /// 给 Vulkan 对象挂调试名（best-effort：失败只影响报错可读性，不致命）。
-    /// 对象类型从句柄类型推导（ash 的 Handle trait）。
-    pub(crate) fn name_object<H: vk::Handle>(&self, handle: H, name: &str) {
-        let c = match std::ffi::CString::new(name) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let info = vk::DebugUtilsObjectNameInfoEXT::default().object_handle(handle).object_name(c.as_c_str());
-        let _ = unsafe { self.debug_device.set_debug_utils_object_name(&info) };
-    }
 }
 
 impl Context {
@@ -354,14 +343,14 @@ impl Context {
         ];
         if let Some((name, _)) = required_di.iter().find(|(_, v)| *v == 0) {
             return Err(VulkanError::Init(format!(
-                "物理设备 descriptor indexing 特性不足：{name} 不支持（bindless 路线无传统回退，该设备出局）"
+                "物理设备 descriptor indexing 特性不足：{name} 不支持（bindless 路线无传统回退，该设备不可用）"
             )));
         }
         // indirect 一次多 draw 必需，没有逐 draw 回退路径。
         // 坑：未启用时 drawCount>1 的 cmd_draw_indexed_indirect 违反 VUID-vkCmdDrawIndexedIndirect-drawCount-02718
         if !multi_draw_indirect_supported {
             return Err(VulkanError::Init(
-                "物理设备 feature 不足：multi_draw_indirect 不支持（5.3 indirect 闭环无逐 draw 回退路径，该设备出局）".into(),
+                "物理设备 feature 不足：multi_draw_indirect 不支持（indirect 绘制无逐 draw 回退路径，该设备不可用）".into(),
             ));
         }
         // 20 个分位的支持情况全部记日志，以后要多启用哪一位先查这行
@@ -417,21 +406,19 @@ impl Context {
         // 坑：view 换格式要求图像带 MUTABLE_FORMAT，swapchain 图像靠本扩展加格式清单（见 swapchain.rs）实现；不支持就报错退出
         let device_ext_props = unsafe { instance.enumerate_device_extension_properties(physical_device) }
             .map_err(|e| VulkanError::Init(format!("枚举设备扩展失败: {e}")))?;
-        let has_mutable_format = device_ext_props.iter().any(|p| unsafe {
-            std::ffi::CStr::from_ptr(p.extension_name.as_ptr()) == ash::khr::swapchain_mutable_format::NAME
-        });
-        if !has_mutable_format {
+        let has_device_ext = |name: &std::ffi::CStr| {
+            device_ext_props
+                .iter()
+                .any(|p| unsafe { std::ffi::CStr::from_ptr(p.extension_name.as_ptr()) } == name)
+        };
+        if !has_device_ext(ash::khr::swapchain_mutable_format::NAME) {
             return Err(VulkanError::Init(
-                "设备不支持 VK_KHR_swapchain_mutable_format——输出编码定案（UNORM 底板 + SRGB view 别名）无法落地，出局".into(),
+                "设备不支持 VK_KHR_swapchain_mutable_format——输出编码方案（UNORM 底板 + SRGB view 别名）无法落地，该设备不可用".into(),
             ));
         }
 
         // 显存预算扩展可选：不支持就不开，只是监控面板隐藏显存行，不影响渲染
-        let budget_enabled = unsafe { instance.enumerate_device_extension_properties(physical_device) }
-            .unwrap_or_default()
-            .iter()
-            .any(|props| unsafe { std::ffi::CStr::from_ptr(props.extension_name.as_ptr()) }
-                == ash::ext::memory_budget::NAME);
+        let budget_enabled = has_device_ext(ash::ext::memory_budget::NAME);
         let mut dev_exts = vec![
             ash::khr::swapchain::NAME.as_ptr(),
             ash::khr::swapchain_mutable_format::NAME.as_ptr(),
@@ -471,10 +458,9 @@ impl Context {
             "专用 transfer 族（无 GRAPHICS）"
         };
         // Safety：physical_device 来自枚举结果，instance 仍存活
-        let memory_contract =
-            unsafe { crate::render::MemoryContract::new(&instance, physical_device) };
+        let memory_contract = unsafe { MemoryContract::new(&instance, physical_device) };
         info!(
-            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}（GRAPHICS+COMPUTE+PRESENT，5.2 前置闸门①实测钉明）  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  features[支持→已启用]: timelineSemaphore {}→on  dynamicRendering {}→on  descriptorIndexing+4 位 {}→on  multiDrawIndirect {}→on（5.3 闸门①）  maxDrawIndirectCount {}（5.3 闸门③留痕）  swapchain_mutable_format on  synchronization2 off（屏障走传统形状）  验证层 {}",
+            "Vulkan 进程级上下文就绪: API v{}.{}.{}  设备 {dev_name} ({:?})  图形队列族 {queue_family_index}（GRAPHICS+COMPUTE+PRESENT 同族）  transfer: 族 {transfer_queue_family_index}（{transfer_note}）  features[支持→已启用]: timelineSemaphore {}→on  dynamicRendering {}→on  descriptorIndexing+4 位 {}→on  multiDrawIndirect {}→on  maxDrawIndirectCount {}  swapchain_mutable_format on  synchronization2 off（屏障走传统形状）  验证层 {}",
             vk::api_version_major(dev_props.api_version),
             vk::api_version_minor(dev_props.api_version),
             vk::api_version_patch(dev_props.api_version),
@@ -510,8 +496,16 @@ impl Context {
 
     /// 内存契约：内存类型选择和 atom 对齐都以它为准。
     #[must_use]
-    pub fn memory_contract(&self) -> &crate::render::MemoryContract {
+    pub fn memory_contract(&self) -> &MemoryContract {
         &self.memory_contract
+    }
+
+    /// 给 Vulkan 对象挂调试名（best-effort：失败只影响报错可读性，不致命）。
+    /// 对象类型从句柄类型推导（ash 的 Handle trait）。
+    pub(crate) fn name_object<H: vk::Handle>(&self, handle: H, name: &str) {
+        let Ok(c) = std::ffi::CString::new(name) else { return };
+        let info = vk::DebugUtilsObjectNameInfoEXT::default().object_handle(handle).object_name(c.as_c_str());
+        let _ = unsafe { self.debug_device.set_debug_utils_object_name(&info) };
     }
 
     /// 读各内存堆的 budget/usage；未启用 VK_EXT_memory_budget 时返回 `None`。每次调用现查，开销可忽略。

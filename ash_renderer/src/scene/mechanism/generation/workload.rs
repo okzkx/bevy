@@ -3,6 +3,8 @@
 
 use bevy::prelude::*;
 
+use ash_macros::system;
+
 /// 每帧变更设置；默认关闭，`enabled = false` 或 `rows = 0` 时不修改实体。
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct WorkloadSettings {
@@ -25,8 +27,9 @@ impl Plugin for AshWorkloadPlugin {
 /// 又不致旋转出视锥造成剔除读数漂移干扰对照。
 const SPIN_DEG_PER_SEC: f32 = 30.0;
 
-/// 每帧对迭代序前 `rows` 个可渲染 primitive 追加绕 Y 旋转。旋转不改 AABB
-/// 包围球心距（保守包围体语义下不引入误剔）。
+/// 每帧对迭代序前 `rows` 个可渲染 primitive 追加绕 Y 旋转。旋转不改
+/// 包围球心距，保守包围体下不会误剔。
+#[system]
 fn spin_workload(
     settings: Res<WorkloadSettings>,
     time: Res<Time>,

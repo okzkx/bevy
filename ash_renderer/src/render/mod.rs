@@ -12,20 +12,27 @@
 //! 生命周期分四级：进程级（随进程活）、resize 级（随窗口尺寸重建）、资产级（随资产增删）、
 //! 帧级（按帧槽轮转）；各类型属于哪一级写在它自己的文档里。
 //!
+//! `layout_registry` 登记全部管线/set 声明，要引用 `passes` 与 `resident`，所以放在本层
+//! 根上而不是 `core`；布局契约测试跟着它。
+//!
 //! 拆分点：同步对象不挂任何一张 swapchain image 上——重建 swapchain 时原地不动；
 //! 上层（driver 的帧编排、overlay、remote）只消费本层重出口的类型，不进子模块
 //! 内部；本层不依赖 common 以外的任何顶层模块。
 
 mod core;
 mod frame;
+mod layout_registry;
 mod passes;
 mod resident;
 mod stats;
 
+#[cfg(test)]
+mod layout_contract_tests;
+
 pub use self::core::device::context::{Context, MAX_FRAMES_IN_FLIGHT};
 pub use self::core::target::color::HDR_FORMAT;
 pub use self::core::binding::set_layout::{SetLayout, SetLayouts};
-pub(crate) use self::core::binding::layout_registry::{ALL_PIPELINES, ALL_SETS};
+pub(crate) use layout_registry::{ALL_PIPELINES, ALL_SETS};
 pub use passes::visibility::cull::{
     aabb_visible, frustum_planes, CullDiagnostics, CullDraw, CullPass, CullSettings,
 };

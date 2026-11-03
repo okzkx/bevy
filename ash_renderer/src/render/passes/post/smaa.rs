@@ -1,16 +1,14 @@
-//! 8.5 SMAA 资源族（官方 1x 三 pass）：LDR 中间目标（tonemap 落点）+ edges/
-//! blend 中间目标 + 两张预生成 LUT（area 160×560 R8G8 / search 64×16 R8，
-//! 源 = bevy_anti_alias 内置 ktx2 转档）+ SmaaInfo UBO 帧槽环 + 描述符。
+//! SMAA 资源（1x，三 pass）：LDR 中间目标（tonemap 落点）+ edges/blend 中间目标 +
+//! 两张预生成 LUT（area 160×560 / search 64×16，由 bevy_anti_alias 内置 ktx2 转成
+//! PNG）+ SmaaInfo UBO 帧槽环 + 描述符。
 //!
-//! 链路：composite HDR → tonemap（渲到 LDR UNORM 目标——线性域，UNORM 仅
-//! clamp）→ edge 检测（读 LDR）→ blend 权重（读 edges + LUT）→ neighborhood
-//! 混合（读 LDR + blend → swapchain，SRGB view ROP 编码恰好一次）。三 pass
-//! 中间目标 UNORM 存储 + 线性采样 = 线性域抗锯齿（官方"非 sRGB 读写"条款
-//! 的线性管线实现：全链无编码，编码仍在终点 view 恰好一次）。
+//! 链路：composite HDR → tonemap（写 LDR UNORM 目标，线性域，UNORM 只做 clamp）→
+//! edge 检测（读 LDR）→ blend 权重（读 edges + LUT）→ neighborhood 混合（读 LDR +
+//! blend → swapchain）。中间目标全是 UNORM 线性存储，sRGB 编码只在写 swapchain 的
+//! SRGB view 时做一次。
 //!
-//! 关闭路径：smaa_set off = edge/blend 跳过、neighborhood 直通（shader 内
-//! 旁路），tonemap → neighborhood → swapchain 仍走全链（画面回 8.4 基线）。
-//! 目标布局纪律照 bloom：进出屏障恒录（UNDEFINED 进 = 内容可弃）。
+//! 关闭时（`smaa_set` off）跳过 edge/blend，neighborhood 在 shader 里直通，链路其余
+//! 不变。中间目标每轮从 UNDEFINED 进附件（内容可弃），写完转可采样。
 
 use ash::{vk, Device};
 use bevy::image::{CompressedImageFormats, Image, ImageType};
@@ -26,7 +24,7 @@ use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 use crate::render::core::target::color::ColorTarget;
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
-use crate::render::core::pipeline::graphics::PipelineRef;
+use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
@@ -34,13 +32,14 @@ use crate::render::core::binding::shader_abi;
 const SMAA_AREA_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_area_lut.png");
 const SMAA_SEARCH_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_search_lut.png");
 
-pub const SMAA_BINDING_TEX0: u32 = 0;
-pub const SMAA_BINDING_INFO: u32 = 1;
-pub const SMAA_BINDING_SAMPLER: u32 = 2;
-pub const SMAA_BINDING_TEX1: u32 = 3;
-pub const SMAA_BINDING_TEX2: u32 = 4;
+const SMAA_BINDING_TEX0: u32 = 0;
+const SMAA_BINDING_INFO: u32 = 1;
+const SMAA_BINDING_SAMPLER: u32 = 2;
+const SMAA_BINDING_TEX1: u32 = 3;
+const SMAA_BINDING_TEX2: u32 = 4;
 
-pub(crate) const SMAA_INFO_SIZE: u32 = 32;
+/// SmaaInfo UBO 字节长。
+const SMAA_INFO_SIZE: u32 = 32;
 
 const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
 const VS_FS: vk::ShaderStageFlags = stages(&[vk::ShaderStageFlags::VERTEX, FS]);
@@ -125,8 +124,8 @@ pub struct SmaaTargets {
     sets_edge: Vec<vk::DescriptorSet>,
     sets_blend: Vec<vk::DescriptorSet>,
     sets_nb: Vec<vk::DescriptorSet>,
-    /// LDR/edges/blend 中间目标 ×帧槽环（两帧在飞各用各的——单份会被
-    /// 在飞帧布局竞争，WRITE_AFTER_WRITE 实抓即修）。
+    /// LDR/edges/blend 中间目标，每帧槽一份。坑：只建一份会被两帧在飞同时写
+    /// （验证层报 WRITE_AFTER_WRITE）。
     ldrs: Vec<ColorTarget>,
     edges: Vec<ColorTarget>,
     blends: Vec<ColorTarget>,
@@ -228,8 +227,15 @@ impl SmaaTargets {
         // 失败路径：已建对象都已落字段，由 Drop 回收
         unsafe { this.build_static() }?;
         this.build_targets(ctx, extent)?;
+        let sharing = ctx.sharing_families();
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            this.infos.push(this.mk_buffer(ctx, BufferRole::FrameUniform, u64::from(SMAA_INFO_SIZE))?);
+            this.infos.push(GpuBuffer::create_with_families(
+                &ctx.device,
+                ctx.memory_contract(),
+                u64::from(SMAA_INFO_SIZE),
+                BufferRole::FrameUniform,
+                &sharing,
+            )?);
         }
         unsafe { this.build_descriptors() }?;
         info!(
@@ -252,11 +258,6 @@ impl SmaaTargets {
             self.blends.push(ColorTarget::new(ctx, extent, vk::Format::R8G8B8A8_UNORM, false, "smaa blend")?);
         }
         Ok(())
-    }
-
-    fn mk_buffer(&self, ctx: &Context, role: BufferRole, size: u64) -> Result<GpuBuffer> {
-        let sharing = ctx.sharing_families();
-        GpuBuffer::create_with_families(&self.device, ctx.memory_contract(), size, role, &sharing)
     }
 
     /// 尺寸无关对象：两套布局 + 采样器 + pool（容量只随帧槽定）。
@@ -294,30 +295,25 @@ impl SmaaTargets {
         unsafe {
         let device = &self.device;
         let slots = MAX_FRAMES_IN_FLIGHT;
-        self.sets_edge = device.allocate_descriptor_sets(
-            &vk::DescriptorSetAllocateInfo::default()
-                .descriptor_pool(self.pool)
-                .set_layouts(&std::iter::repeat_n(self.set_layout_a, slots).collect::<Vec<_>>()),
-        )?;
-        self.sets_blend = device.allocate_descriptor_sets(
-            &vk::DescriptorSetAllocateInfo::default()
-                .descriptor_pool(self.pool)
-                .set_layouts(&std::iter::repeat_n(self.set_layout_a, slots).collect::<Vec<_>>()),
-        )?;
-        self.sets_nb = device.allocate_descriptor_sets(
-            &vk::DescriptorSetAllocateInfo::default()
-                .descriptor_pool(self.pool)
-                .set_layouts(&std::iter::repeat_n(self.set_layout_b, slots).collect::<Vec<_>>()),
-        )?;
-        // 三组集逐槽写，写入过声明校验（种类按 SMAA_A_SET_DESC / SMAA_B_SET_DESC 核对）
+        let alloc = |layout: vk::DescriptorSetLayout| -> Result<Vec<vk::DescriptorSet>> {
+            Ok(device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(self.pool)
+                    .set_layouts(&std::iter::repeat_n(layout, slots).collect::<Vec<_>>()),
+            )?)
+        };
+        self.sets_edge = alloc(self.set_layout_a)?;
+        self.sets_blend = alloc(self.set_layout_a)?;
+        self.sets_nb = alloc(self.set_layout_b)?;
+        // 写入按布局声明核对种类，写满才提交
         let ro = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
-        let info_buf = |slot: usize| self.infos[slot % MAX_FRAMES_IN_FLIGHT].buffer();
         for slot in 0..slots {
+            let info = self.infos[slot].buffer();
             // edge set：b0 ldr + b1 参数 + b2 采样器
             let mut edge = DescriptorWriter::new(&SMAA_A_SET_DESC, self.sets_edge[slot]);
             edge.image(SMAA_BINDING_TEX0, self.ldrs[slot].view(), ro)
                 .sampler(SMAA_BINDING_SAMPLER, self.sampler)
-                .buffer(SMAA_BINDING_INFO, info_buf(slot), 0, vk::WHOLE_SIZE);
+                .buffer(SMAA_BINDING_INFO, info, 0, vk::WHOLE_SIZE);
             edge.submit(device)?;
             // blend set：b0 edges + b3 search + b4 area
             let mut blend = DescriptorWriter::new(&SMAA_A_SET_DESC, self.sets_blend[slot]);
@@ -326,7 +322,7 @@ impl SmaaTargets {
                 .sampler(SMAA_BINDING_SAMPLER, self.sampler)
                 .image(SMAA_BINDING_TEX1, self.search_lut.view(), ro)
                 .image(SMAA_BINDING_TEX2, self.area_lut.view(), ro)
-                .buffer(SMAA_BINDING_INFO, info_buf(slot), 0, vk::WHOLE_SIZE);
+                .buffer(SMAA_BINDING_INFO, info, 0, vk::WHOLE_SIZE);
             blend.submit(device)?;
             // nb set：b0 ldr + b3 blend + b4 blend 采样器
             let mut nb = DescriptorWriter::new(&SMAA_B_SET_DESC, self.sets_nb[slot]);
@@ -334,15 +330,15 @@ impl SmaaTargets {
                 .sampler(SMAA_BINDING_SAMPLER, self.sampler)
                 .image(SMAA_BINDING_TEX1, self.blends[slot].view(), ro)
                 .sampler(SMAA_BINDING_TEX2, self.sampler)
-                .buffer(SMAA_BINDING_INFO, info_buf(slot), 0, vk::WHOLE_SIZE);
+                .buffer(SMAA_BINDING_INFO, info, 0, vk::WHOLE_SIZE);
             nb.submit(device)?;
         }
         Ok(())
         }
     }
 
-    /// 随 swapchain 重建（闸门③，幂等）：三目标销毁重建 + pool reset 后重分配
-    /// 描述符集。layout/采样器/pool/LUT 本体不动（与尺寸无关）。
+    /// 随 swapchain 重建（尺寸没变直接返回）：三目标销毁重建，reset pool 后重分配
+    /// 描述符集。layout/采样器/pool/LUT 本体与尺寸无关，不动。
     ///
     /// # Errors
     /// 附件/描述符重建失败。
@@ -392,10 +388,6 @@ impl SmaaTargets {
     #[must_use]
     pub fn set_nb(&self, slot: usize) -> DescSet {
         DescSet::new(&SMAA_B_SET_DESC, self.sets_nb[slot])
-    }
-    #[must_use]
-    pub fn info(&self, slot: usize) -> &GpuBuffer {
-        &self.infos[slot]
     }
 
     /// SmaaInfo UBO（宿主写入口，fence 纪律内）。
@@ -447,9 +439,8 @@ impl Drop for SmaaTargets {
     }
 }
 
-
-/// SMAA 三全屏管线（edge/blend/neighborhood；复用全屏管线骨架，
-/// 本体持有——句柄拷贝陷阱照 8.4 教训）。
+/// SMAA 三条全屏管线（edge/blend/neighborhood）。坑同 [`super::bloom::BloomPipelines`]：
+/// 必须持有管线本体。
 #[derive(Resource)]
 pub struct SmaaPipelines {
     edge: FullscreenPipeline,
@@ -476,39 +467,16 @@ impl SmaaPipelines {
         self.edge.rec()
     }
 
-    pub fn edge_pipeline(&self) -> vk::Pipeline {
-        self.edge.pipeline()
-    }
-    #[must_use]
-    pub fn edge_layout(&self) -> vk::PipelineLayout {
-        self.edge.layout()
-    }
     #[must_use]
     pub(crate) fn blend_rec(&self) -> PipelineRef {
         self.blend.rec()
     }
 
-    pub fn blend_pipeline(&self) -> vk::Pipeline {
-        self.blend.pipeline()
-    }
-    #[must_use]
-    pub fn blend_layout(&self) -> vk::PipelineLayout {
-        self.blend.layout()
-    }
     #[must_use]
     pub(crate) fn neighborhood_rec(&self) -> PipelineRef {
         self.neighborhood.rec()
     }
-
-    pub fn neighborhood_pipeline(&self) -> vk::Pipeline {
-        self.neighborhood.pipeline()
-    }
-    #[must_use]
-    pub fn neighborhood_layout(&self) -> vk::PipelineLayout {
-        self.neighborhood.layout()
-    }
 }
-
 
 /// 一帧 edge/blend 两 pass 的录制输入（smaa 开 = Some）。
 #[derive(Clone, Copy)]

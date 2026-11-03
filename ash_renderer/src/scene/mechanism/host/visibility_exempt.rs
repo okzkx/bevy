@@ -9,16 +9,16 @@ use crate::scene::mechanism::update_ledger;
 
 use ash_macros::system;
 
-/// 豁免计量（BRP 读数面走 increment_stats 不经过这里，仅日志收账用）。
+/// 豁免计量（只供日志累计；BRP 读数不经过这里）。
 #[derive(Resource, Default)]
-pub struct VisibilityExemptStats {
+struct VisibilityExemptStats {
     /// 移除三件套的累计次数。
-    pub removed_total: u64,
+    removed_total: u64,
 }
 
 /// 移除仍持有可见性组件的实体上的三件套。
 #[system]
-pub(crate) fn visibility_exempt(
+fn visibility_exempt(
     mut commands: Commands,
     targets: Query<Entity, With<Visibility>>,
     mut stats: ResMut<VisibilityExemptStats>,

@@ -1,8 +1,8 @@
-//! 布局契约登记表：宿主建的全部管线配方与 set 声明的全量清单（O2）。新增管线/set
-//! 必须登记在这里，否则 [`every_shader_entry_has_a_pipeline`]（契约测试）和
+//! 布局契约登记表：宿主建的全部管线配方与 set 声明的全量清单。新增管线/set
+//! 必须登记在这里，否则契约测试 `every_shader_entry_has_a_pipeline` 和
 //! `ash_renderer/layout_contract`（BRP 报表）会报。
 //!
-//! 这个模块刻意不挂测试：BRP 只读方法在运行期也要读它。
+//! 这个模块不挂 `cfg(test)`：BRP 只读方法在运行期也要读它。
 
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayoutDesc;

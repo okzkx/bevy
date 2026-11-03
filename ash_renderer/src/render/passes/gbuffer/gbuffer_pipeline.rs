@@ -15,7 +15,8 @@ use crate::common::error::Result;
 
 use crate::render::Context;
 
-use crate::render::core::pipeline::graphics::{PipelineRef, create_graphics_pipeline, PipelineHandle};
+use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
@@ -49,7 +50,7 @@ impl GBufferPipeline {
         layouts: &SetLayouts,
     ) -> Result<Self> {
         GBUFFER_WRITE_PIPELINE.build(ctx, layouts, |layout, stages| unsafe {
-            Self::create_pipeline(&ctx.device, &GBUFFER_WRITE_PIPELINE, layout, stages)
+            Self::create_pipeline(&ctx.device, layout, stages)
         })
     }
 
@@ -59,11 +60,10 @@ impl GBufferPipeline {
     /// `layout` 与 `stages` 里的 module 须为合法句柄。
     unsafe fn create_pipeline(
         device: &Device,
-        desc: &'static PipelineDesc,
         layout: vk::PipelineLayout,
         stages: &[vk::PipelineShaderStageCreateInfo<'_>],
     ) -> Result<Self> {
-        // 顶点输入 = mesh_convert 的同一份 32B 交错契约（三属性偏移 0/12/24）
+        let desc = &GBUFFER_WRITE_PIPELINE;
         let vertex_binding = [vk::VertexInputBindingDescription::default()
             .binding(0)
             .stride(crate::render::VERTEX_STRIDE as u32)
@@ -90,28 +90,24 @@ impl GBufferPipeline {
             .vertex_attribute_descriptions(&vertex_attributes);
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-        // viewport/scissor 动态：尺寸随 swapchain 逐帧给（正高度直出，朝向定案见模块注释）
         let viewport_state = vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
             .scissor_count(1);
         let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
-            // 关剔除：HoseMat 双面 + 镜片按不透明覆盖；正高度直出未镜像
-            // 绕向，开剔除前的绕向核验另立判定（面板定案）
+            // 开剔除前须先核对三角形绕向
             .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-        // reverse-Z 成套：清 0 + GREATER（bevy 无限反向透视）；stencil 全关
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(true)
             .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::GREATER)
             .min_depth_bounds(0.0)
             .max_depth_bounds(1.0);
-        // 逐 color 附件一条 blend 态（8.1 起 G-buffer pass 双 color；
-        // 声明面 = 实例附件全集，VUID-08914 纪律）
+        // 每个颜色附件一条 blend 状态，条数须等于声明的颜色附件数
         let blend_attachment: Vec<vk::PipelineColorBlendAttachmentState> = desc.color_formats
             .iter()
             .map(|_| {
@@ -125,10 +121,9 @@ impl GBufferPipeline {
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        // dynamic rendering：附件格式内联声明（无 RenderPass/Framebuffer）
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(desc.color_formats)
-            .depth_attachment_format(desc.depth_format.expect("gbuffer_write 声明深度"));
+            .depth_attachment_format(desc.depth_format.unwrap_or(vk::Format::UNDEFINED));
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)
             .vertex_input_state(&vertex_input)
@@ -142,19 +137,15 @@ impl GBufferPipeline {
             .layout(layout)
             .push_next(&mut rendering_info);
         let pipeline = create_graphics_pipeline(device, &info)?;
-        // module 用毕即拆：管线创建完成即编译收口，规范允许此刻销毁 shader
-        // module（vkDestroyShaderModule 与管线无生命周期耦合）。句柄是纯整数，
-        // 不拆即每次启动泄漏 1 个 VkShaderModule（验证层
-        // VUID-vkDestroyDevice-device-05137 可抓获此类泄漏）。
         info!(
             "图形管线就绪: dynamic rendering（color {:?} / depth {:?}），\
              顶点输入 32B 交错（pos/normal/uv @ 0/12/24），reverse-Z（clear 0 + GREATER），\
-             viewport 正高度直出，剔除关，push 退役（5.3：firstInstance 携带槽号），set0/set1/set2 同源绑定",
+             viewport 正高度直出，剔除关，push 退役（firstInstance 携带槽号），set0/set1/set2 同源绑定",
             desc.color_formats,
             desc.depth_format
         );
         Ok(Self {
-            handle: PipelineHandle::new(device, layout, pipeline, GBUFFER_WRITE_PIPELINE.sets),
+            handle: PipelineHandle::new(device, layout, pipeline, desc.sets),
         })
     }
 
@@ -162,17 +153,5 @@ impl GBufferPipeline {
     #[must_use]
     pub(crate) fn rec(&self) -> PipelineRef {
         self.handle.rec()
-    }
-
-    /// 管线句柄（帧录制绑定用）。
-    #[must_use]
-    pub fn pipeline(&self) -> vk::Pipeline {
-        self.handle.pipeline()
-    }
-
-    /// pipeline layout 句柄（push/描述符绑定与管线同源）。
-    #[must_use]
-    pub fn layout(&self) -> vk::PipelineLayout {
-        self.handle.layout()
     }
 }

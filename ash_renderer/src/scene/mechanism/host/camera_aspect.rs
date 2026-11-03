@@ -1,4 +1,5 @@
-//! 渲染插件未启用时，将主窗口宽高比同步到透视相机；窗口尺寸为零时跳过。
+//! 渲染插件未启用时，将主窗口宽高比同步到透视相机；窗口尺寸为零（最小化）时跳过，
+//! 恢复后再同步。
 
 use bevy::{camera::Projection, prelude::*, window::PrimaryWindow};
 
@@ -13,9 +14,8 @@ impl Plugin for AshCameraAspectPlugin {
     }
 }
 
-/// 窗口尺寸为零时跳过更新，恢复后再同步；只处理透视投影。
 #[system]
-pub(super) fn sync_projection_aspect(
+fn sync_projection_aspect(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut cameras: Query<&mut Projection, With<Camera>>,
 ) {

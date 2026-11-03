@@ -8,8 +8,9 @@
 //! | `pipeline` | 管线骨架：图形句柄、compute、全屏管线的创建与持有 |
 //! | `record` | 命令录制助手：绑定、viewport、屏障、dispatch、全屏 pass |
 //!
-//! 目录间依赖：`target` 只依赖 `device`；`binding` 与 `record` 不依赖 core 里的其他目录；
-//! `pipeline` 依赖 `binding`（按配方建）和 `record`（compute 管线交出录制句柄）。
+//! 目录间依赖：`device` 不依赖 core 里的其他目录；`target` 只依赖 `device`；`binding`
+//! 依赖 `device`（建布局、挂调试名）；`record` 只依赖 `binding`（绑定序校验）；`pipeline`
+//! 依赖 `binding`（按配方建）、`record`（交出录制句柄）和 `device`。
 //! `resident` 只用 `device` 与 `binding`。
 
 pub(super) mod binding;

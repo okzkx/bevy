@@ -27,7 +27,7 @@ pub(crate) struct ResourceUse {
     pub array: ArrayShape,
 }
 
-/// 一个入口点：名字、阶段、push（var<immediate>）字节数（0 = 不用 push）、用到的资源。
+/// 一个入口点：名字、阶段、push（`var<immediate>`）字节数（0 = 不用 push）、用到的资源。
 #[derive(Debug)]
 pub(crate) struct EntryAbi {
     pub name: &'static str,

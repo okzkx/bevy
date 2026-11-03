@@ -1,12 +1,11 @@
-//! 持续监控历史账：fps 快照节奏的采样点（fps/进程内存/系统内存/显存堆级
-//! 预算）环形累积。overlay 的 pass 在 fps 快照刷新时采样入账（资源由 overlay
-//! 插入）；overlay 监控页与 BRP `monitor_stats` 读同一本账。
+//! 监控历史：随 fps 快照刷新（约 0.5s）采一个点（fps/进程内存/系统内存/显存预算），环形累积。
+//! overlay 的 pass 采样入账（资源由 overlay 插入）；overlay 监控页与 BRP `monitor_stats` 读同一本账。
 
 use bevy::prelude::*;
 
 use crate::render::Context;
 
-/// 一个监控采样点（fps 快照刷新节奏入账，约 0.5s 一个）。
+/// 一个监控采样点。
 #[derive(Clone, Copy)]
 pub(crate) struct MonitorSample {
     /// 起始以来秒数。
@@ -22,21 +21,20 @@ pub(crate) struct MonitorSample {
     pub(crate) vram: Option<(u64, u64)>,
 }
 
-/// 监控历史账：采样点环形累积（满容量从头挤掉最旧），窗口内统计与曲线
-/// 都从 `samples` 现算——不做增量聚合，1 小时窗 7200 点的量级不值得。
+/// 监控历史：满容量挤掉最旧；窗口统计与曲线每次从 `samples` 现算（最多 7200 点，不做增量聚合）。
 #[derive(Resource, Default)]
 pub(crate) struct MonitorHistory {
-    /// 首个采样的时刻（elapsed 起点；Startup 后首刷才落，None = 未开账）。
+    /// 首个采样的时刻（elapsed 起点；None = 还没采过）。
     started: Option<std::time::Instant>,
     pub(crate) samples: Vec<MonitorSample>,
 }
 
 impl MonitorHistory {
-    /// 容量：0.5s 节奏 × 7200 = 1 小时窗，超出挤掉最旧。
+    /// 容量：0.5s × 7200 = 1 小时。
     const CAP: usize = 7200;
 
-    /// 一次采样：fps 快照 + 进程/系统内存 + 显存堆读数。pass 侧在 fps 快照
-    /// 刚刷新时调用（0.5s 节奏），页面是否显示不影响记账。
+    /// 采一个点：fps 快照 + 进程/系统内存 + 显存读数。overlay 在 fps 快照刚刷新时调用，与监控页
+    /// 是否显示无关。
     pub(crate) fn sample(&mut self, fps: f32, ms: f32, ctx: Option<&Context>) {
         let elapsed = match self.started {
             Some(t) => t.elapsed().as_secs_f32(),
@@ -66,8 +64,7 @@ impl MonitorHistory {
     }
 }
 
-/// 进程工作集字节。失败（句柄/权限异常）静默 None——监控读数缺一行
-/// 不值一次报错。
+/// 进程工作集字节。失败静默 None——缺一行监控读数不值得报错。
 #[cfg(windows)]
 fn process_working_set() -> Option<u64> {
     use windows::Win32::System::{

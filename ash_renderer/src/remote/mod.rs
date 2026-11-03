@@ -1,63 +1,69 @@
-//! BRP 远程直控通道：宿主 World 经 HTTP JSON-RPC 暴露在 127.0.0.1:15702
-//! （bevy_remote 默认端口；拷出 target 的正式版用 [`PUBLISHED_PORT`]，环境变量
-//! `ASH_BRP_PORT` 可改，见 [`brp_port`]），AI/脚本不开 UI
-//! 即可"查询 → 改
-//! Transform → 相机环绕推拉"。读侧零自研——官方 inspection 方法族
-//!（`world.query`/`world.inspect`/`world.summarize` 等）与内置 CRUD 随
-//! [`RemotePlugin`] 默认注册，`rpc.discover` 可列全量；写侧全部复用既有封装
-//!（[`TransformEdit`] 的 [`apply_transform_edit`]、[`apply_camera_command`]），
-//! 与 egui 面板同款实现、不养两份逻辑。
+//! BRP 远程直控通道：宿主 World 经 HTTP JSON-RPC 暴露在 127.0.0.1（开发实例用
+//! bevy_remote 默认端口 15702，拷出 target 的正式版用 [`PUBLISHED_PORT`]，环境
+//! 变量 `ASH_BRP_PORT` 可改，见 [`brp_port`]），AI/脚本不开 UI 即可查询与改场景。
+//! 读侧优先用官方 inspection 方法族（`world.query`/`world.inspect` 等，随
+//! [`RemotePlugin`] 默认注册，`rpc.discover` 可列全量）；本模块只注册官方够不着
+//! 的自定义方法，写侧全部复用 scene 机制层封装，与 egui 面板同一实现。
 //!
 //! | 子模块 | 职责 |
 //! |---|---|
-//! | [`mouse`] | 虚拟鼠标：窗口无关鼠标输入源，注入 `Messages<WindowEvent>` 与 bevy_winit 同层 |
-//! | [`objects`] | 对象生命周期方法族：spawn 克隆/换柄写方法 + increment_stats 统计读数 |
-//! | [`shapes`] | 测试实体方法族（6.1.1/8.2）：spawn_shape 五形状 + 颜色 + PBR 参数 → 材质（遮挡对/墙体/梯度球载具） |
-//! | [`generate`] | 常驻大场景方法族（5.4）：generate_scene 程序化铺实例；chunk 身份与整块增删（5.4.2） |
-//! | [`assets`] | 资产内容变更 + 运行期动态加载：mutate/load_mesh/load_image/reload |
-//! | [`cull`] | 剔除读数与开关（5.2）：cull_stats 对照 + cull_set_enabled 开关 |
-//! | [`draw`] | indirect 闭环读数（5.3）：draw_stats 绘制调用/命令条数/不可见计数 |
-//! | [`perf`] | 性能读数与变更形态（5.5）：perf_stats 分位数/分段/显存 + perf_samples 原始导出 + workload 变更形态开关 |
-//! | [`monitor`] | 持续监控读数（7.5）：monitor_stats fps/内存/显存堆级预算 + 内部账，与 egui 监控窗口同账；frame_sync 帧率同步开关读写（7.6） |
-//! | [`residency`] | 驻留管理器读数与设置（6.3）：residency_stats 预算/实占/逐资产清单 + residency_set 开关/预算/半径 |
-//! | [`gap`] | GPU 缺口请求读数与模式（6.6）：gap_stats 聚合 + gap_census 逐槽位图 + gap_set 三态模式 |
+//! | [`scene`] | 场景直控：层级树读、Transform/相机/太阳方向写 |
+//! | [`mouse`] | 虚拟鼠标：注入 `Messages<WindowEvent>`，与 bevy_winit 同层 |
+//! | [`objects`] | 对象生命周期：spawn 克隆/换柄 + increment_stats 账本读数 |
+//! | [`shapes`] | 测试实体：spawn_shape 五形状 + 颜色/PBR 参数、spawn_lod 阶梯体 |
+//! | [`generate`] | 大场景生成：generate_scene 批量铺实例、chunk 生成/盘点/整块删除 |
+//! | [`assets`] | 资产内容变更与运行期动态加载：mutate/load_mesh/load_image/load_world/reload |
+//! | [`cull`] | 视锥/遮挡剔除：cull_stats 对照、开关、Hi-Z 读回与遮挡判定参照 |
+//! | [`lod`] | LOD：lod_census 档位对照、开关与判据参数 |
+//! | [`cluster`] | cluster 光照与透明层：灯表增删改读、cluster/透明排序对照 |
+//! | [`shadow`] | 阴影：开关 + 逐 cascade 标记对照 |
+//! | [`render_settings`] | 画面设置：Bloom/tonemap、SMAA、着色调试模式 |
+//! | [`draw`] | indirect 闭环读数与组装对照开关 |
+//! | [`residency`] | 驻留管理器读数与设置 |
+//! | [`gap`] | GPU 缺口请求读数与模式 |
+//! | [`ring_census`](mod@ring_census) | 环与常驻表 GPU 内容 vs 宿主期望字节对账 |
+//! | [`perf`] | 性能读数、原始样本导出与 workload 变更形态开关 |
+//! | [`monitor`] | 持续监控读数（与 egui 监控窗口同账）与帧率同步开关 |
+//! | [`layout_contract`](mod@layout_contract) | 描述符集布局与管线配方清单 |
 //!
-//! 机制与边界（侦察笔记《bevy_remote：BRP远程协议与自定义方法》）：handler 本身
-//! 就是一个 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍执行——写值下一帧
-//! 生效（BRP 天然以帧为单位量化延迟），参数即请求 `params` 的 JSON、返回值即响应。
-//! 安全边界：默认只绑 loopback、完全无鉴权，仅限本机调试使用，不改绑对外地址。
+//! 公共件：`params`（参数解析与协议错误）、`readback`（GPU 读回与字节解析）、
+//! `reference`（CPU 参照用相机矩阵与投屏钳制）。
+//!
+//! 机制与边界（详见 `.agents/docs/笔记/Bevy/bevy_remote：BRP远程协议与自定义方法.md`）：
+//! handler 本身是 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍执行——写值
+//! 下一帧生效，参数即请求 `params` 的 JSON、返回值即响应。协议层错误一律回
+//! `BrpError`，不 panic。安全边界：只绑 loopback、无鉴权，仅限本机调试。
 
-pub mod assets;
-pub mod layout_contract;
-pub mod cluster;
-pub mod cull;
-pub mod draw;
-pub mod generate;
-pub mod gap;
-pub mod lod;
-pub mod monitor;
-pub mod mouse;
-pub mod objects;
+mod assets;
+mod cluster;
+mod cull;
+mod draw;
+mod gap;
+mod generate;
+mod layout_contract;
+mod lod;
+mod monitor;
+mod mouse;
+mod objects;
 mod params;
-pub mod perf;
+mod perf;
 mod readback;
-pub mod residency;
-pub mod ring_census;
-pub mod bloom;
-pub mod smaa;
-pub mod shapes;
-pub mod sun;
-pub mod shadow;
+mod reference;
+mod render_settings;
+mod residency;
+mod ring_census;
+mod scene;
+mod shadow;
+mod shapes;
 
 use bevy::{
     prelude::*,
     render::RenderApp,
     remote::{
-        error_codes, BrpError, BrpResult, RemotePlugin,
         http::{DEFAULT_PORT, HostPort, RemoteHttpPlugin},
+        RemotePlugin,
     },
 };
-use serde_json::{json, Value};
 
 use self::{
     assets::{load_image_cmd, load_mesh_cmd, load_world_cmd, mutate_asset_cmd, reload_asset_cmd},
@@ -66,31 +72,22 @@ use self::{
     draw::{draw_stats, drawlist_verify_set},
     generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
     gap::{gap_census, gap_set, gap_stats},
+    layout_contract::layout_contract,
     lod::{lod_census, lod_set_enabled, lod_set_params},
-    monitor::{frame_sync_cmd, monitor_stats, set_render_mode},
+    monitor::{frame_sync_cmd, monitor_stats},
     mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
     objects::{increment_stats, replace_handles, spawn_primitive},
+    perf::{perf_samples, perf_stats, workload},
+    render_settings::{bloom_set, set_render_mode, smaa_set},
     residency::{residency_set, residency_stats},
     ring_census::ring_census,
-    perf::{perf_samples, perf_stats, workload},
-    bloom::bloom_set,
-    smaa::smaa_set,
-    sun::{sun_get, sun_set},
-    shapes::{spawn_lod, spawn_shape},
+    scene::{scene_tree, set_camera, set_transform, sun_get, sun_set},
     shadow::{shadow_set, shadow_stats},
+    shapes::{spawn_lod, spawn_shape},
 };
 
-use crate::scene::mechanism::{
-    apply_camera_command, apply_transform_edit, CameraCommandError, CameraOrbitCommand, EntityRow,
-    SceneTreeIndex, TransformEdit, TransformEditError, TREE_MAX_DEPTH,
-};
-
-use ash_macros::system;
-
-/// BRP 远程通道插件：装协议 + HTTP 传输 + 场景语义
-/// 方法族（本模块三个 + mouse 虚拟鼠标四个 + objects 对象生命周期与统计 +
-/// shapes 测试实体 + assets 资产变更与动态加载）。宿主 main 照插件清单惯例
-/// 只 `add_plugins`，方法注册收在本插件内。
+/// BRP 远程通道插件：装协议 + HTTP 传输 + 全部自定义方法。宿主 main 照插件清单
+/// 惯例只 `add_plugins`，方法注册收在本插件内（协议面注册单点）。
 pub struct AshRemotePlugin;
 
 impl Plugin for AshRemotePlugin {
@@ -148,16 +145,16 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/monitor_stats", monitor_stats)
                 .with_method_main("ash_renderer/frame_sync", frame_sync_cmd)
                 .with_method_main("ash_renderer/set_render_mode", set_render_mode)
-                    .with_method_main("ash_renderer/ring_census", ring_census)
+                .with_method_main("ash_renderer/ring_census", ring_census)
                 .with_method_main("ash_renderer/shadow_set", shadow_set)
                 .with_method_main("ash_renderer/bloom_set", bloom_set)
                 .with_method_main("ash_renderer/smaa_set", smaa_set)
                 .with_method_main("ash_renderer/shadow_stats", shadow_stats)
-                .with_method_main("ash_renderer/layout_contract", layout_contract::layout_contract),
+                .with_method_main("ash_renderer/layout_contract", layout_contract),
             RemoteHttpPlugin::default().with_port(port),
         ));
-        // render subapp 的 BRP 端口跟随主端口（HostPort 字段公开；build 时机早于
-        // RenderStartup，改写来得及）
+        // render subapp 的 BRP 端口跟随主端口 +1（build 时机早于 RenderStartup，
+        // 改写 HostPort 来得及）
         if let Some(mut host) = app
             .get_sub_app_mut(RenderApp)
             .and_then(|render| render.world_mut().get_resource_mut::<HostPort>())
@@ -204,184 +201,4 @@ fn is_dev_instance() -> bool {
         return false;
     };
     exe.starts_with(profile_dir)
-}
-
-/// 参数缺失/不合法的统一错误（JSON-RPC 标准段 -32602）。mouse 族方法
-/// （[`mouse`]）复用同款，协议面错误口径只有一处。
-pub(crate) fn invalid_params(message: impl Into<String>) -> BrpError {
-    BrpError {
-        code: error_codes::INVALID_PARAMS,
-        message: message.into(),
-        data: None,
-    }
-}
-
-/// `ash_renderer/scene_tree`：场景层级树（只读）。索引与 egui 层级树页共用
-/// [`SceneTreeIndex`]——CLI 树与面板树看到同一棵树、同一套"相关"语义。根 =
-/// 相关且无父的实体，经 `Children` 递归；不相关子树整枝跳过（同面板）。
-/// DefaultPlugins 注册的数百个内部实体被过滤，`relevant`/`total` 如实报出过滤量。
-#[system]
-fn scene_tree(In(_params): In<Option<Value>>, rows: Query<EntityRow>) -> BrpResult {
-    let index = SceneTreeIndex::build(&rows);
-    let tree: Vec<Value> = index
-        .roots
-        .iter()
-        .map(|r| tree_node_json(*r, &index, 0))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(json!({
-        "relevant": index.nodes.len(),
-        "total": index.total,
-        "roots": tree,
-    }))
-}
-
-/// 递归序列化一个相关子树：子实体里不相关的整枝跳过（与 egui 树同语义）。
-/// 调用方保证 `entity` 在表内；`depth` 越过 [`TREE_MAX_DEPTH`] 回协议错误
-///（栈溢出走 abort 是"禁 panic"规则下唯一不可兜底路径）。
-fn tree_node_json(entity: Entity, index: &SceneTreeIndex, depth: usize) -> BrpResult {
-    if depth > TREE_MAX_DEPTH {
-        return Err(BrpError {
-            code: error_codes::INTERNAL_ERROR,
-            message: format!("scene_tree 层级超过深度上限 {TREE_MAX_DEPTH}（病态深树拒绝序列化）"),
-            data: None,
-        });
-    }
-    let node = &index.nodes[&entity];
-    let children: Vec<Value> = node
-        .children
-        .iter()
-        .filter(|c| index.nodes.contains_key(*c))
-        .map(|c| tree_node_json(*c, index, depth + 1))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(json!({
-        "entity": entity.to_string(),
-        "label": node.label,
-        "children": children,
-    }))
-}
-
-/// `ash_renderer/set_transform` 的请求参数：逐组可选（缺省 = 不动该组），
-/// 与 [`TransformEdit`] 逐组 Option 同形状。欧拉角 YXZ 度数，与属性面板同口径。
-#[derive(serde::Deserialize)]
-struct SetTransformParams {
-    entity: Entity,
-    #[serde(default)]
-    translation: Option<[f32; 3]>,
-    #[serde(default)]
-    rotation_euler_deg: Option<[f32; 3]>,
-    #[serde(default)]
-    scale: Option<[f32; 3]>,
-}
-
-/// `ash_renderer/set_transform`：写一个实体的 Transform（独占 &mut World 直调
-/// [`apply_transform_edit`]，不排队不走 UI——Transform 编辑"唯一实现"复用点）。
-/// 至少一组量必须出现；成功返回写后的读回值（客户端可拿它做写后读对账）。
-#[system]
-fn set_transform(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| invalid_params("params 缺失：需要 entity 与至少一组量"))?;
-    let p: SetTransformParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
-    let edit = TransformEdit {
-        translation: p.translation.map(Vec3::from_array),
-        rotation_euler_deg: p.rotation_euler_deg.map(Vec3::from_array),
-        scale: p.scale.map(Vec3::from_array),
-    };
-    if edit.translation.is_none() && edit.rotation_euler_deg.is_none() && edit.scale.is_none() {
-        return Err(invalid_params(
-            "至少一组量（translation / rotation_euler_deg / scale）",
-        ));
-    }
-    match apply_transform_edit(world, p.entity, edit) {
-        Ok(()) => {}
-        Err(TransformEditError::EntityMissing) => {
-            return Err(BrpError::entity_not_found(p.entity));
-        }
-        Err(TransformEditError::TransformMissing) => {
-            return Err(BrpError::component_not_present("Transform", p.entity));
-        }
-    }
-    // 刚写入成功，组件必在；查无 = 内部矛盾，回协议错误不 panic
-    let t = world
-        .get_entity(p.entity)
-        .ok()
-        .and_then(|er| er.get::<Transform>())
-        .ok_or_else(|| BrpError::internal("apply_transform_edit 成功后 Transform 缺席——状态矛盾"))?;
-    let (yaw, pitch, roll) = t.rotation.to_euler(bevy::math::EulerRot::YXZ);
-    Ok(json!({
-        "entity": p.entity.to_string(),
-        "transform": {
-            "translation": [t.translation.x, t.translation.y, t.translation.z],
-            "rotation_euler_deg": [yaw.to_degrees(), pitch.to_degrees(), roll.to_degrees()],
-            "scale": [t.scale.x, t.scale.y, t.scale.z],
-        },
-    }))
-}
-
-/// `ash_renderer/set_camera` 的请求参数：逐项可选（缺省 = 不动该量），
-/// 与 [`CameraOrbitCommand`] 同形状；zoom 与滚轮缩放同语义（<1 推近）。
-#[derive(serde::Deserialize)]
-struct SetCameraParams {
-    #[serde(default)]
-    target: Option<[f32; 3]>,
-    #[serde(default)]
-    yaw_deg: Option<f32>,
-    #[serde(default)]
-    pitch_deg: Option<f32>,
-    #[serde(default)]
-    radius: Option<f32>,
-    #[serde(default)]
-    zoom: Option<f32>,
-}
-
-/// `ash_renderer/set_camera`：相机给值（轨道控制的 CLI 输入源，独占
-/// &mut World 直调 [`apply_camera_command`]）。环绕（yaw/pitch）与推拉
-///（radius/zoom）绝对值或系数覆盖，限位与鼠标输入共用；成功返回命令后的
-/// 轨道参数读回值。
-#[system]
-fn set_camera(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let value = params.ok_or_else(|| invalid_params("params 缺失：需要至少一项给值"))?;
-    let p: SetCameraParams =
-        serde_json::from_value(value).map_err(|e| invalid_params(e.to_string()))?;
-    if p.target.is_none()
-        && p.yaw_deg.is_none()
-        && p.pitch_deg.is_none()
-        && p.radius.is_none()
-        && p.zoom.is_none()
-    {
-        return Err(invalid_params(
-            "至少一项给值（target / yaw_deg / pitch_deg / radius / zoom）",
-        ));
-    }
-    let cmd = CameraOrbitCommand {
-        target: p.target.map(Vec3::from_array),
-        yaw_deg: p.yaw_deg,
-        pitch_deg: p.pitch_deg,
-        radius: p.radius,
-        zoom: p.zoom,
-    };
-    let orbit = match apply_camera_command(world, cmd) {
-        Ok(orbit) => orbit,
-        Err(CameraCommandError::NoCamera) => {
-            return Err(BrpError {
-                code: error_codes::COMPONENT_ERROR,
-                message: "World 里没有带 CameraOrbit 的相机".to_owned(),
-                data: None,
-            });
-        }
-        Err(CameraCommandError::AmbiguousCamera) => {
-            return Err(BrpError {
-                code: error_codes::COMPONENT_ERROR,
-                message: "World 里带 CameraOrbit 的相机不止一台,机位目标不明确".to_owned(),
-                data: None,
-            });
-        }
-    };
-    Ok(json!({
-        "orbit": {
-            "target": [orbit.target.x, orbit.target.y, orbit.target.z],
-            "yaw_deg": orbit.yaw.to_degrees(),
-            "pitch_deg": orbit.pitch.to_degrees(),
-            "radius": orbit.radius,
-        },
-    }))
 }

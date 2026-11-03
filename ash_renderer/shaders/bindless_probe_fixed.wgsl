@@ -1,8 +1,8 @@
 // bindless 探针小样例（定长版，examples/bindless_probe.rs 以 include_str! 自行编译）：与 runtime 版同形状，唯一差异是数组带定长 4。
 //
 // 定长 binding_array → SPIR-V OpTypeArray（非 OpTypeRuntimeArray），不需要
-// runtimeDescriptorArray 特性——它是 naga 原生 runtime 输出若被 spirv-val 拒绝时
-// 的备选路线证据（选型记录的切换评估素材），也是"更窄特性集即可跑"的对照组。
+// runtimeDescriptorArray 特性——是"更窄特性集即可跑"的对照组，也是 naga 原生
+// runtime 输出被 spirv-val 拒绝时的备选路线证据。
 // 采样语义、NonUniform 预期、字段偏移与 runtime 版完全一致。
 enable wgpu_binding_array;
 

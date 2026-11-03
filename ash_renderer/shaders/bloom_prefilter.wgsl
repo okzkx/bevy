@@ -1,9 +1,8 @@
 // Bloom prefilter（全屏）：HDR 线性输入 → 亮度阈值 + soft knee 提亮部
 // ——Kawase 双滤波链的源头级（半分辨率目标）。
 //
-// 接口：set0 = G-buffer 采样集（b2 hdr / b4 采样器——合成/present 共用布局，
-// 其余 binding 合法闲置）。阈值常量：软膝起点 1.0（HDR 域 >1 即光晕源）、
-// 膝宽 0.5（读图调）。
+// 接口：set0 = G-buffer 采样集（只用 b2 hdr / b4 采样器，其余 binding 闲置）。
+// 阈值常量：软膝起点 1.0（HDR 域 >1 即光晕源）、膝宽 0.5（看图调的）。
 // #import fullscreen
 
 @group(0) @binding(2) var hdr_tex: texture_2d<f32>;

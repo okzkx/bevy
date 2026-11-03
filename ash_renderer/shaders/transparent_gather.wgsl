@@ -1,8 +1,8 @@
 // 透明命令组装（compute 单入口）：透明行索引列表 → 20B 命令环（与
-// build_indirect 的 IndirectCommand 同布局）。LOD 引脚选择与 build_indirect 同语义
-//（common/lod_pick.wgsl：选中档哨兵向细档回退、基准兜底）；instanceCount 取剔除
-// 标记（透明行同样吃视锥/遮挡标记——标记环对在场槽恒新鲜）。列表内容 =
-// collect 紧凑产物经 transparent_sort 升序排好，本 pass 从尾部反向取。
+// build_indirect 的 IndirectCommand 同布局）。LOD 选档与 build_indirect 相同
+//（common/lod_pick.wgsl：选中档未驻留就向细档回退，最后用基准 mesh）；instanceCount
+// 取剔除标记（透明行同样受视锥/遮挡剔除，在场槽的标记每帧都是新的）。列表 =
+// collect 的紧凑产物经 transparent_sort 升序排好，本 pass 从尾部反向取。
 //
 // 接口：set0 = set2（b0 对象表 / b3 剔除标记 / b7 LOD 变体表 / b8 档位环），
 // set1 = 透明命令链集（b0 索引列表 / b2 命令环 / b3 计数）。
@@ -23,7 +23,7 @@ struct PushGather {
     count: u32,  // 在场行数上界（dispatch 组数口径）
 }
 
-const TRANSPARENT_CAPACITY: u32 = 16384u;  // transparent.rs 同名常量
+const TRANSPARENT_CAPACITY: u32 = 16384u;  // transparent_targets.rs 同名常量
 
 @compute @workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {

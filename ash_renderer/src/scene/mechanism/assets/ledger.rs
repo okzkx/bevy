@@ -1,8 +1,7 @@
 //! 稳定槽账本与变更发现：Entity→GPU 实例槽关联的跨帧账本，
 //! 增量维护，不做每帧全量快照重建。
 //!
-//! 三线分工里的枢纽：变更发现的输出落进账本（删除处理的信息来源），增量写入
-//! （上传链）的输入来自账本脏行。机制：
+//! 变更发现的输出落进账本，上传链的输入来自账本脏行。机制：
 //!
 //! - **账本**（[`InstanceLedger`]）：在场可渲染 primitive 每实体一行（两柄 +
 //!   传播后终值矩阵），BTreeMap 按 Entity 有序迭代（DrawList 顺序确定）。行随
@@ -11,20 +10,17 @@
 //! - **发现**（[`update_ledger`]，PostUpdate 排 [`TransformSystems::Propagate`]
 //!   之后）：三条入口各接一类变更——
 //!   ① 移除：`RemovedComponents<Mesh3d>` / `RemovedComponents<MeshMaterial3d>`
-//!   清行。despawn 递归删子树走组件移除路径（bundle/remove.rs 写
-//!   `removed_components`），每个 primitive 各发一次，**整树清账免费拿到**；
+//!   清行。despawn 递归删子树时每个 primitive 各发一次组件移除，**整树清账免费拿到**；
 //!   ② 新增/换绑：`Or<(Changed<Mesh3d>, Changed<MeshMaterial3d>)>`（插入也置
 //!   changed tick，故新增不需要 Added）；③ 矩阵：`Changed<GlobalTransform>`——
 //!   传播只在矩阵变化时更新终值，静态场景不触发。
 //!
-//! 计量（判定线证据口径）：**扫描数**（tick 比较的候选实体数 = 三样俱全实体
-//! 总数，O(匹配实体) 是 Changed 语义的已知成本）与**处理数**（真实动手的行）
-//! 分开报——不把"零上传"说成"零 CPU 每对象成本"。
+//! 计量：**扫描数**（tick 比较的候选实体数 = 三样俱全实体总数，O(匹配实体) 是
+//! Changed 语义的已知成本）与**处理数**（真实动手的行）分开报——不把"零上传"
+//! 说成"零 CPU 每对象成本"。
 //!
-//! 组装增量账（[`AssemblyCache`]，实现住 `assembly_cache.rs`）：DrawList 可绘
-//! 行集合的增量缓存与账本同体维护——各变更点（行增删/换绑/置脏/槽位交接）
-//! 顺带标记组装重估，缓存视图由 [`InstanceLedger::assembly_view`] 供帧循环
-//! 全程只读。
+//! DrawList 组装缓存（[`AssemblyCache`]）与账本同体维护：各变更点（行增删/换绑/
+//! 置脏/槽位交接）顺带标记组装重估，帧循环经 [`InstanceLedger::assembly_view`] 只读。
 //!
 //! 零 Vulkan 代码：账本只有 ECS 侧事实；GPU 足迹（池区间/贴图槽）按资产身份
 //! 去驻留缓存（MeshPool/ImageCache）现查，不进账本行。
@@ -40,9 +36,7 @@ use bevy::{
 
 use ash_macros::system;
 
-use super::assembly_cache::AssemblyEval;
-// 保持调用方现有的 AssemblyCache 和 AssemblyView 路径。
-pub(crate) use super::assembly_cache::{AssemblyCache, AssemblyView};
+use super::assembly_cache::{AssemblyCache, AssemblyEval, AssemblyView};
 
 /// 账本一行：一个可渲染 primitive 的跨帧实例数据。柄去资产容器取内容，
 /// `model` 直进模型环（帧循环增量重写）；`instance_slot` 是 GPU 对象表下标
@@ -120,7 +114,7 @@ pub struct InstanceLedger {
     /// 新增/换柄置位，flush_uploads 盘点（驻留或登记重试）后清。
     dirty: BTreeSet<Entity>,
     /// 删除或换绑的实例槽交给 flush；排空前不复用，避免旧引用指向已复用槽。
-    pub(crate) freed_slots: Vec<u32>,
+    freed_slots: Vec<u32>,
     /// 模型环待写标记，按帧槽奇偶两套：改动行的 model 要写进**两个帧槽**
     /// 各自的环（draw_frame 只消费本帧奇偶的那套，另一套下帧消费）——
     /// 每个改动行两次写入后两个环都新鲜，静态场景零写入。
@@ -190,13 +184,10 @@ impl InstanceLedger {
         slot: u32,
         bound: (AssetId<Mesh>, u64, AssetId<StandardMaterial>),
     ) -> Option<u32> {
-        let old = self
-            .rows
-            .get_mut(&entity)
-            .and_then(|row| row.instance_slot.replace(slot));
-        if let Some(row) = self.rows.get_mut(&entity) {
+        let old = self.rows.get_mut(&entity).and_then(|row| {
             row.bound = Some(bound);
-        }
+            row.instance_slot.replace(slot)
+        });
         // 槽位交接 = 组装可绘判定输入变化
         self.mark_assembly_stale(entity);
         old
@@ -209,30 +200,22 @@ impl InstanceLedger {
 
     /// 标记一行模型待写：进**两套**奇偶集（两个帧槽的环都要补写）。
     pub(crate) fn mark_model_dirty(&mut self, entity: Entity) {
-        self.model_dirty[0].insert(entity);
-        self.model_dirty[1].insert(entity);
+        mark_both_parities(&mut self.model_dirty, entity);
     }
 
     /// 取走一套奇偶集的待写实体（draw_frame 按本帧奇偶消费，取走即清）。
     pub(crate) fn take_model_dirty(&mut self, frame: usize) -> Vec<Entity> {
-        let set = &mut self.model_dirty[frame % 2];
-        let out: Vec<Entity> = set.iter().copied().collect();
-        set.clear();
-        out
+        take_parity(&mut self.model_dirty, frame)
     }
 
     /// 将一行加入两套奇偶集，确保两个帧槽的 LOD 表都更新。
     pub(crate) fn mark_lod_dirty(&mut self, entity: Entity) {
-        self.lod_dirty[0].insert(entity);
-        self.lod_dirty[1].insert(entity);
+        mark_both_parities(&mut self.lod_dirty, entity);
     }
 
     /// 取走一套奇偶集的 LOD 待写实体（draw_frame 按本帧奇偶消费，取走即清）。
     pub(crate) fn take_lod_dirty(&mut self, frame: usize) -> Vec<Entity> {
-        let set = &mut self.lod_dirty[frame % 2];
-        let out: Vec<Entity> = set.iter().copied().collect();
-        set.clear();
-        out
+        take_parity(&mut self.lod_dirty, frame)
     }
 
     /// 全部引用给定 mesh 身份的行（LOD 组档位资产到货时反查引用行
@@ -261,10 +244,8 @@ impl InstanceLedger {
         self.assembly.mark_stale(entity);
     }
 
-    /// DrawList 组装增量维护：消费重估集，按 `eval`（可绘判定闭包，由帧循环
-    /// 注入 pool/材质容器/LOD 组的读取）维护可绘行缓存。全量重建仅在首帧播种
-    /// 或换形（锚开关翻转 / LOD 登记换代）发生；其余帧只重估重估集——行宇宙
-    /// 不变帧零走访、产物零重建（容量复用）。
+    /// DrawList 组装增量维护：按 `eval`（可绘判定闭包，由帧循环注入 pool/材质
+    /// 容器/LOD 组的读取）消费重估集，语义见 [`AssemblyCache::update`]。
     pub(crate) fn assembly_update(
         &mut self,
         eval: AssemblyEval<'_>,
@@ -294,9 +275,20 @@ impl InstanceLedger {
     }
 }
 
+/// 把一行加入两套奇偶集（两个帧槽的环都要补写）。
+fn mark_both_parities(sets: &mut [BTreeSet<Entity>; 2], entity: Entity) {
+    for set in sets {
+        set.insert(entity);
+    }
+}
+
+/// 取走并清空本帧奇偶那套集合（Entity 升序）。
+fn take_parity(sets: &mut [BTreeSet<Entity>; 2], frame: usize) -> Vec<Entity> {
+    std::mem::take(&mut sets[frame % 2]).into_iter().collect()
+}
+
 /// 账本插件：初始化 [`InstanceLedger`]，把 [`update_ledger`] 挂 PostUpdate
-/// （传播之后，读到的才是含父链的本帧终值）。接线收在本插件内，main 只
-/// `add_plugins`。
+/// （传播之后，读到的才是含父链的本帧终值）。
 pub struct AshLedgerPlugin;
 
 impl Plugin for AshLedgerPlugin {
@@ -306,9 +298,9 @@ impl Plugin for AshLedgerPlugin {
             // 与到货重挂），恒在账——随账本插件初始化
             .init_resource::<super::LodGroups>()
             .add_systems(
-            PostUpdate,
-            update_ledger.after(TransformSystems::Propagate),
-        );
+                PostUpdate,
+                update_ledger.after(TransformSystems::Propagate),
+            );
     }
 }
 
@@ -326,7 +318,7 @@ type ChangedAssets<'w, 's> = Query<
     Or<(Changed<Mesh3d>, Changed<MeshMaterial3d<StandardMaterial>>)>,
 >;
 
-/// 矩阵入口的查询：Changed<GlobalTransform> + 三样俱全过滤（只更新已入账行）。
+/// 矩阵入口的查询：`Changed<GlobalTransform>` + 三样俱全过滤（只更新已入账行）。
 type MovedTransforms<'w, 's> = Query<
     'w,
     's,
@@ -338,15 +330,13 @@ type MovedTransforms<'w, 's> = Query<
     ),
 >;
 
-/// 变更发现（每帧）：三条入口接账本。`pub(crate)` 给业务侧核验
-/// （[`crate::scene::content::collect_report`]）当排序锚点用，语义 =
-/// "账本已与 World 对账完毕"。
+/// 变更发现（每帧）：三条入口接账本。`pub(crate)` 给业务侧核验当排序锚点用，
+/// 语义 = "账本已与 World 对账完毕"。
 #[system]
 pub(crate) fn update_ledger(
     mut ledger: ResMut<InstanceLedger>,
     mut removed_meshes: RemovedComponents<Mesh3d>,
     mut removed_materials: RemovedComponents<MeshMaterial3d<StandardMaterial>>,
-    // 新增/换柄入口：插入也置 changed tick，故不需要 Added。
     assets: ChangedAssets,
     // 矩阵入口：只写行的 model（传播后才跑，终值直读）。
     moved: MovedTransforms,
@@ -435,11 +425,11 @@ pub(crate) fn update_ledger(
         }
     }
     let dirty_len = ledger.dirty.len();
-    let self_rows_len = ledger.rows.len();
+    let rows_len = ledger.rows.len();
     let stats = &mut ledger.stats;
-    // 扫描数口径 = 三样俱全实体总数 = 账本行集（update_ledger ②对每个持有
-    // 两组件的实体入行，集合恒等）——不另做每帧 O(N) 的查询 count 走访
-    stats.scan_candidates = self_rows_len;
+    // 扫描数口径 = 三样俱全实体总数 = 账本行集（② 对每个持有两组件的实体入行，
+    // 集合恒等）——不另做每帧 O(N) 的查询 count 走访
+    stats.scan_candidates = rows_len;
 
     stats.added_rows = added;
     stats.removed_rows = removed;
@@ -456,7 +446,6 @@ pub(crate) fn update_ledger(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::math::Mat4;
 
     /// 合成行：柄按真实容器生成（身份唯一、无渲染依赖），可绘判定由测试
     /// eval 闭包以 instance_slot 直接决定——缓存语义与真实判定解耦。
@@ -611,6 +600,6 @@ mod tests {
         ledger.rows.remove(&e);
         ledger.mark_assembly_stale(e);
         ledger.assembly_update(&mut alpha_eval, false, 0);
-        assert_eq!(ledger.assembly_view().alpha_override, 0, "退场行 alpha 收账");
+        assert_eq!(ledger.assembly_view().alpha_override, 0, "退场行的 alpha 覆盖计数应已扣除");
     }
 }

@@ -244,7 +244,7 @@ impl GpuBuffer {
     /// 分配内（checked_add 同时防 u64 溢出）。
     fn check_host_access(&self, offset: u64, len: u64, what: &str) -> Result<()> {
         if !self.host_visible() {
-            return Err(VulkanError::Upload(format!(
+            return Err(VulkanError::Contract(format!(
                 "host {what}要求 HOST_VISIBLE,本 buffer 类型属性 {:?}",
                 self.property_flags
             )));

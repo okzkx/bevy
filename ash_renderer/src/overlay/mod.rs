@@ -1,8 +1,8 @@
-//! 窗口内调试 UI：egui 裸接 ash，自含插件（照 scene 样式）。
+//! 窗口内调试 UI：egui 裸接 ash，自含插件。
 //!
 //! **边界**：本模块 = 画在 3D 画面之上的**屏幕空间 egui 2D 层**，全部形状走
 //! egui→epaint→ash 一条绘制路径；3D 场景内的 gizmo（拾取/描边/物体中心拖拽
-//! 手柄，外置拓展条目 4）有独立渲染路径，**不归这里**。
+//! 手柄）有独立渲染路径，**不归这里**。
 //!
 //! 禁渲染宿主上 `bevy_egui` 挂不上（依赖 bevy_render 的 render graph），egui 官方
 //! 后端只有 wgpu/glow——本模块自己接：[`framework`] 持有 [`egui::Context`] 并在
@@ -18,7 +18,7 @@
 //!
 //! 与下层的接口：GPU 侧 UI 账面（`AtlasGpu`/`UiVertexRing`）、着色模式、监控账
 //! 与 pass 自计时等数据契约住 [`crate::render`]；Transform 编辑与层级树索引的
-//! 机制层、输入仲裁窄接口 `PointerCapture` 住 [`crate::scene::mechanism`]——
+//! 机制层、输入仲裁窄接口 `PointerCapture` 住 [`crate::scene`]——
 //! 本模块只消费/写入这些契约，不被下层与 remote 引用。
 //!
 //! 机制与证据：`.agents/docs/3-静态取数链路/3.7-egui调试GUI/`、

@@ -3,13 +3,13 @@
 //! 帧循环的核心分支逻辑就是区分 `ERROR_OUT_OF_DATE_KHR`（必须重建后重试，不算错误）
 //! 与真失败——`String` 承载不了这个语义，所以引入 enum。初始化失败带调用上下文走
 //! `Init(String)`；固定容量耗尽与访问越界走 `Capacity(String)`；运行期编排契约被
-//! 打破（状态矛盾、误用）走 `Upload(String)`。
+//! 打破（状态矛盾、误用）走 `Contract(String)`。
 //!
 //! 统一错误通道（正本见《代码结构优化：统一错误通道定案》）：system 签名
 //! `Result<(), BevyError>`，`?` 冒泡的 Err 由执行器交给 [`tier_handler`]，按错误值的
-//! `Severity` 元数据两 Tier 分流——`Warning` 就地 warn 丢弃（Tier①），其余 error
-//! 留档 + 置位 [`FATAL`]，由 [`fatal_gate`] 看门写 `AppExit` 优雅退出（Tier②）。
-//! handler 是裸函数指针、无 world 访问权，退出请求只能经静态位中转给看门 system。
+//! `Severity` 分流——`Warning` 打 warn 后丢弃；其余打 error 并置位 [`FATAL`]，由
+//! [`fatal_gate`] 写 `AppExit` 优雅退出。handler 是裸函数指针、无 world 访问权，
+//! 退出请求只能经静态位转给 `fatal_gate`。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -28,8 +28,9 @@ pub enum VulkanError {
     SwapchainOutOfDate,
     #[error("Vulkan 调用失败: {0}")]
     Vk(#[from] vk::Result),
-    #[error("上传/资源编排契约被打破: {0}")]
-    Upload(String),
+    /// 运行期编排契约被打破：内部状态矛盾或接口误用，状态已不可信
+    #[error("运行期编排契约被打破: {0}")]
+    Contract(String),
     /// 固定容量耗尽或访问范围越界：显式拒绝，不静默截断、不越界读写
     #[error("容量/范围越界: {0}")]
     Capacity(String),
@@ -37,22 +38,22 @@ pub enum VulkanError {
     Init(String),
 }
 
-/// 进程级优雅退出请求位：唯一写者 [`tier_handler`]（Tier② 分支置位），唯一消费者
+/// 优雅退出请求位：唯一写者 [`tier_handler`]（致命分支置位），唯一消费者
 /// [`fatal_gate`]。
 ///
-/// 进程级全局静态，多 App 并存会串扰——本项目单进程单 App，前提钉死。
+/// 坑：进程级全局静态，多 App 并存会串扰——本项目单进程单 App。
 static FATAL: AtomicBool = AtomicBool::new(false);
 
 /// 统一错误处理器（`App::set_error_handler` 注册；system/observer/command 的 Err
-/// 全走这里）：按 `Severity` 元数据两 Tier 分流。
+/// 全走这里）：按 `Severity` 分流。
 ///
-/// - `Warning` = Tier①：影响不大、下帧自愈，warn 后丢弃，运行继续；
-/// - 其余 = Tier②：状态不可信，error 留档 + 置位 `FATAL`，看门 system 写 `AppExit`
-///   优雅退出。忘标 severity 的错误默认 `Severity::Panic`（官方 `From` 转换语义）
-///   且无 payload，落到本分支按 Tier② 走——"非必要不 panic"在通道侧坐实。
+/// - `Warning`：影响不大、下帧自愈，warn 后丢弃，运行继续；
+/// - 其余：状态不可信，打 error 并置位 `FATAL`，由 `fatal_gate` 写 `AppExit` 优雅
+///   退出。忘标 severity 的错误默认 `Severity::Panic`（官方 `From` 转换语义）且无
+///   payload，也走这一支。
 ///
-/// panic 岗必须保留：真 panic 被 `handle_unwind` 捕获后带着 payload 转进本 handler，
-/// `resume_unwind` 原样还回去，保住 backtrace 取证；吞掉 payload = 丢取证能力。
+/// 坑：panic 分支必须保留——真 panic 被 `handle_unwind` 捕获后带着 payload 转进本
+/// handler，`resume_unwind` 原样还回去才保得住 backtrace；吞掉 payload 就丢了现场。
 pub fn tier_handler(mut err: BevyError, ctx: ErrorContext) {
     if matches!(err.severity(), Severity::Panic)
         && let Some(payload) = err.take_payload()
@@ -61,8 +62,7 @@ pub fn tier_handler(mut err: BevyError, ctx: ErrorContext) {
     }
     match err.severity() {
         Severity::Warning => warn!("{ctx}: {err}"),
-        // 低档（Ignore/Trace/Debug/Info）= 携带方明示可忽略,按 info 记录不升级,
-        // 不伪造致命退出
+        // 低档 = 携带方明示可忽略：按 info 记录，不升级为致命退出
         Severity::Ignore | Severity::Trace | Severity::Debug | Severity::Info => {
             info!("{ctx}: {err}");
         }
@@ -73,11 +73,10 @@ pub fn tier_handler(mut err: BevyError, ctx: ErrorContext) {
     }
 }
 
-/// 看门 system（锚定 `First` 集——多线程执行器下无序系统插入序不保证，早位收益
-/// 须显式锚定）：`FATAL` 置位 → 写 `AppExit` 优雅退出。
+/// `FATAL` 置位 → 写 `AppExit::error()` 优雅退出（main.rs 挂在 `First`）。
 ///
-/// swap 清位：连续多个 Tier② 只退一次。置位到生效有半帧延迟——本帧剩余 system
-/// 照跑、runner 帧末查 `AppExit` 才停，本帧正常收尾。
+/// swap 清位：连续多个致命错误只退一次。写入后本帧剩余 system 照跑，runner 帧末
+/// 查到 `AppExit` 才停。
 #[system]
 pub fn fatal_gate(mut exit: MessageWriter<AppExit>) {
     if FATAL.swap(false, Ordering::AcqRel) {
@@ -85,8 +84,7 @@ pub fn fatal_gate(mut exit: MessageWriter<AppExit>) {
     }
 }
 
-/// crate 级 `Result` 别名：缺省错误 = [`VulkanError`]，运行期 Vulkan 侧签名共用；
-/// 第二参显式可写（如 `Result<ImageSpec, ImageConvertError>`）。导入本名即遮蔽
-/// std 同名——文件里需要别的 `Result` 形态时用全称 `std::result::Result`
-///（common::syntax 泛型代码的惯例）。
+/// crate 级 `Result` 别名：缺省错误 = [`VulkanError`]，第二参可显式改写（如
+/// `Result<ImageSpec, ImageConvertError>`）。导入本名会遮蔽 std 同名，需要别的
+/// 形态时写全称 `std::result::Result`。
 pub type Result<T, E = VulkanError> = std::result::Result<T, E>;

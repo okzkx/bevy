@@ -7,6 +7,7 @@
 
 use ash::{vk, Device};
 use bevy::log::info;
+use bevy::math::{ops, Mat4, Vec3, Vec4};
 use bevy::prelude::Resource;
 
 use crate::common::bytes::{put_f32, put_mat4, put_u32};
@@ -16,7 +17,7 @@ use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::role::BufferRole;
 use crate::render::LightRecord;
-use crate::render::Context;
+use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::{DescSet, stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
@@ -46,19 +47,19 @@ pub(crate) static CLUSTER_BUILD_PIPELINE: PipelineDesc = PipelineDesc {
 };
 
 /// cluster 屏幕 tile 边长（px）。
-pub(crate) const CLUSTER_TILE_SIZE: u32 = 32;
+const CLUSTER_TILE_SIZE: u32 = 32;
 /// 深度片数。
-pub(crate) const CLUSTER_SLICES: u32 = 32;
+const CLUSTER_SLICES: u32 = 32;
 /// 每格最多记几盏灯，超出的丢掉（CPU 参照同样丢）。
-pub(crate) const MAX_PER_CLUSTER: u32 = 16;
+const MAX_PER_CLUSTER: u32 = 16;
 /// 分簇覆盖的视深范围（米）。
-pub(crate) const CLUSTER_NEAR: f32 = 0.1;
-pub(crate) const CLUSTER_FAR: f32 = 200.0;
+const CLUSTER_NEAR: f32 = 0.1;
+const CLUSTER_FAR: f32 = 200.0;
 
 /// cluster 均匀数据大小：两个矩阵 128B + 8 个 4B 标量。
 pub const CLUSTER_UNIFORM_SIZE: usize = 160;
 /// 每格记录大小：count + `MAX_PER_CLUSTER` 个索引，各 4B。
-pub const CLUSTER_RECORD_SIZE: usize = 4 * (1 + MAX_PER_CLUSTER as usize);
+const CLUSTER_RECORD_SIZE: usize = 4 * (1 + MAX_PER_CLUSTER as usize);
 
 /// cluster 网格维度，由渲染尺寸算出。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,7 +79,7 @@ impl ClusterGrid {
 
 /// 屏幕边缘不满一个 tile 的也算一格（与 cluster_build.wgsl 一致）。
 #[must_use]
-pub(crate) fn cluster_grid(extent: vk::Extent2D) -> ClusterGrid {
+fn cluster_grid(extent: vk::Extent2D) -> ClusterGrid {
     ClusterGrid {
         tiles_x: extent.width.div_ceil(CLUSTER_TILE_SIZE),
         tiles_y: extent.height.div_ceil(CLUSTER_TILE_SIZE),
@@ -89,11 +90,11 @@ pub(crate) fn cluster_grid(extent: vk::Extent2D) -> ClusterGrid {
 /// 第 `slice` 片的视深区间：near·(far/near)^(s/S) 到 near·(far/near)^((s+1)/S)，
 /// 近处切得密、远处疏。与 cluster_build.wgsl 同式。
 #[must_use]
-pub(crate) fn slice_view_depth(slice: u32, grid: ClusterGrid) -> (f32, f32) {
+fn slice_view_depth(slice: u32, grid: ClusterGrid) -> (f32, f32) {
     let ratio = CLUSTER_FAR / CLUSTER_NEAR;
     // 仓库禁用 f32::powf，用 bevy 的 ops::powf
-    let z0 = CLUSTER_NEAR * bevy::math::ops::powf(ratio, slice as f32 / grid.slices as f32);
-    let z1 = CLUSTER_NEAR * bevy::math::ops::powf(ratio, (slice as f32 + 1.0) / grid.slices as f32);
+    let z0 = CLUSTER_NEAR * ops::powf(ratio, slice as f32 / grid.slices as f32);
+    let z1 = CLUSTER_NEAR * ops::powf(ratio, (slice as f32 + 1.0) / grid.slices as f32);
     (z0, z1)
 }
 
@@ -102,9 +103,9 @@ pub(crate) fn slice_view_depth(slice: u32, grid: ClusterGrid) -> (f32, f32) {
 /// 坑：不能把 (0,0,−z) 直接乘 view_proj，那是把视空间当世界空间；相机一离开
 /// 原点深度片就错位，按 tile 阶梯状漏灯。
 #[must_use]
-fn slice_ndc_z(view_proj: bevy::math::Mat4, inv_view_proj: bevy::math::Mat4, z_view: f32) -> f32 {
+fn slice_ndc_z(view_proj: Mat4, inv_view_proj: Mat4, z_view: f32) -> f32 {
     let depth_at = |ndc_z: f32| {
-        let p = inv_view_proj * bevy::math::Vec4::new(0.0, 0.0, ndc_z, 1.0);
+        let p = inv_view_proj * Vec4::new(0.0, 0.0, ndc_z, 1.0);
         (view_proj * (p.truncate() / p.w).extend(1.0)).w
     };
     let (n0, n1) = (0.5, 0.25);
@@ -127,8 +128,8 @@ fn pixel_ndc(px: f32, py: f32, extent: vk::Extent2D) -> (f32, f32) {
 /// 返回每格的光源索引列表。
 #[must_use]
 pub fn cluster_reference(
-    view_proj: bevy::math::Mat4,
-    inv_view_proj: bevy::math::Mat4,
+    view_proj: Mat4,
+    inv_view_proj: Mat4,
     extent: vk::Extent2D,
     grid: ClusterGrid,
     lights: &[LightRecord],
@@ -152,11 +153,11 @@ pub fn cluster_reference(
             ((ty + 1) * CLUSTER_TILE_SIZE) as f32,
             extent,
         );
-        let mut min = bevy::math::Vec3::splat(f32::INFINITY);
-        let mut max = bevy::math::Vec3::splat(f32::NEG_INFINITY);
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
         for &(x, y) in &[(nx0, ny0), (nx1, ny0), (nx0, ny1), (nx1, ny1)] {
             for &cz in &[cz0, cz1] {
-                let clip = inv_view_proj * bevy::math::Vec4::new(x, y, cz, 1.0);
+                let clip = inv_view_proj * Vec4::new(x, y, cz, 1.0);
                 let world = clip.truncate() / clip.w;
                 min = min.min(world);
                 max = max.max(world);
@@ -164,7 +165,7 @@ pub fn cluster_reference(
         }
         let mut list = Vec::new();
         for (l, light) in lights.iter().enumerate() {
-            let c = bevy::math::Vec3::from_slice(&light.pos_radius[..3]);
+            let c = Vec3::from_slice(&light.pos_radius[..3]);
             let r = light.pos_radius[3];
             // 已回收的空槽半径为 0，跳过（GPU 同）
             if r <= 0.0 {
@@ -187,8 +188,8 @@ pub fn cluster_reference(
 /// inv_view_proj @64、near/far/tiles_x/tiles_y/slices/light_count/extent @128 起。
 #[must_use]
 pub fn pack_cluster_uniforms(
-    view_proj: &bevy::math::Mat4,
-    inv_view_proj: &bevy::math::Mat4,
+    view_proj: &Mat4,
+    inv_view_proj: &Mat4,
     extent: vk::Extent2D,
     grid: ClusterGrid,
     light_count: u32,
@@ -264,8 +265,8 @@ impl LightClusters {
             GpuBuffer::create_with_families(&ctx.device, ctx.memory_contract(), size, role, &sharing)
         };
         let clusters = u64::from(self.grid.cluster_count());
-        let mut slots = Vec::with_capacity(slot_count());
-        for slot in 0..slot_count() {
+        let mut slots = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        for slot in 0..MAX_FRAMES_IN_FLIGHT {
             // b1 只引用 LightTable 的帧槽 buffer，不归这里销毁
             let light = *light_buffers.get(slot % light_buffers.len().max(1)).ok_or_else(|| {
                 VulkanError::Init("光源常驻表帧槽环数量少于 cluster 帧槽".into())
@@ -357,10 +358,6 @@ impl LightClusters {
         self.lists.clear();
         self.counts.clear();
     }
-}
-
-fn slot_count() -> usize {
-    crate::render::MAX_FRAMES_IN_FLIGHT
 }
 
 impl Drop for LightClusters {

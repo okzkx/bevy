@@ -1,14 +1,13 @@
-// SMAA 1x 公共段（官方移植：源 = bevy_anti_alias smaa.wesl @ 0.20-dev，MIT，
-// (C) 2013 Jorge Jimenez et al.——上游版权头见仓库原文件）。条件编译展开口径：
-// SMAA_PRESET_HIGH + corner/diag 全开 + 无 predication/reprojection。
-// 接线差异：绑定随 ash_renderer 约定重排（三 pass 的 set0 均为 b0 输入纹理 /
-// b1 SmaaInfo / b2+ 采样器与 LUT），每 pass 单文件单入口（vs_main/fs_main）。
+// SMAA 1x 公共段。移植自 bevy_anti_alias 的 smaa.wesl（MIT，(C) 2013 Jorge Jimenez
+// et al.，上游版权头见原文件）。条件编译按 SMAA_PRESET_HIGH + corner/diag 全开 +
+// 无 predication/reprojection 展开。绑定按本项目约定重排（三 pass 的 set0 均为
+// b0 输入纹理 / b1 SmaaInfo / b2+ 采样器与 LUT），每 pass 一个文件、入口 vs_main/fs_main。
 
-// SmaaInfo UBO（32B = SMAA_INFO_SIZE，src/render/pipeline/smaa.rs；宿主每帧写）。
+// SmaaInfo UBO（32B = SMAA_INFO_SIZE，src/render/passes/post/smaa.rs；宿主每帧写）。
 struct SmaaInfo {
     // (1/w, 1/h, w, h)
     rt_metrics: vec4<f32>,
-    // x = SMAA 开关（0/1）——关 = neighborhood 混合权重清零直通
+    // x = SMAA 开关（0/1），关时 neighborhood 混合权重清零直通
     flags: vec4<f32>,
 }
 

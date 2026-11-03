@@ -1,11 +1,19 @@
-//! 图形管线的录制助手：绑定管线与描述符集、顶点/索引 buffer、viewport/scissor。
+//! 图形管线的录制助手：录制句柄、绑定管线与描述符集、顶点/索引 buffer、viewport/scissor。
 //! 所有 `unsafe fn` 的前提与 ash 的 `cmd_*` 相同：`cb` 处于录制状态，传入的句柄合法且
 //! 活到命令执行完。
 
 use ash::{vk, Device};
 
-use crate::render::core::binding::set_layout::{assert_set_sequence, DescSet};
-use crate::render::core::pipeline::graphics::PipelineRef;
+use crate::render::core::binding::set_layout::{assert_set_sequence, DescSet, SetLayoutDesc};
+
+/// 图形管线的录制句柄（Copy）：持有方管生命周期，录制输入束带这个。
+#[derive(Clone, Copy)]
+pub struct PipelineRef {
+    pub pipeline: vk::Pipeline,
+    pub layout: vk::PipelineLayout,
+    /// 预期的 set 声明序列（建管线时从配方抄入；绑定序校验用）。
+    pub sets: &'static [&'static SetLayoutDesc],
+}
 
 /// 覆盖整个 `extent` 的矩形，用作 renderArea 或 scissor。
 pub(crate) fn full_rect(extent: vk::Extent2D) -> vk::Rect2D {
@@ -15,7 +23,7 @@ pub(crate) fn full_rect(extent: vk::Extent2D) -> vk::Rect2D {
     }
 }
 
-/// 全幅 viewport，深度范围 [0,1]。
+/// 全幅 viewport，深度范围 `[0,1]`。
 /// 坑：高度用正值，不要改成负高度翻转 Y——Y 已在 shader 里翻过，再翻画面会倒过来（见 gbuffer_pipeline 模块注释）。
 ///
 /// # Safety

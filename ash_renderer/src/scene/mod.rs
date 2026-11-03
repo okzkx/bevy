@@ -3,25 +3,51 @@
 //!
 //! | 子模块 | 职责 |
 //! |---|---|
-//! | [`mechanism`] | 机制半边：材质缝补位、稳定槽账本与变更发现（跨帧增量维护）、资产事件读侧、宽高比补位——换任何场景内容都不变 |
-//! | [`content`] | 业务半边：场景内容参数（进场/取景/灯光）+ 随内容走的一次性核验 |
-//! | `util` | 子模块公共小工具 |
+//! | `mechanism` | 机制半边：账本与资产驻留、宿主补位、输入交互、对象/资产编辑、场景生成——换任何场景内容都不变 |
+//! | `content` | 业务半边：场景内容参数（进场/取景/灯光）+ 随内容走的一次性核验 |
+//!
+//! 两个子模块都私有；scene 外部只走本模块根上的重出口（`crate::scene::X`）。
 
 mod content;
-pub(crate) mod mechanism;
-mod util;
+mod mechanism;
 
+// content
 pub use content::SceneEntryPlugin;
+
+// mechanism/assets
 pub use mechanism::{
-    AshAssetEventPlugin, AshCameraAspectPlugin, AshCameraControlPlugin, AshCameraGuardPlugin,
-    AshLedgerPlugin,
-    AshLightControlPlugin, AshMaterialHookPlugin, AshReadinessPlugin, AshResidencyPlugin,
-    AshVisibilityExemptPlugin,
-    AshWorkloadPlugin, AssetInvalidations, AssetReadiness, AssetRetirements, DrawListVerify,
-    IncrementStats,
-    InstanceLedger,
-    InstanceRow, LodDemand, LodGroups, LodLadderReadback, ReadinessStats, RecycleStats,
-    ResidencySet, ResidencySettings, ResidencyStats, SunOrbit, WorkloadSettings, GapMode, GapSnapshot,
-    anchor_level,
-    gap_asset_ids, spawn_lod_ladder,
+    anchor_level, spawn_lod_ladder, AshAssetEventPlugin, AshLedgerPlugin, AshReadinessPlugin,
+    AshResidencyPlugin, AssetInvalidations, AssetReadiness, AssetRetirements, DrawListVerify,
+    GapMode, GapSnapshot, InstanceLedger, InstanceRow, LodDemand, LodGroups, ResidencySet,
+    ResidencySettings, ResidencyStats,
 };
+pub(crate) use mechanism::AssemblyView;
+
+// mechanism/editing
+pub use mechanism::{
+    apply_transform_edit, load_image_slot, load_mesh_rebind, mutate_asset, replace_handles,
+    spawn_primitive_clone, spawn_with_loaded_mesh, AssetOpError, MutateAsset, TransformEdit,
+    TransformEditError, TransformEditQueue,
+};
+pub(crate) use mechanism::{
+    apply_transform_edits, EntityRow, HandleSwapReadback, ObjectOpError, SceneTreeIndex,
+    SceneTreeNode, TREE_MAX_DEPTH,
+};
+
+// mechanism/generation
+pub use mechanism::{
+    chunk_census, despawn_chunk, generate_chunks, generate_instances, spawn_test_shape,
+    AshWorkloadPlugin, ChunkGenParams, SceneChunk, SceneGenParams, TestShape, WorkloadSettings,
+};
+
+// mechanism/host
+pub use mechanism::{
+    AshCameraAspectPlugin, AshCameraGuardPlugin, AshMaterialHookPlugin, AshVisibilityExemptPlugin,
+};
+
+// mechanism/interaction
+pub use mechanism::{
+    apply_sun_rotation, clamp_elevation, AshCameraControlPlugin, AshLightControlPlugin,
+    PointerCapture, PointerCaptureSet, SunOrbit,
+};
+pub(crate) use mechanism::{apply_camera_command, CameraCommandError, CameraOrbitCommand};

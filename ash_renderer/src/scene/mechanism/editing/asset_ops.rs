@@ -3,6 +3,7 @@
 //! 像素 tint 仅支持 4 字节 RGBA 格式。
 
 use bevy::{
+    asset::AssetMut,
     image::Image,
     mesh::{Mesh, VertexAttributeValues},
     pbr::StandardMaterial,
@@ -38,9 +39,9 @@ pub enum AssetOpError {
 pub struct MutateAsset {
     /// 写入材质 base_color 的线性 RGBA 值。
     pub base_color: Option<[f32; 4]>,
-    /// 改材质参数：metallic（[0,1]，PBR 面）。
+    /// 改材质参数：metallic（`[0,1]`，PBR 面）。
     pub metallic: Option<f32>,
-    /// 改材质参数：perceptual_roughness（[0,1]，PBR 面）。
+    /// 改材质参数：perceptual_roughness（`[0,1]`，PBR 面）。
     pub perceptual_roughness: Option<f32>,
     /// 复制源实体的 base_color_texture 槽；源材质无贴图时清空目标槽。
     pub slot_base_color_from: Option<Entity>,
@@ -68,9 +69,9 @@ pub fn mutate_asset(
     target: Entity,
     p: MutateAsset,
 ) -> Result<AssetOpReadback, AssetOpError> {
-    if world.get_entity(target).is_err() {
-        return Err(AssetOpError::EntityMissing(target));
-    }
+    world
+        .get_entity(target)
+        .map_err(|_| AssetOpError::EntityMissing(target))?;
     let mesh_handle = world
         .get::<Mesh3d>(target)
         .map(|m| m.0.clone())
@@ -101,19 +102,13 @@ pub fn mutate_asset(
     let new_slot: Option<Option<Handle<Image>>> = match p.slot_base_color_from {
         None => None,
         Some(source) => {
-            let source_texture = world
+            let source_material = world
                 .get::<MeshMaterial3d<StandardMaterial>>(source)
                 .ok_or(AssetOpError::SourceNotPrimitive(source))?
                 .0
                 .clone();
             // 源材质的 base_color 槽柄（None = 清目标槽——拷槽语义含"没有"）
-            let assets = world
-                .get_resource::<Assets<StandardMaterial>>()
-                .ok_or(AssetOpError::AssetMissing("Assets<StandardMaterial> 容器缺席"))?;
-            let source_material = assets
-                .get(&source_texture)
-                .ok_or(AssetOpError::AssetMissing("StandardMaterial"))?;
-            Some(source_material.base_color_texture.clone())
+            Some(asset_ref(world, &source_material, MATERIAL)?.base_color_texture.clone())
         }
     };
     let tint_target: Option<Handle<Image>> = if p.image_tint.is_some() {
@@ -124,102 +119,70 @@ pub fn mutate_asset(
                     "换槽请求清除了 base_color_texture,无处 tint",
                 ));
             }
-            None => {
-                let assets = world
-                    .get_resource::<Assets<StandardMaterial>>()
-                    .ok_or(AssetOpError::AssetMissing("Assets<StandardMaterial> 容器缺席"))?;
-                assets
-                    .get(&material_handle)
-                    .ok_or(AssetOpError::AssetMissing("StandardMaterial"))?
-                    .base_color_texture
-                    .clone()
-                    .ok_or(AssetOpError::AssetMissing(
-                        "该实体材质没有 base_color_texture,无处 tint",
-                    ))?
-            }
+            None => asset_ref(world, &material_handle, MATERIAL)?
+                .base_color_texture
+                .clone()
+                .ok_or(AssetOpError::AssetMissing(
+                    "该实体材质没有 base_color_texture,无处 tint",
+                ))?,
         };
-        let assets = world
-            .get_resource::<Assets<Image>>()
-            .ok_or(AssetOpError::AssetMissing("Assets<Image> 容器缺席"))?;
-        let image = assets
-            .get(&texture_handle)
-            .ok_or(AssetOpError::AssetMissing("Image"))?;
-        check_tint_rgba8(image)?;
+        check_tint_rgba8(asset_ref(world, &texture_handle, IMAGE)?)?;
         Some(texture_handle)
     } else {
         None
     };
-    if p.mesh_vertex_scale.is_some() {
-        let assets =
-            world.get_resource::<Assets<Mesh>>().ok_or(AssetOpError::AssetMissing(
-                "Assets<Mesh> 容器缺席",
-            ))?;
-        let mesh = assets
-            .get(&mesh_handle)
-            .ok_or(AssetOpError::AssetMissing("Mesh"))?;
-        match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
-            Some(VertexAttributeValues::Float32x3(_)) => {}
-            _ => return Err(AssetOpError::MeshPositionsUnsupported),
-        }
+    if p.mesh_vertex_scale.is_some()
+        && !matches!(
+            asset_ref(world, &mesh_handle, MESH)?.attribute(Mesh::ATTRIBUTE_POSITION),
+            Some(VertexAttributeValues::Float32x3(_))
+        )
+    {
+        return Err(AssetOpError::MeshPositionsUnsupported);
     }
 
     // 全部校验通过后才写入资产并触发修改事件。
     let mut readback = AssetOpReadback::default();
 
-    if let Some(color) = p.base_color {
-        let [r, g, b, a] = color;
-        let mut assets = world.get_resource_mut::<Assets<StandardMaterial>>().ok_or(
-            AssetOpError::AssetMissing("Assets<StandardMaterial> 容器缺席"),
-        )?;
-        let mut material = assets
-            .get_mut(&material_handle)
-            .ok_or(AssetOpError::AssetMissing("StandardMaterial"))?;
-        material.base_color = Color::LinearRgba(LinearRgba::new(r, g, b, a));
+    if let Some([r, g, b, a]) = p.base_color {
+        write_asset(world, &material_handle, MATERIAL, |material| {
+            material.base_color = Color::LinearRgba(LinearRgba::new(r, g, b, a));
+            Ok(())
+        })?;
         readback.material = Some(material_handle.id());
     }
 
     if p.metallic.is_some() || p.perceptual_roughness.is_some() {
-        let mut assets = world.get_resource_mut::<Assets<StandardMaterial>>().ok_or(
-            AssetOpError::AssetMissing("Assets<StandardMaterial> 容器缺席"),
-        )?;
-        let mut material = assets
-            .get_mut(&material_handle)
-            .ok_or(AssetOpError::AssetMissing("StandardMaterial"))?;
-        if let Some(m) = p.metallic {
-            material.metallic = m;
-        }
-        if let Some(r) = p.perceptual_roughness {
-            material.perceptual_roughness = r;
-        }
+        write_asset(world, &material_handle, MATERIAL, |material| {
+            if let Some(m) = p.metallic {
+                material.metallic = m;
+            }
+            if let Some(r) = p.perceptual_roughness {
+                material.perceptual_roughness = r;
+            }
+            Ok(())
+        })?;
         readback.material = Some(material_handle.id());
     }
 
-    if let Some(source_slot) = new_slot.clone() {
-        let mut assets = world.get_resource_mut::<Assets<StandardMaterial>>().ok_or(
-            AssetOpError::AssetMissing("Assets<StandardMaterial> 容器缺席"),
-        )?;
-        let mut material = assets
-            .get_mut(&material_handle)
-            .ok_or(AssetOpError::AssetMissing("StandardMaterial"))?;
-        material.base_color_texture = source_slot;
+    if let Some(source_slot) = &new_slot {
+        write_asset(world, &material_handle, MATERIAL, |material| {
+            material.base_color_texture = source_slot.clone();
+            Ok(())
+        })?;
         readback.material = Some(material_handle.id());
     }
 
     if let Some(scale) = p.mesh_vertex_scale {
-        let mut assets =
-            world.get_resource_mut::<Assets<Mesh>>().ok_or(AssetOpError::AssetMissing(
-                "Assets<Mesh> 容器缺席",
-            ))?;
-        let mut mesh = assets
-            .get_mut(&mesh_handle)
-            .ok_or(AssetOpError::AssetMissing("Mesh"))?;
-        let VertexAttributeValues::Float32x3(positions) =
-            mesh.attribute(Mesh::ATTRIBUTE_POSITION).ok_or(AssetOpError::MeshPositionsUnsupported)?
-        else {
-            return Err(AssetOpError::MeshPositionsUnsupported);
-        };
-        let scaled: Vec<[f32; 3]> = positions.iter().map(|p| [p[0] * scale, p[1] * scale, p[2] * scale]).collect();
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, scaled);
+        write_asset(world, &mesh_handle, MESH, |mesh| {
+            let VertexAttributeValues::Float32x3(positions) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION).ok_or(AssetOpError::MeshPositionsUnsupported)?
+            else {
+                return Err(AssetOpError::MeshPositionsUnsupported);
+            };
+            let scaled: Vec<[f32; 3]> = positions.iter().map(|p| [p[0] * scale, p[1] * scale, p[2] * scale]).collect();
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, scaled);
+            Ok(())
+        })?;
         readback.mesh = Some(mesh_handle.id());
     }
 
@@ -228,13 +191,7 @@ pub fn mutate_asset(
         let texture_handle = tint_target.ok_or(AssetOpError::AssetMissing(
             "该实体材质没有 base_color_texture,无处 tint",
         ))?;
-        let mut assets = world
-            .get_resource_mut::<Assets<Image>>()
-            .ok_or(AssetOpError::AssetMissing("Assets<Image> 容器缺席"))?;
-        let mut image = assets
-            .get_mut(&texture_handle)
-            .ok_or(AssetOpError::AssetMissing("Image"))?;
-        tint_rgba8(&mut image, tint)?;
+        write_asset(world, &texture_handle, IMAGE, |image| tint_rgba8(image, tint))?;
         readback.image = Some(texture_handle.id());
     }
 
@@ -248,6 +205,39 @@ pub fn mutate_asset(
     }
 
     Ok(readback)
+}
+
+/// 资产查无时的拒绝消息：(容器缺席, 柄查无)。
+type MissingMsgs = (&'static str, &'static str);
+const MATERIAL: MissingMsgs = ("Assets<StandardMaterial> 容器缺席", "StandardMaterial");
+const MESH: MissingMsgs = ("Assets<Mesh> 容器缺席", "Mesh");
+const IMAGE: MissingMsgs = ("Assets<Image> 容器缺席", "Image");
+
+/// 只读取资产；容器缺席或柄查无都按 `AssetMissing` 拒绝。
+fn asset_ref<'w, A: Asset>(
+    world: &'w World,
+    handle: &Handle<A>,
+    (container, name): MissingMsgs,
+) -> Result<&'w A, AssetOpError> {
+    world
+        .get_resource::<Assets<A>>()
+        .ok_or(AssetOpError::AssetMissing(container))?
+        .get(handle)
+        .ok_or(AssetOpError::AssetMissing(name))
+}
+
+/// 经 `Assets::get_mut` 写入资产：真正可变解引用时才发出修改事件。
+fn write_asset<A: Asset>(
+    world: &mut World,
+    handle: &Handle<A>,
+    (container, name): MissingMsgs,
+    write: impl FnOnce(&mut AssetMut<'_, A>) -> Result<(), AssetOpError>,
+) -> Result<(), AssetOpError> {
+    let mut assets = world
+        .get_resource_mut::<Assets<A>>()
+        .ok_or(AssetOpError::AssetMissing(container))?;
+    let mut asset = assets.get_mut(handle).ok_or(AssetOpError::AssetMissing(name))?;
+    write(&mut asset)
 }
 
 /// 校验 tint 支持的像素格式及数据是否存在。
@@ -276,10 +266,7 @@ fn tint_format_supported(format: TextureFormat) -> bool {
 
 /// 对 RGBA8 像素的 RGB 字节直接乘以系数，不做色彩空间转换。格式或数据缺失时返回错误。
 fn tint_rgba8(image: &mut Image, tint: [f32; 3]) -> Result<(), AssetOpError> {
-    let format = image.texture_descriptor.format;
-    if !tint_format_supported(format) {
-        return Err(AssetOpError::ImageFormatUnsupported(format));
-    }
+    check_tint_rgba8(image)?;
     let Some(data) = image.data.as_mut() else {
         return Err(AssetOpError::AssetMissing("Image 像素数据"));
     };

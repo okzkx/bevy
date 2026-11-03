@@ -1,7 +1,7 @@
 //! 着色器编译管线：`shaders/*.wgsl`（入口模块；`read_dir` 不递归，`shaders/common/`
 //! 下的公共片段不单独编译）→ 展开 `// #import <name>` → naga 30.0.1（wgsl-in →
-//! spv-out）→ spirv-val 闸门 →（被 VUID-04680 拒的 runtime 模块）capability 补丁 →
-//! 复跑 spirv-val 兜底 → `OUT_DIR/<stem>.spv`（小端词流），由
+//! spv-out）→ spirv-val 校验 →（被 VUID-04680 拒的 runtime 模块）capability 补丁 →
+//! 复跑 spirv-val → `OUT_DIR/<stem>.spv`（小端词流），由
 //! `include_bytes!(concat!(env!("OUT_DIR"), "/<stem>.spv"))` 消费。
 //!
 //! ABI 表：同一次 naga 校验的产物里，逐入口点列出实际用到的 set/binding/描述符种类/
@@ -9,29 +9,27 @@
 //! 静态项，spv 字节也挂在上面）；宿主创建 pipeline layout 前拿它和布局声明对账。
 //!
 //! 公共片段：独占一行的 `// #import <name>` 展开为 `shaders/common/<name>.wgsl` 全文，
-//! 递归展开；同一入口内每个片段只展开一次（菱形依赖去重），循环引用 = 构建错误。
-//! 片段只放 struct / 常量 / 函数，`@group/@binding` 声明留在各入口（组号随管线
-//! 布局走，同一资源在不同入口里组号/绑定号可能不同）；片段函数若引用全局绑定，
-//! 由导入方声明，片段头注写明所需名字。展开结果落 `OUT_DIR/<stem>.expanded.wgsl`，
-//! naga 报错的行列号以该文件为准。
+//! 递归展开；同一入口内每个片段只展开一次，循环引用 = 构建错误。片段只放 struct /
+//! 常量 / 函数，`@group/@binding` 声明留在各入口（同一资源在不同入口里组号/绑定号可能
+//! 不同）；片段函数若引用全局绑定，由导入方声明，片段头注写明所需名字。展开结果落
+//! `OUT_DIR/<stem>.expanded.wgsl`，naga 报错的行列号以该文件为准。
 //!
-//! spirv-val 定位：`VULKAN_SDK` 环境变量优先，回退本机 1.4.357.0 默认安装路径。
-//! - **有 spirv-val**：先验原生输出，仅被拒模块打补丁（补丁幂等，已声明的
-//!   capability 不重复注）。
-//! - **无 spirv-val**：全部模块无条件打补丁 + `cargo:warning`。补丁是纯声明性插词
-//!   （capability 只收紧设备要求不放松合法性），合法性由运行期验证层在
-//!   `vkCreateShaderModule` 内执法（VUID-04680/08740）兜底；构建日志明示证据链降级。
+//! spirv-val 定位：`VULKAN_SDK` 环境变量优先，回退本机默认安装路径。
+//! - **有 spirv-val**：先验原生输出，仅被拒模块打补丁（补丁幂等）。
+//! - **无 spirv-val**：全部模块无条件打补丁 + `cargo:warning`。补丁只是声明 capability，
+//!   合法性由运行期验证层在 `vkCreateShaderModule` 内检查（VUID-04680/08740）。
 //!
-//! 输出纪律：`cargo:warning` 只承载真正异常（缺 spirv-val 降级）；验证轨迹
-//! （原生通过/预期被拒/补丁后通过）走 stderr——cargo 捕获下平时静默，仅在脚本
-//! 失败时随错误展示（或 `cargo build -vv` 全量可见），不污染 rustc 警告流。
+//! 输出：`cargo:warning` 只承载真正异常（缺 spirv-val）；验证轨迹走 stderr，cargo 捕获
+//! 下平时静默，仅在脚本失败时展示（或 `cargo build -vv`）。
+//!
+//! 构建脚本里 panic/expect/assert 就是报构建错误的方式，错误处理规范的 panic 禁令不适用。
 
 use std::path::{Path, PathBuf};
 
 use naga::back::spv;
 use naga::valid::{Capabilities, Validator, ValidationFlags};
 
-// SPIR-V 语法常量（与 examples/bindless_probe.rs 同表：值由规范钉死）。
+// SPIR-V 语法常量（值由规范规定，与 examples/bindless_probe.rs 同表）。
 const OP_CAPABILITY: u16 = 17;
 const OP_EXTENSION: u16 = 10;
 const CAP_RUNTIME_DESCRIPTOR_ARRAY: u32 = 5302;
@@ -49,9 +47,8 @@ fn main() {
     let shaders_dir = Path::new("shaders");
     let common_dir = shaders_dir.join("common");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo 提供 OUT_DIR"));
-    // 目录级 rerun-if-changed：逐文件声明对"新增文件"无感知，新落的 .wgsl 不会
-    // 触发重编译。目录声明覆盖增删（cargo 递归扫描，含 common/），逐文件声明
-    // 保留（内容变更逐文件精确触发）。
+    // 目录级 rerun-if-changed：逐文件声明感知不到"新增文件"。目录声明覆盖增删（cargo
+    // 递归扫描，含 common/），逐文件声明保留（内容变更精确触发）。
     println!("cargo:rerun-if-changed={}", shaders_dir.display());
     println!("cargo:rerun-if-env-changed=VULKAN_SDK");
     let mut wgsl_paths: Vec<PathBuf> = std::fs::read_dir(shaders_dir)
@@ -78,12 +75,10 @@ fn main() {
         }
         let source = expand_imports(path, &common_dir);
         let expanded = out_dir.join(format!("{stem}.expanded.wgsl"));
-        std::fs::write(&expanded, &source).unwrap_or_else(|e| panic!("写 {expanded:?} 失败: {e}"));
+        write_file(&expanded, &source);
         let (words, abi) = compile(&source, &expanded, &stem);
         let words = gate_and_patch(words, &stem, val_exe.as_deref());
-        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let out = out_dir.join(format!("{stem}.spv"));
-        std::fs::write(&out, &bytes).unwrap_or_else(|e| panic!("写 {out:?} 失败: {e}"));
+        write_file(&out_dir.join(format!("{stem}.spv")), words_to_bytes(&words));
         abi_table.push_str(&abi);
         abi_names.push(stem.to_uppercase());
     }
@@ -92,13 +87,21 @@ fn main() {
         abi_table.push_str(&format!("&{name}, "));
     }
     abi_table.push_str("];\n");
-    let abi_out = out_dir.join("shader_abi.rs");
-    std::fs::write(&abi_out, abi_table).unwrap_or_else(|e| panic!("写 {abi_out:?} 失败: {e}"));
-    // MSVC 默认主线程栈 1MB 不够 init 链（Context::new 的 ash 枚举 + InitChain 元组）
-    // 的栈深，会稳定栈溢出；主线程栈保留提到 16MB（Rust 子线程 2MB 默认不受影响）。
+    write_file(&out_dir.join("shader_abi.rs"), abi_table);
+    // 坑：MSVC 默认主线程栈 1MB 不够 init 链（Context::new 的 ash 枚举 + InitChain）的
+    // 栈深，会稳定栈溢出，主线程栈保留提到 16MB（Rust 子线程默认 2MB 不受影响）。
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         println!("cargo:rustc-link-arg=/STACK:16777216");
     }
+}
+
+fn write_file(path: &Path, contents: impl AsRef<[u8]>) {
+    std::fs::write(path, contents).unwrap_or_else(|e| panic!("写 {path:?} 失败: {e}"));
+}
+
+/// SPIR-V 词流 → 小端字节。
+fn words_to_bytes(words: &[u32]) -> Vec<u8> {
+    words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
 /// 展开入口模块的 `// #import <name>`（见模块注释）。
@@ -172,8 +175,8 @@ fn compile(source: &str, expanded: &Path, stem: &str) -> (Vec<u32>, String) {
         ),
     };
     let mut options = spv::Options::default();
-    // 坑点：全部管线的正高度 viewport 朝向依赖 naga 对 @builtin(position) 注入的
-    // Y 翻转；默认值已含此位，显式写出防默认值变动后画面整体上下颠倒。
+    // 坑：全部管线的正高度 viewport 朝向依赖 naga 对 @builtin(position) 注入的 Y 翻转；
+    // 默认值已含此位，显式写出防默认值变动后画面整体上下颠倒。
     options.flags.insert(spv::WriterFlags::ADJUST_COORDINATE_SPACE);
     let words = match spv::write_vec(&module, &info, &options, None) {
         Ok(w) => w,
@@ -260,15 +263,14 @@ fn resource_kind(module: &naga::Module, var: &naga::GlobalVariable, stem: &str) 
     (kind, array)
 }
 
-/// 跨端布局互证闸门：与宿主打包逐字节同源的记录结构体，naga 算出的
-/// 结构体 span（字节数）必须与宿主常量相等——WGSL 侧结构体的成员对齐
-///（如 `vec3<u32>` 对齐 16）会把步长撑得比宿主打包大，材质/对象槽 ≥1
-/// 全体错位（实例：MaterialRecord 尾垫用 vec3<u32> 时步长 80 ≠ 宿主 64）。
-/// 宿主常量正本 = `src/render/assets/instance_table.rs`（MATERIAL_RECORD_SIZE
-/// / OBJECT_RECORD_SIZE 等）与 `src/render/shading/light_table.rs`
-/// （LIGHT_RECORD_SIZE）；新增记录结构时在此登记。
-/// 注：span = 结构体字节数；storage 数组步长 = span 向上取整到对齐，span
-/// 相等且对齐不超宿主步长即步长相等。
+/// 跨端布局互证：与宿主打包逐字节同源的记录结构体，naga 算出的结构体 span（字节数）
+/// 必须与宿主常量相等。
+///
+/// 坑：WGSL 成员对齐（如 `vec3<u32>` 对齐 16）会把步长撑得比宿主打包大，材质/对象槽
+/// ≥1 全体错位（实例：MaterialRecord 尾垫用 vec3<u32> 时步长 80 ≠ 宿主 64）。
+/// 宿主常量正本 = `src/render/resident/instance_table.rs`（MATERIAL_RECORD_SIZE /
+/// OBJECT_RECORD_SIZE 等）与 `src/render/resident/light_table.rs`（LIGHT_RECORD_SIZE）；
+/// 新增记录结构时在此登记。span 相等且对齐不超宿主步长即步长相等。
 const HOST_LAYOUT_GATE: &[(&str, u32)] = &[
     ("MaterialRecord", 64),
     ("ObjectRecord", 48),
@@ -295,31 +297,27 @@ fn assert_host_layout(module: &naga::Module, stem: &str) {
     }
 }
 
-/// spirv-val 闸门 + 按需补丁（原生被 VUID-04680 拒 → 补丁 → 复跑兜底）。
-/// 无 spirv-val 时降级为无条件补丁（见模块注释）。
+/// spirv-val 校验 + 按需补丁（原生被 VUID-04680 拒 → 补丁 → 复跑）。
+/// 无 spirv-val 时无条件补丁（见模块注释）。
 fn gate_and_patch(words: Vec<u32>, stem: &str, val_exe: Option<&Path>) -> Vec<u32> {
-    match val_exe {
-        Some(val_exe) => match run_spirv_val(val_exe, &words) {
-            Ok(()) => {
-                eprintln!("[{stem}] spirv-val 原生输出通过（零补丁）");
-                words
+    let Some(val_exe) = val_exe else {
+        return patch_descriptor_indexing(&words);
+    };
+    match run_spirv_val(val_exe, &words) {
+        Ok(()) => {
+            eprintln!("[{stem}] spirv-val 原生输出通过（零补丁）");
+            words
+        }
+        Err(native_error) => {
+            eprintln!("[{stem}] 原生输出被 spirv-val 拒（预期缺口：RuntimeDescriptorArray capability 不发射）——打补丁重验");
+            let patched = patch_descriptor_indexing(&words);
+            if let Err(patch_error) = run_spirv_val(val_exe, &patched) {
+                panic!(
+                    "[{stem}] 补丁后仍被 spirv-val 拒——模块无合法形态\n-- 原生错误 --\n{native_error}\n-- 补丁后错误 --\n{patch_error}"
+                );
             }
-            Err(native_error) => {
-                eprintln!("[{stem}] 原生输出被 spirv-val 拒（预期缺口：RuntimeDescriptorArray capability 不发射）——打补丁重验");
-                let patched = patch_descriptor_indexing(&words);
-                if let Err(patch_error) = run_spirv_val(val_exe, &patched) {
-                    panic!(
-                        "[{stem}] 补丁后仍被 spirv-val 拒——模块无合法形态\n-- 原生错误 --\n{native_error}\n-- 补丁后错误 --\n{patch_error}"
-                    );
-                }
-                eprintln!("[{stem}] 补丁后通过 spirv-val");
-                patched
-            }
-        },
-        None => {
-            // 降级分支：无条件补丁。声明多余 capability 只收紧设备要求，运行期
-            // 验证层仍按 VUID-04680/08740 执法兜底
-            patch_descriptor_indexing(&words)
+            eprintln!("[{stem}] 补丁后通过 spirv-val");
+            patched
         }
     }
 }
@@ -338,14 +336,12 @@ fn locate_spirv_val() -> Option<PathBuf> {
 
 /// 跑一次 spirv-val：词流写临时 .spv，--target-env vulkan1.3。被拒返回 Err 文本。
 fn run_spirv_val(val_exe: &Path, words: &[u32]) -> Result<(), String> {
-    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-    // 临时文件名混 pid：并发 cargo 调用（多 target/多工作区共享构建脚本路径）
-    // 不互踩同一 .spv
+    // 临时文件名混 pid：并发 cargo 调用（多 target/多工作区）不互踩同一 .spv
     let spv_path = std::env::temp_dir().join(format!(
         "ash_renderer_build_val_{}.spv",
         std::process::id()
     ));
-    std::fs::write(&spv_path, &bytes).map_err(|e| format!("写临时 .spv 失败: {e}"))?;
+    std::fs::write(&spv_path, words_to_bytes(words)).map_err(|e| format!("写临时 .spv 失败: {e}"))?;
     let result = std::process::Command::new(val_exe)
         .arg("--target-env")
         .arg("vulkan1.3")
@@ -365,10 +361,10 @@ fn run_spirv_val(val_exe: &Path, words: &[u32]) -> Result<(), String> {
     }
 }
 
-/// 最小确定性补丁（与 examples/bindless_probe.rs 组 B 同款）：capability 段注入缺失的
+/// 最小确定性补丁（与 examples/bindless_probe.rs 组 B 相同）：capability 段注入缺失的
 /// RuntimeDescriptorArray / SampledImageArrayNonUniformIndexing + 扩展段注入
-/// SPV_EXT_descriptor_indexing。capability 必须插在 extension 区段之前
-///（SPIR-V 逻辑布局顺序），分两个插入点拼接。
+/// SPV_EXT_descriptor_indexing。SPIR-V 逻辑布局要求 capability 在 extension 之前，
+/// 所以分两个插入点拼接。
 fn patch_descriptor_indexing(words: &[u32]) -> Vec<u32> {
     let mut caps_present: Vec<u32> = Vec::new();
     let mut exts_present: Vec<String> = Vec::new();
@@ -385,16 +381,14 @@ fn patch_descriptor_indexing(words: &[u32]) -> Vec<u32> {
         }
     }
     let cap_insert = pos;
-    // 第二遍：从 capability 结束点继续吃 OpExtension，记下 extension 区段结束点
-    let mut ext_pos = cap_insert;
+    // 第二遍：继续吃 OpExtension，记下 extension 区段结束点
     let mut ext_insert = cap_insert;
-    while ext_pos < words.len() {
-        let word0 = words[ext_pos];
+    while ext_insert < words.len() {
+        let word0 = words[ext_insert];
         let wc = ((word0 >> 16) as usize).max(1);
         if (word0 & 0xFFFF) as u16 == OP_EXTENSION {
-            exts_present.push(decode_spv_string(&words[ext_pos + 1..ext_pos + wc]));
-            ext_insert = ext_pos + wc;
-            ext_pos += wc;
+            exts_present.push(decode_spv_string(&words[ext_insert + 1..ext_insert + wc]));
+            ext_insert += wc;
         } else {
             break;
         }
