@@ -63,9 +63,11 @@ use super::drawlist::{self, DrawabilitySources, ParityDirty};
 
 mod resize_gate;
 mod stopwatch;
+mod frame_logs;
 
 use self::resize_gate::ResizeGate;
 use self::stopwatch::FrameStopwatch;
+use self::frame_logs::FrameLogs;
 
 /// 遮挡 fallback 的相机历史（`draw_frame` 的 `Local`，跨帧保持）：跳变判定用
 /// "当前 vs 两帧前"——遮挡读的金字塔正是两帧前的深度。阈值见 occlusion 模块文档，
@@ -249,27 +251,6 @@ pub(crate) struct TransparentInput<'w> {
     pipeline: Res<'w, TransparentPipeline>,
 }
 
-/// 帧循环日志状态（跨帧 `Local`）：缺资源/相机告警去重 + 一次性里程碑日志。
-#[derive(Default)]
-struct FrameLogs {
-    /// "快照未全部可画（缺驻留/缺材质）"已报过（下帧自愈，不逐帧刷屏）。
-    /// 可逆旗标：pending 清零时复位重开（所以不用 [`OnceLog`]）。
-    warned_pending: bool,
-    warned_no_camera: OnceLog,
-    warned_no_ambient: OnceLog,
-    /// 首个完整 DrawList 的材质日志。
-    override_logged: OnceLog,
-    /// 首个取到灯光的帧（值随帧可变，只报"链路已通"）。
-    lights_logged: OnceLog,
-    /// 多方向光/无方向光的状态告警。
-    warned_light_count: OnceLog,
-    /// 各 compute 段首个 dispatch 帧。
-    cull_first_dispatch: OnceLog,
-    occlusion_first_dispatch: OnceLog,
-    lod_first_dispatch: OnceLog,
-    indirect_first_submit: OnceLog,
-}
-
 /// ash 帧循环系统（注册与排序在 [`super`]；流程与错误分流见模块文档）。
 #[system]
 pub(crate) fn draw_frame(
@@ -321,25 +302,7 @@ pub(crate) fn draw_frame(
     let ledger: &InstanceLedger = &scene.ledger;
     let assembly = ledger.assembly_view();
     let pending_rows = ledger.len() - assembly.slots.len();
-    if pending_rows > 0 {
-        if !logs.warned_pending {
-            logs.warned_pending = true;
-            info!(
-                "DrawList 暂缓 {}/{} 行（实例槽/mesh/材质未就绪，上传链自愈后消失）",
-                pending_rows,
-                ledger.len(),
-            );
-        }
-    } else {
-        logs.warned_pending = false;
-    }
-    if !ledger.is_empty() && pending_rows == 0 {
-        logs.override_logged.log(|| info!(
-            "材质调试覆盖：{} 个 primitive 全部按不透明绘制——blend 关闭（alpha<1 的 {} 行照常画出，glTF BLEND 镜片在此列）；材质参数/贴图槽走材质环（每帧从容器现读）；着色模式按 ASH_RENDER_MODE（三态，见灯光 UBO 日志）",
-            ledger.len(),
-            assembly.alpha_override,
-        ));
-    }
+    logs.log_assembly_status(pending_rows, ledger.len(), assembly.alpha_override);
 
     // —— 帧槽 UBO 与环写入：复用安全靠 wait_for_slot 的 fence——写发生在本槽上一轮
     // 使用完成之后（帧槽轮转只是定位）。
