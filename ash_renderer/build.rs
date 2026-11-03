@@ -268,8 +268,8 @@ fn resource_kind(module: &naga::Module, var: &naga::GlobalVariable, stem: &str) 
 ///
 /// 坑：WGSL 成员对齐（如 `vec3<u32>` 对齐 16）会把步长撑得比宿主打包大，材质/对象槽
 /// ≥1 全体错位（实例：MaterialRecord 尾垫用 vec3<u32> 时步长 80 ≠ 宿主 64）。
-/// 宿主常量正本 = `src/render/resident/instance_table.rs`（MATERIAL_RECORD_SIZE /
-/// OBJECT_RECORD_SIZE 等）与 `src/render/resident/light_table.rs`（LIGHT_RECORD_SIZE）；
+/// 宿主常量正本 = `src/render/resident/tables/instance_table.rs`（MATERIAL_RECORD_SIZE /
+/// OBJECT_RECORD_SIZE 等）与 `src/render/resident/tables/light_table.rs`（LIGHT_RECORD_SIZE）；
 /// 新增记录结构时在此登记。span 相等且对齐不超宿主步长即步长相等。
 const HOST_LAYOUT_GATE: &[(&str, u32)] = &[
     ("MaterialRecord", 64),

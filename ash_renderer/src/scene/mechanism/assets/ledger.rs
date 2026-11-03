@@ -41,7 +41,7 @@ use super::assembly_cache::{AssemblyCache, AssemblyEval, AssemblyView};
 /// 账本一行：一个可渲染 primitive 的跨帧实例数据。柄去资产容器取内容，
 /// `model` 直进模型环（帧循环增量重写）；`instance_slot` 是 GPU 对象表下标
 /// （flush_uploads 分配，`None` = 尚未驻留成表——对象记录/模型环内容的
-/// hazard 纪律见 `render::resident::instance_table` 模块文档）。
+/// hazard 纪律见 `render::resident::tables::instance_table` 模块文档）。
 #[derive(Clone)]
 pub struct InstanceRow {
     pub mesh: Handle<Mesh>,
@@ -110,6 +110,8 @@ pub struct IncrementStats {
 /// [`crate::render::MeshPool`]/[`crate::render::ImageCache`] 现查。
 #[derive(Resource, Default)]
 pub struct InstanceLedger {
+    /// 跨帧行账，Entity 升序迭代。选 BTreeMap 是要保序：DrawList 组装、环写入、
+    /// 对照真值共用这个迭代序，逐帧稳定才可比（HashMap 无序做不到）。
     rows: BTreeMap<Entity, InstanceRow>,
     /// 新增/换柄置位，flush_uploads 盘点（驻留或登记重试）后清。
     dirty: BTreeSet<Entity>,

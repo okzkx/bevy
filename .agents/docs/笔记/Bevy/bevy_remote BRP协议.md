@@ -1,0 +1,128 @@
+# bevy_remote：BRP远程协议与自定义方法
+
+> 定位：**侦察篇**——2026-09-22 用户问"Bevy 有没有工具能完全展现 World 里所有 Entity 和 Component"，顺藤摸到 `bevy_remote` 并通读源码。**未来 Web Console 的候选底座**：本篇先存档结论，开工时在此基础上展开，不重复侦察。
+> ⚠ 时效警告：0.20 把方法名从旧版 `bevy.query` 风格**整体改名**为 `world.*` 系列，网上旧资料照抄会得到 METHOD_NOT_FOUND；本篇全部核对于本仓库 0.20.0-dev（`crates/bevy_remote/`）。
+
+## 1. 一句话定性
+
+**不是 CLI 工具，是插件库。** `RemotePlugin`（协议核心）+ `RemoteHttpPlugin`（HTTP 传输）两个插件装进 App，在**自己的进程内**起 HTTP 服务器，World 通过 JSON-RPC 2.0 暴露在 `127.0.0.1:15702`。客户端随便——curl、PowerShell、网页、第三方 GUI 都行。Bevy 仓库自带一个 158 行的 Rust 命令行客户端**示例**（`examples/remote/client.rs`），那是演示不是发布工具。名字相近的 `bevy_cli` 是社区另一个项目（脚手架/web 构建），与此无关。
+
+对 App 的意义：**引擎变成可选暴露的"ECS 服务端"**——远程可对实体、组件、资源增删改查，还能订阅变化（`+watch`）和内省引擎自身（schema、调度器图）。
+
+## 2. 架构两层：协议与传输解耦
+
+**协议核心 `RemotePlugin`**（`lib.rs:596`）：维护方法注册表 `RemoteMethods`（`HashMap<方法名, handler>`，`lib.rs:1047`）。handler 本身**就是一个 Bevy system**：`SystemId<In<Option<Value>>, BrpResult>`——入参是请求 `params` 的 JSON，返回值序列化成响应。请求处理跑在专门的 `RemoteLast` schedule（`RemoteSystems::ProcessRequests`，`lib.rs:993/999`），即 handler 在真实 World 上按帧节拍执行：天然线程安全，代价是**延迟以帧为单位量化**（insert 的请求下一帧生效）。
+
+**传输 `RemoteHttpPlugin`**（`http.rs:113`）：hyper + smol 实现的 HTTP 服务，`Startup` 时启动。默认 `127.0.0.1:15702`（`http.rs:52`）；开 `bevy_render` 时 RenderApp 里另起一台，默认 15703，专查渲染子世界。三个关键行为：
+
+- **RenderApp 不存在则静默跳过**（`get_sub_app_mut(RenderApp) else return`）→ 禁渲染宿主零障碍兼容；
+- WASM 没有 HTTP 传输（门面 Cargo.toml 用 target 配置处理）；
+- 协议/传输解耦，可以自写其它传输（官方只内置 HTTP）。
+
+请求格式标准 JSON-RPC 2.0（`BrpRequest`，`lib.rs:1122`）；响应带 `result` 或 `error`，错误码 = 标准 JSON-RPC 段 + 自定义段（如 `-23401 ENTITY_NOT_FOUND`，`lib.rs:1469` 起）。
+
+## 3. 内置方法全景（0.20 命名，`builtin_methods.rs:46-121` 常量）
+
+| 分组 | 方法 | 说明 |
+|------|------|------|
+| 实体·读 | `world.query` | with/without 过滤 + 取组件值；`option: ["all"]` 一次抓全部反射组件 |
+| | `world.list_components` | 列全部组件类型名（不需反射） |
+| | `world.get_components` | 按 entity 取值，`strict` 控制缺组件时报错还是回 errors |
+| 实体·写 | `world.spawn_entity` / `insert_components` / `remove_components` / `mutate_components` / `despawn_entity` / `reparent_entities` | 远程改 World 全套 |
+| 事件/消息 | `world.trigger_event` / `world.write_message` | 远程触发 observer 事件、写消息 |
+| 资源 | `world.list_resources` / `get_resources` / `insert_resources` / `remove_resources` / `mutate_resources` | 资源同款读写 |
+| 订阅流 | `world.get_components+watch` / `list_components+watch` / `observe+watch` | watching 型 handler：无变化返回 None 不响应，有变化才推——远程订阅 |
+| 元信息 | `registry.schema` / `rpc.discover` / `app.info` / `diagnostics.list` · `get` / `schedule.list` / `schedule.graph` | 反射类型 schema、可用方法发现、诊断、调度器结构 |
+
+## 4. 反射边界："完全展现"的口径
+
+- **存在性查询永远全量**：`list_components`、`query` 的 with/without/has 过滤只按全限定类型名匹配，不依赖反射——自研组件没实现 Reflect 也能列出/过滤。
+- **取值/写值走 `bevy_reflect`**：组件需 `#[derive(Reflect)] #[reflect(Component)]` + `app.register_type::<T>()` 才能查到值，否则 `get_components` 回 errors。
+- 绕反射拿存在性：`query` 的 `has` 模式返回布尔。
+- 对照：`World::archetypes()` 遍历（`bevy_ecs/src/world/mod.rs:255`，组件名经 `ComponentInfo::name()`→`DebugName`）是唯一**反射无关**的全量口径；资源用 `world.iter_resources()`（`world/mod.rs:3652`）。BRP 管交互式查询，archetype 遍历管离线对账，互补。
+
+## 5. 自定义方法：handler 就是 system（本篇重点）
+
+**构建期**（`RemotePlugin::with_method_main`，`lib.rs:615`）：
+
+```rust
+impl Plugin for AshHostPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins((
+            RemotePlugin::default()
+                .with_method_main("ash_renderer/scene_stats", scene_stats),
+            RemoteHttpPlugin::default(),
+        ));
+    }
+}
+
+// handler 就是 system：入参 = 请求 params JSON，出参 = 响应 JSON
+fn scene_stats(
+    In(_params): In<Option<Value>>,
+    stats: Res<SceneArrivalStats>,      // 自家插件维护的资源
+) -> BrpResult {                        // BrpResult<T=Value> = Result<T, BrpError>（lib.rs:1510）
+    Ok(json!({ "entities": stats.entity_count, "images": stats.image_count }))
+}
+```
+
+**运行期**（`RemoteMethods` 是公开 Resource，`lib.rs:1058`）：任何 system 里 `world.register_system(handler)` 拿 `SystemId`，包成 `RemoteMethodSystemId::Instant` 后 `insert`——可按条件/运行中动态增删方法。运行期插入的方法同样被 `rpc.discover` 自动发现（`builtin_methods.rs:1146` 直接读该资源）。
+
+handler 能力上限：**可独占 `&mut World`**——内置的 `process_remote_query_request(In(params), world: &mut World)` 就是独占系统（`builtin_methods.rs:920`）。所以自定义方法可读写任意状态、调插件公开函数、发事件/消息、`commands.run_system` 触发已注册系统——相当于给插件开了一个网络可达的控制端点，不止"查"。
+
+细节：方法名任意字符串（内置点分风格，自定如 `ash_renderer/xxx`）；重名静默替换旧 handler；未知方法 `-32601`；`with_method_render` 注册进渲染子世界注册表——宿主无 RenderApp，用不上。
+
+**错误路径是两套机制，勿混（3.12 §4.1 实测收账）**："system 返回 Result 须 `Result<T, BevyError>` 否则 Err 走错误处理器静默吞"这条内存钉说的是**调度内系统**（Update 等走错误处理器那一层）；BRP handler 不是——它经 `world.run_system_with(id, params)`（lib.rs:1705）运行，返回的 `Ok(result)` 直接就是 handler 的 `BrpResult`，`Err(BrpError)` **原样 force_send 给客户端、原码穿透**（负例实抓 -23401 原码回传为证）。即：handler 的错误不进调度错误处理器，写 `BrpError` 直接当响应协议用。
+
+## 6. Web Console 落点（未开工，先记结论）
+
+1. **BRP 就是现成后端**：网页 `fetch` POST JSON-RPC 即可读写 ECS，不用自建任何服务器。
+2. **跨域已留口**：`Headers`/`HostHeaders` 资源给 HTTP 响应加头，源码 doc 里就有 `cors_headers` 示例（`http.rs:184-194`）——`RemoteHttpPlugin::default().with_headers(Headers::new()...)`。⚠ CORS 预检（OPTIONS）是否完备**未验证**，开工先测。
+3. **安全边界**：默认只绑 loopback、**完全无鉴权**——console 只能开发期本地用，绝不 `with_address` 绑 `0.0.0.0` 对外。
+4. **自定义方法当"业务接口"**：内置方法是裸 ECS CRUD，让前端拼反射类型名很脆；渲染器内部状态（bindless 池占用、FlightHelmet 到货统计、collect_scene 采集范围）应注册成自定义方法暴露——前端只调语义接口。
+5. **Unity 类比**：相当于把 Unity Editor attach 到 Player 的通道（Hierarchy/Inspector 走网络读运行时状态）协议化、无头化。官方 Bevy Editor 将来大概率骑在 BRP 上——见《[Bevy编辑器路线与代码热重载](../../开发步骤/1-熟悉Bevy结构/材料/Bevy编辑器路线与代码热重载.md)》（该篇 §"BRP 基建现状"是编辑器路线视角，协议细节以本篇为准；其"调试面板可用"的判断就是本篇 Web Console 落点的出处）。
+
+## 7. 启用成本与源码索引
+
+**feature**：门面 `bevy` 加 `features = ["bevy_remote"]`（原生平台带 http + bevy_asset + bevy_render；宿主本就有 asset/render crate，增量只有 hyper/async-io/serde_json 等小依赖）；`ash_renderer` 侧另需直接依赖 `serde_json`（取 `Value`）。
+
+| 位置 | 内容 |
+|------|------|
+| `bevy_remote/src/lib.rs` | 协议核心：`RemotePlugin`:596、自定义方法:615-666、内置注册 build():889-919、`RemoteLast`/`RemoteSystems`:993/999、`RemoteMethods`:1047、`BrpRequest`:1122、`BrpError`/error_codes:1386/1469、`BrpResult`:1510 |
+| `bevy_remote/src/http.rs` | 传输：`DEFAULT_PORT`:52、`Headers`:68、`RemoteHttpPlugin`:113、CORS 示例:184-194 |
+| `bevy_remote/src/builtin_methods.rs` | 方法常量:46-121、独占 handler 样例:920、`rpc.discover` 实现:1146 |
+| `examples/remote/` | `server.rs`（91 行最小服务端）· `client.rs`（158 行 Rust 客户端示例）· `integration_test.rs` |
+
+**启用就两行**：`app.add_plugins((RemotePlugin::default(), RemoteHttpPlugin::default()));`
+
+## 8. 树内官方检视栈：bevy_inspector 三层结构（2026-10-09 3.10 收官后补查）
+
+3.10 自研实体树收官后用户问"bevy 源码里有没有现成的"——**有，且是 0.20-dev 树内新 crate**，与本项目 3.10/3.11/3.12 三段两两相关。三层 + 一个数据模型层：
+
+| 层 | 位置 | 内容 |
+|------|------|------|
+| UI | `crates/bevy_inspector/` | **实体层级树面板 + 选中详情面板**，建在 `bevy_ui` + `bevy_feathers`（0.20 新 UI 框架）+ `bevy_picking` 上；`entity_tree.rs` 的 `sync_entity_tree` 每帧 World→UI 树同步，**根 = 无 `ChildOf` 实体**（:255，与 3.10 定根逻辑同构）；row↔source 双向映射（`row()`/`source()`）、expanded/selected 各落资源、`set_dirty` 手动失效；**`remote` feature：同套面板经 BRP 检视另一个运行中的 app** |
+| 数据 | `bevy_dev_tools::inspection/` | UI 与数据分家：entity/component/resource 检视、`world_summary`（archetype 摘要）、label_resolution、fuzzy_name_matching——数据半边零渲染依赖 |
+| 协议 | `bevy_remote/src/inspection_methods.rs` | BRP 读方法族（点风格，与 §3 同代）：`world.inspect` / `world.inspect_component` / `world.inspect_component_type` / `world.inspect_resource` / `world.inspect_all_resources` / `world.summarize`（archetype 全景）/ `registry.component_metadata` |
+| ECS | `bevy_ecs/src/relationship/relationship_query.rs` | 现成遍历器：`iter_descendants` / `iter_descendants_depth_first` / `iter_ancestors`（:101/:118/:135，QueryData/Filter 参数化）——手写递归遍历有现成替代 |
+
+**官方示例与测试命令**（`examples/inspector/`）：
+
+```bash
+# 本机检视自己的 World：左实体树 + 右详情面板（reflect 可编辑 widget 全家桶，Showcase 组件演示每种）
+cargo run --example local_inspector --features="bevy_inspector,debug"   # debug=未注册类型出可读名
+
+# 进程外检视（3.12 同款形状）：T1 起 BRP 服务端，T2 面板客户端
+cargo run --example server --features="bevy_remote"
+cargo run --example remote_inspector --features="bevy_inspector,bevy_remote_client"
+# 默认连 127.0.0.1:15702，BRP_HOST/BRP_PORT 可覆盖；关键接线 = InspectorSource::Remote(RemoteSource::new(..))
+```
+
+对 3.10~3.12 的判定：
+
+- **3.10 不白做**：`bevy_inspector` 走 `bevy_ui` → `bevy_ui_render` 渲染管线，**禁渲染宿主挂不上**（与 bevy_egui 同根）；egui 裸接仍是我们宿主形状下的唯一路线。且它是 retained 组件树同步，我们是每帧直查 World，形状本就不同。
+- **3.12 重大利好**：BRP 读侧方法族现成（inspect/summarize/query），自定义只需 set_transform/spawn/despawn 三个写方法（复用 3.11 封装的操作函数）；官方 `remote_inspector` 可直接当"现成 GUI 客户端"连我们宿主开出的 BRP 端口，候选验收方式之一。
+- **3.11 参照**：官方详情面板的编辑走 `bevy_reflect`（组件须注册 Reflect，Showcase 演示全部 widget 类型）；我们 3.11 直改 `Transform` 组件不走反射，两条路线互为对照。
+- `InspectorSelection` 资源 = 官方点选落账形状，与我们 `SelectedEntity` 同构。
+- 示例场景用 0.20 新 `bsn!`/`bsn_list!` 场景 DSL（声明式实体树），另见本目录场景篇。
+
+**定案（2026-10-09 用户实测）**：`local_inspector` 的前端 UI 表现**不学**——实测又闪又卡（机制定性假设：bevy_ui retained 组件树每帧重建 + taffy 全量重排，规模一大就抖；未做源码级核实，勿当结论引用）。**可学的是后端数据收集与组织**：`bevy_dev_tools::inspection` 的数据模型（component 分组、label 解析、world_summary）、BRP inspection 读方法族、选中态语义（row↔source 映射）——3.11 开工深读 `entity_tree.rs` 时只取数据/语义层，不取 UI 表现层。

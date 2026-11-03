@@ -1,4 +1,4 @@
-//! shadow 命令组装的 compute 半边：管线与录制。命令环（×4）与标记环住在
+//! shadow 命令组装的 compute 段：管线与录制。命令环（×4）与标记环住在
 //! [`crate::render::ShadowTargets`]，组装语义见 `shadow_build.wgsl`。
 
 use ash::vk;
@@ -12,7 +12,7 @@ use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::passes::shadow::shadow_map::SHADOW_SET_DESC;
-use crate::render::resident::instance_table::INSTANCE_SET_DESC;
+use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 
 pub(crate) static SHADOW_BUILD_PIPELINE: PipelineDesc = PipelineDesc {

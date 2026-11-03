@@ -257,9 +257,10 @@ fn camera_control(
     mut look: Local<DragSession>,
     mut engaged: Local<bool>,
 ) {
-    // 主窗口缺席或最小化时，取消左键拖拽会话。
+    // 主窗口缺席或最小化时，取消左右键拖拽会话（否则恢复后带一个跨窗口的大位移）。
     let Some(window) = active_window(&windows) else {
         *session = DragSession::default();
+        *look = DragSession::default();
         return;
     };
     let cursor = window.cursor_position();

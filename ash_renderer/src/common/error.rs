@@ -85,6 +85,6 @@ pub fn fatal_gate(mut exit: MessageWriter<AppExit>) {
 }
 
 /// crate 级 `Result` 别名：缺省错误 = [`VulkanError`]，第二参可显式改写（如
-/// `Result<ImageSpec, ImageConvertError>`）。导入本名会遮蔽 std 同名，需要别的
+/// `Result<ImageSpec, ImageSpecError>`）。导入本名会遮蔽 std 同名，需要别的
 /// 形态时写全称 `std::result::Result`。
 pub type Result<T, E = VulkanError> = std::result::Result<T, E>;

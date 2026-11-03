@@ -23,7 +23,7 @@ pub use assets::{
     InstanceLedger, InstanceRow, LodDemand, LodGroups, ResidencySet, ResidencySettings,
     ResidencyStats, spawn_lod_ladder,
 };
-pub(crate) use assets::{material_texture_slots, update_ledger, AssemblyView};
+pub(crate) use assets::{material_texture_slots, update_ledger};
 pub use editing::{
     apply_transform_edit, load_image_slot, load_mesh_rebind, mutate_asset, replace_handles,
     spawn_primitive_clone, spawn_with_loaded_mesh, AssetOpError, MutateAsset, TransformEdit,

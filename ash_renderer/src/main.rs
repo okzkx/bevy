@@ -100,7 +100,7 @@ fn main() -> AppExit {
         // BRP 远程直控：World 经 HTTP JSON-RPC 暴露在 127.0.0.1:15702，
         // 官方 inspection 方法族 + 场景语义自定义方法（查询/改 Transform/相机给值）
         .add_plugins(AshRemotePlugin)
-        // egui 调试 UI 的 ECS 半边（裸接 ash）：Update 里输入桥 + pass + 调试窗口，
+        // egui 调试 UI 的 ECS 侧（裸接 ash）：Update 里输入桥 + pass + 调试窗口，
         // 产 EguiFrame 给帧循环、发布 PointerCapture 给相机/日光控制
         .add_plugins(OverlayPlugin)
         // 上传编排：Last 里盘点账本脏行 → 网格/贴图去重转换 → 合批提交，先于帧循环

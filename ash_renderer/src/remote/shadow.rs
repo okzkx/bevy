@@ -11,8 +11,8 @@ use serde_json::{json, Value};
 
 use crate::{
     render::{
-        aabb_visible, conservative_world_aabb, MeshPool,
-        ShadowDiagnostics, ShadowSettings, ShadowTargets, OBJECT_TABLE_CAPACITY,
+        aabb_visible, conservative_world_aabb, InstanceTables, MAX_FRAMES_IN_FLIGHT, MeshPool,
+        ShadowSettings, ShadowTargets, OBJECT_TABLE_CAPACITY,
         SHADOW_CASCADES, SHADOW_UBO_SIZE,
     },
     scene::InstanceLedger,
@@ -40,38 +40,16 @@ pub(crate) fn shadow_set(In(params): In<Option<Value>>, world: &mut World) -> Br
 }
 
 /// `ash_renderer/shadow_stats`：逐 cascade GPU 标记 vs CPU 参照对照读数面。
-/// 读数 = marks_frame 槽两帧前 compute 输出（marks_frame 标注陈旧度）。
+/// 每个帧槽各报一份：槽 s 的标记 = 用槽 s 那帧的 compute 输出，槽 s 的 shadow UBO
+/// 也是同帧写的，两者同帧同源才能互为对照（读数陈旧 ≤2 帧，只进计量）。
 #[system]
 pub(crate) fn shadow_stats(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    // 读数快照先取值，避免与下方标记环可变借用交叠
-    let (marks_frame, diag_enabled) = {
-        let d = res::<ShadowDiagnostics>(world)?;
-        (d.marks_frame, d.enabled)
-    };
+    let enabled = res::<ShadowSettings>(world)?.enabled;
+    let bound = res::<InstanceTables>(world)?.used_object_slots();
 
-    // shadow UBO 读 marks_frame 槽：与 GPU 标记同帧同源，CPU 参照的输入才一致
-    let ubo_bytes = read_buffer(
-        res_mut::<ShadowTargets>(world)?.ubo(marks_frame),
-        SHADOW_UBO_SIZE as usize,
-        "shadow UBO 读失败",
-    )?;
-    let mut planes_per_cascade = [[Vec4::ZERO; 6]; SHADOW_CASCADES];
-    for (c, cascade) in planes_per_cascade.iter_mut().enumerate() {
-        for (p, plane) in cascade.iter_mut().enumerate() {
-            let base = UBO_PLANES + (c * 6 + p) * 16;
-            *plane = Vec4::new(
-                f32_at(&ubo_bytes, base)?,
-                f32_at(&ubo_bytes, base + 4)?,
-                f32_at(&ubo_bytes, base + 8)?,
-                f32_at(&ubo_bytes, base + 12)?,
-            );
-        }
-    }
-
-    // CPU 参照：账本行 × 驻留局部包围盒 → 世界保守盒 → 逐 cascade 平面求交
-    //（保守语义：相交即可见，宁多画不错杀）
+    // CPU 参照：账本行 × 驻留局部包围盒 → 世界保守盒（保守语义：相交即可见，宁多画不错杀）
     let pool = res::<MeshPool>(world)?;
-    let mut reference: Vec<(u32, [bool; SHADOW_CASCADES])> = Vec::new();
+    let mut boxes = Vec::new();
     for (_entity, row) in res::<InstanceLedger>(world)?.rows() {
         let Some(slot) = row.instance_slot else {
             continue;
@@ -79,63 +57,84 @@ pub(crate) fn shadow_stats(In(_params): In<Option<Value>>, world: &mut World) ->
         let Some(mesh_slot) = pool.resident(row.mesh.id()) else {
             continue;
         };
-        let (wmin, wmax) = conservative_world_aabb(
-            &row.model,
-            mesh_slot.local_aabb.0,
-            mesh_slot.local_aabb.1,
-        );
-        let vis = std::array::from_fn(|c| aabb_visible(&planes_per_cascade[c], wmin.into(), wmax.into()));
-        reference.push((slot, vis));
+        boxes.push((
+            slot,
+            conservative_world_aabb(&row.model, mesh_slot.local_aabb.0, mesh_slot.local_aabb.1),
+        ));
     }
 
-    // GPU 标记直读（交错 [槽][cascade]，每槽 4 cascade × u32 = 16B）
-    let gpu = read_buffer(
-        res_mut::<ShadowTargets>(world)?.mark_mut(marks_frame),
-        OBJECT_TABLE_CAPACITY as usize * 16,
-        "shadow 标记环读失败",
-    )?;
-
-    let mut mismatches = [0u32; SHADOW_CASCADES];
-    let mut gpu_visible = [0u32; SHADOW_CASCADES];
-    let mut cpu_visible = [0u32; SHADOW_CASCADES];
-    for (slot, cpu) in reference {
-        for (c, &cpu_vis) in cpu.iter().enumerate() {
-            let gpu_vis = u32_at(&gpu, slot as usize * 16 + c * 4)? == 1;
-            gpu_visible[c] += u32::from(gpu_vis);
-            cpu_visible[c] += u32::from(cpu_vis);
-            mismatches[c] += u32::from(gpu_vis != cpu_vis);
+    let mut slot_reports = Vec::new();
+    for frame_slot in 0..MAX_FRAMES_IN_FLIGHT {
+        let ubo_bytes = read_buffer(
+            res_mut::<ShadowTargets>(world)?.ubo(frame_slot),
+            SHADOW_UBO_SIZE as usize,
+            "shadow UBO 读失败",
+        )?;
+        let mut planes_per_cascade = [[Vec4::ZERO; 6]; SHADOW_CASCADES];
+        for (c, cascade) in planes_per_cascade.iter_mut().enumerate() {
+            for (p, plane) in cascade.iter_mut().enumerate() {
+                let base = UBO_PLANES + (c * 6 + p) * 16;
+                *plane = Vec4::new(
+                    f32_at(&ubo_bytes, base)?,
+                    f32_at(&ubo_bytes, base + 4)?,
+                    f32_at(&ubo_bytes, base + 8)?,
+                    f32_at(&ubo_bytes, base + 12)?,
+                );
+            }
         }
+
+        // GPU 标记直读（交错 [槽][cascade]，每槽 4 cascade × u32 = 16B）
+        let gpu = read_buffer(
+            res_mut::<ShadowTargets>(world)?.mark_mut(frame_slot),
+            OBJECT_TABLE_CAPACITY as usize * 16,
+            "shadow 标记环读失败",
+        )?;
+
+        let mut mismatches = [0u32; SHADOW_CASCADES];
+        let mut gpu_visible = [0u32; SHADOW_CASCADES];
+        let mut cpu_visible = [0u32; SHADOW_CASCADES];
+        for (slot, (wmin, wmax)) in &boxes {
+            for c in 0..SHADOW_CASCADES {
+                let gpu_vis = u32_at(&gpu, *slot as usize * 16 + c * 4)? == 1;
+                let cpu_vis = aabb_visible(&planes_per_cascade[c], (*wmin).into(), (*wmax).into());
+                gpu_visible[c] += u32::from(gpu_vis);
+                cpu_visible[c] += u32::from(cpu_vis);
+                mismatches[c] += u32::from(gpu_vis != cpu_vis);
+            }
+        }
+        let splits = (0..SHADOW_CASCADES)
+            .map(|k| f32_at(&ubo_bytes, UBO_SPLITS + k * 4))
+            .collect::<Result<Vec<f32>, _>>()?;
+        let mat_at = |c: usize, row: usize, col: usize| {
+            // to_cols_array 列主序：flat = col*4 + row
+            f32_at(&ubo_bytes, c * 64 + (col * 4 + row) * 4)
+        };
+        let cascades_detail = (0..SHADOW_CASCADES)
+            .map(|c| {
+                let view_proj = (0..4)
+                    .map(|r| (0..4).map(|k| mat_at(c, r, k)).collect::<Result<Vec<_>, _>>())
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(json!({
+                    "gpu_visible": gpu_visible[c],
+                    "cpu_visible": cpu_visible[c],
+                    "mismatches": mismatches[c],
+                    "cascade_view_proj": view_proj,
+                    "texel_world": f32_at(&ubo_bytes, UBO_TEXEL_WORLD + c * 4)?,
+                    "inv_span": f32_at(&ubo_bytes, UBO_INV_SPAN + c * 4)?,
+                    "planes": planes_per_cascade[c].iter().map(|p| p.to_array()).collect::<Vec<_>>(),
+                }))
+            })
+            .collect::<Result<Vec<Value>, BrpError>>()?;
+        slot_reports.push(json!({
+            "slot": frame_slot,
+            "splits": splits,
+            "cascades": cascades_detail,
+        }));
     }
-    let diag = res::<ShadowDiagnostics>(world)?;
-    let splits = (0..SHADOW_CASCADES)
-        .map(|k| f32_at(&ubo_bytes, UBO_SPLITS + k * 4))
-        .collect::<Result<Vec<f32>, _>>()?;
-    let mat_at = |c: usize, row: usize, col: usize| {
-        // to_cols_array 列主序：flat = col*4 + row
-        f32_at(&ubo_bytes, c * 64 + (col * 4 + row) * 4)
-    };
-    let cascades_detail = (0..SHADOW_CASCADES)
-        .map(|c| {
-            let view_proj = (0..4)
-                .map(|r| (0..4).map(|k| mat_at(c, r, k)).collect::<Result<Vec<_>, _>>())
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(json!({
-                "gpu_visible": gpu_visible[c],
-                "cpu_visible": cpu_visible[c],
-                "mismatches": mismatches[c],
-                "cascade_view_proj": view_proj,
-                "texel_world": f32_at(&ubo_bytes, UBO_TEXEL_WORLD + c * 4)?,
-                "inv_span": f32_at(&ubo_bytes, UBO_INV_SPAN + c * 4)?,
-                "planes": planes_per_cascade[c].iter().map(|p| p.to_array()).collect::<Vec<_>>(),
-            }))
-        })
-        .collect::<Result<Vec<Value>, BrpError>>()?;
     Ok(json!({
-        "enabled": diag_enabled,
-        "bound": diag.bound,
-        "marks_frame": marks_frame,
-        "splits": splits,
-        "cascades": cascades_detail,
-        "note": "读数 = 本帧槽两帧前 compute 输出（fence 纪律内陈旧 ≤2 帧，与主可见标记一致）",
+        "enabled": enabled,
+        "bound": bound,
+        "slots": slot_reports,
+        "note": "读数 = 各帧槽最近一次 compute 输出（陈旧 ≤2 帧）；槽 s 的标记与槽 s 的 UBO 同帧同源",
     }))
 }

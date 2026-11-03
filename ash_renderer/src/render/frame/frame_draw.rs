@@ -11,9 +11,11 @@ use std::slice;
 use super::frame_pool::FramePool;
 
 use ash::vk;
+use bevy::ecs::error::BevyError;
 
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
+use crate::common::syntax::ResultTierExt;
 use crate::render::core::record::barrier::{image_barrier, image_barrier_with_memory, ImageBarrier};
 use crate::render::core::record::fullscreen::{
     record_fullscreen, record_fullscreen_open, record_fullscreen_sampled, FullscreenPass,
@@ -79,8 +81,8 @@ pub struct FrameDraw<'a> {
     pub ui: Option<&'a UiPaint>,
     /// 本帧槽 UI 顶点/索引 buffer（`ui` 为 Some 时本帧已写入）。
     pub ui_buffers: (vk::Buffer, vk::Buffer),
-    /// 视锥剔除（空场或关闭为 None；关闭时 host 已把标记填全可见）。
-    pub cull: Option<CullDraw>,
+    /// 视锥剔除与阴影视锥标记（两者都关闭或空场为 None）。
+    pub frustum_cull: Option<CullDraw>,
     /// indirect 命令组装（空场为 None）。命令写 → 绘制读的屏障在 indirect::record 内。
     pub indirect: Option<IndirectDraw>,
     /// Hi-Z 遮挡测试（关闭/降级/空场为 None）。屏障在 occlusion::record 内。
@@ -116,10 +118,21 @@ impl FramePool {
     /// Bloom → tonemap → SMAA → neighborhood + UI → 出场屏障 → queue_submit。提交在 GPU 侧等
     /// image_available 与上传票据，完成时 signal render_finished 与 fence。`render_finished`
     /// 由调用方按 acquire 的 image index 从 Swapchain 取，不按帧槽轮转。
-    ///
-    /// # Errors
-    /// 录制或提交任一步失败。
+    /// 录制或提交任一步失败 = 渲染链无法继续，按致命错误冒泡。
     pub fn record_frame(
+        &self,
+        ctx: &Context,
+        render_finished: vk::Semaphore,
+        image: vk::Image,
+        view: vk::ImageView,
+        extent: vk::Extent2D,
+        draw: &FrameDraw<'_>,
+    ) -> Result<(), BevyError> {
+        self.record_frame_steps(ctx, render_finished, image, view, extent, draw)
+            .or_fatal("录制/提交失败，渲染链无法继续")
+    }
+
+    fn record_frame_steps(
         &self,
         ctx: &Context,
         render_finished: vk::Semaphore,
@@ -222,8 +235,8 @@ impl FramePool {
             // —— compute 段，顺序即依赖：视锥剔除 → 遮挡测试（读视锥标记与两帧前的 Hi-Z 金字塔）
             // → LOD 选档 → indirect 命令组装 → shadow 命令组装 → 光源列表 → 透明层。
             // 各段之间的屏障都在各自的 record 内。
-            if let Some(cull) = &draw.cull {
-                crate::render::passes::visibility::cull::record(device, cb, draw.set2, draw.shadow_set, cull);
+            if let Some(frustum_cull) = &draw.frustum_cull {
+                crate::render::passes::visibility::cull::record(device, cb, draw.set2, draw.shadow_set, frustum_cull);
             }
             if let Some(occlusion) = &draw.occlusion {
                 crate::render::passes::visibility::occlusion::record(device, cb, draw.set2, occlusion);

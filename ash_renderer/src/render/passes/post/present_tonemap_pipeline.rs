@@ -11,7 +11,7 @@ use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
 use crate::render::passes::post::bloom::BLOOM_UP_SET_DESC;
-use crate::render::resident::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
+use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
 use crate::render::Context;
 
 /// set 依次为帧 UBO（调试模式旁路用）、G-buffer 采样集（取 HDR）、Bloom 升采样集

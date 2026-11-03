@@ -1,7 +1,7 @@
 //! 场景侧业务层：当前场景内容——写死的模型进场请求、相机取景与灯光参数，以及
 //! 随内容走的一次性核验（判定线期望值"6 primitive"等写在本层）。零 Vulkan 代码。
 //!
-//! 换场景 = 在 [`SceneEntryPlugin`] 组清单里增删组；机制半边（补位与采集）在
+//! 换场景 = 在 [`SceneEntryPlugin`] 组清单里增删组；机制侧（补位与采集）在
 //! [`crate::scene::mechanism`]，不随内容变。
 
 mod camera;

@@ -285,7 +285,7 @@ fn group_a_mapping(validation_installed: bool) {
     let e = image_spec(&uninit).unwrap_err();
     assert!(matches!(
         e,
-        ash_renderer::render::ImageConvertError::MissingData
+        ash_renderer::render::ImageSpecError::MissingData
     ));
     let d1 = Image::new(
         Extent3d {
@@ -301,7 +301,7 @@ fn group_a_mapping(validation_installed: bool) {
     let e = image_spec(&d1).unwrap_err();
     assert!(matches!(
         e,
-        ash_renderer::render::ImageConvertError::UnsupportedDimension(_)
+        ash_renderer::render::ImageSpecError::UnsupportedDimension(_)
     ));
     // mip 链不再拒绝(链由 GPU blit 生成),此处不测
     let hdr = Image::new(
@@ -318,7 +318,7 @@ fn group_a_mapping(validation_installed: bool) {
     let e = image_spec(&hdr).unwrap_err();
     assert!(matches!(
         e,
-        ash_renderer::render::ImageConvertError::UnsupportedFormat(_)
+        ash_renderer::render::ImageSpecError::UnsupportedFormat(_)
     ));
     println!("[拒绝] 无数据 ✓  D1 ✓  Rgba16Float ✓(warn 一次跳过,帧循环照常)");
 

@@ -1,4 +1,4 @@
-//! indirect 命令组装的 compute 半边：管线、录制、诊断账面。命令环与在场环住在
+//! indirect 命令组装的 compute 段：管线、录制、诊断账面。命令环与在场环住在
 //! [`crate::render::InstanceTables`]。
 //!
 //! - **分两步 compute**：cull 产标记、build_indirect 产命令，写职责不挤一个 shader，
@@ -23,7 +23,7 @@ use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
-use crate::render::resident::instance_table::INSTANCE_SET_DESC;
+use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 
 pub(crate) static BUILD_INDIRECT_PIPELINE: PipelineDesc = PipelineDesc {

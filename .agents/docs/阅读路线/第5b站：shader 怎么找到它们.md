@@ -76,7 +76,7 @@ set1 帧 UBO        frame.view_proj 等全局量
 | 实例表 | `INSTANCE_SET_DESC`：b0..b9 storage | 每帧槽 init 写一次，**永不更新** | 对象表走上传批次；各环按帧槽写或由 compute 写 | `objects`、`models`、`materials` 等 |
 | 光源表 | 不自带集；挂在 `LIGHT_CLUSTER_SET_DESC` 的 b1 | 随光源分簇集建立，resize 时重建 | 脏行写到当前帧槽的环 | `lights: array<LightRecord>` |
 
-### bindless 表（`resident/bindless_texture_table.rs`）
+### bindless 表（`resident/tables/bindless_texture_table.rs`）
 
 - **槽 0 是 fallback**：建表时上传 1×1 白图并配线性采样器，占住贴图槽 0 与采样器槽 0，永不回收。`PARTIALLY_BOUND` 下没写过的槽不能被访问，缺贴图的材质就指向槽 0。
 - **`publish`**：贴图槽 `alloc` 一个新号；采样器按 `SamplerKey`（完整采样参数）去重，已有同参数采样器就引用数加一，否则分槽并创建；最后用写入器写两条描述符，返回 `SlotBinding { texture, sampler }`。
@@ -92,11 +92,11 @@ set1 帧 UBO        frame.view_proj 等全局量
 - `release`：立即可复用。用于从未发布给 GPU 的槽，或每个帧槽各有一份数据的表（光源表）。
 - `retire` + `drain_retired`：先进待回收账，调用方等 GPU 用完再归还。bindless 表和对象表用这个。
 
-### 帧 UBO 表（`resident/frame_uniform_table.rs`）
+### 帧 UBO 表（`resident/tables/frame_uniform_table.rs`）
 
 每帧槽一个 208 B 的 UBO 和一个集，init 时把 UBO 写进集后描述符不再动。`draw_frame` 在 `wait_for_slot` 之后调 `write_frame_ubo` 整块重写当前帧槽：`view_proj`、`dir_to_light`、环境光、方向光颜色、`mode`、`inv_view_proj`、`camera_pos`。**方向光走这里，不进光源表**。字节偏移由 `FrameUniformTableLayout` 的 `offset_of!` 静态断言钉住。
 
-### 实例表（`resident/instance_table.rs`）
+### 实例表（`resident/tables/instance_table.rs`）
 
 一块对象表 + 九种帧槽环，每帧槽一个 set2，十个 binding 在 init 时一次写满。b0 两个帧槽都指向同一块对象表；b1..b9 指向各自帧槽的环。
 
@@ -118,7 +118,7 @@ set1 帧 UBO        frame.view_proj 等全局量
 - **实例槽号是全表共用的索引空间**：对象表、模型环、各种标记环都按同一个实例槽直址；材质环用另一套材质槽号（bump-only，不回收，量级 = 唯一材质数）。
 - **材质记录里的贴图槽在每帧写环时现查**：`write_material_ring` 从 `ImageCache::slots` 取当前槽位。base color 缺贴图或未驻留时用 fallback 槽 0；其余三张缺席写 `NO_TEXTURE_INDEX`（`u32::MAX`），shader 分支跳过采样。所以贴图换槽后，材质环下一次写入就指向新槽，不需要单独的失效通道。
 
-### 光源表（`resident/light_table.rs`）
+### 光源表（`resident/tables/light_table.rs`）
 
 256 槽 × 64 B × 2 帧槽，`HOST_VISIBLE` 的 `Storage` 角色。它**没有自己的描述符集**：`LightClusters` 建集时把 `LightTable::ring_buffer(slot)` 写进 `LIGHT_CLUSTER_SET_DESC` 的 b1，b0 是 cluster 参数、b2 每格列表、b3 每格计数。
 

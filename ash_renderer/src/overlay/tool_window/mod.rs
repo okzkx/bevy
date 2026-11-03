@@ -1,4 +1,4 @@
-//! overlay 业务半边——工具窗口：全部调试 UI 合并成一个窗口，左侧分组导航、
+//! overlay 业务——工具窗口：全部调试 UI 合并成一个窗口，左侧分组导航、
 //! 右侧当前页内容。窗口默认折叠成标题栏，点标题展开；坐标轴指示器不进本窗口，
 //! 永远显示（[`crate::overlay::widgets::axis_gizmo`]）。
 //!
@@ -6,7 +6,7 @@
 //! [`ToolPage`] 加一项并挂进 [`GROUPS`]、[`ToolWindowParams::show`] 的页面分发加
 //! 一个分支（页面读写的资源进 [`ToolWindowParams`] 束）。
 //!
-//! 与框架半边的接口：framework pass 每帧调 [`ToolWindowParams::tick_snapshot`]
+//! 与框架的接口：framework pass 每帧调 [`ToolWindowParams::tick_snapshot`]
 //!（节拍底座）、以 [`ToolWindowParams::changed`] 计入面板触发集、在 begin/end
 //! pass 之间调 [`ToolWindowParams::show`]；资源由 [`insert_tool_window_resources`]
 //! 在 Startup 落地。

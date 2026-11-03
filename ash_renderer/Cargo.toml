@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 license = "MIT OR Apache-2.0"
 
-# 自研 ash Vulkan 渲染器（lib）+ 宿主壳（bin）。设计资料：.agents/docs/2-宿主壳/
+# 自研 ash Vulkan 渲染器（lib）+ 宿主壳（bin）。设计资料：.agents/docs/开发步骤/2-宿主壳/
 # bevy 用默认 feature，渲染族插件在运行时 disable。额外 feature：
 # - debug：ComponentInfo::name()/DebugName 给实名，组件全清单展示依赖它；只影响类型名字符串。
 # - bevy_remote：BRP 远程直控通道（宿主再补场景语义自定义方法，见 src/remote/）。

@@ -49,25 +49,27 @@ pub use passes::visibility::occlusion::{
     aabb_screen_rect, OcclusionDiagnostics, OcclusionDraw, OcclusionFallback, OcclusionPass,
     OcclusionSettings,
 };
-pub use resident::bindless_texture_table::{BindlessTextureTable, TABLE_CAPACITY};
-pub(crate) use resident::bindless_texture_table::SlotBinding;
-pub use resident::frame_uniform_table::{
+pub use resident::tables::bindless_texture_table::{BindlessTextureTable, TABLE_CAPACITY};
+pub(crate) use resident::tables::bindless_texture_table::SlotBinding;
+pub use resident::tables::frame_uniform_table::{
     pack_frame_uniforms, FrameUniformTable, FrameUniformsData, PLACEHOLDER_DIR_TO_LIGHT,
 };
-pub(crate) use resident::frame_uniform_table::{
+pub(crate) use resident::tables::frame_uniform_table::{
     FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC,
     FRAME_MODE_NORMAL, FRAME_MODE_POSITION, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS,
     FRAME_MODE_UNLIT,
 };
-pub use resident::images::{image_spec, sampler_key, GpuImage, ImageCache, ImageConvertError, ImageSpec, SamplerKey};
-pub use resident::instance_table::{
+pub use resident::assets::image_spec::{image_spec, ImageSpecError, ImageSpec};
+pub use resident::assets::images::{GpuImage, ImageCache};
+pub use resident::sampler::{sampler_key, SamplerKey};
+pub use resident::tables::instance_table::{
     conservative_world_aabb, pack_lod_entry, pack_material_record, pack_model, pack_object_record,
     InstanceTables, GAP_MARK_SIZE, INDIRECT_COMMAND_SIZE, LOD_ENTRY_SIZE, LOD_LEVEL_SIZE,
     LOD_TABLE_STRIDE, MARK_SIZE, MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS,
     MODEL_STRIDE, NO_TEXTURE_INDEX, OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY,
 };
-pub use resident::mesh_convert::{convert_mesh, ConvertedMesh, MeshConvertError, VERTEX_STRIDE};
-pub use resident::pool::{MeshPool, MeshSlot, PoolRange};
+pub use resident::assets::mesh_convert::{convert_mesh, ConvertedMesh, MeshConvertError, VERTEX_STRIDE};
+pub use resident::assets::pool::{MeshPool, MeshSlot, PoolRange};
 pub use core::device::transfer::{
     CopyRegion, ImageRelease, Release, StagingCopy, StagingImageCopy, UploadBatch, Uploader,
 };
@@ -77,7 +79,7 @@ pub use stats::egui_pass_timing::EguiPassTiming;
 pub use frame::frame_sync_settings::FrameSyncSettings;
 pub(crate) use stats::monitor_history::MonitorHistory;
 // 不导出 LIGHT_TYPE_SPOT：聚光灯还没实现，导出了也没人用
-pub use resident::light_table::{LightRecord, LightTable, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT};
+pub use resident::tables::light_table::{LightRecord, LightTable, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT};
 pub use frame::render_mode::RenderMode;
 pub use passes::lighting::cluster::{
     cluster_reference, pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, ClusterGrid,
@@ -112,7 +114,7 @@ pub use passes::post::smaa::{
 pub use passes::shadow::shadow_build::ShadowBuildPass;
 pub use passes::shadow::cascades::{
     cascade_matrices, pack_shadow_uniforms, ShadowCascadeInput,
-    ShadowCascades, ShadowDiagnostics, ShadowSettings, ShadowUniformsData, SHADOW_CASCADES,
+    ShadowCascades, ShadowSettings, ShadowUniformsData, SHADOW_CASCADES,
     SHADOW_MAP_SIZE, SHADOW_UBO_SIZE,
 };
 pub use self::core::device::memory::buffer::GpuBuffer;

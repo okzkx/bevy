@@ -1,9 +1,9 @@
-//! 相机组（业务半边）：裸 Camera 三件套的 spawn 与就位核验，取景参数与官方
+//! 相机组（业务侧）：裸 Camera 三件套的 spawn 与就位核验，取景参数与官方
 //! 对照进程同源，零 Vulkan 代码。
 //!
 //! 宽高比补位由机制层的 [`crate::scene::AshCameraAspectPlugin`] 提供；
 //! "为什么裸 `Camera` 不用 `Camera3d`"的机制见
-//! `.agents/docs/3-静态取数链路/3.1-ECS侧取数/3.1.3-相机与灯光：引擎层自建与宽高比第四补位.md`。
+//! `.agents/docs/开发步骤/3-静态取数链路/3.1-ECS侧取数/3.1.3-相机与灯光：引擎层自建与宽高比第四补位.md`。
 
 use bevy::{
     camera::{Camera, Projection},
@@ -36,6 +36,11 @@ pub(super) fn spawn_camera(
     // 宽高比初值：渲染族禁用后官方不再维护，Startup 先按主窗口写一次，resize 由
     // 机制侧宽高比同步接管。宽高比错了，VP 矩阵的横向视野就错。
     let mut projection = Projection::default();
+    if let Projection::Perspective(ref mut persp) = projection {
+        // 远平面放宽：默认 1000 不够俯瞰 256+ 单位的常驻大场景。坑：resize 补位只改宽高比，
+        // 远平面必须在这里无条件设，不能放进"主窗口在场"分支
+        persp.far = 4000.0;
+    }
     let mut aspect_note = "默认 1.0，交 Update 修正";
     if let Ok(window) = windows.single()
         && window.resolution.width() > 0.0
@@ -43,8 +48,6 @@ pub(super) fn spawn_camera(
         && let Projection::Perspective(ref mut persp) = projection
     {
         persp.aspect_ratio = window.resolution.width() / window.resolution.height();
-        // 远平面放宽：默认 1000 不够俯瞰 256+ 单位的常驻大场景
-        persp.far = 4000.0;
         aspect_note = "按主窗口";
     }
     commands.spawn((

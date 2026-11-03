@@ -4,9 +4,11 @@
 //! render_finished 信号量按 image 分配，挂在本结构下随重建一起换（原因见 `frame/frame_pool.rs` 模块注释）。
 
 use ash::{khr::swapchain, vk, Device};
+use bevy::ecs::error::BevyError;
 use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
+use crate::common::syntax::{fatal, warning};
 
 use super::context::Context;
 
@@ -65,6 +67,8 @@ pub struct Swapchain {
     /// 写入时硬件自动做 sRGB 编码）。
     pub view_format: vk::Format,
     pub extent: vk::Extent2D,
+    /// 驱动报过 OUT_OF_DATE：下次 `rebuild` 不论尺寸都真重建。
+    out_of_date: bool,
 }
 
 /// swapchain 输出格式常量：BGRA8-UNORM 底板的 SRGB view 别名。
@@ -226,10 +230,22 @@ impl Swapchain {
             format: surface_format.format,
             view_format,
             extent: caps.current_extent,
+            out_of_date: false,
         })
     }
 
-    /// 窗口尺寸变化后重建。窗口最小化（尺寸为 0）或尺寸没变时什么都不做。
+    /// 记下"驱动报过 OUT_OF_DATE"。坑：显示模式切换/换显示器时表面失配但尺寸不变，
+    /// 不标记的话 `rebuild` 按尺寸相等早退，之后每帧 acquire 都过时、画面不恢复。
+    pub fn mark_out_of_date(&mut self) {
+        self.out_of_date = true;
+    }
+
+    /// 帧首是否待重建（acquire 次优/过时置位，`rebuild` 成功即清）。
+    pub fn pending_rebuild(&self) -> bool {
+        self.out_of_date
+    }
+
+    /// 窗口尺寸变化或 OUT_OF_DATE 后重建。窗口最小化（尺寸为 0），或尺寸没变且未过时，什么都不做。
     ///
     /// 坑：一次真重建约 60ms，调用方必须去抖（`driver/host/frame.rs` 的 `ResizeGate`），不要拖拽中每步都调。
     pub fn rebuild(&mut self, ctx: &Context) -> Result<()> {
@@ -243,7 +259,10 @@ impl Swapchain {
             return Ok(());
         }
         // 坑：上次重建失败会留下空壳（句柄 null、extent 是旧值），尺寸相等也必须重建，否则之后每帧都拿 null 去 acquire
-        if caps.current_extent == self.extent && self.swapchain != vk::SwapchainKHR::null() {
+        if caps.current_extent == self.extent
+            && self.swapchain != vk::SwapchainKHR::null()
+            && !self.out_of_date
+        {
             return Ok(());
         }
         // 在飞帧还在用旧 image，先等 GPU 全部做完再拆。
@@ -288,9 +307,52 @@ impl Swapchain {
         }
     }
 
-    /// 等 `wait_semaphore`（该 image 的 render_finished）后把 image 交给显示。
+    /// 取下一张可画的 image 并就地消化过时，返回即可用。
+    /// - `Suboptimal`：置位 `out_of_date` 照常画完本帧，下个帧首重建；
+    /// - `OUT_OF_DATE`：置位后本帧作废让路（Warn），重建交给下个帧首（幂等）；
+    /// - 其余失败致命。
+    /// 坑：本帧没拿到图、后续步骤都没跑，让路安全；acquire 成功之后的失败必须致命
+    /// （提交侧约定，见 `driver/host/frame.rs` 模块文档）。
+    pub fn acquire_index(&mut self, semaphore: vk::Semaphore) -> Result<u32, BevyError> {
+        match self.acquire(semaphore) {
+            Ok(AcquireOutcome::Ready(index)) => Ok(index),
+            Ok(AcquireOutcome::Suboptimal(index)) => {
+                // 拿得到图但尺寸不理想：照常画完这帧，下个帧首重建
+                self.mark_out_of_date();
+                Ok(index)
+            }
+            Err(VulkanError::SwapchainOutOfDate) => {
+                // 本帧作废（没拿到图）：置位后让路；重建失败也会在帧首原样重试
+                self.mark_out_of_date();
+                Err(warning("swapchain 过时，本帧作废让路，下个帧首重建"))
+            }
+            Err(e) => Err(fatal("acquire 失败，渲染链无法继续", e)),
+        }
+    }
+
+    /// 等 `wait_semaphore`（该 image 的 render_finished）后把 image 交给显示，并就地
+    /// 消化过时（与 [`Self::acquire_index`] 同款约定）：OUT_OF_DATE 置位 `out_of_date`
+    /// 后返回 None，重建交给下个帧首（`pending_rebuild` 驱动）；其余真失败原样返回
+    /// ——提交已发生，调用方保持帧槽账本推进后再冒泡。
+    pub fn present_digest(
+        &mut self,
+        queue: vk::Queue,
+        wait_semaphore: vk::Semaphore,
+        index: u32,
+    ) -> Option<VulkanError> {
+        match self.present(queue, wait_semaphore, index) {
+            Ok(_) => None,
+            Err(VulkanError::SwapchainOutOfDate) => {
+                self.mark_out_of_date();
+                None
+            }
+            Err(e) => Some(e),
+        }
+    }
+
+    /// 等 `wait_semaphore` 后把 image 交给显示。
     /// OUT_OF_DATE 返回 [`VulkanError::SwapchainOutOfDate`]。
-    pub fn present(
+    fn present(
         &self,
         queue: vk::Queue,
         wait_semaphore: vk::Semaphore,

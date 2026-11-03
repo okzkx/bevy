@@ -1,4 +1,4 @@
-//! GPU 视锥剔除的 compute 半边：管线、push 排布、CPU 参照实现、诊断账面。可见标记环
+//! GPU 视锥剔除的 compute 段：管线、push 排布、CPU 参照实现、诊断账面。可见标记环
 //! 住在 [`crate::render::InstanceTables`]（set2 b3）。
 //!
 //! - **视锥平面**：CPU 从 view_proj 提取六平面（[`frustum_planes`]），每帧随 push 进
@@ -28,7 +28,7 @@ use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::passes::shadow::shadow_map::SHADOW_SET_DESC;
-use crate::render::resident::instance_table::INSTANCE_SET_DESC;
+use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 
 pub(crate) static CULL_PIPELINE: PipelineDesc = PipelineDesc {

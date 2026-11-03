@@ -1,4 +1,4 @@
-//! Hi-Z 遮挡测试的 compute 半边：管线、push 排布、CPU 参照投屏、诊断账面。在视锥
+//! Hi-Z 遮挡测试的 compute 段：管线、push 排布、CPU 参照投屏、诊断账面。在视锥
 //! 剔除之后、indirect 组装之前运行：遮挡把视锥标记清零（b3 = 视锥 ∧ 遮挡），
 //! build_indirect 读法不变；遮挡独立标记 b6 只进诊断读数。
 //!
@@ -26,7 +26,7 @@ use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::passes::visibility::hiz::HIZ_OCCLUSION_SET_DESC;
-use crate::render::resident::instance_table::INSTANCE_SET_DESC;
+use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 
 pub(crate) static OCCLUSION_PIPELINE: PipelineDesc = PipelineDesc {

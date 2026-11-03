@@ -18,9 +18,9 @@ use crate::render::passes::post::present_tonemap_pipeline::PRESENT_TONEMAP_PIPEL
 use crate::render::passes::shadow::shadow_map::{SHADOW_SET_DESC, SHADOW_WRITE_PIPELINE, SHADOW_BINDING_UNIFORM};
 use crate::render::passes::transparent::TRANSPARENT_SET_DESC;
 use crate::render::passes::visibility::cull::CULL_PIPELINE;
-use crate::render::resident::bindless_texture_table::{BINDLESS_TEXTURE_SET_DESC, TABLE_CAPACITY};
-use crate::render::resident::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
-use crate::render::resident::instance_table::INSTANCE_SET_DESC;
+use crate::render::resident::tables::bindless_texture_table::{BINDLESS_TEXTURE_SET_DESC, TABLE_CAPACITY};
+use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
+use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 
 const ALL_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::ALL;
 

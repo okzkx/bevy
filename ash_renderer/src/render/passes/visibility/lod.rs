@@ -1,4 +1,4 @@
-//! GPU LOD 选档的 compute 半边：管线、push 排布、CPU 参照纯函数、诊断账面。在遮挡
+//! GPU LOD 选档的 compute 段：管线、push 排布、CPU 参照纯函数、诊断账面。在遮挡
 //! 测试之后、indirect 组装之前运行：本 pass 写档位环 b8，build_indirect 读它，命令
 //! 三字段从 LOD 变体表按档直址，instanceCount 语义不变。
 //!
@@ -26,7 +26,7 @@ use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
-use crate::render::resident::instance_table::INSTANCE_SET_DESC;
+use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 use crate::render::MAX_LOD_LEVELS;
 

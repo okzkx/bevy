@@ -1,4 +1,4 @@
-//! overlay 绘制半边：图集 CPU 镜像 → 整图重传新槽、镶嵌写 UI 顶点环，
+//! overlay 绘制段：图集 CPU 镜像 → 整图重传新槽、镶嵌写 UI 顶点环，
 //! `paint_overlay` 把 [`EguiFrame`] 变成 [`UiPaint`]。GPU 侧账面
 //!（[`AtlasGpu`]/[`UiVertexRing`]）住 render 层，本模块只做 egui 侧产出。
 //!
@@ -18,7 +18,7 @@ use bevy::{ecs::system::SystemParam, image::ImageSamplerDescriptor, prelude::*};
 use crate::{
     common::{
         error::{Result, VulkanError},
-        syntax::OnceLog,
+        syntax::{OnceLog, ResultTierExt},
     },
     render::{
         sampler_key, AtlasGpu, BindlessTextureTable, Context, GpuImage, ImageSpec, StagingImageCopy,
@@ -28,12 +28,12 @@ use crate::{
 
 use super::ui::{EguiFrame, EguiLayer, EguiState};
 
-/// 字体图集的 CPU 镜像（Update 侧由 [`super::ui`] 折入，绘制半边按代数差整传）。
+/// 字体图集的 CPU 镜像（Update 侧由 [`super::ui`] 折入，绘制段按代数差整传）。
 #[derive(Resource, Default)]
 pub struct AtlasMirror {
     /// 镜像本体：首个整图 delta 落位，此后 dirty-rect 折入。
     image: Option<egui::epaint::ColorImage>,
-    /// 镜像代数：任何折入 +1。GPU 半边"已传代数 < 镜像代数"即需整传。
+    /// 镜像代数：任何折入 +1。GPU 段"已传代数 < 镜像代数"即需整传。
     generation: u64,
     /// 非图集纹理（用户贴图）告警去重。
     warned_foreign: OnceLog,
@@ -129,16 +129,35 @@ pub(crate) struct OverlayLogState {
     gizmo_meshes: (u64, Vec<egui::epaint::ClippedPrimitive>),
 }
 
-/// overlay 绘制半边本体：图集整传（有新代时）→ 镶嵌 → 顶点环写入 → [`UiPaint`]。
+/// overlay 绘制段：图集整传（有新代时）→ 镶嵌 → 顶点环写入 → [`UiPaint`]。
 /// 在 draw_frame 内、FrameDraw 组装（wait_ticket 快照）之前调用。
-///
-/// # Errors
-/// 图集建图/提交/发布、顶点环写入失败（绘制链状态已不可信，调用方按致命错误冒泡）。
+/// 失败 = 绘制链状态已不可信（图集建图/提交/发布、顶点环写入），按致命错误冒泡。
 #[expect(
     clippy::too_many_arguments,
-    reason = "bevy 系统侧拆出的半边函数：资源逐项传入是 draw_frame 依赖注入的延续，非函数设计味道"
+    reason = "bevy 系统侧拆出的独立函数：资源逐项传入是 draw_frame 依赖注入的延续，非函数设计味道"
 )]
 pub(crate) fn paint_overlay(
+    ctx: &Context,
+    egui: &EguiState,
+    frame: &mut EguiFrame,
+    mirror: &AtlasMirror,
+    gpu: &mut AtlasGpu,
+    ring: &mut UiVertexRing,
+    tables: &mut BindlessTextureTable,
+    uploader: &mut Uploader,
+    slot: usize,
+    screen_px: vk::Extent2D,
+    log: &mut OverlayLogState,
+) -> Result<Option<UiPaint>, BevyError> {
+    paint_overlay_steps(ctx, egui, frame, mirror, gpu, ring, tables, uploader, slot, screen_px, log)
+        .or_fatal("overlay 绘制段失败，渲染链无法继续")
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "同 paint_overlay：参数表是原函数体，不为消提示而拆分"
+)]
+fn paint_overlay_steps(
     ctx: &Context,
     egui: &EguiState,
     frame: &mut EguiFrame,

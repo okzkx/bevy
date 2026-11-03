@@ -28,13 +28,13 @@
 //!   `resident`（常驻 GPU 数据：池/贴图/描述符表/实例表/光源表）、`passes`
 //!   （按功能：可见性链、G-buffer、阴影、光照、透明、后处理、UI）、`frame`（帧槽与
 //!   整帧录制）、`stats`（计时与监控读数）；各 GPU 特性的开关与诊断账面随所属功能；
-//! - [`scene`]：ECS 侧场景机制（零 Vulkan 调用）——机制半边 `mechanism`（材质缝、
+//! - [`scene`]：ECS 侧场景机制（零 Vulkan 调用）——机制侧 `mechanism`（材质缝、
 //!   稳定槽账本与变更发现、驻留管理、相机/日光控制与输入仲裁窄接口、对象/资产/
-//!   Transform 写操作封装、层级树索引）+ 业务半边 `content`（进场/取景/灯光参数/
-//!   进场核验）；两半都私有，外部只用 `scene::X`；
-//! - [`overlay`]：egui 调试 UI（裸接 ash）——框架半边 `framework`（Context/字体、
-//!   Update 的 egui pass、输入桥、发布 `PointerCapture`、绘制半边 `paint_overlay`）+
-//!   业务半边 `tool_window`/`widgets`（工具窗口各页、坐标轴指示器、加载弹窗）；
+//!   Transform 写操作封装、层级树索引）+ 业务侧 `content`（进场/取景/灯光参数/
+//!   进场核验）；两侧都私有，外部只用 `scene::X`；
+//! - [`overlay`]：egui 调试 UI（裸接 ash）——框架侧 `framework`（Context/字体、
+//!   Update 的 egui pass、输入桥、发布 `PointerCapture`、绘制段 `paint_overlay`）+
+//!   业务侧 `tool_window`/`widgets`（工具窗口各页、坐标轴指示器、加载弹窗）；
 //! - [`remote`]：BRP 远程直控通道（HTTP JSON-RPC @ 127.0.0.1:15702）——
 //!   [`remote::AshRemotePlugin`] 是协议面注册单点，方法族按域分子模块；写侧复用
 //!   scene 机制层的 Transform 编辑、相机给值与对象/资产操作封装，读侧直读 scene/

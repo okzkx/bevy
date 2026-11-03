@@ -73,7 +73,7 @@ fn main() {
 
     println!("\n== 组 A(合同正路观察组)==");
     {
-        let (device, queue) = create_device(&instance, pd);
+        let (device, queue, gfx) = create_device(&instance, pd);
         // 契约事实:内存类型/堆表 + atom 粒度,是选型结果的证据输入。
         let contract = unsafe { MemoryContract::new(&instance, pd) };
         let mem_props = unsafe { instance.get_physical_device_memory_properties(pd) };
@@ -162,7 +162,7 @@ fn main() {
         );
 
         // 最小 copyBuffer 闭环:staging → pool → readback,fence 等完成再读
-        record_copy_round(&device, queue, &staging, &pool, &readback);
+        record_copy_round(&device, queue, gfx, &staging, &pool, &readback);
         for (off, len) in [REGION_A, REGION_B] {
             let mut back = vec![0u8; len];
             readback
@@ -207,7 +207,7 @@ fn main() {
 
     println!("\n== 组 B(负例诊断组):memoryOffset 违反 alignment 整数倍条款 ==");
     {
-        let (device, _queue) = create_device(&instance, pd);
+        let (device, _queue, _gfx) = create_device(&instance, pd);
         let contract = unsafe { MemoryContract::new(&instance, pd) };
         let buffer = unsafe {
             device.create_buffer(
@@ -395,8 +395,8 @@ unsafe extern "system" fn probe_callback(
     vk::FALSE
 }
 
-/// graphics 族设备,零 feature 链(内存路径不涉及 1.2/1.3 位)。
-fn create_device(instance: &ash::Instance, pd: vk::PhysicalDevice) -> (Device, vk::Queue) {
+/// graphics 族设备,零 feature 链(内存路径不涉及 1.2/1.3 位)。返回设备、队列与队列族。
+fn create_device(instance: &ash::Instance, pd: vk::PhysicalDevice) -> (Device, vk::Queue, u32) {
     let families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
     let gfx = families
         .iter()
@@ -415,7 +415,7 @@ fn create_device(instance: &ash::Instance, pd: vk::PhysicalDevice) -> (Device, v
     }
     .expect("vkCreateDevice");
     let queue = unsafe { device.get_device_queue(gfx, 0) };
-    (device, queue)
+    (device, queue, gfx)
 }
 
 /// 组 A 的拷贝闭环:一次录制两张 region(对齐 + 非对齐各一)两段拷贝:
@@ -424,6 +424,7 @@ fn create_device(instance: &ash::Instance, pd: vk::PhysicalDevice) -> (Device, v
 fn record_copy_round(
     device: &Device,
     queue: vk::Queue,
+    gfx: u32,
     staging: &GpuBuffer,
     pool: &GpuBuffer,
     readback: &GpuBuffer,
@@ -433,7 +434,7 @@ fn record_copy_round(
             .create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
                     .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-                    .queue_family_index(0),
+                    .queue_family_index(gfx),
                 None,
             )
             .expect("探针命令池");

@@ -268,7 +268,7 @@ impl LightClusters {
         let mut slots = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for slot in 0..MAX_FRAMES_IN_FLIGHT {
             // b1 只引用 LightTable 的帧槽 buffer，不归这里销毁
-            let light = *light_buffers.get(slot % light_buffers.len().max(1)).ok_or_else(|| {
+            let light = *light_buffers.get(slot).ok_or_else(|| {
                 VulkanError::Init("光源常驻表帧槽环数量少于 cluster 帧槽".into())
             })?;
             self.uniforms.push(mk(BufferRole::Storage, CLUSTER_UNIFORM_SIZE as u64)?);

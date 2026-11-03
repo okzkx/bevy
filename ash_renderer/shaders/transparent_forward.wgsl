@@ -1,5 +1,5 @@
 // 透明前向绘制（vertex + fragment 双入口）：Clustered Forward 透明层。
-// 顶点半边与 gbuffer_write 共用 common/mesh.wgsl（set2 常驻表按 instance_index
+// 顶点段与 gbuffer_write 共用 common/mesh.wgsl（set2 常驻表按 instance_index
 // 读，firstInstance 携带槽号）；fragment 做透明行的光照与 alpha 输出——与不透明
 // 光照累积用同样的光源、同一份 BRDF（common/brdf.wgsl）和 cluster 点光源列表
 //（3D cluster 索引 = 屏幕 tile × 深度片）。

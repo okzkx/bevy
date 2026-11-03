@@ -3,7 +3,7 @@
 //!
 //! 只管进程级对象和窗口 Surface；Swapchain 在 `swapchain` 模块，帧级命令缓冲、fence、
 //! 信号量在 `frame::frame_pool`。各字段释义与生命周期分层见
-//! `.agents/docs/2-宿主壳/材料/VulkanContext字段释义：从Entry到Swapchain.md` §12。
+//! `.agents/docs/开发步骤/2-宿主壳/材料/VulkanContext字段释义：从Entry到Swapchain.md` §12。
 
 use std::ffi::{c_char, c_void};
 use std::num::NonZeroIsize;
