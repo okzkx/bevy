@@ -311,6 +311,7 @@ impl Swapchain {
     /// - `Suboptimal`：置位 `out_of_date` 照常画完本帧，下个帧首重建；
     /// - `OUT_OF_DATE`：置位后本帧作废让路（Warn），重建交给下个帧首（幂等）；
     /// - 其余失败致命。
+    ///
     /// 坑：本帧没拿到图、后续步骤都没跑，让路安全；acquire 成功之后的失败必须致命
     /// （提交侧约定，见 `driver/host/frame.rs` 模块文档）。
     pub fn acquire_index(&mut self, semaphore: vk::Semaphore) -> Result<u32, BevyError> {
