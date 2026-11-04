@@ -1,5 +1,5 @@
 //! shadow 资源族与 depth-only 绘制管线及其录制：四张级联深度图、shadow UBO、标记环、命令环、
-//! 描述符集。shadow 域的 binding 全收在本 set，不动 instance set2：b0 UBO、b1..4 级联
+//! 描述符集。shadow 域的 binding 全收在本 set，不动实例集：b0 UBO、b1..4 级联
 //! 深度图（合成采样）、b5 交错标记环（cull 写/host 读）、b6..9 四 cascade 命令环
 //! （shadow_build 写/shadow draw 读）。
 //!
@@ -66,7 +66,7 @@ pub(crate) static SHADOW_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
 #[derive(Clone, Copy)]
 pub struct ShadowWriteDraw {
     pub pipeline: PipelineRef,
-    pub set2: DescSet,
+    pub instance_set: DescSet,
     pub shadow_set: DescSet,
     pub views: [vk::ImageView; SHADOW_CASCADES],
     /// 深度图本体（布局屏障用——view 之外屏障吃 image）。
@@ -234,7 +234,7 @@ impl Drop for ShadowTargets {
     }
 }
 
-/// shadow 域 depth-only 绘制管线 + layout（[set2 实例表, shadow set] + 4B push =
+/// shadow 域 depth-only 绘制管线 + layout（[instance_set 实例表, shadow set] + 4B push =
 /// cascade 索引）。无色附件，深度 D32 reverse-Z（清 0 + GREATER，与主链同向）。
 #[derive(bevy::prelude::Resource)]
 pub struct ShadowPipeline {
@@ -323,7 +323,7 @@ impl ShadowPipeline {
         let pipeline = create_graphics_pipeline(device, &info)?;
         info!(
             "shadow 管线就绪: depth-only dynamic rendering（D32 reverse-Z GREATER），\
-             顶点输入 32B 交错 pos 位，4B push cascade 索引，[set2, shadow set]"
+             顶点输入 32B 交错 pos 位，4B push cascade 索引，[instance_set, shadow set]"
         );
         Ok(Self { handle: PipelineHandle::new(device, layout, pipeline, SHADOW_WRITE_PIPELINE.sets) })
     }
@@ -366,7 +366,7 @@ pub(crate) fn record(
                         .layer_count(1)
                         .depth_attachment(&shadow_depth_attachment),
                 );
-                bind_graphics(device, cb, &shadow.pipeline, &[shadow.set2, shadow.shadow_set]);
+                bind_graphics(device, cb, &shadow.pipeline, &[shadow.instance_set, shadow.shadow_set]);
                 bind_vertex_index(device, cb, shadow.vertex_buffer, shadow.index_buffer);
                 set_viewport_scissor(device, cb, map_extent);
                 // 4B push = 级联索引

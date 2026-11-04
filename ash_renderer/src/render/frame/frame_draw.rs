@@ -44,12 +44,12 @@ const INDIRECT_COMMAND_STRIDE: u32 = INDIRECT_COMMAND_SIZE as u32;
 /// 一帧录制的全部输入（draw_frame 组装，`record_frame` 消费）。`None` 的可选段整段跳过。
 pub struct FrameDraw<'a> {
     pub pipeline: PipelineRef,
-    /// set0 bindless 表，整帧绑一次。
-    pub set0: DescSet,
-    /// set1 本帧槽的每帧 UBO。
-    pub set1: DescSet,
-    /// set2 本帧槽的实例表（对象表 + 本帧各环）。
-    pub set2: DescSet,
+    /// bindless 纹理表，整帧绑一次（场景管线 set0 槽）。
+    pub bindless_set: DescSet,
+    /// 本帧槽的每帧 UBO（场景管线 set1 槽）。
+    pub frame_set: DescSet,
+    /// 本帧槽的实例表，对象表 + 本帧各环（场景管线 set2 槽）。
+    pub instance_set: DescSet,
     pub vertex_buffer: Option<vk::Buffer>,
     pub index_buffer: Option<vk::Buffer>,
     /// 在场行数（= GPU 侧命令条数；0 = 空场，场景绘制整段跳过）。
@@ -238,24 +238,24 @@ impl FramePool {
         // ---- ② compute 前置：剔除 → 遮挡 → LOD → indirect 组装 → shadow 组装 → 光源列表 → 透明层 ----
         // 顺序即依赖，各步之间的屏障都在各自的 record 内。
         if let Some(frustum_cull) = &draw.frustum_cull {
-            cull::record(device, cb, draw.set2, draw.shadow_set, frustum_cull);
+            cull::record(device, cb, draw.instance_set, draw.shadow_set, frustum_cull);
         }
 
         // 读视锥标记与两帧前的 Hi-Z 金字塔
         if let Some(occlusion) = &draw.occlusion {
-            occlusion::record(device, cb, draw.set2, occlusion);
+            occlusion::record(device, cb, draw.instance_set, occlusion);
         }
 
         if let Some(lod) = &draw.lod {
-            lod::record(device, cb, draw.set2, lod);
+            lod::record(device, cb, draw.instance_set, lod);
         }
 
         if let Some(indirect) = &draw.indirect {
-            indirect::record(device, cb, draw.set2, indirect);
+            indirect::record(device, cb, draw.instance_set, indirect);
         }
 
         if let Some(sb) = &draw.shadow_build {
-            shadow_build::record(device, cb, draw.set2, draw.shadow_set, sb);
+            shadow_build::record(device, cb, draw.instance_set, draw.shadow_set, sb);
         }
 
         // 光源列表必须在合成和透明前向之前算好
@@ -269,7 +269,7 @@ impl FramePool {
                 transparent::record_transparent_collect(
                     device,
                     cb,
-                    draw.set2,
+                    draw.instance_set,
                     draw.cluster_set,
                     t.transparent_set,
                     collect,
@@ -281,7 +281,7 @@ impl FramePool {
                 transparent::record_transparent_gather(
                     device,
                     cb,
-                    draw.set2,
+                    draw.instance_set,
                     t.transparent_set,
                     gather,
                 );
@@ -319,7 +319,7 @@ impl FramePool {
         // 实例槽号经 firstInstance 进 VS（按 instance_index 读 set2）；不可见行 instanceCount=0。
         if draw.indirect_count > 0 {
             let (vertex_buffer, index_buffer) = draw.pool_buffers()?;
-            bind_graphics(device, cb, &draw.pipeline, &[draw.set0, draw.set1, draw.set2]);
+            bind_graphics(device, cb, &draw.pipeline, &[draw.bindless_set, draw.frame_set, draw.instance_set]);
             // 坑：viewport 正高度，原因见 set_viewport
             set_viewport_scissor(device, cb, extent);
             // 整池绑一次，每条命令自带 vertexOffset/firstIndex
@@ -363,7 +363,7 @@ impl FramePool {
             extent,
             clear: Some(draw.clear),
             pipeline: draw.composite,
-            sets: &[draw.set1, draw.gbuffer.sampled_set(slot), draw.cluster_set, draw.shadow_set],
+            sets: &[draw.frame_set, draw.gbuffer.sampled_set(slot), draw.cluster_set, draw.shadow_set],
         });
 
         // 透明前向层：合成之后在同一 HDR 目标上 LOAD + 混合，深度转回附件只测不写。
@@ -394,7 +394,7 @@ impl FramePool {
                     .color_attachments(slice::from_ref(&transparent_attachment))
                     .depth_attachment(&transparent_depth),
             );
-            bind_graphics(device, cb, &t.pipeline, &[draw.set0, draw.set1, draw.set2, draw.cluster_set]);
+            bind_graphics(device, cb, &t.pipeline, &[draw.bindless_set, draw.frame_set, draw.instance_set, draw.cluster_set]);
             set_viewport_scissor(device, cb, extent);
             let (vertex_buffer, index_buffer) = draw.pool_buffers()?;
             bind_vertex_index(device, cb, vertex_buffer, index_buffer);
@@ -498,7 +498,7 @@ impl FramePool {
                 extent: draw.smaa_nb.ldr_extent,
                 clear: None,
                 pipeline: draw.tonemap,
-                sets: &[draw.set1, draw.gbuffer.sampled_set(slot), draw.bloom_params_set],
+                sets: &[draw.frame_set, draw.gbuffer.sampled_set(slot), draw.bloom_params_set],
             },
         );
 
@@ -538,7 +538,7 @@ impl FramePool {
         // UI：接在 neighborhood 的同一次渲染里画
         if let Some(ui) = draw.ui {
             // 描述符绑定跟随 pipeline layout：切到 overlay 管线后 set0 要按它的 layout 重绑
-            bind_graphics(device, cb, &draw.overlay, &[draw.set0]);
+            bind_graphics(device, cb, &draw.overlay, &[draw.bindless_set]);
             // 场景分支不一定跑过，UI 自己设 viewport
             set_viewport(device, cb, extent);
             bind_vertex_index(device, cb, draw.ui_buffers.0, draw.ui_buffers.1);

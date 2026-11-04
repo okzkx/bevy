@@ -9,7 +9,7 @@
 //! - **命令条数**：`cmd_draw_indexed_indirect`（CPU 传在场行数上界），只启用
 //!   `multi_draw_indirect`；条数只有 GPU 知道时（压缩合批）才需要 `draw_indirect_count`。
 //! - **图形侧无 push**：firstInstance 携带实例槽号，VS 按 `@builtin(instance_index)`
-//!   读 set2。instanceCount 恒 1/0，instance_index == firstInstance == 槽号。
+//!   读 instance_set。instanceCount 恒 1/0，instance_index == firstInstance == 槽号。
 
 use ash::vk;
 use bevy::log::info;
@@ -67,7 +67,7 @@ pub struct IndirectDraw {
     pub groups: u32,
 }
 
-/// 命令组装 compute 管线（set2 单集 + 4B push）。
+/// 命令组装 compute 管线（instance_set 单集 + 4B push）。
 #[derive(Resource)]
 pub struct IndirectPass {
     pipeline: ComputePipeline,
@@ -76,7 +76,7 @@ pub struct IndirectPass {
 }
 
 impl IndirectPass {
-    /// 建管线：layout 只借 set2 + COMPUTE push range。
+    /// 建管线：layout 只借 instance_set + COMPUTE push range。
     ///
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
@@ -84,7 +84,7 @@ impl IndirectPass {
         let pipeline = ComputePipeline::new(ctx, &BUILD_INDIRECT_PIPELINE, layouts)?;
         let max_draw_indirect_count = ctx.limits().max_draw_indirect_count;
         info!(
-            "indirect 组装管线就绪: build_indirect compute（set2 + 4B push count）,\
+            "indirect 组装管线就绪: build_indirect compute（instance_set + 4B push count）,\
              maxDrawIndirectCount {max_draw_indirect_count}（drawCount 上界，超界显式报错）"
         );
         Ok(Self { pipeline, max_draw_indirect_count })
@@ -117,13 +117,13 @@ impl IndirectPass {
 pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
-    set2: DescSet,
+    instance_set: DescSet,
     indirect: &IndirectDraw,
 ) {
     indirect.pass.record(
         device,
         command_buffer,
-        &[set2],
+        &[instance_set],
         &indirect.push,
         indirect.groups,
         Handoff::IndirectCommandRead,

@@ -61,8 +61,6 @@ pub struct TransparentFrame {
     pub gather: Option<TransparentGatherDraw>,
     /// 坑：只要场景非空每帧都要排，透明行从 0 变多的那一帧也不能读未排序的数组。
     pub sort: TransparentSortPlan,
-    /// 常驻实例表，gather 和透明绘制都要绑。
-    pub set2: DescSet,
     pub pipeline: PipelineRef,
     pub t_commands: vk::Buffer,
     /// 每帧录制前填 -inf。
@@ -99,8 +97,8 @@ pub struct TransparentSortPlan {
     pub passes: Vec<[u8; TRANSPARENT_SORT_PUSH as usize]>,
 }
 
-/// 透明层的三条 compute 管线。绑定的 set：collect 绑 set2、光源分簇集、透明集；
-/// sort 只绑透明集；gather 绑 set2、透明集。
+/// 透明层的三条 compute 管线。绑定的 set：collect 绑 instance_set、光源分簇集、透明集；
+/// sort 只绑透明集；gather 绑 instance_set、透明集。
 #[derive(bevy::prelude::Resource)]
 pub struct TransparentPasses {
     sort: ComputePipeline,
@@ -121,7 +119,7 @@ impl TransparentPasses {
         let collect = ComputePipeline::new(ctx, &TRANSPARENT_COLLECT_PIPELINE, layouts)?;
         let gather = ComputePipeline::new(ctx, &TRANSPARENT_GATHER_PIPELINE, layouts)?;
         info!(
-            "透明层 compute 三件就绪: collect（[set2, cluster, transparent]）/ sort（[transparent]）/ gather（[set2, transparent]）"
+            "透明层 compute 三件就绪: collect（[instance_set, cluster, transparent]）/ sort（[transparent]）/ gather（[instance_set, transparent]）"
         );
         Ok(Self { sort, sort_passes, collect, gather })
     }
@@ -195,7 +193,7 @@ fn bitonic_sequence(n: u32) -> Result<Vec<[u8; TRANSPARENT_SORT_PUSH as usize]>>
 pub(crate) fn record_transparent_collect(
     device: &Device,
     command_buffer: vk::CommandBuffer,
-    set2: DescSet,
+    instance_set: DescSet,
     cluster_set: DescSet,
     transparent_set: DescSet,
     draw: &TransparentCollectDraw,
@@ -203,7 +201,7 @@ pub(crate) fn record_transparent_collect(
     draw.pass.record(
         device,
         command_buffer,
-        &[set2, cluster_set, transparent_set],
+        &[instance_set, cluster_set, transparent_set],
         &draw.push,
         draw.groups,
         Handoff::ComputeRead,
@@ -228,14 +226,14 @@ pub(crate) fn record_transparent_sort(
 pub(crate) fn record_transparent_gather(
     device: &Device,
     command_buffer: vk::CommandBuffer,
-    set2: DescSet,
+    instance_set: DescSet,
     transparent_set: DescSet,
     draw: &TransparentGatherDraw,
 ) {
     draw.pass.record(
         device,
         command_buffer,
-        &[set2, transparent_set],
+        &[instance_set, transparent_set],
         &draw.push,
         draw.groups,
         Handoff::IndirectCommandRead,

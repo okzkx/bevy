@@ -1,5 +1,5 @@
 //! GPU 视锥剔除的 compute 段：管线、push 排布、CPU 参照实现、诊断账面。可见标记环
-//! 住在 [`crate::render::InstanceTables`]（set2 b3）。
+//! 住在 [`crate::render::InstanceTables`]（instance_set b3）。
 //!
 //! - **视锥平面**：CPU 从 view_proj 提取六平面（[`frustum_planes`]），每帧随 push 进
 //!   compute。clip volume 是 D3D 型（Z∈`[0,1]`），near = row2、far = row3−row2；
@@ -147,7 +147,7 @@ pub struct CullDraw {
     pub groups: u32,
 }
 
-/// 剔除 compute 管线（[set2, shadow set] 双集 + 112B push）。
+/// 剔除 compute 管线（[instance_set, shadow set] 双集 + 112B push）。
 #[derive(Resource)]
 pub struct CullPass {
     pipeline: ComputePipeline,
@@ -180,14 +180,14 @@ impl CullPass {
 pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
-    set2: DescSet,
+    instance_set: DescSet,
     shadow_set: DescSet,
     cull: &CullDraw,
 ) {
     cull.pass.record(
         device,
         command_buffer,
-        &[set2, shadow_set],
+        &[instance_set, shadow_set],
         &cull.push,
         cull.groups,
         Handoff::VertexComputeReadWrite,

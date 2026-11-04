@@ -36,20 +36,20 @@ pub struct ShadowBuildDraw {
     pub groups: u32,
 }
 
-/// shadow 命令组装 compute 管线（[set2, shadow set] + 4B push）。
+/// shadow 命令组装 compute 管线（[instance_set, shadow set] + 4B push）。
 #[derive(bevy::prelude::Resource)]
 pub struct ShadowBuildPass {
     pipeline: ComputePipeline,
 }
 
 impl ShadowBuildPass {
-    /// 建管线：layout 借用 set2 与 shadow set 布局。
+    /// 建管线：layout 借用 instance_set 与 shadow set 布局。
     ///
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
         let pipeline = ComputePipeline::new(ctx, &SHADOW_BUILD_PIPELINE, layouts)?;
-        info!("shadow 命令组装管线就绪: shadow_build compute（[set2, shadow set] + 4B push count）");
+        info!("shadow 命令组装管线就绪: shadow_build compute（[instance_set, shadow set] + 4B push count）");
         Ok(Self { pipeline })
     }
 
@@ -71,14 +71,14 @@ impl ShadowBuildPass {
 pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
-    set2: DescSet,
+    instance_set: DescSet,
     shadow_set: DescSet,
     build: &ShadowBuildDraw,
 ) {
     build.pass.record(
         device,
         command_buffer,
-        &[set2, shadow_set],
+        &[instance_set, shadow_set],
         &build.push,
         build.groups,
         Handoff::IndirectCommandRead,

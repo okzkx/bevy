@@ -88,7 +88,7 @@ pub(super) fn shadow_write_draw(
     let targets = &shadow.targets;
     Ok(Some(ShadowWriteDraw {
         pipeline: shadow.pipeline.rec(),
-        set2: instances.frame_set2(slot),
+        instance_set: instances.frame_set(slot),
         shadow_set: targets.frame_set(slot),
         views: std::array::from_fn(|c| targets.map_view(c)),
         images: std::array::from_fn(|c| targets.map_image(c)),

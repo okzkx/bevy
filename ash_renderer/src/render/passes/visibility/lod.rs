@@ -166,14 +166,14 @@ pub struct LodDraw {
     pub groups: u32,
 }
 
-/// 选档 compute 管线（set2 单集 + 96B push）。
+/// 选档 compute 管线（instance_set 单集 + 96B push）。
 #[derive(Resource)]
 pub struct LodPass {
     pipeline: ComputePipeline,
 }
 
 impl LodPass {
-    /// 建管线：layout 只借 set2（读 b0/b1、写 b8）。
+    /// 建管线：layout 只借 instance_set（读 b0/b1、写 b8）。
     ///
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
@@ -204,10 +204,10 @@ impl LodPass {
 pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
-    set2: DescSet,
+    instance_set: DescSet,
     lod: &LodDraw,
 ) {
-    lod.pass.record(device, command_buffer, &[set2], &lod.push, lod.groups, Handoff::VertexComputeRead);
+    lod.pass.record(device, command_buffer, &[instance_set], &lod.push, lod.groups, Handoff::VertexComputeRead);
 }
 
 #[cfg(test)]

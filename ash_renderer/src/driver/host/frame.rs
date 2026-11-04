@@ -229,15 +229,15 @@ pub(crate) fn draw_frame(
     let render_finished = gpu.swapchain.render_finished[index as usize];
     let instances = &scene.instance_tables;
     let transparent_frame =
-        transparent_draw(transparent, instances, slot, indirect_count)?;
+        transparent_draw(transparent, slot, indirect_count)?;
     let shadow_write = shadow_write_draw(shadow, instances, &scene.pool, slot, indirect_count)?;
     let (smaa_edge_blend, smaa_nb) = smaa_draws(post, slot);
 
     let frame_draw = FrameDraw {
         pipeline: post.gbuffer.pipeline.rec(),
-        set0: gpu.tables.descriptor_set(),
-        set1: gpu.frame_uniform_table.frame_set(slot),
-        set2: instances.frame_set2(slot),
+        bindless_set: gpu.tables.descriptor_set(),
+        frame_set: gpu.frame_uniform_table.frame_set(slot),
+        instance_set: instances.frame_set(slot),
         vertex_buffer: scene.pool.vertex_buffer(),
         index_buffer: scene.pool.index_buffer(),
         // 命令环句柄在 count = 0 时不被读（record_frame 的场景绘制整段跳过）

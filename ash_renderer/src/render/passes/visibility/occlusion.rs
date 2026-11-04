@@ -167,14 +167,14 @@ pub struct OcclusionDraw {
     pub hiz_set: DescSet,
 }
 
-/// 遮挡 compute 管线（[set2, hiz] 双集 + 80B push）。
+/// 遮挡 compute 管线（[instance_set, hiz] 双集 + 80B push）。
 #[derive(Resource)]
 pub struct OcclusionPass {
     pipeline: ComputePipeline,
 }
 
 impl OcclusionPass {
-    /// 建管线：layout 借用 set2 + Hi-Z 独立小集布局。
+    /// 建管线：layout 借用 instance_set + Hi-Z 独立小集布局。
     ///
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
@@ -205,13 +205,13 @@ impl OcclusionPass {
 pub(crate) fn record(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
-    set2: DescSet,
+    instance_set: DescSet,
     occlusion: &OcclusionDraw,
 ) {
     occlusion.pass.record(
         device,
         command_buffer,
-        &[set2, occlusion.hiz_set],
+        &[instance_set, occlusion.hiz_set],
         &occlusion.push,
         occlusion.groups,
         Handoff::VertexComputeRead,
