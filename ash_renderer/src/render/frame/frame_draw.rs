@@ -17,11 +17,11 @@ use crate::common::error::{Result, VulkanError};
 use crate::common::syntax::ResultTierExt;
 use crate::render::core::record::barrier::{ImageBarrier, MemoryBarrierDesc};
 use crate::render::core::record::fullscreen::{
-    record_fullscreen, record_fullscreen_open, record_fullscreen_sampled, FullscreenPass,
+    record_fullscreen, record_fullscreen_sampled, FullscreenPass,
 };
 use crate::render::core::record::graphics::{
     bind_graphics, bind_vertex_index, color_attachment, full_rect, reverse_z_depth_attachment,
-    set_viewport, set_viewport_scissor, PipelineRef,
+    set_viewport_scissor, PipelineRef,
 };
 use crate::render::core::binding::set_layout::DescSet;
 use crate::render::passes::lighting::cluster::{self, ClusterBuildDraw};
@@ -34,9 +34,9 @@ use crate::render::passes::visibility::indirect::{self, IndirectDraw};
 use crate::render::passes::visibility::lod::{self, LodDraw};
 use crate::render::passes::visibility::occlusion::{self, OcclusionDraw};
 use crate::render::GBufferTargets;
-use crate::render::passes::overlay::overlay_pipeline::{pack_ui_push, UiPaint};
+use crate::render::passes::overlay::overlay_pipeline::UiPaint;
 use crate::render::stats::perf::{GpuTimer, TimestampPoint};
-use crate::render::{Context, BLOOM_LEVELS, INDIRECT_COMMAND_SIZE};
+use crate::render::{Context, INDIRECT_COMMAND_SIZE};
 
 /// indirect draw 的命令步长（`VkDrawIndexedIndirectCommand` 20B，与命令环同一常量）。
 const INDIRECT_COMMAND_STRIDE: u32 = INDIRECT_COMMAND_SIZE as u32;
@@ -436,52 +436,8 @@ impl FramePool {
         mark(TimestampPoint::HiZ);
 
         // ---- ⑦ Bloom：prefilter → 逐级 down → 逐级 up ----
-        // prefilter 读 HDR 提取亮部写 down0；up 上采样下一级并叠加同级 down。各级目标每次
-        // UNDEFINED→COLOR 进、→SHADER_READ_ONLY 出。
         if let Some(bloom) = &draw.bloom {
-            let prefilter = (
-                bloom.images_down[0],
-                bloom.views_down[0],
-                bloom.extents[0],
-                bloom.prefilter,
-                bloom.gbuffer_set,
-            );
-            let downs = (1..BLOOM_LEVELS).map(|i| {
-                (
-                    bloom.images_down[i],
-                    bloom.views_down[i],
-                    bloom.extents[i],
-                    bloom.down,
-                    bloom.down_sets[i - 1],
-                )
-            });
-            let ups = (0..BLOOM_LEVELS - 1).rev().map(|i| {
-                (
-                    bloom.images_up[i],
-                    bloom.views_up[i],
-                    bloom.extents[i],
-                    bloom.up,
-                    bloom.up_sets[i],
-                )
-            });
-            for (target, target_view, target_extent, pipeline, set) in
-                std::iter::once(prefilter).chain(downs).chain(ups)
-            {
-                record_fullscreen_sampled(
-                    device,
-                    cb,
-                    target,
-                    // bloom 目标不分帧槽：等上一帧的片元采样读完再覆写（WAR）
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    &FullscreenPass {
-                        view: target_view,
-                        extent: target_extent,
-                        clear: None,
-                        pipeline,
-                        sets: &[set],
-                    },
-                );
-            }
+            bloom.record(device, cb);
         }
 
         // ---- ⑧ 后链 + UI：tonemap → SMAA edge/blend → neighborhood + UI ----
@@ -502,80 +458,17 @@ impl FramePool {
             },
         );
 
-        // SMAA edge → blend（关闭为 None）。中间目标按帧槽分配，同槽上一轮已被 fence 等完，
-        // UNDEFINED 进场即可。
+        // SMAA edge → blend（关闭为 None）
         if let Some(smaa) = &draw.smaa_edge_blend {
-            for (target, target_view, rec, set) in [
-                (smaa.edges_image, smaa.edges_view, smaa.edge, smaa.edge_set),
-                (smaa.blend_image, smaa.blend_view, smaa.blend, smaa.blend_set),
-            ] {
-                record_fullscreen_sampled(
-                    device,
-                    cb,
-                    target,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    &FullscreenPass {
-                        view: target_view,
-                        extent: smaa.extent,
-                        clear: None,
-                        pipeline: rec,
-                        sets: &[set],
-                    },
-                );
-            }
+            smaa.record(device, cb);
         }
 
-        // neighborhood 混合（终点）：LDR + blend → swapchain（SMAA 关闭时 shader 内直通）。
-        // UI 在同一次渲染里接着画，按光栅序盖在场景之上。
-        record_fullscreen_open(device, cb, &FullscreenPass {
-            view: swapchain_view,
-            extent,
-            clear: None,
-            pipeline: draw.smaa_nb.nb,
-            sets: &[draw.smaa_nb.nb_set],
-        });
+        // neighborhood 混合（终点）：LDR + blend → swapchain（SMAA 关闭时 shader 内直通）
+        draw.smaa_nb.record(device, cb, swapchain_view, extent);
 
-        // UI：接在 neighborhood 的同一次渲染里画
+        // UI：接在 neighborhood 的同一次渲染里画，按光栅序盖在场景之上
         if let Some(ui) = draw.ui {
-            // 描述符绑定跟随 pipeline layout：切到 overlay 管线后 set0 要按它的 layout 重绑
-            bind_graphics(device, cb, &draw.overlay, &[draw.bindless_set]);
-            // 场景分支不一定跑过，UI 自己设 viewport
-            set_viewport(device, cb, extent);
-            bind_vertex_index(device, cb, draw.ui_buffers.0, draw.ui_buffers.1);
-            // push 常量整帧不变，循环外打包一次
-            let ui_push = pack_ui_push(ui.screen_pt, ui.atlas_texture, ui.atlas_sampler);
-            for call in &ui.draws {
-                // 每个 clip 设一次 scissor（零尺寸 = 全裁）
-                device.cmd_set_scissor(
-                    cb,
-                    0,
-                    &[vk::Rect2D {
-                        offset: vk::Offset2D {
-                            x: call.scissor[0] as i32,
-                            y: call.scissor[1] as i32,
-                        },
-                        extent: vk::Extent2D {
-                            width: call.scissor[2],
-                            height: call.scissor[3],
-                        },
-                    }],
-                );
-                device.cmd_push_constants(
-                    cb,
-                    draw.overlay.layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    &ui_push,
-                );
-                device.cmd_draw_indexed(
-                    cb,
-                    call.index_count,
-                    1,
-                    call.first_index,
-                    call.vertex_base as i32,
-                    0,
-                );
-            }
+            ui.record(device, cb, draw.overlay, draw.bindless_set, extent, draw.ui_buffers);
         }
 
         device.cmd_end_rendering(cb);

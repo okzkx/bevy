@@ -25,6 +25,9 @@ use crate::render::core::target::color::ColorTarget;
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::record::graphics::PipelineRef;
+use crate::render::core::record::fullscreen::{
+    record_fullscreen_open, record_fullscreen_sampled, FullscreenPass,
+};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
@@ -492,6 +495,33 @@ pub struct SmaaEdgeBlendDraw {
     pub extent: vk::Extent2D,
 }
 
+impl SmaaEdgeBlendDraw {
+    /// 录制 edge → blend 两 pass。中间目标按帧槽分配，同槽上一轮已被 fence 等完，
+    /// UNDEFINED 进场即可。
+    pub fn record(&self, device: &Device, cb: vk::CommandBuffer) {
+        unsafe {
+            for (target, target_view, pipeline, set) in [
+                (self.edges_image, self.edges_view, self.edge, self.edge_set),
+                (self.blend_image, self.blend_view, self.blend, self.blend_set),
+            ] {
+                record_fullscreen_sampled(
+                    device,
+                    cb,
+                    target,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    &FullscreenPass {
+                        view: target_view,
+                        extent: self.extent,
+                        clear: None,
+                        pipeline,
+                        sets: &[set],
+                    },
+                );
+            }
+        }
+    }
+}
+
 /// neighborhood 终点 pass 的录制输入（恒 Some）。
 #[derive(Clone, Copy)]
 pub struct SmaaNbDraw {
@@ -500,4 +530,26 @@ pub struct SmaaNbDraw {
     pub ldr_view: vk::ImageView,
     pub ldr_image: vk::Image,
     pub ldr_extent: vk::Extent2D,
+}
+
+impl SmaaNbDraw {
+    /// 录制 neighborhood 混合（终点）：LDR + blend → swapchain（SMAA 关闭时 shader 内
+    /// 直通）。开渲染不关——UI 在同一次渲染里接着画，`cmd_end_rendering` 由调用方负责。
+    pub fn record(
+        &self,
+        device: &Device,
+        cb: vk::CommandBuffer,
+        swapchain_view: vk::ImageView,
+        extent: vk::Extent2D,
+    ) {
+        unsafe {
+            record_fullscreen_open(device, cb, &FullscreenPass {
+                view: swapchain_view,
+                extent,
+                clear: None,
+                pipeline: self.nb,
+                sets: &[self.nb_set],
+            });
+        }
+    }
 }

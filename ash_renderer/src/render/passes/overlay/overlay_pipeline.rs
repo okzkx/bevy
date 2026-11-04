@@ -25,9 +25,11 @@ use crate::common::error::Result;
 use crate::render::Context;
 
 use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
-use crate::render::core::record::graphics::PipelineRef;
+use crate::render::core::record::graphics::{
+    bind_graphics, bind_vertex_index, set_viewport, PipelineRef,
+};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
-use crate::render::core::binding::set_layout::{stages, SetLayouts};
+use crate::render::core::binding::set_layout::{stages, DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::resident::tables::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
 
@@ -103,6 +105,62 @@ pub struct UiPaint {
     pub screen_pt: [f32; 2],
     /// 每个 clip 一条 draw，各带自己的 scissor。
     pub draws: Vec<UiDrawCall>,
+}
+
+impl UiPaint {
+    /// 录制 UI 绘制，接在 neighborhood 的同一次渲染里（渲染实例由调用方开，按光栅序
+    /// 盖在场景之上）。顶点/索引在本帧槽的 UI 环 buffer（`buffers`）里。
+    pub fn record(
+        &self,
+        device: &Device,
+        cb: vk::CommandBuffer,
+        overlay: PipelineRef,
+        bindless_set: DescSet,
+        extent: vk::Extent2D,
+        buffers: (vk::Buffer, vk::Buffer),
+    ) {
+        unsafe {
+            // 描述符绑定跟随 pipeline layout：切到 overlay 管线后 set0 要按它的 layout 重绑
+            bind_graphics(device, cb, &overlay, &[bindless_set]);
+            // 场景分支不一定跑过，UI 自己设 viewport
+            set_viewport(device, cb, extent);
+            bind_vertex_index(device, cb, buffers.0, buffers.1);
+            // push 常量整帧不变，循环外打包一次
+            let ui_push = pack_ui_push(self.screen_pt, self.atlas_texture, self.atlas_sampler);
+            for call in &self.draws {
+                // 每个 clip 设一次 scissor（零尺寸 = 全裁）
+                device.cmd_set_scissor(
+                    cb,
+                    0,
+                    &[vk::Rect2D {
+                        offset: vk::Offset2D {
+                            x: call.scissor[0] as i32,
+                            y: call.scissor[1] as i32,
+                        },
+                        extent: vk::Extent2D {
+                            width: call.scissor[2],
+                            height: call.scissor[3],
+                        },
+                    }],
+                );
+                device.cmd_push_constants(
+                    cb,
+                    overlay.layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    &ui_push,
+                );
+                device.cmd_draw_indexed(
+                    cb,
+                    call.index_count,
+                    1,
+                    call.first_index,
+                    call.vertex_base as i32,
+                    0,
+                );
+            }
+        }
+    }
 }
 
 /// overlay 图形管线 + pipeline layout（只声明 set0 + 16B push）。

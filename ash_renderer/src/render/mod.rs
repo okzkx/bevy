@@ -95,7 +95,6 @@ pub use passes::post::bloom::{
     pack_bloom_params, BloomFrameDraw, BloomPipelines, BloomParamsData, BloomSettings,
     BloomTargets, TonemapCurve,
 };
-pub(crate) use passes::post::bloom::BLOOM_LEVELS;
 pub use passes::gbuffer::gbuffer_targets::{
     GBufferTargets, ALBEDO_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
 };
