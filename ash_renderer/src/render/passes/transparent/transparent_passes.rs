@@ -6,10 +6,13 @@ use bevy::log::info;
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::record::barrier::ImageBarrier;
 use crate::render::core::record::compute::{ComputeHandles, Handoff};
-use crate::render::Context;
+use crate::render::core::record::graphics::{
+    bind_graphics, bind_vertex_index, full_rect, set_viewport_scissor, PipelineRef,
+};
+use crate::render::{Context, INDIRECT_COMMAND_SIZE};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
-use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET_DESC;
@@ -62,6 +65,9 @@ pub struct TransparentFrame {
     /// 坑：只要场景非空每帧都要排，透明行从 0 变多的那一帧也不能读未排序的数组。
     pub sort: TransparentSortPlan,
     pub pipeline: PipelineRef,
+    /// 本帧槽透明命令环（t_ 前缀 = transparent，区别于主管线的命令环）：gather 把
+    /// 排好序的透明行写成 IndirectCommand（20B，与 build_indirect 同布局），透明
+    /// 前向一次 indirect 读。t_ 系列与 shader 内 t_index_list/t_keys 同名同源。
     pub t_commands: vk::Buffer,
     /// 每帧录制前填 -inf。
     pub t_keys: vk::Buffer,
@@ -238,6 +244,61 @@ pub(crate) fn record_transparent_gather(
         draw.groups,
         Handoff::IndirectCommandRead,
     );
+}
+
+/// 录制透明前向：合成写 HDR → 混合读写的显式内存屏障 → HDR LOAD + 深度只测不写的
+/// 一次间接绘制。两次动态渲染之间没有光栅序保证，合成写 HDR → 透明混合读写必须
+/// 显式屏障；深度在本段转回附件（只测不写），⑥ 段 Hi-Z 归约再转回只读。
+pub(crate) fn record_forward(
+    device: &Device,
+    cb: vk::CommandBuffer,
+    t: &TransparentFrame,
+    hdr_view: vk::ImageView,
+    depth_image: vk::Image,
+    depth_view: vk::ImageView,
+    extent: vk::Extent2D,
+    sets: &[DescSet; 4],
+    pool: (vk::Buffer, vk::Buffer),
+) {
+    unsafe {
+        let hdr_write_to_blend = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .dst_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            );
+        ImageBarrier::depth_read_only_to_attachment(depth_image)
+            .record_with_memory(device, cb, std::slice::from_ref(&hdr_write_to_blend));
+        let transparent_attachment = vk::RenderingAttachmentInfo::default()
+            .image_view(hdr_view)
+            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::STORE);
+        let transparent_depth = vk::RenderingAttachmentInfo::default()
+            .image_view(depth_view)
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE);
+        device.cmd_begin_rendering(
+            cb,
+            &vk::RenderingInfo::default()
+                .render_area(full_rect(extent))
+                .layer_count(1)
+                .color_attachments(std::slice::from_ref(&transparent_attachment))
+                .depth_attachment(&transparent_depth),
+        );
+        bind_graphics(device, cb, &t.pipeline, sets);
+        set_viewport_scissor(device, cb, extent);
+        bind_vertex_index(device, cb, pool.0, pool.1);
+        // 一次 indirect 消费透明命令环（非透明行 instanceCount=0）
+        device.cmd_draw_indexed_indirect(
+            cb,
+            t.t_commands,
+            0,
+            t.command_count,
+            INDIRECT_COMMAND_SIZE as u32,
+        );
+        device.cmd_end_rendering(cb);
+    }
 }
 
 #[cfg(test)]

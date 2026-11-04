@@ -368,45 +368,17 @@ impl FramePool {
 
         // 透明前向层：合成之后在同一 HDR 目标上 LOAD + 混合，深度转回附件只测不写。
         if let Some(t) = draw.transparent.as_ref() {
-            // 两次动态渲染之间没有光栅序保证，合成写 HDR → 透明混合读写必须显式屏障
-            let hdr_write_to_blend = vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                .dst_access_mask(
-                    vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                );
-            ImageBarrier::depth_read_only_to_attachment(frame.depth.image)
-                .record_with_memory(device, cb, slice::from_ref(&hdr_write_to_blend));
-            let transparent_attachment = vk::RenderingAttachmentInfo::default()
-                .image_view(draw.gbuffer.hdr_view(slot))
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::LOAD)
-                .store_op(vk::AttachmentStoreOp::STORE);
-            let transparent_depth = vk::RenderingAttachmentInfo::default()
-                .image_view(frame.depth.view)
-                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::LOAD)
-                .store_op(vk::AttachmentStoreOp::DONT_CARE);
-            device.cmd_begin_rendering(
+            transparent::record_forward(
+                device,
                 cb,
-                &vk::RenderingInfo::default()
-                    .render_area(full_rect(extent))
-                    .layer_count(1)
-                    .color_attachments(slice::from_ref(&transparent_attachment))
-                    .depth_attachment(&transparent_depth),
+                t,
+                draw.gbuffer.hdr_view(slot),
+                frame.depth.image,
+                frame.depth.view,
+                extent,
+                &[draw.bindless_set, draw.frame_set, draw.instance_set, draw.cluster_set],
+                draw.pool_buffers()?,
             );
-            bind_graphics(device, cb, &t.pipeline, &[draw.bindless_set, draw.frame_set, draw.instance_set, draw.cluster_set]);
-            set_viewport_scissor(device, cb, extent);
-            let (vertex_buffer, index_buffer) = draw.pool_buffers()?;
-            bind_vertex_index(device, cb, vertex_buffer, index_buffer);
-            // 一次 indirect 消费透明命令环（非透明行 instanceCount=0）
-            device.cmd_draw_indexed_indirect(
-                cb,
-                t.t_commands,
-                0,
-                t.command_count,
-                INDIRECT_COMMAND_STRIDE,
-            );
-            device.cmd_end_rendering(cb);
         }
 
         // HDR 目标 → 只读，供 Bloom 与 tonemap 采样
