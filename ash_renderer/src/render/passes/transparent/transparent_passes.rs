@@ -195,55 +195,58 @@ fn bitonic_sequence(n: u32) -> Result<Vec<[u8; TRANSPARENT_SORT_PUSH as usize]>>
     Ok(passes)
 }
 
-/// 录制 collect；自带屏障让后面的 compute 读到列表、键和计数。
-pub(crate) fn record_transparent_collect(
-    device: &Device,
-    command_buffer: vk::CommandBuffer,
-    instance_set: DescSet,
-    cluster_set: DescSet,
-    transparent_set: DescSet,
-    draw: &TransparentCollectDraw,
-) {
-    draw.pass.record(
-        device,
-        command_buffer,
-        &[instance_set, cluster_set, transparent_set],
-        &draw.push,
-        draw.groups,
-        Handoff::ComputeRead,
-    );
-}
-
-/// 录制排序：只绑一次，逐个 (k, j) dispatch；每次之间加屏障，下一轮才能读到
-/// 上一轮的交换结果。
-pub(crate) fn record_transparent_sort(
-    device: &Device,
-    command_buffer: vk::CommandBuffer,
-    transparent_set: DescSet,
-    plan: &TransparentSortPlan,
-) {
-    plan.pass.bind(device, command_buffer, &[transparent_set]);
-    for pass in &plan.passes {
-        plan.pass.dispatch(device, command_buffer, pass, plan.groups, Handoff::ComputeReadWrite);
+impl TransparentCollectDraw {
+    /// 录制 collect；自带屏障让后面的 compute 读到列表、键和计数。instance/cluster 集
+    /// 不在本束（不透明合成共用），录制时传入。
+    pub(crate) fn record(
+        &self,
+        device: &Device,
+        command_buffer: vk::CommandBuffer,
+        instance_set: DescSet,
+        cluster_set: DescSet,
+        transparent_set: DescSet,
+    ) {
+        self.pass.record(
+            device,
+            command_buffer,
+            &[instance_set, cluster_set, transparent_set],
+            &self.push,
+            self.groups,
+            Handoff::ComputeRead,
+        );
     }
 }
 
-/// 录制 gather；自带屏障让后面的间接绘制读到新命令。
-pub(crate) fn record_transparent_gather(
-    device: &Device,
-    command_buffer: vk::CommandBuffer,
-    instance_set: DescSet,
-    transparent_set: DescSet,
-    draw: &TransparentGatherDraw,
-) {
-    draw.pass.record(
-        device,
-        command_buffer,
-        &[instance_set, transparent_set],
-        &draw.push,
-        draw.groups,
-        Handoff::IndirectCommandRead,
-    );
+impl TransparentSortPlan {
+    /// 录制排序：只绑一次，逐个 (k, j) dispatch；每次之间加屏障，下一轮才能读到
+    /// 上一轮的交换结果。透明集不在本束，录制时传入。
+    pub(crate) fn record(&self, device: &Device, command_buffer: vk::CommandBuffer, transparent_set: DescSet) {
+        self.pass.bind(device, command_buffer, &[transparent_set]);
+        for pass in &self.passes {
+            self.pass.dispatch(device, command_buffer, pass, self.groups, Handoff::ComputeReadWrite);
+        }
+    }
+}
+
+impl TransparentGatherDraw {
+    /// 录制 gather；自带屏障让后面的间接绘制读到新命令。instance 集不在本束（不透明
+    /// 合成共用），录制时传入。
+    pub(crate) fn record(
+        &self,
+        device: &Device,
+        command_buffer: vk::CommandBuffer,
+        instance_set: DescSet,
+        transparent_set: DescSet,
+    ) {
+        self.pass.record(
+            device,
+            command_buffer,
+            &[instance_set, transparent_set],
+            &self.push,
+            self.groups,
+            Handoff::IndirectCommandRead,
+        );
+    }
 }
 
 /// 录制透明前向：合成写 HDR → 混合读写的显式内存屏障 → HDR LOAD + 深度只测不写的

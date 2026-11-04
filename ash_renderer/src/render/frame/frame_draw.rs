@@ -148,6 +148,22 @@ impl UploadWait {
     }
 }
 
+/// 段界打点器：cb 与帧槽固定，只差打哪个点。队列族不支持 timestamp（`timer` 为
+/// None）时静默跳过。
+struct FrameMark<'a> {
+    cb: vk::CommandBuffer,
+    slot: usize,
+    timer: Option<&'a GpuTimer>,
+}
+
+impl FrameMark<'_> {
+    fn mark(&self, point: TimestampPoint) {
+        if let Some(timer) = self.timer {
+            timer.mark(self.cb, self.slot, point);
+        }
+    }
+}
+
 impl FramePool {
     /// 录制并提交一帧：进场屏障（颜色+深度+G-buffer）→ compute 段（剔除/遮挡/LOD/indirect 与
     /// shadow 命令组装/光源列表/透明）→ shadow depth → G-buffer → 合成 + 透明层 → Hi-Z 归约 →
@@ -203,11 +219,7 @@ impl FramePool {
         let device = &self.device;
         let slot = self.current;
         let cb = frame.command_buffer;
-        let mark = |point: TimestampPoint| {
-            if let Some(timer) = draw.timer {
-                timer.mark(cb, slot, point);
-            }
-        };
+        let mark = FrameMark { cb, slot, timer: draw.timer };
 
         // ---- ① 进场：cb 开始 → 帧计时 → 三组进场屏障 → 透明排序键预填 ----
         device.begin_command_buffer(
@@ -303,35 +315,24 @@ impl FramePool {
         // 透明层：collect → sort → gather
         if let Some(t) = draw.transparent.as_ref() {
             if let Some(collect) = &t.collect {
-                transparent::record_transparent_collect(
-                    device,
-                    cb,
-                    draw.instance_set,
-                    draw.cluster_set,
-                    t.transparent_set,
-                    collect,
-                );
+                collect.record(device, cb, draw.instance_set, draw.cluster_set, t.transparent_set);
             }
+
             // 固定容量数组每个非空帧都重排，保证本帧新增的透明行不会以未排序状态进 gather
-            transparent::record_transparent_sort(device, cb, t.transparent_set, &t.sort);
+            t.sort.record(device, cb, t.transparent_set);
+
             if let Some(gather) = &t.gather {
-                transparent::record_transparent_gather(
-                    device,
-                    cb,
-                    draw.instance_set,
-                    t.transparent_set,
-                    gather,
-                );
+                gather.record(device, cb, draw.instance_set, t.transparent_set);
             }
         }
 
-        mark(TimestampPoint::Compute);
+        mark.mark(TimestampPoint::Compute);
 
         // ---- ③ shadow depth：进场 → 逐级联 indirect draw → 出场 ----
         // 进出屏障每帧都录（合成 pass 的 shadow 描述符总是绑定）。
         shadow_map::record(device, cb, &draw.shadow_images, draw.shadow.as_ref());
 
-        mark(TimestampPoint::Shadow);
+        mark.mark(TimestampPoint::Shadow);
 
         // ---- ④ G-buffer：不透明物体写三色附件 + 深度 ----
         // 全部 loadOp CLEAR（背景像素内容无意义，合成按 depth==0 判背景）；深度清 0（reverse-Z
@@ -372,7 +373,7 @@ impl FramePool {
 
         device.cmd_end_rendering(cb);
 
-        mark(TimestampPoint::GBuffer);
+        mark.mark(TimestampPoint::GBuffer);
 
         // ---- ⑤ 合成 + 透明前向：G-buffer 转只读 → 合成光照写 HDR → 透明层混合 → HDR 转只读 ----
         // G-buffer 三色附件 → SHADER_READ_ONLY，深度 → DEPTH_READ_ONLY，供合成采样；dst 含
@@ -421,7 +422,7 @@ impl FramePool {
         // HDR 目标 → 只读，供 Bloom 与 tonemap 采样
         ImageBarrier::color_to_sampled(draw.gbuffer.hdr_image(slot)).record(device, cb);
 
-        mark(TimestampPoint::Lighting);
+        mark.mark(TimestampPoint::Lighting);
 
         // ---- ⑥ Hi-Z：深度转回只读 → 逐级归约金字塔 ----
         // 透明层用过的深度转回只读，供 Hi-Z 归约（没有透明层时深度一直是只读）
@@ -442,7 +443,7 @@ impl FramePool {
             hiz.record_reduction(device, cb, slot);
         }
 
-        mark(TimestampPoint::HiZ);
+        mark.mark(TimestampPoint::HiZ);
 
         // ---- ⑦ Bloom：prefilter → 逐级 down → 逐级 up ----
         if let Some(bloom) = &draw.bloom {
@@ -482,7 +483,7 @@ impl FramePool {
 
         device.cmd_end_rendering(cb);
 
-        mark(TimestampPoint::PostUi);
+        mark.mark(TimestampPoint::PostUi);
 
         // ---- ⑨ 出场 + 提交：swapchain → PRESENT_SRC_KHR → 结束 cb → 重置 fence → 提交 ----
         ImageBarrier {
@@ -497,7 +498,7 @@ impl FramePool {
         }
         .record(device, cb);
 
-        mark(TimestampPoint::FrameEnd);
+        mark.mark(TimestampPoint::FrameEnd);
 
         device.end_command_buffer(cb)?;
 
