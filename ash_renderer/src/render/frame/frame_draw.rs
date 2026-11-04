@@ -24,6 +24,7 @@ use crate::render::core::record::graphics::{
     set_viewport_scissor, PipelineRef,
 };
 use crate::render::core::binding::set_layout::DescSet;
+use crate::render::core::device::transfer::Uploader;
 use crate::render::passes::lighting::cluster::{self, ClusterBuildDraw};
 use crate::render::passes::shadow::shadow_build::{self, ShadowBuildDraw};
 use crate::render::passes::shadow::shadow_map::{self, ShadowWriteDraw};
@@ -36,7 +37,7 @@ use crate::render::passes::visibility::occlusion::{self, OcclusionDraw};
 use crate::render::GBufferTargets;
 use crate::render::passes::overlay::overlay_pipeline::UiPaint;
 use crate::render::stats::perf::{GpuTimer, TimestampPoint};
-use crate::render::{Context, INDIRECT_COMMAND_SIZE};
+use crate::render::{Context, Ticket, INDIRECT_COMMAND_SIZE};
 
 /// indirect draw 的命令步长（`VkDrawIndexedIndirectCommand` 20B，与命令环同一常量）。
 const INDIRECT_COMMAND_STRIDE: u32 = INDIRECT_COMMAND_SIZE as u32;
@@ -100,15 +101,51 @@ pub struct FrameDraw<'a> {
     pub transparent: Option<TransparentFrame>,
     /// Hi-Z 金字塔归约，渲染后重写本帧槽；屏障在 hiz::record_reduction 内。
     pub hiz: Option<&'a HizPyramid>,
-    /// 图形提交在 GPU 侧等上传 timeline ≥ 此值（0 = 从未上传，不等）。这个等待同时保证 transfer
-    /// 写的跨队列可见性（池/贴图 CONCURRENT 共享，没有所有权屏障）。
-    pub wait_ticket: u64,
-    pub ticket_semaphore: vk::Semaphore,
+    /// 图形提交对上传队列的跨队列等待（备料时刻快照，见 [`UploadWait`]）。
+    pub upload_wait: UploadWait,
     /// 清屏颜色（线性；SRGB view 写出时编码）。
     pub clear: [f32; 4],
     /// GPU 帧计时：帧首 reset + 原点，段界打点见 [`TimestampPoint`]；None = 队列族不支持
     /// timestamp。
     pub timer: Option<&'a GpuTimer>,
+}
+
+/// 图形提交对上传队列的跨队列等待：备料时刻的票据快照 + 票据信号量。
+/// 快照前的所有上传都归本帧等（GPU 侧 ALL_COMMANDS 等待，CPU 不阻塞）；这个等待同时保证
+/// transfer 写的跨队列可见性（池/贴图 CONCURRENT 共享，没有所有权屏障）。
+/// fallback 白图在初始化时就上传了，正常帧票据非 0；0 只在启动后从未上传时出现。
+#[derive(Clone, Copy)]
+pub struct UploadWait {
+    /// 备料时刻已发出的最高票据（0 = 从未上传）。
+    ticket: Ticket,
+    /// 上传队列的 timeline 票据信号量（全工程唯一，每帧引用同一个）。
+    semaphore: vk::Semaphore,
+}
+
+impl UploadWait {
+    /// 备料点取快照。时序契约：必须在 overlay 图集整传之后取——图集批可能多发一张
+    /// 票据，取早了本帧 UI 贴图不在等待值里，图形队列读到未完成的 transfer 写。
+    pub fn snapshot(uploader: &Uploader) -> Self {
+        Self {
+            ticket: uploader.last_issued_ticket(),
+            semaphore: uploader.ticket_semaphore(),
+        }
+    }
+
+    /// 追加进提交的平行等待三元组；票 0 = 从未上传，不追加（不能等 0 值，VUID-03242）。
+    pub fn push_to(
+        &self,
+        semaphores: &mut Vec<vk::Semaphore>,
+        stages: &mut Vec<vk::PipelineStageFlags>,
+        values: &mut Vec<u64>,
+    ) {
+        if self.ticket == 0 {
+            return;
+        }
+        semaphores.push(self.semaphore);
+        stages.push(vk::PipelineStageFlags::ALL_COMMANDS);
+        values.push(self.ticket);
+    }
 }
 
 impl FramePool {
@@ -469,32 +506,16 @@ impl FramePool {
         // 不会回来死等（见 `wait_for_slot`）。
         device.reset_fences(slice::from_ref(&frame.in_flight))?;
 
-        // 等待点：
-        // ① image_available 在 COLOR_ATTACHMENT_OUTPUT 才需要，之前的工作可与 acquire 重叠；
-        // ② 上传票据（timeline）在 ALL_COMMANDS 等，CPU 不阻塞；这个内存依赖同时保证
-        //    transfer 写池/贴图的跨队列可见性（CONCURRENT 共享没有所有权屏障，全靠这里）。
-        // 票据 0 表示从未上传，不能等 0 值（VUID-03242），只等 acquire。fallback 白图在初始化时
-        // 就上传了，实际走不到这个分支。
-        let (wait_semaphores, wait_dst_stage, wait_values): (
-            Vec<vk::Semaphore>,
-            Vec<vk::PipelineStageFlags>,
-            Vec<u64>,
-        ) = if draw.wait_ticket == 0 {
-            (
-                vec![frame.image_available],
-                vec![vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT],
-                vec![0],
-            )
-        } else {
-            (
-                vec![frame.image_available, draw.ticket_semaphore],
-                vec![
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    vk::PipelineStageFlags::ALL_COMMANDS,
-                ],
-                vec![0, draw.wait_ticket],
-            )
-        };
+        // 等待点：① image_available 在 COLOR_ATTACHMENT_OUTPUT 才需要，之前的工作可与
+        // acquire 重叠；② 上传票据（timeline）在 ALL_COMMANDS 等，CPU 不阻塞；这个内存依赖
+        // 同时保证 transfer 写池/贴图的跨队列可见性（CONCURRENT 共享没有所有权屏障，全靠
+        // 这里）。
+        let (mut wait_semaphores, mut wait_dst_stage, mut wait_values) = (
+            vec![frame.image_available],
+            vec![vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT],
+            vec![0],
+        );
+        draw.upload_wait.push_to(&mut wait_semaphores, &mut wait_dst_stage, &mut wait_values);
         let mut timeline_submit =
             vk::TimelineSemaphoreSubmitInfo::default().wait_semaphore_values(&wait_values);
         device.queue_submit(

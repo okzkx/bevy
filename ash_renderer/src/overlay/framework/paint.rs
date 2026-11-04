@@ -9,7 +9,7 @@
 //! 跨系统携带——`TexturesDelta` Drop 时要求增量已消费，且最小化帧 Update 照跑而
 //! draw_frame 整帧让路，跨系统携带会被下帧覆写丢失。
 //!
-//! 时序：`paint_overlay` 必须在 draw_frame 组装 FrameDraw（`wait_ticket` 快照）之前
+//! 时序：`paint_overlay` 必须在 draw_frame 组装 FrameDraw（`upload_wait` 快照）之前
 //! 调用——图集批的票据要落进本帧图形提交的等待值。
 
 use ash::vk;
@@ -130,7 +130,7 @@ pub(crate) struct OverlayLogState {
 }
 
 /// overlay 绘制段：图集整传（有新代时）→ 镶嵌 → 顶点环写入 → [`UiPaint`]。
-/// 在 draw_frame 内、FrameDraw 组装（wait_ticket 快照）之前调用。
+/// 在 draw_frame 内、FrameDraw 组装（upload_wait 快照）之前调用。
 /// 失败 = 绘制链状态已不可信（图集建图/提交/发布、顶点环写入），按致命错误冒泡。
 #[expect(
     clippy::too_many_arguments,

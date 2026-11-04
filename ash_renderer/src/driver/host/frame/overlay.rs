@@ -21,9 +21,8 @@ pub(super) struct OverlayInput<'w, 's> {
 /// UI 绘制产出：绘制参数 + 该帧槽的顶点/索引环句柄（None = UI 缺席，UI 段整段跳过）。
 pub(super) type UiDrawOutput = Option<(UiPaint, (vk::Buffer, vk::Buffer))>;
 
-/// 本帧 UI 绘制备料：图集整传（可能多一张 transfer 票据，调用方本帧 wait_ticket
-/// 必须在此后取）→ 镶嵌 → 顶点环写入。UI 数据缺席 = None（record_frame 的 UI 段
-/// 整段跳过）。
+/// 本帧 UI 绘制备料：图集整传（可能多一张 transfer 票据，本帧 upload_wait 快照必须在此后
+/// 取）→ 镶嵌 → 顶点环写入。UI 数据缺席 = None（record_frame 的 UI 段整段跳过）。
 pub(super) fn create_overlay_draw(
     ctx: &Context,
     tables: &mut BindlessTextureTable,

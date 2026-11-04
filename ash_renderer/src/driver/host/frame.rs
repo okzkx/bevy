@@ -31,7 +31,7 @@ use ash_macros::system;
 use crate::{
     common::syntax::fatal,
     scene::InstanceLedger,
-    render::FrameDraw,
+    render::{FrameDraw, UploadWait},
 };
 
 use super::drawlist::{self, DrawabilitySources, ParityDirty};
@@ -216,8 +216,9 @@ pub(crate) fn draw_frame(
     let shadow_build_dispatch = (shadow.settings.enabled && indirect_count > 0)
         .then(|| shadow.build_pass.draw(indirect_count));
 
-    // —— overlay 绘制：图集整传（可能多一张 transfer 票据，所以本帧 wait_ticket 必须
-    // 在此后取）→ 镶嵌 → 顶点环写入。UI 数据缺席 = None（record_frame 的 UI 段整段跳过）。
+    // —— overlay 绘制：图集整传（可能多一张 transfer 票据，本帧 upload_wait 快照必须在此后取，
+    // 见 UploadWait::snapshot）→ 镶嵌 → 顶点环写入。UI 数据缺席 = None（record_frame 的
+    // UI 段整段跳过）。
     let ui = create_overlay_draw(&gpu.ctx, &mut gpu.tables, &mut gpu.uploader, overlay, slot, extent)?;
 
     // —— 录制 + 提交。上传票据在 GPU 侧等待（ALL_COMMANDS），CPU 不阻塞。
@@ -260,8 +261,7 @@ pub(crate) fn draw_frame(
             .as_ref()
             .map(|(_, buffers)| *buffers)
             .unwrap_or((vk::Buffer::null(), vk::Buffer::null())),
-        wait_ticket: gpu.uploader.last_issued_ticket(),
-        ticket_semaphore: gpu.uploader.ticket_semaphore(),
+        upload_wait: UploadWait::snapshot(&gpu.uploader),
         clear: CLEAR_COLOR,
         frustum_cull: frustum_cull_draw,
         shadow_build: shadow_build_dispatch,
