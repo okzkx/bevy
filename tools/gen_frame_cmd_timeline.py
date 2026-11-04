@@ -67,7 +67,7 @@ CPU_POST = [  # wait_for_slot 之后的 draw_frame 各步（字母, 时长）
     ("c", 20), ("d", 40), ("e", 30), ("f", 40), ("g", 50), ("h", 40), ("i", 15), ("j", 105), ("k", 10), ("l", 15)
 ]
 CPU_LETTERS = {
-    "a": "驻留 tick + flush_uploads（排空墓地·脏行盘点·合批提交）",
+    "a": "驻留 tick + flush_uploads（排空墓地·脏行盘点·合批提交；无新资产 = 空批，不提交）",
     "b": "wait_for_slot：等本槽 fence（上一轮同槽提交执行完）",
     "c": "acquire：取图，置位本槽 image_available",
     "d": "组装 DrawList（增量）+ 取走奇偶脏集",
@@ -91,17 +91,25 @@ SEGS = [  # 图形队列一帧九段（编号, 名, 时长, 填色, 描边）
     ("⑧", "后链+UI", 80, "#e0f2fe", "#0284c7"),
     ("⑨", "出场", 15, "#e5e7eb", "#6b7280"),
 ]
+# 推演跑一长串帧到稳态后截固定时间窗：窗内四帧 N-1~N+2 高亮，窗口两端露出的相邻帧淡显，四条泳道
+# 在窗内都连续。冷启动帧不进窗口——启动时帧槽首用、CPU 不等 fence，会误画成 GPU 受限时 CPU 照样连续跑
+WARMUP = [("帧 N-5", "B", 1, None), ("帧 N-4", "A", 2, None), ("帧 N-3", "B", 0, None), ("帧 N-2", "A", 1, None)]
 FRAMES = [  # (名, 帧槽, 交换链图, 上传批: None 或 (票据, 时长))
     ("帧 N-1", "B", 2, (7, 110)),
     ("帧 N", "A", 0, None),
     ("帧 N+1", "B", 1, (8, 90)),
     ("帧 N+2", "A", 2, (9, 760)),
 ]
+TAIL = [("帧 N+3", "B", 0, None), ("帧 N+4", "A", 1, None), ("帧 N+5", "B", 2, None)]
+ALL = WARMUP + FRAMES + TAIL
+FIRST = len(WARMUP)
+FOCUS = set(range(FIRST, FIRST + len(FRAMES)))
 
-# 推演：CPU 串行；wait_for_slot 等两帧前同槽 GPU 结束；GPU 等 提交/前帧结束/票据 三者最晚
+# 推演：CPU 串行；wait_for_slot 等两帧前同槽 GPU 结束；GPU 等 提交/前帧结束/快照票据 三者最晚
+# （快照取的是已发出的最高票据，所以后帧也要等前帧发出的大批上传）
 sched = []
 cpu_t = 0
-for k, (_, slot, img, upload) in enumerate(FRAMES):
+for k, (_, slot, img, upload) in enumerate(ALL):
     s = cpu_t
     pre_end = s + CPU_PRE
     up = (pre_end - 5, pre_end - 5 + upload[1], upload[0]) if upload else None
@@ -115,19 +123,48 @@ for k, (_, slot, img, upload) in enumerate(FRAMES):
     acquire_end = steps[0][1] + steps[0][2]
     submit = steps[-2][1] + steps[-2][2]
     prev_end = sched[k - 1]["gpu_end"] if k else 0
-    ticket_done = up[1] if up else 0
+    ticket_done = max([sc["up"][1] for sc in sched if sc["up"]] + [up[1] if up else 0])
     gpu_start = max(submit, prev_end, ticket_done)
     sched.append(dict(s=s, pre_end=pre_end, wait_end=wait_end, steps=steps, cpu_end=t, up=up,
                       submit=submit, prev_end=prev_end, ticket_done=ticket_done,
                       gpu_start=gpu_start, gpu_end=gpu_start + G, acquire_end=acquire_end))
     cpu_t = t
 
-X0, S = 300, 0.95
+T0 = sched[FIRST]["s"] - 40
+for sc in sched:
+    for key in ("s", "pre_end", "wait_end", "cpu_end", "submit", "prev_end", "ticket_done", "gpu_start", "gpu_end", "acquire_end"):
+        sc[key] -= T0
+    sc["steps"] = [(letter, t0 - T0, d) for letter, t0, d in sc["steps"]]
+    if sc["up"]:
+        sc["up"] = (sc["up"][0] - T0, sc["up"][1] - T0, sc["up"][2])
+STEADY_WAIT = sched[FIRST]["wait_end"] - sched[FIRST]["pre_end"]
+
+X0 = 300
+S = (3460 - 24 - X0) / (sched[FIRST + len(FRAMES) - 1]["gpu_end"] + 300)
 W = 3460
+WIN_R = W - 24  # 时间窗右缘
 
 
 def tx(t):
     return X0 + t * S
+
+
+def inside(x0, x1):
+    return x0 >= X0 - 0.5 and x1 <= WIN_R + 0.5
+
+
+def box_text(x0, w, y, s, *args, **kwargs):
+    """字写在框的可见部分正中；可见部分太窄（被窗口裁成残片）就只留色块。"""
+    a, b = max(x0, X0), min(x0 + w, WIN_R)
+    if b - a >= min(w, 26) - 0.5 and b - a >= 9:
+        text((a + b) / 2, y, s, *args, **kwargs)
+
+
+def clamped_text(x0, x1, y, s, size, half, **kwargs):
+    """长条的说明字落在条的可见部分中央。"""
+    a, b = max(x0, X0 + 4), min(x1, WIN_R - 4)
+    if b - a > 2 * half:
+        text((a + b) / 2, y, s, size, **kwargs)
 
 
 LANES = {"cpu": (200, 64), "tr": (318, 40), "gpu": (420, 60), "pr": (540, 38)}
@@ -139,88 +176,116 @@ LANE_NAMES = {
 }
 
 rect(10, 96, W - 20, 560, "#f8fafc", "#cbd5e1", rx=6)
-text(24, 116, "上半 · 四帧在飞宏观时序：两帧槽 A/B 交替、三张交换链图轮转、GPU 受限时队列积压一帧", 15, "start", "bold")
+text(24, 116, f"上半 · 稳态时间窗：GPU 受限 → CPU 每帧在 b 段等 fence（{STEADY_WAIT} / 560，被 GPU 拉到同一节拍），图形队列积压一帧；"
+     "高亮四帧 N-1~N+2（CPU 备料 → GPU 执行 → 呈现全程在窗内），淡色为相邻帧", 15, "start", "bold")
 for key, (y, h) in LANES.items():
     rect(20, y, 250, h, "#ffffff", "#94a3b8", rx=4)
     text(145, y + h / 2, LANE_NAMES[key], 12, weight="bold")
     line(280, y + h / 2, W - 20, y + h / 2, "#e2e8f0", 1, "4 4")
+for x in (X0, WIN_R):  # 窗口两缘
+    line(x, 150, x, 590, "#94a3b8", 1, "2 4")
 
-frame_stroke = lambda k: 2.4 if k == 1 else 1.0  # 帧 N 加粗
+frame_stroke = lambda k: 2.4 if k == FIRST + 1 else 1.0  # 帧 N 加粗
 
-for k, (name, slot, img, upload) in enumerate(FRAMES):
+parts.append(f'<clipPath id="upper"><rect x="{X0}" y="96" width="{WIN_R - X0}" height="500"/></clipPath>')
+parts.append('<g clip-path="url(#upper)">')
+for k, (name, slot, img, upload) in enumerate(ALL):
     sc = sched[k]
+    if k not in FOCUS:
+        parts.append('<g opacity="0.38">')
     cy, ch = LANES["cpu"]
     gy, gh = LANES["gpu"]
-    # 帧标题
-    text(tx(sc["s"]) + 4, cy - 14, f"{name} · 槽 {slot} · 图 {img}", 12.5, "start", "bold",
-         "#b91c1c" if k == 1 else "#0f172a")
+    title_color = "#b91c1c" if k == FIRST + 1 else "#0f172a"
+    # 帧标题（落在 CPU 段可见部分的左端）
+    lx_ = max(tx(sc["s"]), X0) + 4
+    if lx_ < min(tx(sc["cpu_end"]), WIN_R) - 120:
+        text(lx_, cy - 14, f"{name} · 槽 {slot} · 图 {img}", 12.5, "start", "bold", title_color)
     # CPU：a 段 + b 等待 + 其余字母段
-    rect(tx(sc["s"]), cy, (sc["pre_end"] - sc["s"]) * S, ch, "#dbeafe", "#2563eb", sw=frame_stroke(k))
-    text(tx(sc["s"]) + (sc["pre_end"] - sc["s"]) * S / 2, cy + ch / 2, "a\n上传", 10.5)
+    a_w = (sc["pre_end"] - sc["s"]) * S
+    rect(tx(sc["s"]), cy, a_w, ch, "#dbeafe", "#2563eb", sw=frame_stroke(k))
+    box_text(tx(sc["s"]), a_w, cy + ch / 2, "a\n上传" if sc["up"] else "a\n空批", 10.5,
+             fill="#0f172a" if sc["up"] else "#64748b")
     if sc["wait_end"] > sc["pre_end"]:
         ww = (sc["wait_end"] - sc["pre_end"]) * S
         rect(tx(sc["pre_end"]), cy, ww, ch, "#fee2e2", FENCE, sw=frame_stroke(k))
-        text(tx(sc["pre_end"]) + ww / 2, cy + ch / 2, "b\n等fence", 10.5, fill=FENCE, weight="bold")
-    else:
-        line(tx(sc["pre_end"]), cy - 2, tx(sc["pre_end"]), cy + ch + 2, FENCE, 2)
-        text(tx(sc["pre_end"]), cy + ch + 9, "b 免等", 9, fill=FENCE)
+        box_text(tx(sc["pre_end"]), ww, cy + ch / 2, "b\n等fence", 10.5, fill=FENCE, weight="bold")
     for letter, t0, d in sc["steps"]:
         fill = "#bfdbfe" if letter == "j" else "#dbeafe"
         rect(tx(t0), cy, d * S, ch, fill, "#2563eb", sw=frame_stroke(k))
         label = {"j": "j\n录制 cmd", "g": "g\n开关", "d": "d\n组装", "f": "f\n四环", "h": "h\nUI"}.get(letter, letter)
-        text(tx(t0) + d * S / 2, cy + ch / 2, label, 10.5)
+        box_text(tx(t0), d * S, cy + ch / 2, label, 10.5)
     # 传输队列
     ty_, th = LANES["tr"]
     if sc["up"]:
         u0, u1, tk = sc["up"]
         rect(tx(u0), ty_, (u1 - u0) * S, th, "#fef3c7", "#d97706")
         big = "（大批：贴图流送）" if u1 - u0 > 300 else ""
-        text(tx(u0) + (u1 - u0) * S / 2, ty_ + th / 2, f"拷贝→池/对象表/贴图{big}\n置位票据 {tk}", 10.5)
+        label = f"拷贝→池/对象表/贴图{big}\n置位票据 {tk}" if u1 - u0 > 300 else f"上传拷贝\n置位票据 {tk}"
+        clamped_text(tx(u0), tx(u1), ty_ + th / 2, label, 10.5, 24)
         line(tx(sc["s"] + 50), cy + ch, tx(u0) + 6, ty_, TICKET, 1.4, arrow=True)
         curve(tx(u1), ty_ + th, tx(sc["gpu_start"]) + 3, gy, TICKET, bend=0.6)
-    if not sc["up"]:
+    else:
+        # 空批帧：flush_uploads 照跑（排墓地/盘点/对账），无新资产不提交，传输队列留淡色占位；
+        # 前帧的上传批还在跑时占位会压在它上面，只画标注、不画框
+        px, pw = tx(sc["s"] + 8), 120 * S
+        busy = any(o["up"] and o["up"][0] < sc["s"] + 128 and o["up"][1] > sc["s"] + 8 for o in sched)
+        if not busy:
+            rect(px, ty_ + 4, pw, th - 8, "#ffffff", "#d97706", "3 3", opacity=0.6)
+            box_text(px, pw, ty_ + th / 2, "空批 · 不提交\n不发新票据", 9.5, fill="#b45309")
+            line(tx(sc["s"] + 50), cy + ch, px + pw / 2, ty_ + 4, "#d97706", 1, "2 3")
+    if k == FIRST + 1:
         text(tx(sc["gpu_start"]) + 4, gy + gh + 26, "无上传批：票据快照 = 7（已完成）→ 票据门免等", 10, "start", fill="#b45309", weight="bold")
     # 图形队列：排队条 + 等票据 + 九段
     if sc["gpu_start"] > sc["submit"]:
         qy = gy + gh + 4
-        rect(tx(sc["submit"]), qy, (sc["gpu_start"] - sc["submit"]) * S, 11, "#ffffff", "#64748b", "3 2", rx=2)
-        text(tx(sc["submit"]) + 4, qy + 6, "已提交·排队（前帧仍在执行）" if sc["prev_end"] >= sc["ticket_done"] else "已提交·整批等票据", 9, "start", fill="#475569")
+        qw = (sc["gpu_start"] - sc["submit"]) * S
+        rect(tx(sc["submit"]), qy, qw, 11, "#ffffff", "#64748b", "3 2", rx=2)
+        if inside(tx(sc["submit"]), tx(sc["submit"]) + 150):
+            text(tx(sc["submit"]) + 4, qy + 6, "已提交·排队（前帧仍在执行）" if sc["prev_end"] >= sc["ticket_done"] else "已提交·整批等票据", 9, "start", fill="#475569")
     if sc["ticket_done"] > max(sc["submit"], sc["prev_end"]):
         st = max(sc["submit"], sc["prev_end"])
-        rect(tx(st), gy, (sc["ticket_done"] - st) * S, gh, "#fef3c7", TICKET, "4 2")
-        text(tx(st) + (sc["ticket_done"] - st) * S / 2, gy + gh / 2, "票据门\n整批冻结", 10, fill="#92400e", weight="bold")
+        tw = (sc["ticket_done"] - st) * S
+        rect(tx(st), gy, tw, gh, "#fef3c7", TICKET, "4 2")
+        box_text(tx(st), tw, gy + gh / 2, "票据门\n整批冻结", 10, fill="#92400e", weight="bold")
     t = sc["gpu_start"]
     seg_x = {}
     for num, nm, d, fill, stroke in SEGS:
         rect(tx(t), gy, d * S, gh, fill, stroke, sw=frame_stroke(k))
         seg_x[num] = tx(t)
-        text(tx(t) + d * S / 2, gy + gh / 2, num if d < 50 else f"{num}\n{nm}", 10.5)
+        box_text(tx(t), d * S, gy + gh / 2, num if d < 50 else f"{num}\n{nm}", 10.5)
         t += d
-    text(tx(sc["gpu_start"]) + G * S / 2, gy - 8, f"{name} 命令缓冲（槽 {slot}）", 10, fill="#334155")
+    clamped_text(tx(sc["gpu_start"]), tx(sc["gpu_end"]), gy - 8, f"{name} 命令缓冲（槽 {slot}）", 10, 70, fill="#334155")
     # 图门：image_available 卡在 ④ 起点
     py, ph = LANES["pr"]
     ax = tx(sc["acquire_end"])
     line(ax, cy + ch, ax, py, IMG, 1.0, "2 3")
     curve(ax + 2, py, seg_x["④"], gy + gh, IMG, 1.4, bend=0.5)
     parts.append(f'<polygon points="{seg_x["④"]:.1f},{gy - 1} {seg_x["④"] - 5:.1f},{gy - 9} {seg_x["④"] + 5:.1f},{gy - 9}" fill="{IMG}"/>')
-    # render_finished → 演示引擎；fence → 两帧后同槽 wait
+    # render_finished → 演示引擎持有到下一张图交付；fence → 两帧后同槽 wait
     end_x = tx(sc["gpu_end"])
-    nxt = sched[k + 1]["gpu_end"] if k + 1 < len(sched) else sc["gpu_end"] + 380
+    nxt = sched[k + 1]["gpu_end"] if k + 1 < len(sched) else sc["gpu_end"] + G
     rect(end_x + 6, py, (nxt - sc["gpu_end"]) * S - 8, ph, "#f3e8ff", "#9333ea")
-    text(end_x + 6 + ((nxt - sc["gpu_end"]) * S - 8) / 2, py + ph / 2, f"等 render_finished[{img}] → 呈现并持有 图 {img}", 10.5)
+    clamped_text(end_x + 6, tx(nxt) - 2, py + ph / 2, f"等 render_finished[{img}] → 呈现并持有 图 {img}（{name}）", 10.5, 130)
     line(end_x - 2, gy + gh, end_x + 8, py, RFIN, 1.6, arrow=True)
     if k + 2 < len(sched):
         tgt = sched[k + 2]
         curve(end_x - 4, gy, tx(tgt["pre_end"]) + 8, cy + ch, FENCE, 1.8, bend=0.45)
-        text(end_x + 4, gy - 20, f"fence[{slot}] 置位", 10, "start", fill=FENCE, weight="bold")
+        if inside(end_x, end_x + 80):
+            text(end_x + 4, gy - 20, f"fence[{slot}] 置位", 10, "start", fill=FENCE, weight="bold")
+    if k not in FOCUS:
+        parts.append("</g>")
+parts.append("</g>")
 
 # 时间轴
 ay = 600
-line(X0, ay, W - 30, ay, GRAY, 1.2, arrow=True)
-text(W - 34, ay + 14, "时间", 11, "end", fill=GRAY)
+line(X0, ay, WIN_R - 6, ay, GRAY, 1.2, arrow=True)
+text(WIN_R - 10, ay + 14, "时间", 11, "end", fill=GRAY)
 for k, sc in enumerate(sched):
-    line(tx(sc["s"]), ay - 4, tx(sc["s"]), ay + 4, GRAY, 1.2)
-    text(tx(sc["s"]) + 4, ay - 9, f"{FRAMES[k][0]} draw_frame 开始", 9.5, "start", fill=GRAY)
+    x = tx(sc["s"])
+    if X0 <= x <= WIN_R - 140:
+        color = GRAY if k in FOCUS else "#b6bec9"
+        line(x, ay - 4, x, ay + 4, color, 1.2)
+        text(x + 4, ay - 9, f"{ALL[k][0]} draw_frame 开始", 9.5, "start", fill=color)
 
 # 上半图例
 ly = 632
