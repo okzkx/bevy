@@ -1,0 +1,895 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="2892" viewBox="0 0 2000 2892" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif">
+<defs>
+<pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#e2e8f0"/><line x1="0" y1="0" x2="0" y2="6" stroke="#94a3b8" stroke-width="2"/></pattern>
+<linearGradient id="bggrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#eef2f7"/><stop offset="1" stop-color="#e2e9f2"/></linearGradient>
+<linearGradient id="hdrgrad" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#0f172a"/><stop offset="1" stop-color="#1f3a58"/></linearGradient>
+<filter id="soft" x="-15%" y="-30%" width="130%" height="170%"><feDropShadow dx="0" dy="1.5" stdDeviation="2.2" flood-color="#1e293b" flood-opacity="0.18"/></filter>
+<filter id="lift" x="-15%" y="-30%" width="130%" height="170%"><feDropShadow dx="0" dy="2.5" stdDeviation="3.2" flood-color="#1e293b" flood-opacity="0.25"/></filter>
+<marker id="ah-dc2626" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/></marker>
+<marker id="ah-d97706" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#d97706"/></marker>
+<marker id="ah-9333ea" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9333ea"/></marker>
+<marker id="ah-0d9488" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0d9488"/></marker>
+<marker id="ah-475569" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+<marker id="ah-64748b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+</defs>
+<rect width="2000" height="2892" fill="url(#bggrad)"/>
+<text font-size="22" text-anchor="start" font-weight="bold" fill="#0f172a"><tspan x="30.0" y="37.9">设备队列在飞快照：冻住 GPU 截五个典型时刻，看每条 cmb 排在哪、跑到哪、被哪道门以什么理由卡住</tspan></text>
+<text font-size="12.5" text-anchor="start" font-weight="normal" fill="#475569"><tspan x="30.0" y="62.5">ash_renderer · RTX 2060 实测队列拓扑 · MAX_FRAMES_IN_FLIGHT = 2 · 交换链 3 图 · staging 2 槽 · 帧/槽/图/票据编号与《多帧在飞竞争》§3 时序图同一稳态推演（时刻 ⑤ 为另一情形）</tspan></text>
+<line x1="30.0" y1="86.0" x2="64.0" y2="86.0" stroke="#dc2626" stroke-width="2.2" marker-end="url(#ah-dc2626)"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="72.0" y="90.1">fence[帧槽]：GPU 跑完整条 cmb → 放行 CPU 复用该帧槽（wait_for_slot）</tspan></text>
+<line x1="1010.0" y1="86.0" x2="1044.0" y2="86.0" stroke="#d97706" stroke-width="2.2" marker-end="url(#ah-d97706)"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="1052.0" y="90.1">timeline 票据：transfer / blit 完成 → 放行等 ≥N 的提交（@ALL_COMMANDS，整批）</tspan></text>
+<line x1="30.0" y1="108.0" x2="64.0" y2="108.0" stroke="#9333ea" stroke-width="2.2" marker-end="url(#ah-9333ea)"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="72.0" y="112.1">image_available[帧槽]：演示引擎放手图 → 放行 @COLOR_ATTACHMENT_OUTPUT</tspan></text>
+<line x1="1010.0" y1="108.0" x2="1044.0" y2="108.0" stroke="#0d9488" stroke-width="2.2" marker-end="url(#ah-0d9488)"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="1052.0" y="112.1">render_finished[图]：cmb 写完交换链图 → 放行 present</tspan></text>
+<rect x="30.0" y="127.0" width="34.0" height="18.0" rx="4" fill="#ffffff" stroke="#2563eb" stroke-width="2.6"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="72.0" y="140.1">执行中</tspan></text>
+<rect x="138.0" y="127.0" width="34.0" height="18.0" rx="4" fill="#ffffff" stroke="#2563eb" stroke-width="1.6" stroke-dasharray="5 3"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="180.0" y="140.1">已提交排队</tspan></text>
+<rect x="270.0" y="127.0" width="34.0" height="18.0" rx="4" fill="#f8fafc" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 3"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="312.0" y="140.1">冻结（等信号量）</tspan></text>
+<rect x="438.0" y="127.0" width="34.0" height="18.0" rx="4" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="480.0" y="140.1">已完成（淡显）</tspan></text>
+<rect x="594.0" y="129.0" width="7.0" height="14.0" rx="1" fill="#e5e7eb" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="601.0" y="129.0" width="41.8" height="14.0" rx="1" fill="#ffedd5" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="621.9" y="139.4">②</tspan></text>
+<rect x="642.8" y="129.0" width="32.5" height="14.0" rx="1" fill="#e7e5e4" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="659.0" y="139.4">③</tspan></text>
+<rect x="675.2" y="129.0" width="51.1" height="14.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="675.2" y="129.0" width="25.5" height="14.0" rx="1" fill="#dcfce7" stroke="none" stroke-width="0"/>
+<rect x="674.2" y="127.0" width="53.1" height="18.0" rx="2" fill="none" stroke="#0f172a" stroke-width="1.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="700.8" y="139.4">④</tspan></text>
+<rect x="726.3" y="129.0" width="37.1" height="14.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="744.9" y="139.4">⑤</tspan></text>
+<rect x="763.5" y="129.0" width="18.6" height="14.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="772.8" y="139.4">⑥</tspan></text>
+<rect x="782.0" y="129.0" width="27.9" height="14.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="796.0" y="139.4">⑦</tspan></text>
+<rect x="809.9" y="129.0" width="37.1" height="14.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="828.5" y="139.4">⑧</tspan></text>
+<rect x="847.0" y="129.0" width="7.0" height="14.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="864.0" y="140.1">九段进度：彩 = 已跑 · 黑框 = 当前段 · 白 = 未跑 · 斜线 = 冻结 · 紫竖线 = 停在此段前</tspan></text>
+<text font-size="11.5" text-anchor="start" font-weight="bold" fill="#0f172a"><tspan x="30.0" y="164.1">框底横条 = 这条 cmb 的卡点：</tspan></text>
+<rect x="250.0" y="151.0" width="24.0" height="17.0" rx="3" fill="#f0fdf4" stroke="#15803d" stroke-width="0.8"/>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="282.0" y="164.0">无卡点 · 执行中</tspan></text>
+<rect x="418.2" y="151.0" width="24.0" height="17.0" rx="3" fill="#f1f5f9" stroke="#64748b" stroke-width="0.8"/>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="450.2" y="164.0">只等队列顺序（非同步原语）</tspan></text>
+<rect x="633.6" y="151.0" width="24.0" height="17.0" rx="3" fill="#fffbeb" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="665.6" y="164.0">等票据 T：@ALL_COMMANDS 整批挡住</tspan></text>
+<rect x="978.8" y="151.0" width="24.0" height="17.0" rx="3" fill="#f5f3ff" stroke="#9333ea" stroke-width="0.8"/>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="1010.8" y="164.0">等图 A：@COLOR_ATTACHMENT_OUTPUT</tspan></text>
+<rect x="16.0" y="192.0" width="1968.0" height="502.0" rx="10" fill="#ffffff" stroke="#c3cedd" stroke-width="1.2" filter="url(#soft)"/>
+<rect x="21.0" y="206.0" width="6.0" height="474.0" rx="3" fill="#0ea5e9" stroke="none" stroke-width="0"/>
+<rect x="16.0" y="192.0" width="1968.0" height="34.0" rx="8" fill="url(#hdrgrad)" stroke="#0f172a" stroke-width="1.0"/>
+<rect x="16.0" y="218.0" width="1968.0" height="8.0" rx="0" fill="url(#hdrgrad)" stroke="#0f172a" stroke-width="1.0"/>
+<rect x="16.0" y="223.0" width="1968.0" height="3.0" rx="0" fill="#0ea5e9" stroke="none" stroke-width="0"/>
+<text font-size="15" text-anchor="start" font-weight="bold" fill="#ffffff"><tspan x="40.0" y="214.4">时刻 ① 稳态 · GPU 受限：两帧 cmb 在图形队列排队，CPU 停在 fence</tspan></text>
+<line x1="30.0" y1="312.0" x2="1980.0" y2="312.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="464.0" x2="1980.0" y2="464.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="564.0" x2="1980.0" y2="564.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="624.0" x2="1980.0" y2="624.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="234.0" y1="232.0" x2="234.0" y2="620.0" stroke="#94a3b8" stroke-width="1.4"/>
+<rect x="236.0" y="313.0" width="1740.0" height="150.0" rx="0" fill="#f8fafc" stroke="none" stroke-width="1.0"/>
+<rect x="236.0" y="465.0" width="1740.0" height="98.0" rx="0" fill="#fffdf5" stroke="none" stroke-width="1.0"/>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="264.7">演示引擎 · 交换链</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="282.6">3 张图 · MAILBOX 优先</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="383.7">图形队列 Q0</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="401.6">族 0 · GRAPHICS+COMPUTE+PRESENT</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="509.7">传输队列 Q1</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="527.6">族 1 · 专用 transfer · 单队列</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="589.7">CPU 主线程</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="607.6">draw_frame（Bevy Last）</tspan></text>
+<path d="M1924.0,456.0 C1924.0,517.0 502.5,517.0 502.5,578.0" fill="none" stroke="#dc2626" stroke-width="1.7" marker-end="url(#ah-dc2626)"/>
+<path d="M1564.0,332.0 C1564.0,316.0 1498.0,316.0 1498.0,332.0" fill="none" stroke="#0d9488" stroke-width="1.5" marker-end="url(#ah-0d9488)"/>
+<path d="M1564.0,332.0 C1564.0,306.0 1312.0,306.0 1312.0,332.0" fill="none" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ah-64748b)"/>
+<rect x="250.0" y="236.0" width="560.0" height="66.0" rx="4" fill="#f1f5f9" stroke="#475569" stroke-width="1.0" filter="url(#soft)"/>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#475569"><tspan x="264.0" y="261.7">img0 · 已交给帧 N</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="264.0" y="283.0">帧 N 的 cmb 排队中，将写这张</tspan></text>
+<rect x="830.0" y="236.0" width="560.0" height="66.0" rx="4" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6" filter="url(#soft)"/>
+<rect x="840.0" y="244.0" width="70.0" height="50.0" rx="3" fill="#1e3a8a" stroke="#1e3a8a" stroke-width="1.0"/>
+<text font-size="11" text-anchor="middle" font-weight="bold" fill="#ffffff"><tspan x="875.0" y="273.0">▶ 屏幕</tspan></text>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#1d4ed8"><tspan x="922.0" y="261.7">img1 · 扫描显示中</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="922.0" y="283.0">屏幕上 = 帧 N-2 的画面</tspan></text>
+<rect x="1410.0" y="236.0" width="560.0" height="66.0" rx="4" fill="#f1f5f9" stroke="#475569" stroke-width="1.0" filter="url(#soft)"/>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#475569"><tspan x="1424.0" y="261.7">img2 · 已交给帧 N-1</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="1424.0" y="283.0">cmb N-1 正在写（④ 起）</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="bold" fill="#64748b"><tspan x="1966.0" y="324.6">队首（先提交）→ GPU</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="bold" fill="#64748b"><tspan x="254.0" y="324.6">← 队尾（后提交）</tspan></text>
+<rect x="1534.0" y="330.0" width="430.0" height="126.0" rx="4" fill="#ffffff" stroke="#64748b" stroke-width="2.6" filter="url(#lift)"/>
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#64748b"><tspan x="1542.0" y="346.5">cmb · 帧 N-1</tspan></text>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1956.0" y="345.8">帧槽 B · 画 img2</tspan></text>
+<rect x="1542.0" y="356.0" width="11.1" height="15.0" rx="1" fill="#e5e7eb" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1553.1" y="356.0" width="66.5" height="15.0" rx="1" fill="#ffedd5" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1586.4" y="366.9">②</tspan></text>
+<rect x="1619.6" y="356.0" width="51.8" height="15.0" rx="1" fill="#e7e5e4" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1645.5" y="366.9">③</tspan></text>
+<rect x="1671.4" y="356.0" width="81.3" height="15.0" rx="1" fill="#dcfce7" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1712.0" y="366.9">④</tspan></text>
+<rect x="1752.7" y="356.0" width="59.1" height="15.0" rx="1" fill="#fef9c3" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1782.3" y="366.9">⑤</tspan></text>
+<rect x="1811.8" y="356.0" width="29.6" height="15.0" rx="1" fill="#fce7f3" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1826.6" y="366.9">⑥</tspan></text>
+<rect x="1841.4" y="356.0" width="44.4" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1841.4" y="356.0" width="17.7" height="15.0" rx="1" fill="#ede9fe" stroke="none" stroke-width="0"/>
+<rect x="1840.4" y="354.0" width="46.4" height="19.0" rx="2" fill="none" stroke="#0f172a" stroke-width="1.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1863.6" y="366.9">⑦</tspan></text>
+<rect x="1885.8" y="356.0" width="59.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1915.3" y="366.9">⑧</tspan></text>
+<rect x="1944.9" y="356.0" width="11.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1542.0" y="379.0" width="120.2" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="1602.1" y="390.4">✓ 票据≥7 @ALL</tspan></text>
+<rect x="1666.2" y="379.0" width="263.0" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="1797.7" y="390.4">✓ img_avail[B] @COLOR_OUT</tspan></text>
+<rect x="1542.0" y="398.0" width="242.6" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1663.3" y="409.4">发 render_finished[img2]</tspan></text>
+<rect x="1788.6" y="398.0" width="110.0" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1843.6" y="409.4">发 fence[B]</tspan></text>
+<rect x="1542.0" y="417.0" width="414.0" height="17.0" rx="3" fill="#f0fdf4" stroke="#15803d" stroke-width="0.8"/>
+<text font-size="9.8" text-anchor="start" font-weight="bold" fill="#15803d"><tspan x="1547.0" y="429.0">无卡点：三道门全开，正常执行中</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1542.0" y="447.8">状态：执行中 · ⑦ Bloom 降采样 c31</tspan></text>
+<rect x="1348.0" y="344.0" width="170.0" height="98.0" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.4" stroke-dasharray="4 3" filter="url(#soft)"/>
+<text font-size="11.5" text-anchor="middle" font-weight="bold" fill="#64748b"><tspan x="1433.0" y="364.1">present · 帧 N-1</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1433.0" y="380.4">等 render_finished[img2]</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#2563eb"><tspan x="1433.0" y="396.4">排队</tspan></text>
+<rect x="902.0" y="330.0" width="430.0" height="126.0" rx="4" fill="#ffffff" stroke="#2563eb" stroke-width="1.6" stroke-dasharray="5 3" filter="url(#soft)"/>
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="910.0" y="346.5">cmb · 帧 N</tspan></text>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1324.0" y="345.8">帧槽 A · 画 img0</tspan></text>
+<rect x="910.0" y="356.0" width="11.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="921.1" y="356.0" width="66.5" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="954.4" y="366.9">②</tspan></text>
+<rect x="987.6" y="356.0" width="51.8" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1013.5" y="366.9">③</tspan></text>
+<rect x="1039.4" y="356.0" width="81.3" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1080.0" y="366.9">④</tspan></text>
+<rect x="1120.7" y="356.0" width="59.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1150.3" y="366.9">⑤</tspan></text>
+<rect x="1179.8" y="356.0" width="29.6" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1194.6" y="366.9">⑥</tspan></text>
+<rect x="1209.4" y="356.0" width="44.4" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1231.6" y="366.9">⑦</tspan></text>
+<rect x="1253.8" y="356.0" width="59.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1283.3" y="366.9">⑧</tspan></text>
+<rect x="1312.9" y="356.0" width="11.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="910.0" y="379.0" width="120.2" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="970.1" y="390.4">✓ 票据≥7 @ALL</tspan></text>
+<rect x="1034.2" y="379.0" width="263.0" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="1165.7" y="390.4">✓ img_avail[A] @COLOR_OUT</tspan></text>
+<rect x="910.0" y="398.0" width="242.6" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1031.3" y="409.4">发 render_finished[img0]</tspan></text>
+<rect x="1156.6" y="398.0" width="110.0" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1211.6" y="409.4">发 fence[A]</tspan></text>
+<rect x="910.0" y="417.0" width="414.0" height="17.0" rx="3" fill="#f1f5f9" stroke="#64748b" stroke-width="0.8"/>
+<text font-size="9.8" text-anchor="start" font-weight="bold" fill="#64748b"><tspan x="915.0" y="429.0">无同步卡点：门全开，只差队列顺序</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="910.0" y="447.8">状态：已提交，排在 N-1 之后</tspan></text>
+<rect x="716.0" y="344.0" width="170.0" height="98.0" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.4" stroke-dasharray="4 3" filter="url(#soft)"/>
+<text font-size="11.5" text-anchor="middle" font-weight="bold" fill="#2563eb"><tspan x="801.0" y="364.1">present · 帧 N</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="801.0" y="380.4">等 render_finished[img0]</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#2563eb"><tspan x="801.0" y="396.4">排队</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="bold" fill="#64748b"><tspan x="1966.0" y="476.6">队首（先提交）→ 拷贝引擎</tspan></text>
+<rect x="1494.0" y="486.0" width="470.0" height="58.0" rx="4" fill="#ffffff" stroke="none" stroke-width="0"/>
+<g opacity="0.5">
+<rect x="1494.0" y="486.0" width="470.0" height="58.0" rx="4" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" filter="url(#soft)"/>
+<text font-size="12" text-anchor="start" font-weight="bold" fill="#b45309"><tspan x="1502.0" y="502.3">cmb · 上传批 #7 · 用 staging 槽1</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1956.0" y="501.6">帧 N-1 的批</tspan></text>
+<rect x="1502.0" y="511.0" width="454.0" height="9.0" rx="2" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1502.0" y="511.0" width="454.0" height="9.0" rx="2" fill="#fcd34d" stroke="none" stroke-width="0"/>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1502.0" y="538.8">已执行完 · 出队</tspan></text>
+</g>
+<rect x="1008.0" y="486.0" width="470.0" height="58.0" rx="4" fill="#ffffff" stroke="#d97706" stroke-width="2.4" filter="url(#lift)"/>
+<text font-size="12" text-anchor="start" font-weight="bold" fill="#b45309"><tspan x="1016.0" y="502.3">cmb · 上传批 #8 · 用 staging 槽0</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1470.0" y="501.6">帧 N+1 的 flush_uploads · 小批</tspan></text>
+<rect x="1016.0" y="511.0" width="454.0" height="9.0" rx="2" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1016.0" y="511.0" width="249.7" height="9.0" rx="2" fill="#fcd34d" stroke="none" stroke-width="0"/>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1016.0" y="538.8">状态：拷贝中 · 完成后置位 timeline = 8</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="bold" fill="#92400e"><tspan x="254.0" y="497.6">staging 槽记账（CPU 侧账本，不是队列；每槽记最后一批的票据）</tspan></text>
+<rect x="254.0" y="507.0" width="46.0" height="18.0" rx="9" fill="#fef3c7" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#92400e"><tspan x="277.0" y="519.8">槽0</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="308.0" y="519.8">#8 · 拷贝中，下次复用先等它</tspan></text>
+<rect x="254.0" y="529.0" width="46.0" height="18.0" rx="9" fill="#fef3c7" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#92400e"><tspan x="277.0" y="541.8">槽1</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="308.0" y="541.8">#7 · 已到，可复用</tspan></text>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#059669"><tspan x="250.0" y="598.7">帧 N+1</tspan></text>
+<rect x="360.0" y="578.0" width="95.0" height="32.0" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="407.5" y="597.6">a 上传</tspan></text>
+<rect x="455.0" y="578.0" width="95.0" height="32.0" rx="3" fill="#fee2e2" stroke="#dc2626" stroke-width="2" filter="url(#soft)"/>
+<text font-size="10" text-anchor="middle" font-weight="bold" fill="#dc2626"><tspan x="502.5" y="597.6">b fence</tspan></text>
+<rect x="550.0" y="578.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="577.1" y="597.6">c acquire</tspan></text>
+<rect x="604.3" y="578.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="631.4" y="597.6">d DrawList</tspan></text>
+<rect x="658.6" y="578.0" width="40.7" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="678.9" y="597.6">e</tspan></text>
+<rect x="699.3" y="578.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="726.4" y="597.6">f 四环</tspan></text>
+<rect x="753.6" y="578.0" width="67.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="787.5" y="597.6">g 备料</tspan></text>
+<rect x="821.4" y="578.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="848.6" y="597.6">h overlay</tspan></text>
+<rect x="875.7" y="578.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="892.7" y="597.6">i</tspan></text>
+<rect x="909.6" y="578.0" width="142.5" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="980.9" y="597.6">j 录制</tspan></text>
+<rect x="1052.1" y="578.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1069.1" y="597.6">k</tspan></text>
+<rect x="1086.1" y="578.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1103.0" y="597.6">l</tspan></text>
+<text font-size="11.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1136.0" y="598.1">状态：帧 N+1 · b wait_for_slot 阻塞——等 fence[B]，它挂在 cmb N-1 末尾</tspan></text>
+<rect x="26.0" y="629.0" width="1948.0" height="42.0" rx="6" fill="#f8fafc" stroke="none" stroke-width="0"/>
+<rect x="26.0" y="629.0" width="4.0" height="42.0" rx="2" fill="#0ea5e9" stroke="none" stroke-width="0"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="46.0" y="656.1">图形队列队首在跑帧 N-1，帧 N 整条 cmb 已提交在后面排着——这就是“两帧在飞”。CPU 已录完帧 N 又跑到帧 N+1，帧槽 B 的命令缓冲还被帧 N-1 占着，只能停在 b 等 fence[B]。规范上 cmb N 的 ②compute 并不被 N-1 的 ⑥~⑧ 挡（其进场门限只涉及 TRANSFER 段），可与 N-1 尾段重叠；本图按驱动前端顺序取命令画成整条排队。</tspan></text>
+<rect x="511.5" y="547.0" width="102.0" height="18.0" rx="9" fill="#ffffff" stroke="#dc2626" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#dc2626"><tspan x="562.5" y="559.8">fence[B]</tspan></text>
+<rect x="1452.0" y="305.0" width="158.0" height="18" rx="9" fill="#ffffff" stroke="#0d9488" stroke-width="0.8"/>
+<text x="1531.0" y="314.0" font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0d9488">render_finished</text>
+<rect x="1319.0" y="295.0" width="48.0" height="18" rx="9" fill="#ffffff" stroke="#64748b" stroke-width="0.8"/>
+<text x="1343.0" y="304.0" font-size="9.5" text-anchor="middle" font-weight="bold" fill="#64748b">队列顺序</text>
+<rect x="16.0" y="724.0" width="1968.0" height="502.0" rx="10" fill="#ffffff" stroke="#c3cedd" stroke-width="1.2" filter="url(#soft)"/>
+<rect x="21.0" y="738.0" width="6.0" height="474.0" rx="3" fill="#d97706" stroke="none" stroke-width="0"/>
+<rect x="16.0" y="724.0" width="1968.0" height="34.0" rx="8" fill="url(#hdrgrad)" stroke="#0f172a" stroke-width="1.0"/>
+<rect x="16.0" y="750.0" width="1968.0" height="8.0" rx="0" fill="url(#hdrgrad)" stroke="#0f172a" stroke-width="1.0"/>
+<rect x="16.0" y="755.0" width="1968.0" height="3.0" rx="0" fill="#d97706" stroke="none" stroke-width="0"/>
+<text font-size="15" text-anchor="start" font-weight="bold" fill="#ffffff"><tspan x="40.0" y="746.4">时刻 ② 上传批进队：多级贴图拆成两条 cmb——transfer 拷贝 + 图形队列 blit 续批</tspan></text>
+<line x1="30.0" y1="844.0" x2="1980.0" y2="844.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="996.0" x2="1980.0" y2="996.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="1096.0" x2="1980.0" y2="1096.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="1156.0" x2="1980.0" y2="1156.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="234.0" y1="764.0" x2="234.0" y2="1152.0" stroke="#94a3b8" stroke-width="1.4"/>
+<rect x="236.0" y="845.0" width="1740.0" height="150.0" rx="0" fill="#f8fafc" stroke="none" stroke-width="1.0"/>
+<rect x="236.0" y="997.0" width="1740.0" height="98.0" rx="0" fill="#fffdf5" stroke="none" stroke-width="1.0"/>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="796.7">演示引擎 · 交换链</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="814.6">3 张图 · MAILBOX 优先</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="915.7">图形队列 Q0</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="933.6">族 0 · GRAPHICS+COMPUTE+PRESENT</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="1041.7">传输队列 Q1</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="1059.6">族 1 · 专用 transfer · 单队列</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="1121.7">CPU 主线程</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="1139.6">draw_frame（Bevy Last）</tspan></text>
+<path d="M1924.0,988.0 C1924.0,1049.0 502.5,1049.0 502.5,1110.0" fill="none" stroke="#dc2626" stroke-width="1.7" marker-end="url(#ah-dc2626)"/>
+<path d="M1068.0,1018.0 C1068.0,1003.0 440.0,1003.0 440.0,988.0" fill="none" stroke="#d97706" stroke-width="2" marker-end="url(#ah-d97706)"/>
+<path d="M1564.0,864.0 C1564.0,848.0 1498.0,848.0 1498.0,864.0" fill="none" stroke="#0d9488" stroke-width="1.5" marker-end="url(#ah-0d9488)"/>
+<path d="M1564.0,864.0 C1564.0,838.0 1312.0,838.0 1312.0,864.0" fill="none" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ah-64748b)"/>
+<rect x="250.0" y="768.0" width="560.0" height="66.0" rx="4" fill="#f1f5f9" stroke="#475569" stroke-width="1.0" filter="url(#soft)"/>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#475569"><tspan x="264.0" y="793.7">img0 · 已交给帧 N</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="264.0" y="815.0">cmb N 正在写</tspan></text>
+<rect x="830.0" y="768.0" width="560.0" height="66.0" rx="4" fill="#f1f5f9" stroke="#475569" stroke-width="1.0" filter="url(#soft)"/>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#475569"><tspan x="844.0" y="793.7">img1 · 已交给帧 N+1</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="844.0" y="815.0">cmb N+1 排队中</tspan></text>
+<rect x="1410.0" y="768.0" width="560.0" height="66.0" rx="4" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6" filter="url(#soft)"/>
+<rect x="1420.0" y="776.0" width="70.0" height="50.0" rx="3" fill="#1e3a8a" stroke="#1e3a8a" stroke-width="1.0"/>
+<text font-size="11" text-anchor="middle" font-weight="bold" fill="#ffffff"><tspan x="1455.0" y="805.0">▶ 屏幕</tspan></text>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#1d4ed8"><tspan x="1502.0" y="793.7">img2 · 扫描显示中</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="1502.0" y="815.0">屏幕上 = 帧 N-1 的画面</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="bold" fill="#64748b"><tspan x="1966.0" y="856.6">队首（先提交）→ GPU</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="bold" fill="#64748b"><tspan x="254.0" y="856.6">← 队尾（后提交）</tspan></text>
+<rect x="1534.0" y="862.0" width="430.0" height="126.0" rx="4" fill="#ffffff" stroke="#2563eb" stroke-width="2.6" filter="url(#lift)"/>
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1542.0" y="878.5">cmb · 帧 N</tspan></text>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1956.0" y="877.8">帧槽 A · 画 img0</tspan></text>
+<rect x="1542.0" y="888.0" width="11.1" height="15.0" rx="1" fill="#e5e7eb" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1553.1" y="888.0" width="66.5" height="15.0" rx="1" fill="#ffedd5" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1586.4" y="898.9">②</tspan></text>
+<rect x="1619.6" y="888.0" width="51.8" height="15.0" rx="1" fill="#e7e5e4" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1645.5" y="898.9">③</tspan></text>
+<rect x="1671.4" y="888.0" width="81.3" height="15.0" rx="1" fill="#dcfce7" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1712.0" y="898.9">④</tspan></text>
+<rect x="1752.7" y="888.0" width="59.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1752.7" y="888.0" width="35.5" height="15.0" rx="1" fill="#fef9c3" stroke="none" stroke-width="0"/>
+<rect x="1751.7" y="886.0" width="61.1" height="19.0" rx="2" fill="none" stroke="#0f172a" stroke-width="1.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1782.3" y="898.9">⑤</tspan></text>
+<rect x="1811.8" y="888.0" width="29.6" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1826.6" y="898.9">⑥</tspan></text>
+<rect x="1841.4" y="888.0" width="44.4" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1863.6" y="898.9">⑦</tspan></text>
+<rect x="1885.8" y="888.0" width="59.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1915.3" y="898.9">⑧</tspan></text>
+<rect x="1944.9" y="888.0" width="11.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1542.0" y="911.0" width="120.2" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="1602.1" y="922.4">✓ 票据≥7 @ALL</tspan></text>
+<rect x="1666.2" y="911.0" width="263.0" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="1797.7" y="922.4">✓ img_avail[A] @COLOR_OUT</tspan></text>
+<rect x="1542.0" y="930.0" width="242.6" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1663.3" y="941.4">发 render_finished[img0]</tspan></text>
+<rect x="1788.6" y="930.0" width="110.0" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1843.6" y="941.4">发 fence[A]</tspan></text>
+<rect x="1542.0" y="949.0" width="414.0" height="17.0" rx="3" fill="#f0fdf4" stroke="#15803d" stroke-width="0.8"/>
+<text font-size="9.8" text-anchor="start" font-weight="bold" fill="#15803d"><tspan x="1547.0" y="961.0">无卡点：三道门全开，正常执行中</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1542.0" y="979.8">状态：执行中 · ⑤ 透明前向 c25</tspan></text>
+<rect x="1348.0" y="876.0" width="170.0" height="98.0" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.4" stroke-dasharray="4 3" filter="url(#soft)"/>
+<text font-size="11.5" text-anchor="middle" font-weight="bold" fill="#2563eb"><tspan x="1433.0" y="896.1">present · 帧 N</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1433.0" y="912.4">等 render_finished[img0]</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#2563eb"><tspan x="1433.0" y="928.4">排队</tspan></text>
+<rect x="902.0" y="862.0" width="430.0" height="126.0" rx="4" fill="#ffffff" stroke="#059669" stroke-width="1.6" stroke-dasharray="5 3" filter="url(#soft)"/>
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#059669"><tspan x="910.0" y="878.5">cmb · 帧 N+1</tspan></text>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1324.0" y="877.8">帧槽 B · 画 img1</tspan></text>
+<rect x="910.0" y="888.0" width="11.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="921.1" y="888.0" width="66.5" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="954.4" y="898.9">②</tspan></text>
+<rect x="987.6" y="888.0" width="51.8" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1013.5" y="898.9">③</tspan></text>
+<rect x="1039.4" y="888.0" width="81.3" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1080.0" y="898.9">④</tspan></text>
+<rect x="1120.7" y="888.0" width="59.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1150.3" y="898.9">⑤</tspan></text>
+<rect x="1179.8" y="888.0" width="29.6" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1194.6" y="898.9">⑥</tspan></text>
+<rect x="1209.4" y="888.0" width="44.4" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1231.6" y="898.9">⑦</tspan></text>
+<rect x="1253.8" y="888.0" width="59.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1283.3" y="898.9">⑧</tspan></text>
+<rect x="1312.9" y="888.0" width="11.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="910.0" y="911.0" width="120.2" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="970.1" y="922.4">✓ 票据≥8 @ALL</tspan></text>
+<rect x="1034.2" y="911.0" width="263.0" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="1165.7" y="922.4">✓ img_avail[B] @COLOR_OUT</tspan></text>
+<rect x="910.0" y="930.0" width="242.6" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1031.3" y="941.4">发 render_finished[img1]</tspan></text>
+<rect x="1156.6" y="930.0" width="110.0" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1211.6" y="941.4">发 fence[B]</tspan></text>
+<rect x="910.0" y="949.0" width="414.0" height="17.0" rx="3" fill="#f1f5f9" stroke="#64748b" stroke-width="0.8"/>
+<text font-size="9.8" text-anchor="start" font-weight="bold" fill="#64748b"><tspan x="915.0" y="961.0">无同步卡点：T≥8 / A[B] 均已置位，只差队列顺序</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="910.0" y="979.8">状态：排队 · 票据 #8 早已拷完</tspan></text>
+<rect x="716.0" y="876.0" width="170.0" height="98.0" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.4" stroke-dasharray="4 3" filter="url(#soft)"/>
+<text font-size="11.5" text-anchor="middle" font-weight="bold" fill="#059669"><tspan x="801.0" y="896.1">present · 帧 N+1</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="801.0" y="912.4">等 render_finished[img1]</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#2563eb"><tspan x="801.0" y="928.4">排队</tspan></text>
+<rect x="400.0" y="862.0" width="300.0" height="126.0" rx="4" fill="#fffbeb" stroke="#d97706" stroke-width="1.6" stroke-dasharray="5 3" filter="url(#soft)"/>
+<text font-size="12" text-anchor="start" font-weight="bold" fill="#b45309"><tspan x="408.0" y="878.3">cmb · mip 续批（blit）</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="normal" fill="#475569"><tspan x="408.0" y="896.6">槽1 blit_cb · 15 张 × 逐级 blit + 收尾屏障</tspan></text>
+<rect x="408.0" y="911.0" width="120.2" height="16.0" rx="8" fill="#fee2e2" stroke="#b91c1c" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#b91c1c"><tspan x="468.1" y="922.4">✗ 票据≥9 @ALL</tspan></text>
+<rect x="408.0" y="930.0" width="161.0" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="488.5" y="941.4">发 timeline = 10</tspan></text>
+<rect x="408.0" y="949.0" width="284.0" height="17.0" rx="3" fill="#fffbeb" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="9.8" text-anchor="start" font-weight="bold" fill="#d97706"><tspan x="413.0" y="961.0">被 #9 卡：@ALL_COMMANDS 等 timeline</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="408.0" y="979.8">状态：排队 · 等 #9（还在拷）</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="bold" fill="#64748b"><tspan x="1966.0" y="1008.6">队首（先提交）→ 拷贝引擎</tspan></text>
+<rect x="1494.0" y="1018.0" width="470.0" height="58.0" rx="4" fill="#ffffff" stroke="none" stroke-width="0"/>
+<g opacity="0.5">
+<rect x="1494.0" y="1018.0" width="470.0" height="58.0" rx="4" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" filter="url(#soft)"/>
+<text font-size="12" text-anchor="start" font-weight="bold" fill="#b45309"><tspan x="1502.0" y="1034.3">cmb · 上传批 #8 · 用 staging 槽0</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1956.0" y="1033.6">帧 N+1 的批</tspan></text>
+<rect x="1502.0" y="1043.0" width="454.0" height="9.0" rx="2" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1502.0" y="1043.0" width="454.0" height="9.0" rx="2" fill="#fcd34d" stroke="none" stroke-width="0"/>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1502.0" y="1070.8">已执行完 · 出队</tspan></text>
+</g>
+<rect x="1008.0" y="1018.0" width="470.0" height="58.0" rx="4" fill="#ffffff" stroke="#d97706" stroke-width="2.4" filter="url(#lift)"/>
+<text font-size="12" text-anchor="start" font-weight="bold" fill="#b45309"><tspan x="1016.0" y="1034.3">cmb · 上传批 #9 · 用 staging 槽1</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1470.0" y="1033.6">帧 N+2 · 15 张贴图 mip0 + mesh · 大批</tspan></text>
+<rect x="1016.0" y="1043.0" width="454.0" height="9.0" rx="2" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1016.0" y="1043.0" width="54.5" height="9.0" rx="2" fill="#fcd34d" stroke="none" stroke-width="0"/>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1016.0" y="1070.8">状态：拷贝中 12% · 完成后置位 timeline = 9</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="bold" fill="#92400e"><tspan x="254.0" y="1029.6">staging 槽记账（CPU 侧账本，不是队列；每槽记最后一批的票据）</tspan></text>
+<rect x="254.0" y="1039.0" width="46.0" height="18.0" rx="9" fill="#fef3c7" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#92400e"><tspan x="277.0" y="1051.8">槽0</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="308.0" y="1051.8">#8 · 已到，可复用</tspan></text>
+<rect x="254.0" y="1061.0" width="46.0" height="18.0" rx="9" fill="#fef3c7" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#92400e"><tspan x="277.0" y="1073.8">槽1</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="308.0" y="1073.8">#10 · 要等 blit 续批也跑完</tspan></text>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#d97706"><tspan x="250.0" y="1130.7">帧 N+2</tspan></text>
+<rect x="360.0" y="1110.0" width="95.0" height="32.0" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="407.5" y="1129.6">a 上传</tspan></text>
+<rect x="455.0" y="1110.0" width="95.0" height="32.0" rx="3" fill="#fee2e2" stroke="#dc2626" stroke-width="2" filter="url(#soft)"/>
+<text font-size="10" text-anchor="middle" font-weight="bold" fill="#dc2626"><tspan x="502.5" y="1129.6">b fence</tspan></text>
+<rect x="550.0" y="1110.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="577.1" y="1129.6">c acquire</tspan></text>
+<rect x="604.3" y="1110.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="631.4" y="1129.6">d DrawList</tspan></text>
+<rect x="658.6" y="1110.0" width="40.7" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="678.9" y="1129.6">e</tspan></text>
+<rect x="699.3" y="1110.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="726.4" y="1129.6">f 四环</tspan></text>
+<rect x="753.6" y="1110.0" width="67.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="787.5" y="1129.6">g 备料</tspan></text>
+<rect x="821.4" y="1110.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="848.6" y="1129.6">h overlay</tspan></text>
+<rect x="875.7" y="1110.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="892.7" y="1129.6">i</tspan></text>
+<rect x="909.6" y="1110.0" width="142.5" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="980.9" y="1129.6">j 录制</tspan></text>
+<rect x="1052.1" y="1110.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1069.1" y="1129.6">k</tspan></text>
+<rect x="1086.1" y="1110.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1103.0" y="1129.6">l</tspan></text>
+<text font-size="11.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1136.0" y="1130.1">状态：帧 N+2 · a 已提交 #9 + blit，b 阻塞等 fence[A]（挂在 cmb N 末尾）</tspan></text>
+<rect x="26.0" y="1161.0" width="1948.0" height="42.0" rx="6" fill="#f8fafc" stroke="none" stroke-width="0"/>
+<rect x="26.0" y="1161.0" width="4.0" height="42.0" rx="2" fill="#d97706" stroke="none" stroke-width="0"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="46.0" y="1188.1">帧 N+2 的 flush_uploads 带了 15 张多级贴图：transfer 队列拷 mip0（#9），图形队列追加 blit 续批等 #9 再生成整条 mip 链、发 #10；帧 N+2 的快照取已发出最高票据 = 10。blit 排在 cmb N+1 后面，只要 #9 赶在图形队列跑到它之前拷完就零停顿。</tspan></text>
+<rect x="511.5" y="1079.0" width="102.0" height="18.0" rx="9" fill="#ffffff" stroke="#dc2626" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#dc2626"><tspan x="562.5" y="1091.8">fence[A]</tspan></text>
+<rect x="463.5" y="993.0" width="33.0" height="18.0" rx="9" fill="#ffffff" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#d97706"><tspan x="480.0" y="1005.8">#9</tspan></text>
+<rect x="1452.0" y="837.0" width="158.0" height="18" rx="9" fill="#ffffff" stroke="#0d9488" stroke-width="0.8"/>
+<text x="1531.0" y="846.0" font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0d9488">render_finished</text>
+<rect x="1319.0" y="827.0" width="48.0" height="18" rx="9" fill="#ffffff" stroke="#64748b" stroke-width="0.8"/>
+<text x="1343.0" y="836.0" font-size="9.5" text-anchor="middle" font-weight="bold" fill="#64748b">队列顺序</text>
+<rect x="16.0" y="1256.0" width="1968.0" height="502.0" rx="10" fill="#ffffff" stroke="#c3cedd" stroke-width="1.2" filter="url(#soft)"/>
+<rect x="21.0" y="1270.0" width="6.0" height="474.0" rx="3" fill="#dc2626" stroke="none" stroke-width="0"/>
+<rect x="16.0" y="1256.0" width="1968.0" height="34.0" rx="8" fill="url(#hdrgrad)" stroke="#0f172a" stroke-width="1.0"/>
+<rect x="16.0" y="1282.0" width="1968.0" height="8.0" rx="0" fill="url(#hdrgrad)" stroke="#0f172a" stroke-width="1.0"/>
+<rect x="16.0" y="1287.0" width="1968.0" height="3.0" rx="0" fill="#dc2626" stroke="none" stroke-width="0"/>
+<text font-size="15" text-anchor="start" font-weight="bold" fill="#ffffff"><tspan x="40.0" y="1278.4">时刻 ③ 大批没拷完：图形队列整条冻结，GPU 图形单元空转，屏幕停在帧 N+1</tspan></text>
+<line x1="30.0" y1="1376.0" x2="1980.0" y2="1376.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="1528.0" x2="1980.0" y2="1528.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="1628.0" x2="1980.0" y2="1628.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="1688.0" x2="1980.0" y2="1688.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="234.0" y1="1296.0" x2="234.0" y2="1684.0" stroke="#94a3b8" stroke-width="1.4"/>
+<rect x="236.0" y="1377.0" width="1740.0" height="150.0" rx="0" fill="#f8fafc" stroke="none" stroke-width="1.0"/>
+<rect x="236.0" y="1529.0" width="1740.0" height="98.0" rx="0" fill="#fffdf5" stroke="none" stroke-width="1.0"/>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="1328.7">演示引擎 · 交换链</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="1346.6">3 张图 · MAILBOX 优先</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="1447.7">图形队列 Q0</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="1465.6">族 0 · GRAPHICS+COMPUTE+PRESENT</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="1573.7">传输队列 Q1</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="1591.6">族 1 · 专用 transfer · 单队列</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="1653.7">CPU 主线程</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="1671.6">draw_frame（Bevy Last）</tspan></text>
+<path d="M1608.0,1520.0 C1608.0,1581.0 502.5,1581.0 502.5,1642.0" fill="none" stroke="#dc2626" stroke-width="1.7" marker-end="url(#ah-dc2626)"/>
+<path d="M1554.0,1550.0 C1554.0,1535.0 1704.0,1535.0 1704.0,1520.0" fill="none" stroke="#d97706" stroke-width="2" marker-end="url(#ah-d97706)"/>
+<path d="M1704.0,1396.0 C1704.0,1378.0 1608.0,1378.0 1608.0,1396.0" fill="none" stroke="#d97706" stroke-width="1.5" marker-end="url(#ah-d97706)"/>
+<path d="M1704.0,1396.0 C1704.0,1378.0 976.0,1378.0 976.0,1396.0" fill="none" stroke="#d97706" stroke-width="1.5" marker-end="url(#ah-d97706)"/>
+<rect x="250.0" y="1300.0" width="560.0" height="66.0" rx="4" fill="#f1f5f9" stroke="#475569" stroke-width="1.0" filter="url(#soft)"/>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#475569"><tspan x="264.0" y="1325.7">img0 · 已交给帧 N+3</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="264.0" y="1347.0">cmb N+3 冻结中</tspan></text>
+<rect x="830.0" y="1300.0" width="560.0" height="66.0" rx="4" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6" filter="url(#soft)"/>
+<rect x="840.0" y="1308.0" width="70.0" height="50.0" rx="3" fill="#1e3a8a" stroke="#1e3a8a" stroke-width="1.0"/>
+<text font-size="11" text-anchor="middle" font-weight="bold" fill="#ffffff"><tspan x="875.0" y="1337.0">▶ 屏幕</tspan></text>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#1d4ed8"><tspan x="922.0" y="1325.7">img1 · 扫描显示中</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="922.0" y="1347.0">屏幕上 = 帧 N+1 的画面（停住）</tspan></text>
+<rect x="1410.0" y="1300.0" width="560.0" height="66.0" rx="4" fill="#f1f5f9" stroke="#475569" stroke-width="1.0" filter="url(#soft)"/>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#475569"><tspan x="1424.0" y="1325.7">img2 · 已交给帧 N+2</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="1424.0" y="1347.0">cmb N+2 冻结中</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="bold" fill="#64748b"><tspan x="1966.0" y="1388.6">队首（先提交）→ GPU</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="bold" fill="#64748b"><tspan x="254.0" y="1388.6">← 队尾（后提交）</tspan></text>
+<rect x="1664.0" y="1394.0" width="300.0" height="126.0" rx="4" fill="#f8fafc" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 3" filter="url(#soft)"/>
+<text font-size="12" text-anchor="start" font-weight="bold" fill="#b45309"><tspan x="1672.0" y="1410.3">cmb · mip 续批（blit）</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="normal" fill="#475569"><tspan x="1672.0" y="1428.6">槽1 blit_cb · 15 张 × 逐级 blit + 收尾屏障</tspan></text>
+<rect x="1672.0" y="1443.0" width="120.2" height="16.0" rx="8" fill="#fee2e2" stroke="#b91c1c" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#b91c1c"><tspan x="1732.1" y="1454.4">✗ 票据≥9 @ALL</tspan></text>
+<rect x="1672.0" y="1462.0" width="161.0" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1752.5" y="1473.4">发 timeline = 10</tspan></text>
+<rect x="1672.0" y="1481.0" width="284.0" height="17.0" rx="3" fill="#fffbeb" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="9.8" text-anchor="start" font-weight="bold" fill="#d97706"><tspan x="1677.0" y="1493.0">被 #9 卡：@ALL_COMMANDS 等 timeline——队首堵死</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1672.0" y="1511.8">状态：队首 · 等 #9——图形单元空转</tspan></text>
+<rect x="1218.0" y="1394.0" width="430.0" height="126.0" rx="4" fill="#f8fafc" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 3" filter="url(#soft)"/>
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#d97706"><tspan x="1226.0" y="1410.5">cmb · 帧 N+2</tspan></text>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1640.0" y="1409.8">帧槽 A · 画 img2</tspan></text>
+<rect x="1226.0" y="1420.0" width="11.1" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1237.1" y="1420.0" width="66.5" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1270.4" y="1430.9">②</tspan></text>
+<rect x="1303.6" y="1420.0" width="51.8" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1329.5" y="1430.9">③</tspan></text>
+<rect x="1355.4" y="1420.0" width="81.3" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1396.0" y="1430.9">④</tspan></text>
+<rect x="1436.7" y="1420.0" width="59.1" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1466.3" y="1430.9">⑤</tspan></text>
+<rect x="1495.8" y="1420.0" width="29.6" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1510.6" y="1430.9">⑥</tspan></text>
+<rect x="1525.4" y="1420.0" width="44.4" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1547.6" y="1430.9">⑦</tspan></text>
+<rect x="1569.8" y="1420.0" width="59.1" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1599.3" y="1430.9">⑧</tspan></text>
+<rect x="1628.9" y="1420.0" width="11.1" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1226.0" y="1443.0" width="130.4" height="16.0" rx="8" fill="#fee2e2" stroke="#b91c1c" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#b91c1c"><tspan x="1291.2" y="1454.4">✗ 票据≥10 @ALL</tspan></text>
+<rect x="1360.4" y="1443.0" width="263.0" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="1491.9" y="1454.4">✓ img_avail[A] @COLOR_OUT</tspan></text>
+<rect x="1226.0" y="1462.0" width="242.6" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1347.3" y="1473.4">发 render_finished[img2]</tspan></text>
+<rect x="1472.6" y="1462.0" width="110.0" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1527.6" y="1473.4">发 fence[A]</tspan></text>
+<rect x="1226.0" y="1481.0" width="414.0" height="17.0" rx="3" fill="#fffbeb" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="9.8" text-anchor="start" font-weight="bold" fill="#d97706"><tspan x="1231.0" y="1493.0">被 #10 卡：@ALL_COMMANDS——快照 10 含续批 #10</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1226.0" y="1511.8">状态：冻结 · ① 都没开始</tspan></text>
+<rect x="1032.0" y="1408.0" width="170.0" height="98.0" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.4" stroke-dasharray="4 3" filter="url(#soft)"/>
+<text font-size="11.5" text-anchor="middle" font-weight="bold" fill="#d97706"><tspan x="1117.0" y="1428.1">present · 帧 N+2</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1117.0" y="1444.4">等 render_finished[img2]</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#2563eb"><tspan x="1117.0" y="1460.4">排队</tspan></text>
+<rect x="586.0" y="1394.0" width="430.0" height="126.0" rx="4" fill="#f8fafc" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 3" filter="url(#soft)"/>
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#7c3aed"><tspan x="594.0" y="1410.5">cmb · 帧 N+3</tspan></text>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1008.0" y="1409.8">帧槽 B · 画 img0</tspan></text>
+<rect x="594.0" y="1420.0" width="11.1" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="605.1" y="1420.0" width="66.5" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="638.4" y="1430.9">②</tspan></text>
+<rect x="671.6" y="1420.0" width="51.8" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="697.5" y="1430.9">③</tspan></text>
+<rect x="723.4" y="1420.0" width="81.3" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="764.0" y="1430.9">④</tspan></text>
+<rect x="804.7" y="1420.0" width="59.1" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="834.3" y="1430.9">⑤</tspan></text>
+<rect x="863.8" y="1420.0" width="29.6" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="878.6" y="1430.9">⑥</tspan></text>
+<rect x="893.4" y="1420.0" width="44.4" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="915.6" y="1430.9">⑦</tspan></text>
+<rect x="937.8" y="1420.0" width="59.1" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="967.3" y="1430.9">⑧</tspan></text>
+<rect x="996.9" y="1420.0" width="11.1" height="15.0" rx="1" fill="url(#hatch)" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="594.0" y="1443.0" width="130.4" height="16.0" rx="8" fill="#fee2e2" stroke="#b91c1c" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#b91c1c"><tspan x="659.2" y="1454.4">✗ 票据≥10 @ALL</tspan></text>
+<rect x="728.4" y="1443.0" width="263.0" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="859.9" y="1454.4">✓ img_avail[B] @COLOR_OUT</tspan></text>
+<rect x="594.0" y="1462.0" width="242.6" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="715.3" y="1473.4">发 render_finished[img0]</tspan></text>
+<rect x="840.6" y="1462.0" width="110.0" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="895.6" y="1473.4">发 fence[B]</tspan></text>
+<rect x="594.0" y="1481.0" width="414.0" height="17.0" rx="3" fill="#fffbeb" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="9.8" text-anchor="start" font-weight="bold" fill="#d97706"><tspan x="599.0" y="1493.0">被 #10 卡：@ALL_COMMANDS——无新上传也等 10</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="594.0" y="1511.8">状态：冻结 · ① 都没开始（同 N+2）</tspan></text>
+<rect x="400.0" y="1408.0" width="170.0" height="98.0" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.4" stroke-dasharray="4 3" filter="url(#soft)"/>
+<text font-size="11.5" text-anchor="middle" font-weight="bold" fill="#7c3aed"><tspan x="485.0" y="1428.1">present · 帧 N+3</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="485.0" y="1444.4">等 render_finished[img0]</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#2563eb"><tspan x="485.0" y="1460.4">排队</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="bold" fill="#64748b"><tspan x="1966.0" y="1540.6">队首（先提交）→ 拷贝引擎</tspan></text>
+<rect x="1494.0" y="1550.0" width="470.0" height="58.0" rx="4" fill="#ffffff" stroke="#d97706" stroke-width="2.4" filter="url(#lift)"/>
+<text font-size="12" text-anchor="start" font-weight="bold" fill="#b45309"><tspan x="1502.0" y="1566.3">cmb · 上传批 #9 · 用 staging 槽1</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1956.0" y="1565.6">帧 N+2 · 15 张贴图 mip0 + mesh · 大批</tspan></text>
+<rect x="1502.0" y="1575.0" width="454.0" height="9.0" rx="2" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1502.0" y="1575.0" width="326.9" height="9.0" rx="2" fill="#fcd34d" stroke="none" stroke-width="0"/>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1502.0" y="1602.8">状态：拷贝中 72% · 整条图形队列都在等它</tspan></text>
+<text font-size="11" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="1468.0" y="1587.0">帧 N+3 无新资产 = 空批，没往 Q1 提交任何东西</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="bold" fill="#92400e"><tspan x="254.0" y="1561.6">staging 槽记账（CPU 侧账本，不是队列；每槽记最后一批的票据）</tspan></text>
+<rect x="254.0" y="1571.0" width="46.0" height="18.0" rx="9" fill="#fef3c7" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#92400e"><tspan x="277.0" y="1583.8">槽0</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="308.0" y="1583.8">#8 · 已到，可复用</tspan></text>
+<rect x="254.0" y="1593.0" width="46.0" height="18.0" rx="9" fill="#fef3c7" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#92400e"><tspan x="277.0" y="1605.8">槽1</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="308.0" y="1605.8">#10 · 拷贝 + blit 都没完</tspan></text>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#db2777"><tspan x="250.0" y="1662.7">帧 N+4</tspan></text>
+<rect x="360.0" y="1642.0" width="95.0" height="32.0" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="407.5" y="1661.6">a 上传</tspan></text>
+<rect x="455.0" y="1642.0" width="95.0" height="32.0" rx="3" fill="#fee2e2" stroke="#dc2626" stroke-width="2" filter="url(#soft)"/>
+<text font-size="10" text-anchor="middle" font-weight="bold" fill="#dc2626"><tspan x="502.5" y="1661.6">b fence</tspan></text>
+<rect x="550.0" y="1642.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="577.1" y="1661.6">c acquire</tspan></text>
+<rect x="604.3" y="1642.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="631.4" y="1661.6">d DrawList</tspan></text>
+<rect x="658.6" y="1642.0" width="40.7" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="678.9" y="1661.6">e</tspan></text>
+<rect x="699.3" y="1642.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="726.4" y="1661.6">f 四环</tspan></text>
+<rect x="753.6" y="1642.0" width="67.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="787.5" y="1661.6">g 备料</tspan></text>
+<rect x="821.4" y="1642.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="848.6" y="1661.6">h overlay</tspan></text>
+<rect x="875.7" y="1642.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="892.7" y="1661.6">i</tspan></text>
+<rect x="909.6" y="1642.0" width="142.5" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="980.9" y="1661.6">j 录制</tspan></text>
+<rect x="1052.1" y="1642.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1069.1" y="1661.6">k</tspan></text>
+<rect x="1086.1" y="1642.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1103.0" y="1661.6">l</tspan></text>
+<text font-size="11.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1136.0" y="1662.1">状态：帧 N+4 · b 阻塞等 fence[A]——挂在冻结的 cmb N+2 末尾，卡顿传回 CPU</tspan></text>
+<rect x="26.0" y="1693.0" width="1948.0" height="42.0" rx="6" fill="#f8fafc" stroke="none" stroke-width="0"/>
+<rect x="26.0" y="1693.0" width="4.0" height="42.0" rx="2" fill="#dc2626" stroke="none" stroke-width="0"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="46.0" y="1720.1">cmb N+1 跑完、present 已出队，队首轮到 blit——它等的 #9 还在拷。cmb N+2、N+3 的快照都是 10，等待阶段 ALL_COMMANDS 挡在第一条命令前，连 ② compute 都动不了。CPU 已提交 N+3，接着在 N+4 停在 fence[A]——它挂在还没开跑的 cmb N+2 末尾。三张图全被占：1 显示 + 2 交给冻结的 cmb。</tspan></text>
+<rect x="511.5" y="1611.0" width="102.0" height="18.0" rx="9" fill="#ffffff" stroke="#dc2626" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#dc2626"><tspan x="562.5" y="1623.8">fence[A]</tspan></text>
+<rect x="1727.5" y="1525.0" width="33.0" height="18.0" rx="9" fill="#ffffff" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#d97706"><tspan x="1744.0" y="1537.8">#9</tspan></text>
+<rect x="1637.0" y="1367.0" width="38.0" height="18" rx="9" fill="#ffffff" stroke="#d97706" stroke-width="0.8"/>
+<text x="1656.0" y="1376.0" font-size="9.5" text-anchor="middle" font-weight="bold" fill="#d97706">#10</text>
+<rect x="1321.0" y="1367.0" width="38.0" height="18" rx="9" fill="#ffffff" stroke="#d97706" stroke-width="0.8"/>
+<text x="1340.0" y="1376.0" font-size="9.5" text-anchor="middle" font-weight="bold" fill="#d97706">#10</text>
+<rect x="16.0" y="1788.0" width="1968.0" height="502.0" rx="10" fill="#ffffff" stroke="#c3cedd" stroke-width="1.2" filter="url(#soft)"/>
+<rect x="21.0" y="1802.0" width="6.0" height="474.0" rx="3" fill="#059669" stroke="none" stroke-width="0"/>
+<rect x="16.0" y="1788.0" width="1968.0" height="34.0" rx="8" fill="url(#hdrgrad)" stroke="#0f172a" stroke-width="1.0"/>
+<rect x="16.0" y="1814.0" width="1968.0" height="8.0" rx="0" fill="url(#hdrgrad)" stroke="#0f172a" stroke-width="1.0"/>
+<rect x="16.0" y="1819.0" width="1968.0" height="3.0" rx="0" fill="#059669" stroke="none" stroke-width="0"/>
+<text font-size="15" text-anchor="start" font-weight="bold" fill="#ffffff"><tspan x="40.0" y="1810.4">时刻 ④ 解冻：#9 到 → blit 跑完发 #10 → cmb N+2 开跑，后面整串依次放行</tspan></text>
+<line x1="30.0" y1="1908.0" x2="1980.0" y2="1908.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="2060.0" x2="1980.0" y2="2060.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="2160.0" x2="1980.0" y2="2160.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="2220.0" x2="1980.0" y2="2220.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="234.0" y1="1828.0" x2="234.0" y2="2216.0" stroke="#94a3b8" stroke-width="1.4"/>
+<rect x="236.0" y="1909.0" width="1740.0" height="150.0" rx="0" fill="#f8fafc" stroke="none" stroke-width="1.0"/>
+<rect x="236.0" y="2061.0" width="1740.0" height="98.0" rx="0" fill="#fffdf5" stroke="none" stroke-width="1.0"/>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="1860.7">演示引擎 · 交换链</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="1878.6">3 张图 · MAILBOX 优先</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="1979.7">图形队列 Q0</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="1997.6">族 0 · GRAPHICS+COMPUTE+PRESENT</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="2105.7">传输队列 Q1</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="2123.6">族 1 · 专用 transfer · 单队列</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="2185.7">CPU 主线程</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="2203.6">draw_frame（Bevy Last）</tspan></text>
+<path d="M1608.0,2052.0 C1608.0,2113.0 502.5,2113.0 502.5,2174.0" fill="none" stroke="#dc2626" stroke-width="1.7" marker-end="url(#ah-dc2626)"/>
+<path d="M1704.0,1928.0 C1704.0,1910.0 1608.0,1910.0 1608.0,1928.0" fill="none" stroke="#d97706" stroke-width="1.5" marker-end="url(#ah-d97706)"/>
+<path d="M1248.0,1928.0 C1248.0,1902.0 996.0,1902.0 996.0,1928.0" fill="none" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ah-64748b)"/>
+<rect x="250.0" y="1832.0" width="560.0" height="66.0" rx="4" fill="#f1f5f9" stroke="#475569" stroke-width="1.0" filter="url(#soft)"/>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#475569"><tspan x="264.0" y="1857.7">img0 · 已交给帧 N+3</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="264.0" y="1879.0">cmb N+3 排队中</tspan></text>
+<rect x="830.0" y="1832.0" width="560.0" height="66.0" rx="4" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6" filter="url(#soft)"/>
+<rect x="840.0" y="1840.0" width="70.0" height="50.0" rx="3" fill="#1e3a8a" stroke="#1e3a8a" stroke-width="1.0"/>
+<text font-size="11" text-anchor="middle" font-weight="bold" fill="#ffffff"><tspan x="875.0" y="1869.0">▶ 屏幕</tspan></text>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#1d4ed8"><tspan x="922.0" y="1857.7">img1 · 扫描显示中</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="922.0" y="1879.0">屏幕上 = 帧 N+1 的画面</tspan></text>
+<rect x="1410.0" y="1832.0" width="560.0" height="66.0" rx="4" fill="#f1f5f9" stroke="#475569" stroke-width="1.0" filter="url(#soft)"/>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#475569"><tspan x="1424.0" y="1857.7">img2 · 已交给帧 N+2</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="1424.0" y="1879.0">cmb N+2 正在跑（④ 起写）</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="bold" fill="#64748b"><tspan x="1966.0" y="1920.6">队首（先提交）→ GPU</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="bold" fill="#64748b"><tspan x="254.0" y="1920.6">← 队尾（后提交）</tspan></text>
+<rect x="1664.0" y="1926.0" width="300.0" height="126.0" rx="4" fill="#ffffff" stroke="none" stroke-width="0"/>
+<g opacity="0.45">
+<rect x="1664.0" y="1926.0" width="300.0" height="126.0" rx="4" fill="#fffbeb" stroke="#cbd5e1" stroke-width="1" filter="url(#soft)"/>
+<text font-size="12" text-anchor="start" font-weight="bold" fill="#b45309"><tspan x="1672.0" y="1942.3">cmb · mip 续批（blit）</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="normal" fill="#475569"><tspan x="1672.0" y="1960.6">槽1 blit_cb · 15 张 × 逐级 blit + 收尾屏障</tspan></text>
+<rect x="1672.0" y="1975.0" width="120.2" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="1732.1" y="1986.4">✓ 票据≥9 @ALL</tspan></text>
+<rect x="1672.0" y="1994.0" width="161.0" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1752.5" y="2005.4">发 timeline = 10</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1672.0" y="2043.8">已完成 · 已置位 10</tspan></text>
+</g>
+<rect x="1218.0" y="1926.0" width="430.0" height="126.0" rx="4" fill="#ffffff" stroke="#d97706" stroke-width="2.6" filter="url(#lift)"/>
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#d97706"><tspan x="1226.0" y="1942.5">cmb · 帧 N+2</tspan></text>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1640.0" y="1941.8">帧槽 A · 画 img2</tspan></text>
+<rect x="1226.0" y="1952.0" width="11.1" height="15.0" rx="1" fill="#e5e7eb" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1237.1" y="1952.0" width="66.5" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1237.1" y="1952.0" width="33.3" height="15.0" rx="1" fill="#ffedd5" stroke="none" stroke-width="0"/>
+<rect x="1236.1" y="1950.0" width="68.5" height="19.0" rx="2" fill="none" stroke="#0f172a" stroke-width="1.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1270.4" y="1962.9">②</tspan></text>
+<rect x="1303.6" y="1952.0" width="51.8" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1329.5" y="1962.9">③</tspan></text>
+<rect x="1355.4" y="1952.0" width="81.3" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1396.0" y="1962.9">④</tspan></text>
+<rect x="1436.7" y="1952.0" width="59.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1466.3" y="1962.9">⑤</tspan></text>
+<rect x="1495.8" y="1952.0" width="29.6" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1510.6" y="1962.9">⑥</tspan></text>
+<rect x="1525.4" y="1952.0" width="44.4" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1547.6" y="1962.9">⑦</tspan></text>
+<rect x="1569.8" y="1952.0" width="59.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1599.3" y="1962.9">⑧</tspan></text>
+<rect x="1628.9" y="1952.0" width="11.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1226.0" y="1975.0" width="130.4" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="1291.2" y="1986.4">✓ 票据≥10 @ALL</tspan></text>
+<rect x="1360.4" y="1975.0" width="263.0" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="1491.9" y="1986.4">✓ img_avail[A] @COLOR_OUT</tspan></text>
+<rect x="1226.0" y="1994.0" width="242.6" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1347.3" y="2005.4">发 render_finished[img2]</tspan></text>
+<rect x="1472.6" y="1994.0" width="110.0" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1527.6" y="2005.4">发 fence[A]</tspan></text>
+<rect x="1226.0" y="2013.0" width="414.0" height="17.0" rx="3" fill="#f0fdf4" stroke="#15803d" stroke-width="0.8"/>
+<text font-size="9.8" text-anchor="start" font-weight="bold" fill="#15803d"><tspan x="1231.0" y="2025.0">无卡点：T≥10 已到，A[B] 已置位，执行中</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1226.0" y="2043.8">状态：执行中 · ② LOD 选档 c9</tspan></text>
+<rect x="1032.0" y="1940.0" width="170.0" height="98.0" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.4" stroke-dasharray="4 3" filter="url(#soft)"/>
+<text font-size="11.5" text-anchor="middle" font-weight="bold" fill="#d97706"><tspan x="1117.0" y="1960.1">present · 帧 N+2</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1117.0" y="1976.4">等 render_finished[img2]</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#2563eb"><tspan x="1117.0" y="1992.4">排队</tspan></text>
+<rect x="586.0" y="1926.0" width="430.0" height="126.0" rx="4" fill="#ffffff" stroke="#7c3aed" stroke-width="1.6" stroke-dasharray="5 3" filter="url(#soft)"/>
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#7c3aed"><tspan x="594.0" y="1942.5">cmb · 帧 N+3</tspan></text>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1008.0" y="1941.8">帧槽 B · 画 img0</tspan></text>
+<rect x="594.0" y="1952.0" width="11.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="605.1" y="1952.0" width="66.5" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="638.4" y="1962.9">②</tspan></text>
+<rect x="671.6" y="1952.0" width="51.8" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="697.5" y="1962.9">③</tspan></text>
+<rect x="723.4" y="1952.0" width="81.3" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="764.0" y="1962.9">④</tspan></text>
+<rect x="804.7" y="1952.0" width="59.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="834.3" y="1962.9">⑤</tspan></text>
+<rect x="863.8" y="1952.0" width="29.6" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="878.6" y="1962.9">⑥</tspan></text>
+<rect x="893.4" y="1952.0" width="44.4" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="915.6" y="1962.9">⑦</tspan></text>
+<rect x="937.8" y="1952.0" width="59.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="967.3" y="1962.9">⑧</tspan></text>
+<rect x="996.9" y="1952.0" width="11.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="594.0" y="1975.0" width="130.4" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="659.2" y="1986.4">✓ 票据≥10 @ALL</tspan></text>
+<rect x="728.4" y="1975.0" width="263.0" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="859.9" y="1986.4">✓ img_avail[B] @COLOR_OUT</tspan></text>
+<rect x="594.0" y="1994.0" width="242.6" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="715.3" y="2005.4">发 render_finished[img0]</tspan></text>
+<rect x="840.6" y="1994.0" width="110.0" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="895.6" y="2005.4">发 fence[B]</tspan></text>
+<rect x="594.0" y="2013.0" width="414.0" height="17.0" rx="3" fill="#f1f5f9" stroke="#64748b" stroke-width="0.8"/>
+<text font-size="9.8" text-anchor="start" font-weight="bold" fill="#64748b"><tspan x="599.0" y="2025.0">无同步卡点：T≥10 / A[B] 均已置位，只差队列顺序</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="594.0" y="2043.8">状态：排队 · 门全开，只等队列顺序</tspan></text>
+<rect x="400.0" y="1940.0" width="170.0" height="98.0" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.4" stroke-dasharray="4 3" filter="url(#soft)"/>
+<text font-size="11.5" text-anchor="middle" font-weight="bold" fill="#7c3aed"><tspan x="485.0" y="1960.1">present · 帧 N+3</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="485.0" y="1976.4">等 render_finished[img0]</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#2563eb"><tspan x="485.0" y="1992.4">排队</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="bold" fill="#64748b"><tspan x="1966.0" y="2072.6">队首（先提交）→ 拷贝引擎</tspan></text>
+<rect x="1494.0" y="2082.0" width="470.0" height="58.0" rx="4" fill="#ffffff" stroke="none" stroke-width="0"/>
+<g opacity="0.5">
+<rect x="1494.0" y="2082.0" width="470.0" height="58.0" rx="4" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" filter="url(#soft)"/>
+<text font-size="12" text-anchor="start" font-weight="bold" fill="#b45309"><tspan x="1502.0" y="2098.3">cmb · 上传批 #9 · 用 staging 槽1</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1956.0" y="2097.6">帧 N+2 · 大批</tspan></text>
+<rect x="1502.0" y="2107.0" width="454.0" height="9.0" rx="2" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1502.0" y="2107.0" width="454.0" height="9.0" rx="2" fill="#fcd34d" stroke="none" stroke-width="0"/>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1502.0" y="2134.8">已执行完 · 出队</tspan></text>
+</g>
+<text font-size="11" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="1468.0" y="2119.0">Q1 已空</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="bold" fill="#92400e"><tspan x="254.0" y="2093.6">staging 槽记账（CPU 侧账本，不是队列；每槽记最后一批的票据）</tspan></text>
+<rect x="254.0" y="2103.0" width="46.0" height="18.0" rx="9" fill="#fef3c7" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#92400e"><tspan x="277.0" y="2115.8">槽0</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="308.0" y="2115.8">#8 · 已到，可复用</tspan></text>
+<rect x="254.0" y="2125.0" width="46.0" height="18.0" rx="9" fill="#fef3c7" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#92400e"><tspan x="277.0" y="2137.8">槽1</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="308.0" y="2137.8">#10 · 已到，可复用</tspan></text>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#db2777"><tspan x="250.0" y="2194.7">帧 N+4</tspan></text>
+<rect x="360.0" y="2174.0" width="95.0" height="32.0" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="407.5" y="2193.6">a 上传</tspan></text>
+<rect x="455.0" y="2174.0" width="95.0" height="32.0" rx="3" fill="#fee2e2" stroke="#dc2626" stroke-width="2" filter="url(#soft)"/>
+<text font-size="10" text-anchor="middle" font-weight="bold" fill="#dc2626"><tspan x="502.5" y="2193.6">b fence</tspan></text>
+<rect x="550.0" y="2174.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="577.1" y="2193.6">c acquire</tspan></text>
+<rect x="604.3" y="2174.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="631.4" y="2193.6">d DrawList</tspan></text>
+<rect x="658.6" y="2174.0" width="40.7" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="678.9" y="2193.6">e</tspan></text>
+<rect x="699.3" y="2174.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="726.4" y="2193.6">f 四环</tspan></text>
+<rect x="753.6" y="2174.0" width="67.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="787.5" y="2193.6">g 备料</tspan></text>
+<rect x="821.4" y="2174.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="848.6" y="2193.6">h overlay</tspan></text>
+<rect x="875.7" y="2174.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="892.7" y="2193.6">i</tspan></text>
+<rect x="909.6" y="2174.0" width="142.5" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="980.9" y="2193.6">j 录制</tspan></text>
+<rect x="1052.1" y="2174.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1069.1" y="2193.6">k</tspan></text>
+<rect x="1086.1" y="2174.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1103.0" y="2193.6">l</tspan></text>
+<text font-size="11.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1136.0" y="2194.1">状态：帧 N+4 · 仍在 b 等 fence[A]——要等 cmb N+2 整条跑完</tspan></text>
+<rect x="26.0" y="2225.0" width="1948.0" height="42.0" rx="6" fill="#f8fafc" stroke="none" stroke-width="0"/>
+<rect x="26.0" y="2225.0" width="4.0" height="42.0" rx="2" fill="#059669" stroke="none" stroke-width="0"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="46.0" y="2252.1">票据是单调计数：#10 一到，N+2、N+3 两个等 ≥10 的提交同时满足，只剩队列顺序。staging 槽1 记账已换成 #10（续批发布的票据），下次复用槽1 要等的是 #10 而不是 #9——mip 链生成完之前 staging 不能被覆写。</tspan></text>
+<rect x="511.5" y="2143.0" width="102.0" height="18.0" rx="9" fill="#ffffff" stroke="#dc2626" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#dc2626"><tspan x="562.5" y="2155.8">fence[A]</tspan></text>
+<rect x="1637.0" y="1899.0" width="38.0" height="18" rx="9" fill="#ffffff" stroke="#d97706" stroke-width="0.8"/>
+<text x="1656.0" y="1908.0" font-size="9.5" text-anchor="middle" font-weight="bold" fill="#d97706">#10</text>
+<rect x="1003.0" y="1891.0" width="48.0" height="18" rx="9" fill="#ffffff" stroke="#64748b" stroke-width="0.8"/>
+<text x="1027.0" y="1900.0" font-size="9.5" text-anchor="middle" font-weight="bold" fill="#64748b">队列顺序</text>
+<rect x="16.0" y="2320.0" width="1968.0" height="502.0" rx="10" fill="#ffffff" stroke="#c3cedd" stroke-width="1.2" filter="url(#soft)"/>
+<rect x="21.0" y="2334.0" width="6.0" height="474.0" rx="3" fill="#9333ea" stroke="none" stroke-width="0"/>
+<rect x="16.0" y="2320.0" width="1968.0" height="34.0" rx="8" fill="url(#hdrgrad)" stroke="#0f172a" stroke-width="1.0"/>
+<rect x="16.0" y="2346.0" width="1968.0" height="8.0" rx="0" fill="url(#hdrgrad)" stroke="#0f172a" stroke-width="1.0"/>
+<rect x="16.0" y="2351.0" width="1968.0" height="3.0" rx="0" fill="#9333ea" stroke="none" stroke-width="0"/>
+<text font-size="15" text-anchor="start" font-weight="bold" fill="#ffffff"><tspan x="40.0" y="2342.4">时刻 ⑤ 另一情形（FIFO 回退 / 显示节拍受限）：cmb 跑完 ②③，在 ④ 前等图片准备好</tspan></text>
+<line x1="30.0" y1="2440.0" x2="1980.0" y2="2440.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="2592.0" x2="1980.0" y2="2592.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="2692.0" x2="1980.0" y2="2692.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="2752.0" x2="1980.0" y2="2752.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="234.0" y1="2360.0" x2="234.0" y2="2748.0" stroke="#94a3b8" stroke-width="1.4"/>
+<rect x="236.0" y="2441.0" width="1740.0" height="150.0" rx="0" fill="#f8fafc" stroke="none" stroke-width="1.0"/>
+<rect x="236.0" y="2593.0" width="1740.0" height="98.0" rx="0" fill="#fffdf5" stroke="none" stroke-width="1.0"/>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="2392.7">演示引擎 · 交换链</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="2410.6">3 张图 · MAILBOX 优先</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="2511.7">图形队列 Q0</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="2529.6">族 0 · GRAPHICS+COMPUTE+PRESENT</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="2637.7">传输队列 Q1</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="2655.6">族 1 · 专用 transfer · 单队列</tspan></text>
+<text font-size="13" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="216.0" y="2717.7">CPU 主线程</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="216.0" y="2735.6">draw_frame（Bevy Last）</tspan></text>
+<path d="M1440.0,2430.0 C1440.0,2443.5 1039.4,2443.5 1039.4,2457.0" fill="none" stroke="#9333ea" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#ah-9333ea)"/>
+<path d="M1564.0,2460.0 C1564.0,2444.0 1498.0,2444.0 1498.0,2460.0" fill="none" stroke="#0d9488" stroke-width="1.5" marker-end="url(#ah-0d9488)"/>
+<rect x="250.0" y="2364.0" width="560.0" height="66.0" rx="4" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.6" filter="url(#soft)"/>
+<rect x="260.0" y="2372.0" width="70.0" height="50.0" rx="3" fill="#1e3a8a" stroke="#1e3a8a" stroke-width="1.0"/>
+<text font-size="11" text-anchor="middle" font-weight="bold" fill="#ffffff"><tspan x="295.0" y="2401.0">▶ 屏幕</tspan></text>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#1d4ed8"><tspan x="342.0" y="2389.7">img0 · 扫描显示中</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="342.0" y="2411.0">屏幕上 = 帧 K-2 的画面</tspan></text>
+<rect x="830.0" y="2364.0" width="560.0" height="66.0" rx="4" fill="#ccfbf1" stroke="#0f766e" stroke-width="1.0" filter="url(#soft)"/>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#0f766e"><tspan x="844.0" y="2389.7">img1 · 排队等 vblank</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="844.0" y="2411.0">帧 K-1 已画完，FIFO 排队待换页</tspan></text>
+<rect x="1410.0" y="2364.0" width="560.0" height="66.0" rx="4" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.0" filter="url(#soft)"/>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#9333ea"><tspan x="1424.0" y="2389.7">img2 · 编号已交帧 K</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="1424.0" y="2411.0">演示引擎还没放手 → 信号量未置位</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="bold" fill="#64748b"><tspan x="1966.0" y="2452.6">队首（先提交）→ GPU</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="bold" fill="#64748b"><tspan x="254.0" y="2452.6">← 队尾（后提交）</tspan></text>
+<rect x="1534.0" y="2458.0" width="430.0" height="126.0" rx="4" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+<g opacity="0.45">
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#64748b"><tspan x="1542.0" y="2474.5">cmb · 帧 K-1</tspan></text>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1956.0" y="2473.8">帧槽 B · 画 img1</tspan></text>
+<rect x="1542.0" y="2484.0" width="11.1" height="15.0" rx="1" fill="#e5e7eb" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1553.1" y="2484.0" width="66.5" height="15.0" rx="1" fill="#ffedd5" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1586.4" y="2494.9">②</tspan></text>
+<rect x="1619.6" y="2484.0" width="51.8" height="15.0" rx="1" fill="#e7e5e4" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1645.5" y="2494.9">③</tspan></text>
+<rect x="1671.4" y="2484.0" width="81.3" height="15.0" rx="1" fill="#dcfce7" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1712.0" y="2494.9">④</tspan></text>
+<rect x="1752.7" y="2484.0" width="59.1" height="15.0" rx="1" fill="#fef9c3" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1782.3" y="2494.9">⑤</tspan></text>
+<rect x="1811.8" y="2484.0" width="29.6" height="15.0" rx="1" fill="#fce7f3" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1826.6" y="2494.9">⑥</tspan></text>
+<rect x="1841.4" y="2484.0" width="44.4" height="15.0" rx="1" fill="#ede9fe" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1863.6" y="2494.9">⑦</tspan></text>
+<rect x="1885.8" y="2484.0" width="59.1" height="15.0" rx="1" fill="#e0f2fe" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1915.3" y="2494.9">⑧</tspan></text>
+<rect x="1944.9" y="2484.0" width="11.1" height="15.0" rx="1" fill="#e5e7eb" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="1542.0" y="2507.0" width="99.8" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="1591.9" y="2518.4">✓ 票据 @ALL</tspan></text>
+<rect x="1645.8" y="2507.0" width="150.8" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="1721.2" y="2518.4">✓ img_avail[B]</tspan></text>
+<rect x="1542.0" y="2526.0" width="242.6" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1663.3" y="2537.4">发 render_finished[img1]</tspan></text>
+<rect x="1788.6" y="2526.0" width="110.0" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1843.6" y="2537.4">发 fence[B]</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1542.0" y="2575.8">已完成</tspan></text>
+</g>
+<rect x="1348.0" y="2472.0" width="170.0" height="98.0" rx="10" fill="#ffffff" stroke="none" stroke-width="0"/>
+<g opacity="0.45">
+<rect x="1348.0" y="2472.0" width="170.0" height="98.0" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.4" filter="url(#soft)"/>
+<text font-size="11.5" text-anchor="middle" font-weight="bold" fill="#64748b"><tspan x="1433.0" y="2492.1">present · 帧 K-1</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1433.0" y="2508.4">等 render_finished[img1]</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#2563eb"><tspan x="1433.0" y="2524.4">已出队</tspan></text>
+</g>
+<rect x="902.0" y="2458.0" width="430.0" height="126.0" rx="4" fill="#ffffff" stroke="#2563eb" stroke-width="2.6" filter="url(#lift)"/>
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="910.0" y="2474.5">cmb · 帧 K</tspan></text>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="1324.0" y="2473.8">帧槽 A · 画 img2</tspan></text>
+<rect x="910.0" y="2484.0" width="11.1" height="15.0" rx="1" fill="#e5e7eb" stroke="#94a3b8" stroke-width="0.6"/>
+<rect x="921.1" y="2484.0" width="66.5" height="15.0" rx="1" fill="#ffedd5" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="954.4" y="2494.9">②</tspan></text>
+<rect x="987.6" y="2484.0" width="51.8" height="15.0" rx="1" fill="#e7e5e4" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1013.5" y="2494.9">③</tspan></text>
+<rect x="1039.4" y="2484.0" width="81.3" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1080.0" y="2494.9">④</tspan></text>
+<rect x="1120.7" y="2484.0" width="59.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1150.3" y="2494.9">⑤</tspan></text>
+<rect x="1179.8" y="2484.0" width="29.6" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1194.6" y="2494.9">⑥</tspan></text>
+<rect x="1209.4" y="2484.0" width="44.4" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1231.6" y="2494.9">⑦</tspan></text>
+<rect x="1253.8" y="2484.0" width="59.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1283.3" y="2494.9">⑧</tspan></text>
+<rect x="1312.9" y="2484.0" width="11.1" height="15.0" rx="1" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<line x1="1039.4" y1="2478.0" x2="1039.4" y2="2505.0" stroke="#9333ea" stroke-width="3"/>
+<text font-size="10" text-anchor="middle" font-weight="bold" fill="#9333ea"><tspan x="1039.4" y="2476.6">停</tspan></text>
+<rect x="910.0" y="2507.0" width="99.8" height="16.0" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#15803d"><tspan x="959.9" y="2518.4">✓ 票据 @ALL</tspan></text>
+<rect x="1013.8" y="2507.0" width="263.0" height="16.0" rx="8" fill="#fee2e2" stroke="#b91c1c" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#b91c1c"><tspan x="1145.3" y="2518.4">✗ img_avail[A] @COLOR_OUT</tspan></text>
+<rect x="910.0" y="2526.0" width="242.6" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1031.3" y="2537.4">发 render_finished[img2]</tspan></text>
+<rect x="1156.6" y="2526.0" width="110.0" height="16.0" rx="8" fill="#ccfbf1" stroke="#0f766e" stroke-width="0.7"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="1211.6" y="2537.4">发 fence[A]</tspan></text>
+<rect x="910.0" y="2545.0" width="414.0" height="17.0" rx="3" fill="#f5f3ff" stroke="#9333ea" stroke-width="0.8"/>
+<text font-size="9.8" text-anchor="start" font-weight="bold" fill="#9333ea"><tspan x="915.0" y="2557.0">被 image_available[A] 卡：@COLOR_ATTACHMENT_OUTPUT</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="910.0" y="2575.8">状态：等待图片准备好 · 停在 ④ 前</tspan></text>
+<rect x="716.0" y="2472.0" width="170.0" height="98.0" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.4" stroke-dasharray="4 3" filter="url(#soft)"/>
+<text font-size="11.5" text-anchor="middle" font-weight="bold" fill="#2563eb"><tspan x="801.0" y="2492.1">present · 帧 K</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f766e"><tspan x="801.0" y="2508.4">等 render_finished[img2]</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#2563eb"><tspan x="801.0" y="2524.4">排队</tspan></text>
+<text font-size="10" text-anchor="end" font-weight="bold" fill="#64748b"><tspan x="1966.0" y="2604.6">队首（先提交）→ 拷贝引擎</tspan></text>
+<text font-size="11" text-anchor="end" font-weight="normal" fill="#64748b"><tspan x="1954.0" y="2651.0">Q1 空：这几帧无新资产</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="bold" fill="#92400e"><tspan x="254.0" y="2625.6">staging 槽记账（CPU 侧账本，不是队列；每槽记最后一批的票据）</tspan></text>
+<rect x="254.0" y="2635.0" width="46.0" height="18.0" rx="9" fill="#fef3c7" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#92400e"><tspan x="277.0" y="2647.8">槽0</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="308.0" y="2647.8">可复用</tspan></text>
+<rect x="254.0" y="2657.0" width="46.0" height="18.0" rx="9" fill="#fef3c7" stroke="#d97706" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#92400e"><tspan x="277.0" y="2669.8">槽1</tspan></text>
+<text font-size="10.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="308.0" y="2669.8">可复用</tspan></text>
+<text font-size="13" text-anchor="start" font-weight="bold" fill="#059669"><tspan x="250.0" y="2726.7">帧 K+1</tspan></text>
+<rect x="360.0" y="2706.0" width="95.0" height="32.0" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="407.5" y="2725.6">a 上传</tspan></text>
+<rect x="455.0" y="2706.0" width="95.0" height="32.0" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="502.5" y="2725.6">b fence</tspan></text>
+<rect x="550.0" y="2706.0" width="54.3" height="32.0" rx="3" fill="#fee2e2" stroke="#dc2626" stroke-width="2" filter="url(#soft)"/>
+<text font-size="10" text-anchor="middle" font-weight="bold" fill="#dc2626"><tspan x="577.1" y="2725.6">c acquire</tspan></text>
+<rect x="604.3" y="2706.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="631.4" y="2725.6">d DrawList</tspan></text>
+<rect x="658.6" y="2706.0" width="40.7" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="678.9" y="2725.6">e</tspan></text>
+<rect x="699.3" y="2706.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="726.4" y="2725.6">f 四环</tspan></text>
+<rect x="753.6" y="2706.0" width="67.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="787.5" y="2725.6">g 备料</tspan></text>
+<rect x="821.4" y="2706.0" width="54.3" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="848.6" y="2725.6">h overlay</tspan></text>
+<rect x="875.7" y="2706.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="892.7" y="2725.6">i</tspan></text>
+<rect x="909.6" y="2706.0" width="142.5" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="980.9" y="2725.6">j 录制</tspan></text>
+<rect x="1052.1" y="2706.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1069.1" y="2725.6">k</tspan></text>
+<rect x="1086.1" y="2706.0" width="33.9" height="32.0" rx="3" fill="#ffffff" stroke="#94a3b8" stroke-width="0.6"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1103.0" y="2725.6">l</tspan></text>
+<text font-size="11.5" text-anchor="start" font-weight="bold" fill="#2563eb"><tspan x="1136.0" y="2726.1">状态：帧 K+1 · fence[B] 已过，c acquire 阻塞——三张图 = 1 显示 + 1 排队 + 1 被帧 K 持有</tspan></text>
+<rect x="26.0" y="2757.0" width="1948.0" height="42.0" rx="6" fill="#f8fafc" stroke="none" stroke-width="0"/>
+<rect x="26.0" y="2757.0" width="4.0" height="42.0" rx="2" fill="#9333ea" stroke="none" stroke-width="0"/>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#334155"><tspan x="46.0" y="2784.1">acquire 交出图编号不等于演示引擎已放手——image_available 要到换页/合成读完才置位。等待阶段 COLOR_ATTACHMENT_OUTPUT：② compute、③ 阴影不写颜色附件，先跑完；④ G 缓冲是全帧第一次写颜色（哪怕写的不是交换链图）就被拦。本工程默认 MAILBOX 三图时少见；驱动若在 acquire 里直接阻塞，则卡点挪到 CPU 的 c 段。</tspan></text>
+<rect x="757.9" y="2438.0" width="263.0" height="18.0" rx="9" fill="#ffffff" stroke="#9333ea" stroke-width="0.8"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#9333ea"><tspan x="889.4" y="2450.8">image_available[A] 未置位</tspan></text>
+<rect x="1452.0" y="2433.0" width="158.0" height="18" rx="9" fill="#ffffff" stroke="#0d9488" stroke-width="0.8"/>
+<text x="1531.0" y="2442.0" font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0d9488">render_finished</text>
+</svg>
