@@ -1,0 +1,1768 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3460" height="1874" viewBox="0 0 3460 1874" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif">
+<defs>
+<marker id="ah-dc2626" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/></marker>
+<marker id="ah-d97706" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#d97706"/></marker>
+<marker id="ah-9333ea" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9333ea"/></marker>
+<marker id="ah-0d9488" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0d9488"/></marker>
+<marker id="ah-475569" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+<marker id="ah-2563eb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+</defs>
+<rect width="3460" height="1874" fill="#ffffff"/>
+<text x="1730.0" y="44" font-size="26" font-weight="bold" text-anchor="middle" fill="#0f172a">多帧在飞全景：draw_frame × 4 与帧 N 命令缓冲逐 cmd 读写</text>
+<text x="1730.0" y="74" font-size="14" text-anchor="middle" fill="#475569">ash_renderer · 2 帧槽 / 3 交换链图 / 2 上传槽 · 图形与传输两条队列 · 时长为示意刻度（GPU 受限场景）</text>
+<rect x="10.0" y="96.0" width="3440.0" height="560.0" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="15" text-anchor="start" font-weight="bold" fill="#0f172a"><tspan x="24.0" y="121.4">上半 · 四帧在飞宏观时序：两帧槽 A/B 交替、三张交换链图轮转、GPU 受限时队列积压一帧</tspan></text>
+<rect x="20.0" y="200.0" width="250.0" height="64.0" rx="4" fill="#ffffff" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="12" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="145.0" y="229.0">CPU · Bevy Last 调度</tspan><tspan x="145.0" y="243.6">（主线程，串行）</tspan></text>
+<line x1="280.0" y1="232.0" x2="3440.0" y2="232.0" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4 4"/>
+<rect x="20.0" y="318.0" width="250.0" height="40.0" rx="4" fill="#ffffff" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="12" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="145.0" y="335.0">传输队列</tspan><tspan x="145.0" y="349.6">（上传批）</tspan></text>
+<line x1="280.0" y1="338.0" x2="3440.0" y2="338.0" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4 4"/>
+<rect x="20.0" y="420.0" width="250.0" height="60.0" rx="4" fill="#ffffff" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="12" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="145.0" y="447.0">图形队列</tspan><tspan x="145.0" y="461.6">（帧命令缓冲）</tspan></text>
+<line x1="280.0" y1="450.0" x2="3440.0" y2="450.0" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4 4"/>
+<rect x="20.0" y="540.0" width="250.0" height="38.0" rx="4" fill="#ffffff" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="12" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="145.0" y="556.0">演示引擎</tspan><tspan x="145.0" y="570.6">（持有交换链图）</tspan></text>
+<line x1="280.0" y1="559.0" x2="3440.0" y2="559.0" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4 4"/>
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#0f172a"><tspan x="304.0" y="190.5">帧 N-1 · 槽 B · 图 2</tspan></text>
+<rect x="300.0" y="200.0" width="66.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="333.2" y="229.4">a</tspan><tspan x="333.2" y="242.2">上传</tspan></text>
+<line x1="366.5" y1="198.0" x2="366.5" y2="266.0" stroke="#dc2626" stroke-width="2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#dc2626"><tspan x="366.5" y="276.2">b 免等</tspan></text>
+<rect x="366.5" y="200.0" width="19.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="376.0" y="235.8">c</tspan></text>
+<rect x="385.5" y="200.0" width="38.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="404.5" y="229.4">d</tspan><tspan x="404.5" y="242.2">组装</tspan></text>
+<rect x="423.5" y="200.0" width="28.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="437.8" y="235.8">e</tspan></text>
+<rect x="452.0" y="200.0" width="38.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="471.0" y="229.4">f</tspan><tspan x="471.0" y="242.2">四环</tspan></text>
+<rect x="490.0" y="200.0" width="47.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="513.8" y="229.4">g</tspan><tspan x="513.8" y="242.2">开关</tspan></text>
+<rect x="537.5" y="200.0" width="38.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="556.5" y="229.4">h</tspan><tspan x="556.5" y="242.2">UI</tspan></text>
+<rect x="575.5" y="200.0" width="14.2" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="582.6" y="235.8">i</tspan></text>
+<rect x="589.8" y="200.0" width="99.8" height="64.0" rx="3" fill="#bfdbfe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="639.6" y="229.4">j</tspan><tspan x="639.6" y="242.2">录制 cmd</tspan></text>
+<rect x="689.5" y="200.0" width="9.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="694.2" y="235.8">k</tspan></text>
+<rect x="699.0" y="200.0" width="14.2" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="706.1" y="235.8">l</tspan></text>
+<rect x="361.8" y="318.0" width="104.5" height="40.0" rx="3" fill="#fef3c7" stroke="#d97706" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="414.0" y="335.4">拷贝→池/对象表/贴图</tspan><tspan x="414.0" y="348.2">置位票据 7</tspan></text>
+<line x1="347.5" y1="264.0" x2="367.8" y2="318.0" stroke="#d97706" stroke-width="1.4" marker-end="url(#ah-d97706)"/>
+<path d="M466.2,358.0 C466.2,395.2 702.0,395.2 702.0,420.0" fill="none" stroke="#d97706" stroke-width="1.6" marker-end="url(#ah-d97706)"/>
+<rect x="699.0" y="420.0" width="14.2" height="60.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="706.1" y="453.8">①</tspan></text>
+<rect x="713.2" y="420.0" width="85.5" height="60.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="756.0" y="447.4">②</tspan><tspan x="756.0" y="460.2">compute</tspan></text>
+<rect x="798.8" y="420.0" width="66.5" height="60.0" rx="3" fill="#e7e5e4" stroke="#57534e" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="832.0" y="447.4">③</tspan><tspan x="832.0" y="460.2">阴影</tspan></text>
+<rect x="865.2" y="420.0" width="104.5" height="60.0" rx="3" fill="#dcfce7" stroke="#16a34a" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="917.5" y="447.4">④</tspan><tspan x="917.5" y="460.2">G缓冲</tspan></text>
+<rect x="969.8" y="420.0" width="76.0" height="60.0" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1007.8" y="447.4">⑤</tspan><tspan x="1007.8" y="460.2">合成+透明</tspan></text>
+<rect x="1045.8" y="420.0" width="38.0" height="60.0" rx="3" fill="#fce7f3" stroke="#db2777" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1064.8" y="453.8">⑥</tspan></text>
+<rect x="1083.8" y="420.0" width="57.0" height="60.0" rx="3" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1112.2" y="447.4">⑦</tspan><tspan x="1112.2" y="460.2">Bloom</tspan></text>
+<rect x="1140.8" y="420.0" width="76.0" height="60.0" rx="3" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1178.8" y="447.4">⑧</tspan><tspan x="1178.8" y="460.2">后链+UI</tspan></text>
+<rect x="1216.8" y="420.0" width="14.2" height="60.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1223.9" y="453.8">⑨</tspan></text>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="965.0" y="415.6">帧 N-1 命令缓冲（槽 B）</tspan></text>
+<line x1="385.5" y1="264.0" x2="385.5" y2="540.0" stroke="#9333ea" stroke-width="1.0" stroke-dasharray="2 3"/>
+<path d="M387.5,540.0 C387.5,510.0 865.2,510.0 865.2,480.0" fill="none" stroke="#9333ea" stroke-width="1.4" marker-end="url(#ah-9333ea)"/>
+<polygon points="865.2,419 860.2,411 870.2,411" fill="#9333ea"/>
+<rect x="1237.0" y="540.0" width="524.0" height="38.0" rx="3" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1499.0" y="562.8">等 render_finished[2] → 呈现并持有 图 2</tspan></text>
+<line x1="1229.0" y1="480.0" x2="1239.0" y2="540.0" stroke="#0d9488" stroke-width="1.6" marker-end="url(#ah-0d9488)"/>
+<path d="M1227.0,420.0 C1227.0,349.8 1201.0,349.8 1201.0,264.0" fill="none" stroke="#dc2626" stroke-width="1.8" marker-end="url(#ah-dc2626)"/>
+<text font-size="10" text-anchor="start" font-weight="bold" fill="#dc2626"><tspan x="1235.0" y="403.6">fence[B] 置位</tspan></text>
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#b91c1c"><tspan x="717.2" y="190.5">帧 N · 槽 A · 图 0</tspan></text>
+<rect x="713.2" y="200.0" width="66.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="746.5" y="229.4">a</tspan><tspan x="746.5" y="242.2">上传</tspan></text>
+<line x1="779.8" y1="198.0" x2="779.8" y2="266.0" stroke="#dc2626" stroke-width="2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#dc2626"><tspan x="779.8" y="276.2">b 免等</tspan></text>
+<rect x="779.8" y="200.0" width="19.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="789.2" y="235.8">c</tspan></text>
+<rect x="798.8" y="200.0" width="38.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="817.8" y="229.4">d</tspan><tspan x="817.8" y="242.2">组装</tspan></text>
+<rect x="836.8" y="200.0" width="28.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="851.0" y="235.8">e</tspan></text>
+<rect x="865.2" y="200.0" width="38.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="884.2" y="229.4">f</tspan><tspan x="884.2" y="242.2">四环</tspan></text>
+<rect x="903.2" y="200.0" width="47.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="927.0" y="229.4">g</tspan><tspan x="927.0" y="242.2">开关</tspan></text>
+<rect x="950.8" y="200.0" width="38.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="969.8" y="229.4">h</tspan><tspan x="969.8" y="242.2">UI</tspan></text>
+<rect x="988.8" y="200.0" width="14.2" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="995.9" y="235.8">i</tspan></text>
+<rect x="1003.0" y="200.0" width="99.8" height="64.0" rx="3" fill="#bfdbfe" stroke="#2563eb" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1052.9" y="229.4">j</tspan><tspan x="1052.9" y="242.2">录制 cmd</tspan></text>
+<rect x="1102.8" y="200.0" width="9.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1107.5" y="235.8">k</tspan></text>
+<rect x="1112.2" y="200.0" width="14.2" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1119.4" y="235.8">l</tspan></text>
+<text font-size="10" text-anchor="start" font-weight="bold" fill="#b45309"><tspan x="1235.0" y="509.6">无上传批：票据快照 = 7（已完成）→ 票据门免等</tspan></text>
+<rect x="1112.2" y="484.0" width="118.8" height="11.0" rx="2" fill="#ffffff" stroke="#64748b" stroke-width="1.0" stroke-dasharray="3 2"/>
+<text font-size="9" text-anchor="start" font-weight="normal" fill="#475569"><tspan x="1116.2" y="493.2">已提交·排队（前帧仍在执行）</tspan></text>
+<rect x="1231.0" y="420.0" width="14.2" height="60.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1238.1" y="453.8">①</tspan></text>
+<rect x="1245.2" y="420.0" width="85.5" height="60.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1288.0" y="447.4">②</tspan><tspan x="1288.0" y="460.2">compute</tspan></text>
+<rect x="1330.8" y="420.0" width="66.5" height="60.0" rx="3" fill="#e7e5e4" stroke="#57534e" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1364.0" y="447.4">③</tspan><tspan x="1364.0" y="460.2">阴影</tspan></text>
+<rect x="1397.2" y="420.0" width="104.5" height="60.0" rx="3" fill="#dcfce7" stroke="#16a34a" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1449.5" y="447.4">④</tspan><tspan x="1449.5" y="460.2">G缓冲</tspan></text>
+<rect x="1501.8" y="420.0" width="76.0" height="60.0" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1539.8" y="447.4">⑤</tspan><tspan x="1539.8" y="460.2">合成+透明</tspan></text>
+<rect x="1577.8" y="420.0" width="38.0" height="60.0" rx="3" fill="#fce7f3" stroke="#db2777" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1596.8" y="453.8">⑥</tspan></text>
+<rect x="1615.8" y="420.0" width="57.0" height="60.0" rx="3" fill="#ede9fe" stroke="#7c3aed" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1644.2" y="447.4">⑦</tspan><tspan x="1644.2" y="460.2">Bloom</tspan></text>
+<rect x="1672.8" y="420.0" width="76.0" height="60.0" rx="3" fill="#e0f2fe" stroke="#0284c7" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1710.8" y="447.4">⑧</tspan><tspan x="1710.8" y="460.2">后链+UI</tspan></text>
+<rect x="1748.8" y="420.0" width="14.2" height="60.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="2.4"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1755.9" y="453.8">⑨</tspan></text>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="1497.0" y="415.6">帧 N 命令缓冲（槽 A）</tspan></text>
+<line x1="798.8" y1="264.0" x2="798.8" y2="540.0" stroke="#9333ea" stroke-width="1.0" stroke-dasharray="2 3"/>
+<path d="M800.8,540.0 C800.8,510.0 1397.2,510.0 1397.2,480.0" fill="none" stroke="#9333ea" stroke-width="1.4" marker-end="url(#ah-9333ea)"/>
+<polygon points="1397.2,419 1392.2,411 1402.2,411" fill="#9333ea"/>
+<rect x="1769.0" y="540.0" width="524.0" height="38.0" rx="3" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2031.0" y="562.8">等 render_finished[0] → 呈现并持有 图 0</tspan></text>
+<line x1="1761.0" y1="480.0" x2="1771.0" y2="540.0" stroke="#0d9488" stroke-width="1.6" marker-end="url(#ah-0d9488)"/>
+<path d="M1759.0,420.0 C1759.0,349.8 1652.2,349.8 1652.2,264.0" fill="none" stroke="#dc2626" stroke-width="1.8" marker-end="url(#ah-dc2626)"/>
+<text font-size="10" text-anchor="start" font-weight="bold" fill="#dc2626"><tspan x="1767.0" y="403.6">fence[A] 置位</tspan></text>
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#0f172a"><tspan x="1130.5" y="190.5">帧 N+1 · 槽 B · 图 1</tspan></text>
+<rect x="1126.5" y="200.0" width="66.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1159.8" y="229.4">a</tspan><tspan x="1159.8" y="242.2">上传</tspan></text>
+<rect x="1193.0" y="200.0" width="38.0" height="64.0" rx="3" fill="#fee2e2" stroke="#dc2626" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#dc2626"><tspan x="1212.0" y="229.4">b</tspan><tspan x="1212.0" y="242.2">等fence</tspan></text>
+<rect x="1231.0" y="200.0" width="19.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1240.5" y="235.8">c</tspan></text>
+<rect x="1250.0" y="200.0" width="38.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1269.0" y="229.4">d</tspan><tspan x="1269.0" y="242.2">组装</tspan></text>
+<rect x="1288.0" y="200.0" width="28.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1302.2" y="235.8">e</tspan></text>
+<rect x="1316.5" y="200.0" width="38.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1335.5" y="229.4">f</tspan><tspan x="1335.5" y="242.2">四环</tspan></text>
+<rect x="1354.5" y="200.0" width="47.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1378.2" y="229.4">g</tspan><tspan x="1378.2" y="242.2">开关</tspan></text>
+<rect x="1402.0" y="200.0" width="38.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1421.0" y="229.4">h</tspan><tspan x="1421.0" y="242.2">UI</tspan></text>
+<rect x="1440.0" y="200.0" width="14.2" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1447.1" y="235.8">i</tspan></text>
+<rect x="1454.2" y="200.0" width="99.8" height="64.0" rx="3" fill="#bfdbfe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1504.1" y="229.4">j</tspan><tspan x="1504.1" y="242.2">录制 cmd</tspan></text>
+<rect x="1554.0" y="200.0" width="9.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1558.8" y="235.8">k</tspan></text>
+<rect x="1563.5" y="200.0" width="14.2" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1570.6" y="235.8">l</tspan></text>
+<rect x="1188.2" y="318.0" width="85.5" height="40.0" rx="3" fill="#fef3c7" stroke="#d97706" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1231.0" y="335.4">拷贝→池/对象表/贴图</tspan><tspan x="1231.0" y="348.2">置位票据 8</tspan></text>
+<line x1="1174.0" y1="264.0" x2="1194.2" y2="318.0" stroke="#d97706" stroke-width="1.4" marker-end="url(#ah-d97706)"/>
+<path d="M1273.8,358.0 C1273.8,395.2 1766.0,395.2 1766.0,420.0" fill="none" stroke="#d97706" stroke-width="1.6" marker-end="url(#ah-d97706)"/>
+<rect x="1563.5" y="484.0" width="199.5" height="11.0" rx="2" fill="#ffffff" stroke="#64748b" stroke-width="1.0" stroke-dasharray="3 2"/>
+<text font-size="9" text-anchor="start" font-weight="normal" fill="#475569"><tspan x="1567.5" y="493.2">已提交·排队（前帧仍在执行）</tspan></text>
+<rect x="1763.0" y="420.0" width="14.2" height="60.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1770.1" y="453.8">①</tspan></text>
+<rect x="1777.2" y="420.0" width="85.5" height="60.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1820.0" y="447.4">②</tspan><tspan x="1820.0" y="460.2">compute</tspan></text>
+<rect x="1862.8" y="420.0" width="66.5" height="60.0" rx="3" fill="#e7e5e4" stroke="#57534e" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1896.0" y="447.4">③</tspan><tspan x="1896.0" y="460.2">阴影</tspan></text>
+<rect x="1929.2" y="420.0" width="104.5" height="60.0" rx="3" fill="#dcfce7" stroke="#16a34a" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1981.5" y="447.4">④</tspan><tspan x="1981.5" y="460.2">G缓冲</tspan></text>
+<rect x="2033.8" y="420.0" width="76.0" height="60.0" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2071.8" y="447.4">⑤</tspan><tspan x="2071.8" y="460.2">合成+透明</tspan></text>
+<rect x="2109.8" y="420.0" width="38.0" height="60.0" rx="3" fill="#fce7f3" stroke="#db2777" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2128.8" y="453.8">⑥</tspan></text>
+<rect x="2147.8" y="420.0" width="57.0" height="60.0" rx="3" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2176.2" y="447.4">⑦</tspan><tspan x="2176.2" y="460.2">Bloom</tspan></text>
+<rect x="2204.8" y="420.0" width="76.0" height="60.0" rx="3" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2242.8" y="447.4">⑧</tspan><tspan x="2242.8" y="460.2">后链+UI</tspan></text>
+<rect x="2280.8" y="420.0" width="14.2" height="60.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2287.9" y="453.8">⑨</tspan></text>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="2029.0" y="415.6">帧 N+1 命令缓冲（槽 B）</tspan></text>
+<line x1="1250.0" y1="264.0" x2="1250.0" y2="540.0" stroke="#9333ea" stroke-width="1.0" stroke-dasharray="2 3"/>
+<path d="M1252.0,540.0 C1252.0,510.0 1929.2,510.0 1929.2,480.0" fill="none" stroke="#9333ea" stroke-width="1.4" marker-end="url(#ah-9333ea)"/>
+<polygon points="1929.2,419 1924.2,411 1934.2,411" fill="#9333ea"/>
+<rect x="2301.0" y="540.0" width="590.5" height="38.0" rx="3" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2596.2" y="562.8">等 render_finished[1] → 呈现并持有 图 1</tspan></text>
+<line x1="2293.0" y1="480.0" x2="2303.0" y2="540.0" stroke="#0d9488" stroke-width="1.6" marker-end="url(#ah-0d9488)"/>
+<text font-size="12.5" text-anchor="start" font-weight="bold" fill="#0f172a"><tspan x="1581.8" y="190.5">帧 N+2 · 槽 A · 图 2</tspan></text>
+<rect x="1577.8" y="200.0" width="66.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1611.0" y="229.4">a</tspan><tspan x="1611.0" y="242.2">上传</tspan></text>
+<rect x="1644.2" y="200.0" width="118.8" height="64.0" rx="3" fill="#fee2e2" stroke="#dc2626" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#dc2626"><tspan x="1703.6" y="229.4">b</tspan><tspan x="1703.6" y="242.2">等fence</tspan></text>
+<rect x="1763.0" y="200.0" width="19.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1772.5" y="235.8">c</tspan></text>
+<rect x="1782.0" y="200.0" width="38.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1801.0" y="229.4">d</tspan><tspan x="1801.0" y="242.2">组装</tspan></text>
+<rect x="1820.0" y="200.0" width="28.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1834.2" y="235.8">e</tspan></text>
+<rect x="1848.5" y="200.0" width="38.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1867.5" y="229.4">f</tspan><tspan x="1867.5" y="242.2">四环</tspan></text>
+<rect x="1886.5" y="200.0" width="47.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1910.2" y="229.4">g</tspan><tspan x="1910.2" y="242.2">开关</tspan></text>
+<rect x="1934.0" y="200.0" width="38.0" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1953.0" y="229.4">h</tspan><tspan x="1953.0" y="242.2">UI</tspan></text>
+<rect x="1972.0" y="200.0" width="14.2" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1979.1" y="235.8">i</tspan></text>
+<rect x="1986.2" y="200.0" width="99.8" height="64.0" rx="3" fill="#bfdbfe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2036.1" y="229.4">j</tspan><tspan x="2036.1" y="242.2">录制 cmd</tspan></text>
+<rect x="2086.0" y="200.0" width="9.5" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2090.8" y="235.8">k</tspan></text>
+<rect x="2095.5" y="200.0" width="14.2" height="64.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2102.6" y="235.8">l</tspan></text>
+<rect x="1639.5" y="318.0" width="722.0" height="40.0" rx="3" fill="#fef3c7" stroke="#d97706" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2000.5" y="335.4">拷贝→池/对象表/贴图（大批：贴图流送）</tspan><tspan x="2000.5" y="348.2">置位票据 9</tspan></text>
+<line x1="1625.2" y1="264.0" x2="1645.5" y2="318.0" stroke="#d97706" stroke-width="1.4" marker-end="url(#ah-d97706)"/>
+<path d="M2361.5,358.0 C2361.5,395.2 2364.5,395.2 2364.5,420.0" fill="none" stroke="#d97706" stroke-width="1.6" marker-end="url(#ah-d97706)"/>
+<rect x="2095.5" y="484.0" width="266.0" height="11.0" rx="2" fill="#ffffff" stroke="#64748b" stroke-width="1.0" stroke-dasharray="3 2"/>
+<text font-size="9" text-anchor="start" font-weight="normal" fill="#475569"><tspan x="2099.5" y="493.2">已提交·整批等票据</tspan></text>
+<rect x="2295.0" y="420.0" width="66.5" height="60.0" rx="3" fill="#fef3c7" stroke="#d97706" stroke-width="1.0" stroke-dasharray="4 2"/>
+<text font-size="10" text-anchor="middle" font-weight="bold" fill="#92400e"><tspan x="2328.2" y="447.5">票据门</tspan><tspan x="2328.2" y="459.7">整批冻结</tspan></text>
+<rect x="2361.5" y="420.0" width="14.2" height="60.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2368.6" y="453.8">①</tspan></text>
+<rect x="2375.8" y="420.0" width="85.5" height="60.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2418.5" y="447.4">②</tspan><tspan x="2418.5" y="460.2">compute</tspan></text>
+<rect x="2461.2" y="420.0" width="66.5" height="60.0" rx="3" fill="#e7e5e4" stroke="#57534e" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2494.5" y="447.4">③</tspan><tspan x="2494.5" y="460.2">阴影</tspan></text>
+<rect x="2527.8" y="420.0" width="104.5" height="60.0" rx="3" fill="#dcfce7" stroke="#16a34a" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2580.0" y="447.4">④</tspan><tspan x="2580.0" y="460.2">G缓冲</tspan></text>
+<rect x="2632.2" y="420.0" width="76.0" height="60.0" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2670.2" y="447.4">⑤</tspan><tspan x="2670.2" y="460.2">合成+透明</tspan></text>
+<rect x="2708.2" y="420.0" width="38.0" height="60.0" rx="3" fill="#fce7f3" stroke="#db2777" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2727.2" y="453.8">⑥</tspan></text>
+<rect x="2746.2" y="420.0" width="57.0" height="60.0" rx="3" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2774.8" y="447.4">⑦</tspan><tspan x="2774.8" y="460.2">Bloom</tspan></text>
+<rect x="2803.2" y="420.0" width="76.0" height="60.0" rx="3" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2841.2" y="447.4">⑧</tspan><tspan x="2841.2" y="460.2">后链+UI</tspan></text>
+<rect x="2879.2" y="420.0" width="14.2" height="60.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2886.4" y="453.8">⑨</tspan></text>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="2627.5" y="415.6">帧 N+2 命令缓冲（槽 A）</tspan></text>
+<line x1="1782.0" y1="264.0" x2="1782.0" y2="540.0" stroke="#9333ea" stroke-width="1.0" stroke-dasharray="2 3"/>
+<path d="M1784.0,540.0 C1784.0,510.0 2527.8,510.0 2527.8,480.0" fill="none" stroke="#9333ea" stroke-width="1.4" marker-end="url(#ah-9333ea)"/>
+<polygon points="2527.8,419 2522.8,411 2532.8,411" fill="#9333ea"/>
+<rect x="2899.5" y="540.0" width="353.0" height="38.0" rx="3" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="3076.0" y="562.8">等 render_finished[2] → 呈现并持有 图 2</tspan></text>
+<line x1="2891.5" y1="480.0" x2="2901.5" y2="540.0" stroke="#0d9488" stroke-width="1.6" marker-end="url(#ah-0d9488)"/>
+<line x1="300.0" y1="600.0" x2="3430.0" y2="600.0" stroke="#475569" stroke-width="1.2" marker-end="url(#ah-475569)"/>
+<text font-size="11" text-anchor="end" font-weight="normal" fill="#475569"><tspan x="3426.0" y="618.0">时间</tspan></text>
+<line x1="300.0" y1="596.0" x2="300.0" y2="604.0" stroke="#475569" stroke-width="1.2"/>
+<text font-size="9.5" text-anchor="start" font-weight="normal" fill="#475569"><tspan x="304.0" y="594.4">帧 N-1 draw_frame 开始</tspan></text>
+<line x1="713.2" y1="596.0" x2="713.2" y2="604.0" stroke="#475569" stroke-width="1.2"/>
+<text font-size="9.5" text-anchor="start" font-weight="normal" fill="#475569"><tspan x="717.2" y="594.4">帧 N draw_frame 开始</tspan></text>
+<line x1="1126.5" y1="596.0" x2="1126.5" y2="604.0" stroke="#475569" stroke-width="1.2"/>
+<text font-size="9.5" text-anchor="start" font-weight="normal" fill="#475569"><tspan x="1130.5" y="594.4">帧 N+1 draw_frame 开始</tspan></text>
+<line x1="1577.8" y1="596.0" x2="1577.8" y2="604.0" stroke="#475569" stroke-width="1.2"/>
+<text font-size="9.5" text-anchor="start" font-weight="normal" fill="#475569"><tspan x="1581.8" y="594.4">帧 N+2 draw_frame 开始</tspan></text>
+<line x1="30.0" y1="632.0" x2="64.0" y2="632.0" stroke="#dc2626" stroke-width="2" marker-end="url(#ah-dc2626)"/>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="72.0" y="636.0">fence：GPU 执行完 → 两帧后同槽 CPU 才复用</tspan></text>
+<line x1="460.0" y1="632.0" x2="494.0" y2="632.0" stroke="#d97706" stroke-width="2" marker-end="url(#ah-d97706)"/>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="502.0" y="636.0">上传票据（timeline）：ALL_COMMANDS 拦整批</tspan></text>
+<line x1="890.0" y1="632.0" x2="924.0" y2="632.0" stroke="#9333ea" stroke-width="2" marker-end="url(#ah-9333ea)"/>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="932.0" y="636.0">image_available：COLOR_ATTACHMENT_OUTPUT，首个写颜色的 ④ 起才等</tspan></text>
+<line x1="1450.0" y1="632.0" x2="1484.0" y2="632.0" stroke="#0d9488" stroke-width="2" marker-end="url(#ah-0d9488)"/>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="1492.0" y="636.0">render_finished[图]：交演示引擎</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#9333ea"><tspan x="1900.0" y="636.0">▼ = 图门卡点（④ 起点）</tspan></text>
+<rect x="10.0" y="668.0" width="3440.0" height="96.0" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="12" text-anchor="start" font-weight="bold" fill="#0f172a"><tspan x="24.0" y="688.3">CPU 段字母（draw_frame 与之前的上传系统）</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="28.0" y="706.0">a  驻留 tick + flush_uploads（排空墓地·脏行盘点·合批提交）</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="883.0" y="706.0">b  wait_for_slot：等本槽 fence（上一轮同槽提交执行完）</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="1738.0" y="706.0">c  acquire：取图，置位本槽 image_available</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="2593.0" y="706.0">d  组装 DrawList（增量）+ 取走奇偶脏集</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="28.0" y="726.0">e  写本槽 UBO×5（帧/阴影/后处理/分簇/透明计数清零）</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="883.0" y="726.0">f  写本槽四环（模型增量/材质/在场/LOD 表）</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="1738.0" y="726.0">g  compute 开关：dispatch 备料或宿主直填（视锥/遮挡/LOD/缺口/indirect/阴影）</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="2593.0" y="726.0">h  overlay：图集整传（可能多一张票据）+ 镶嵌 + 顶点环</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="28.0" y="746.0">i  组装 FrameDraw，取上传票据快照</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="883.0" y="746.0">j  录制命令缓冲（下半图逐 cmd 展开）</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="1738.0" y="746.0">k  reset fence + queue_submit（等 2 发 2）</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="2593.0" y="746.0">l  present：交出 render_finished[图]，advance 帧槽</tspan></text>
+<rect x="10.0" y="760.0" width="3440.0" height="1260.0" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="15" text-anchor="start" font-weight="bold" fill="#0f172a"><tspan x="24.0" y="783.4">下半 · 帧 N 命令缓冲逐 cmd 展开（槽 A · 交换链图 0）与资源读写矩阵 —— 一列一条（组）命令，一行一类资源</tspan></text>
+<text font-size="12" text-anchor="end" font-weight="bold" fill="#0f172a"><tspan x="310.0" y="813.3">录制段 →</tspan></text>
+<rect x="332.0" y="796.0" width="64.0" height="26.0" rx="3" fill="#fef3c7" stroke="#d97706" stroke-width="1.0"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="364.0" y="806.6">传输队列</tspan><tspan x="364.0" y="818.2">帧前</tspan></text>
+<rect x="400.0" y="796.0" width="64.0" height="26.0" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1.0"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="432.0" y="806.6">宿主写</tspan><tspan x="432.0" y="818.2">帧前 e/f/h</tspan></text>
+<rect x="468.0" y="796.0" width="404.0" height="26.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.4"/>
+<text font-size="12" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="670.0" y="813.3">① 进场</tspan></text>
+<rect x="876.0" y="796.0" width="608.0" height="26.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="1.4"/>
+<text font-size="12" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="1180.0" y="813.3">② compute</tspan></text>
+<rect x="1488.0" y="796.0" width="200.0" height="26.0" rx="3" fill="#e7e5e4" stroke="#57534e" stroke-width="1.4"/>
+<text font-size="12" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="1588.0" y="813.3">③ 阴影</tspan></text>
+<rect x="1692.0" y="796.0" width="268.0" height="26.0" rx="3" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+<text font-size="12" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="1826.0" y="813.3">④ G缓冲</tspan></text>
+<rect x="1964.0" y="796.0" width="268.0" height="26.0" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.4"/>
+<text font-size="12" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="2098.0" y="813.3">⑤ 合成+透明</tspan></text>
+<rect x="2236.0" y="796.0" width="200.0" height="26.0" rx="3" fill="#fce7f3" stroke="#db2777" stroke-width="1.4"/>
+<text font-size="12" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="2336.0" y="813.3">⑥ Hi-Z</tspan></text>
+<rect x="2440.0" y="796.0" width="200.0" height="26.0" rx="3" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.4"/>
+<text font-size="12" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="2540.0" y="813.3">⑦ Bloom</tspan></text>
+<rect x="2644.0" y="796.0" width="404.0" height="26.0" rx="3" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.4"/>
+<text font-size="12" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="2846.0" y="813.3">⑧ 后链+UI</tspan></text>
+<rect x="3052.0" y="796.0" width="200.0" height="26.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.4"/>
+<text font-size="12" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="3152.0" y="813.3">⑨ 出场</tspan></text>
+<rect x="3256.0" y="796.0" width="166.0" height="26.0" rx="3" fill="#f1f5f9" stroke="#64748b" stroke-width="1.0"/>
+<text font-size="11" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="3339.0" y="813.0">跨帧去向</tspan></text>
+<text font-size="11" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="310.0" y="864.2">命令（虚线框 = 可选：</tspan><tspan x="310.0" y="877.7">开关关闭/空场时不录）</tspan></text>
+<rect x="468.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="500.0" y="840.0">c1</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="500.0" y="870.6">begin</tspan><tspan x="500.0" y="882.2">cmd buffer</tspan></text>
+<rect x="536.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="568.0" y="840.0">c2</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="568.0" y="870.6">重置查询池</tspan><tspan x="568.0" y="882.2">时戳起点</tspan></text>
+<rect x="604.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="636.0" y="840.0">c3</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="636.0" y="864.8">屏障 交换链</tspan><tspan x="636.0" y="876.4">UNDEF→</tspan><tspan x="636.0" y="888.0">COLOR</tspan></text>
+<rect x="672.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="704.0" y="840.0">c4</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="704.0" y="864.8">屏障 主深度</tspan><tspan x="704.0" y="876.4">UNDEF→</tspan><tspan x="704.0" y="888.0">附件</tspan></text>
+<rect x="740.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="772.0" y="840.0">c5</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="772.0" y="864.8">屏障×4</tspan><tspan x="772.0" y="876.4">G缓冲+HDR</tspan><tspan x="772.0" y="888.0">→COLOR</tspan></text>
+<rect x="808.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="840.0" y="840.0">c6</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="840.0" y="864.8">fill 排序键</tspan><tspan x="840.0" y="876.4">= -inf</tspan><tspan x="840.0" y="888.0">+屏障</tspan></text>
+<rect x="876.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="908.0" y="840.0">c7</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="908.0" y="859.0">dispatch</tspan><tspan x="908.0" y="870.6">视锥剔除</tspan><tspan x="908.0" y="882.2">主视图+</tspan><tspan x="908.0" y="893.8">4级阴影</tspan></text>
+<rect x="944.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="976.0" y="840.0">c8</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="976.0" y="864.8">dispatch</tspan><tspan x="976.0" y="876.4">遮挡剔除</tspan><tspan x="976.0" y="888.0">读 Hi-Z</tspan></text>
+<rect x="1012.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1044.0" y="840.0">c9</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1044.0" y="870.6">dispatch</tspan><tspan x="1044.0" y="882.2">LOD 选档</tspan></text>
+<rect x="1080.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1112.0" y="840.0">c10</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1112.0" y="864.8">dispatch</tspan><tspan x="1112.0" y="876.4">indirect</tspan><tspan x="1112.0" y="888.0">组装</tspan></text>
+<rect x="1148.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1180.0" y="840.0">c11</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1180.0" y="864.8">dispatch</tspan><tspan x="1180.0" y="876.4">阴影命令</tspan><tspan x="1180.0" y="888.0">4级一次</tspan></text>
+<rect x="1216.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1248.0" y="840.0">c12</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1248.0" y="864.8">dispatch</tspan><tspan x="1248.0" y="876.4">光源分簇</tspan><tspan x="1248.0" y="888.0">32px×32片</tspan></text>
+<rect x="1284.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1316.0" y="840.0">c13</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1316.0" y="864.8">dispatch</tspan><tspan x="1316.0" y="876.4">透明</tspan><tspan x="1316.0" y="888.0">collect</tspan></text>
+<rect x="1352.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1384.0" y="840.0">c14</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1384.0" y="864.8">dispatch</tspan><tspan x="1384.0" y="876.4">×105</tspan><tspan x="1384.0" y="888.0">双调排序</tspan></text>
+<rect x="1420.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#ffedd5" stroke="#ea580c" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1452.0" y="840.0">c15</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1452.0" y="864.8">dispatch</tspan><tspan x="1452.0" y="876.4">透明</tspan><tspan x="1452.0" y="888.0">gather</tspan></text>
+<rect x="1488.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e7e5e4" stroke="#57534e" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1520.0" y="840.0">c16</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1520.0" y="864.8">屏障×4</tspan><tspan x="1520.0" y="876.4">阴影图→</tspan><tspan x="1520.0" y="888.0">深度附件</tspan></text>
+<rect x="1556.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e7e5e4" stroke="#57534e" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1588.0" y="840.0">c17</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1588.0" y="864.8">×4 级联</tspan><tspan x="1588.0" y="876.4">begin 2048²</tspan><tspan x="1588.0" y="888.0">间接绘制</tspan></text>
+<rect x="1624.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e7e5e4" stroke="#57534e" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1656.0" y="840.0">c18</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1656.0" y="864.8">屏障×4</tspan><tspan x="1656.0" y="876.4">阴影图→</tspan><tspan x="1656.0" y="888.0">只读</tspan></text>
+<rect x="1692.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#dcfce7" stroke="#16a34a" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1724.0" y="840.0">c19</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1724.0" y="864.8">begin</tspan><tspan x="1724.0" y="876.4">3色+深度</tspan><tspan x="1724.0" y="888.0">CLEAR</tspan></text>
+<rect x="1760.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#dcfce7" stroke="#16a34a" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1792.0" y="840.0">c20</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1792.0" y="864.8">绑管线</tspan><tspan x="1792.0" y="876.4">3 个集</tspan><tspan x="1792.0" y="888.0">视口 VB/IB</tspan></text>
+<rect x="1828.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#dcfce7" stroke="#16a34a" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1860.0" y="840.0">c21</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1860.0" y="864.8">间接绘制</tspan><tspan x="1860.0" y="876.4">场景命令环</tspan><tspan x="1860.0" y="888.0">×count</tspan></text>
+<rect x="1896.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#dcfce7" stroke="#16a34a" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1928.0" y="840.0">c22</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1928.0" y="870.6">end</tspan><tspan x="1928.0" y="882.2">rendering</tspan></text>
+<rect x="1964.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="1996.0" y="840.0">c23</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="1996.0" y="864.8">屏障×4</tspan><tspan x="1996.0" y="876.4">G缓冲/深度</tspan><tspan x="1996.0" y="888.0">→只读</tspan></text>
+<rect x="2032.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2064.0" y="840.0">c24</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2064.0" y="864.8">全屏 draw3</tspan><tspan x="2064.0" y="876.4">合成光照</tspan><tspan x="2064.0" y="888.0">→HDR</tspan></text>
+<rect x="2100.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2132.0" y="840.0">c25</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2132.0" y="864.8">透明前向</tspan><tspan x="2132.0" y="876.4">深度→附件</tspan><tspan x="2132.0" y="888.0">混合间接绘</tspan></text>
+<rect x="2168.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2200.0" y="840.0">c26</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2200.0" y="870.6">屏障</tspan><tspan x="2200.0" y="882.2">HDR→只读</tspan></text>
+<rect x="2236.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#fce7f3" stroke="#db2777" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2268.0" y="840.0">c27</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2268.0" y="870.6">屏障 深度</tspan><tspan x="2268.0" y="882.2">附件→只读</tspan></text>
+<rect x="2304.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#fce7f3" stroke="#db2777" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2336.0" y="840.0">c28</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2336.0" y="864.8">屏障</tspan><tspan x="2336.0" y="876.4">Hi-Z[A]全mip</tspan><tspan x="2336.0" y="888.0">→GENERAL</tspan></text>
+<rect x="2372.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#fce7f3" stroke="#db2777" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2404.0" y="840.0">c29</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2404.0" y="864.8">dispatch</tspan><tspan x="2404.0" y="876.4">×10 逐级</tspan><tspan x="2404.0" y="888.0">归约(1080p)</tspan></text>
+<rect x="2440.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2472.0" y="840.0">c30</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2472.0" y="864.8">全屏</tspan><tspan x="2472.0" y="876.4">预滤波</tspan><tspan x="2472.0" y="888.0">HDR→降0</tspan></text>
+<rect x="2508.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2540.0" y="840.0">c31</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2540.0" y="864.8">全屏×4</tspan><tspan x="2540.0" y="876.4">降采样</tspan><tspan x="2540.0" y="888.0">1..4</tspan></text>
+<rect x="2576.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2608.0" y="840.0">c32</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2608.0" y="864.8">全屏×4</tspan><tspan x="2608.0" y="876.4">升采样</tspan><tspan x="2608.0" y="888.0">3..0</tspan></text>
+<rect x="2644.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2676.0" y="840.0">c33</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2676.0" y="864.8">全屏</tspan><tspan x="2676.0" y="876.4">tonemap</tspan><tspan x="2676.0" y="888.0">→LDR</tspan></text>
+<rect x="2712.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2744.0" y="840.0">c34</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2744.0" y="864.8">全屏</tspan><tspan x="2744.0" y="876.4">SMAA</tspan><tspan x="2744.0" y="888.0">边缘</tspan></text>
+<rect x="2780.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2812.0" y="840.0">c35</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2812.0" y="864.8">全屏</tspan><tspan x="2812.0" y="876.4">SMAA</tspan><tspan x="2812.0" y="888.0">混合权重</tspan></text>
+<rect x="2848.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2880.0" y="840.0">c36</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2880.0" y="864.8">begin 交换链</tspan><tspan x="2880.0" y="876.4">neighbor-</tspan><tspan x="2880.0" y="888.0">hood draw3</tspan></text>
+<rect x="2916.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.2" stroke-dasharray="4 2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="2948.0" y="840.0">c37</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="2948.0" y="864.8">UI 逐裁剪</tspan><tspan x="2948.0" y="876.4">区 draw_</tspan><tspan x="2948.0" y="888.0">indexed</tspan></text>
+<rect x="2984.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="3016.0" y="840.0">c38</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="3016.0" y="870.6">end</tspan><tspan x="3016.0" y="882.2">rendering</tspan></text>
+<rect x="3052.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="3084.0" y="840.0">c39</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="3084.0" y="864.8">屏障 交换链</tspan><tspan x="3084.0" y="876.4">COLOR→</tspan><tspan x="3084.0" y="888.0">PRESENT</tspan></text>
+<rect x="3120.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="3152.0" y="840.0">c40</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="3152.0" y="864.8">时戳终点</tspan><tspan x="3152.0" y="876.4">end cmd</tspan><tspan x="3152.0" y="888.0">buffer</tspan></text>
+<rect x="3188.0" y="828.0" width="64.0" height="78.0" rx="3" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.2"/>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#64748b"><tspan x="3220.0" y="840.0">c41</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="3220.0" y="864.8">reset fence</tspan><tspan x="3220.0" y="876.4">queue_</tspan><tspan x="3220.0" y="888.0">submit</tspan></text>
+<text font-size="11" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="310.0" y="931.0">命令后屏障 / 时戳</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#9333ea"><tspan x="636.0" y="923.4">链式等图</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#9333ea"><tspan x="772.0" y="923.4">链式等图</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="840.0" y="923.4">T→C</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="908.0" y="923.4">→VCRW</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="976.0" y="923.4">→VCR</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="1044.0" y="923.4">→VCR</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="1112.0" y="923.4">→ICR</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="1180.0" y="923.4">→ICR</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="1248.0" y="923.4">→CFR</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="1316.0" y="923.4">→CR</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="1384.0" y="923.4">→CRW×105</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="1452.0" y="923.4">→ICR</tspan></text>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#0369a1"><tspan x="1452.0" y="938.2">时戳 计算</tspan></text>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#0369a1"><tspan x="568.0" y="938.2">时戳 起点</tspan></text>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#0369a1"><tspan x="1656.0" y="938.2">时戳 阴影</tspan></text>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#0369a1"><tspan x="1928.0" y="938.2">时戳 G缓冲</tspan></text>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#0369a1"><tspan x="2200.0" y="938.2">时戳 光照</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="2404.0" y="923.4">→CR×9</tspan></text>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#0369a1"><tspan x="2404.0" y="938.2">时戳 HiZ</tspan></text>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#0369a1"><tspan x="3016.0" y="938.2">时戳 后链</tspan></text>
+<text font-size="9" text-anchor="middle" font-weight="normal" fill="#0369a1"><tspan x="3152.0" y="938.2">时戳 终点</tspan></text>
+<text font-size="9.5" text-anchor="middle" font-weight="bold" fill="#0f172a"><tspan x="3220.0" y="923.4">等2 发2</tspan></text>
+<rect x="20.0" y="950.0" width="3404.0" height="22.0" rx="2" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="12" text-anchor="start" font-weight="bold" fill="#0f172a"><tspan x="28.0" y="965.3">帧槽私有（×2，图示为槽 A；槽 B 同构一份）</tspan></text>
+<rect x="20.0" y="976.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="987.4">每槽 UBO 组</tspan><tspan x="300.0" y="1000.2">帧/阴影/分簇/Bloom/SMAA</tspan></text>
+<rect x="331" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="403.0" y="979.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="432.0" y="993.8">W</tspan></text>
+<rect x="467" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="879.0" y="979.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="908.0" y="993.8">R</tspan></text>
+<rect x="943" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1219.0" y="979.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1248.0" y="993.8">R</tspan></text>
+<rect x="1283" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1287.0" y="979.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1316.0" y="993.8">R</tspan></text>
+<rect x="1351" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1559.0" y="979.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1588.0" y="993.8">R</tspan></text>
+<rect x="1623" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1831.0" y="979.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1860.0" y="993.8">R</tspan></text>
+<rect x="1895" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2035.0" y="979.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2064.0" y="993.8">R</tspan></text>
+<rect x="2099" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2103.0" y="979.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2132.0" y="993.8">R</tspan></text>
+<rect x="2167" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2579.0" y="979.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2608.0" y="993.8">R</tspan></text>
+<rect x="2643" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2647.0" y="979.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2676.0" y="993.8">R</tspan></text>
+<rect x="2711" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2715.0" y="979.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2744.0" y="993.8">R</tspan></text>
+<rect x="2779" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2851.0" y="979.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2880.0" y="993.8">R</tspan></text>
+<rect x="2915" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="976" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="20.0" y="1006.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1017.4">实例环 b1 模型 b2 材质</tspan><tspan x="300.0" y="1030.2">b4 在场 b7 LOD 表</tspan></text>
+<rect x="331" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="403.0" y="1009.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="432.0" y="1023.8">W</tspan></text>
+<rect x="467" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="879.0" y="1009.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="908.0" y="1023.8">R</tspan></text>
+<rect x="943" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="947.0" y="1009.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="976.0" y="1023.8">R</tspan></text>
+<rect x="1011" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1015.0" y="1009.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1044.0" y="1023.8">R</tspan></text>
+<rect x="1079" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1083.0" y="1009.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1112.0" y="1023.8">R</tspan></text>
+<rect x="1147" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1151.0" y="1009.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1180.0" y="1023.8">R</tspan></text>
+<rect x="1215" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1287.0" y="1009.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1316.0" y="1023.8">R</tspan></text>
+<rect x="1351" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1831.0" y="1009.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1860.0" y="1023.8">R</tspan></text>
+<rect x="1895" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2103.0" y="1009.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2132.0" y="1023.8">R</tspan></text>
+<rect x="2167" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1006" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="20.0" y="1036.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1053.8">b3 视锥标记</tspan></text>
+<rect x="331" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="879.0" y="1039.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="908.0" y="1053.8">W</tspan></text>
+<rect x="943" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="947.0" y="1039.0" width="58.0" height="22.0" rx="4" fill="#e9d5ff" stroke="#7e22ce" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#7e22ce"><tspan x="976.0" y="1053.8">RW</tspan></text>
+<rect x="1011" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1083.0" y="1039.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1112.0" y="1053.8">R</tspan></text>
+<rect x="1147" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1036" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="20.0" y="1066.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1083.8">b6 遮挡标记</tspan></text>
+<rect x="331" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="403.0" y="1069.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="432.0" y="1083.8">填*</tspan></text>
+<rect x="467" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="947.0" y="1069.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="976.0" y="1083.8">W</tspan></text>
+<rect x="1011" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1066" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="20.0" y="1096.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1113.8">b8 LOD 档位</tspan></text>
+<rect x="331" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1015.0" y="1099.0" width="58.0" height="22.0" rx="4" fill="#e9d5ff" stroke="#7e22ce" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#7e22ce"><tspan x="1044.0" y="1113.8">RW</tspan></text>
+<rect x="1079" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1083.0" y="1099.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1112.0" y="1113.8">R</tspan></text>
+<rect x="1147" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1151.0" y="1099.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1180.0" y="1113.8">R</tspan></text>
+<rect x="1215" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1423.0" y="1099.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1452.0" y="1113.8">R</tspan></text>
+<rect x="1487" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1096" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3256.0" y="1096.0" width="166.0" height="28.0" rx="2" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="3339.0" y="1107.6">N+2 选档</tspan><tspan x="3339.0" y="1119.2">读作滞回</tspan></text>
+<rect x="20.0" y="1126.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1143.8">b9 缺口标记</tspan></text>
+<rect x="331" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="879.0" y="1129.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="908.0" y="1143.8">W</tspan></text>
+<rect x="943" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1083.0" y="1129.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="1112.0" y="1143.8">W</tspan></text>
+<rect x="1147" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1126" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3256.0" y="1126.0" width="166.0" height="28.0" rx="2" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="3339.0" y="1137.6">N+2 宿主</tspan><tspan x="3339.0" y="1149.2">缺口快照读</tspan></text>
+<rect x="20.0" y="1156.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1173.8">b5 场景命令环</tspan></text>
+<rect x="331" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1083.0" y="1159.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="1112.0" y="1173.8">W</tspan></text>
+<rect x="1147" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1831.0" y="1159.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1860.0" y="1173.8">R</tspan></text>
+<rect x="1895" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1156" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="20.0" y="1186.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1197.4">阴影标记 + 4 级</tspan><tspan x="300.0" y="1210.2">阴影命令环</tspan></text>
+<rect x="331" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="879.0" y="1189.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="908.0" y="1203.8">W</tspan></text>
+<rect x="943" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1151.0" y="1189.0" width="58.0" height="22.0" rx="4" fill="#e9d5ff" stroke="#7e22ce" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#7e22ce"><tspan x="1180.0" y="1203.8">RW</tspan></text>
+<rect x="1215" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1559.0" y="1189.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1588.0" y="1203.8">R</tspan></text>
+<rect x="1623" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1186" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="20.0" y="1216.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1233.8">光源分簇表</tspan></text>
+<rect x="331" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1219.0" y="1219.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="1248.0" y="1233.8">W</tspan></text>
+<rect x="1283" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2035.0" y="1219.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2064.0" y="1233.8">R</tspan></text>
+<rect x="2099" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2103.0" y="1219.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2132.0" y="1233.8">R</tspan></text>
+<rect x="2167" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1216" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="20.0" y="1246.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1257.4">透明 键/索引/</tspan><tspan x="300.0" y="1270.2">计数/命令</tspan></text>
+<rect x="331" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="403.0" y="1249.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="432.0" y="1263.8">清计数</tspan></text>
+<rect x="467" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="811.0" y="1249.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="840.0" y="1263.8">W</tspan></text>
+<rect x="875" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1287.0" y="1249.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="1316.0" y="1263.8">W</tspan></text>
+<rect x="1351" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1355.0" y="1249.0" width="58.0" height="22.0" rx="4" fill="#e9d5ff" stroke="#7e22ce" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#7e22ce"><tspan x="1384.0" y="1263.8">RW</tspan></text>
+<rect x="1419" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1423.0" y="1249.0" width="58.0" height="22.0" rx="4" fill="#e9d5ff" stroke="#7e22ce" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#7e22ce"><tspan x="1452.0" y="1263.8">RW</tspan></text>
+<rect x="1487" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2103.0" y="1249.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2132.0" y="1263.8">R</tspan></text>
+<rect x="2167" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1246" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="20.0" y="1276.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1293.8">主深度 depth[A]</tspan></text>
+<rect x="331" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="675.0" y="1279.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="704.0" y="1293.8">L</tspan></text>
+<rect x="739" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1695.0" y="1279.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="1724.0" y="1293.8">W</tspan></text>
+<rect x="1759" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1831.0" y="1279.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="1860.0" y="1293.8">W</tspan></text>
+<rect x="1895" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1967.0" y="1279.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="1996.0" y="1293.8">L</tspan></text>
+<rect x="2031" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2035.0" y="1279.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2064.0" y="1293.8">R</tspan></text>
+<rect x="2099" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2103.0" y="1279.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="2132.0" y="1293.8">L·R</tspan></text>
+<rect x="2167" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2239.0" y="1279.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="2268.0" y="1293.8">L</tspan></text>
+<rect x="2303" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2375.0" y="1279.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2404.0" y="1293.8">R</tspan></text>
+<rect x="2439" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1276" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="20.0" y="1306.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1323.8">G 缓冲三色[A]</tspan></text>
+<rect x="331" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="743.0" y="1309.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="772.0" y="1323.8">L</tspan></text>
+<rect x="807" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1695.0" y="1309.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="1724.0" y="1323.8">W</tspan></text>
+<rect x="1759" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1831.0" y="1309.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="1860.0" y="1323.8">W</tspan></text>
+<rect x="1895" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1967.0" y="1309.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="1996.0" y="1323.8">L</tspan></text>
+<rect x="2031" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2035.0" y="1309.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2064.0" y="1323.8">R</tspan></text>
+<rect x="2099" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1306" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="20.0" y="1336.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1353.8">HDR 目标[A]</tspan></text>
+<rect x="331" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="743.0" y="1339.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="772.0" y="1353.8">L</tspan></text>
+<rect x="807" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2035.0" y="1339.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="2064.0" y="1353.8">W</tspan></text>
+<rect x="2099" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2103.0" y="1339.0" width="58.0" height="22.0" rx="4" fill="#e9d5ff" stroke="#7e22ce" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#7e22ce"><tspan x="2132.0" y="1353.8">RW</tspan></text>
+<rect x="2167" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2171.0" y="1339.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="2200.0" y="1353.8">L</tspan></text>
+<rect x="2235" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2443.0" y="1339.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2472.0" y="1353.8">R</tspan></text>
+<rect x="2507" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2647.0" y="1339.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2676.0" y="1353.8">R</tspan></text>
+<rect x="2711" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1336" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="20.0" y="1366.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1383.8">Hi-Z 金字塔[A]</tspan></text>
+<rect x="331" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="947.0" y="1369.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="976.0" y="1383.8">R旧</tspan></text>
+<rect x="1011" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2307.0" y="1369.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="2336.0" y="1383.8">L</tspan></text>
+<rect x="2371" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2375.0" y="1369.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="2404.0" y="1383.8">W</tspan></text>
+<rect x="2439" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1366" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3256.0" y="1366.0" width="166.0" height="28.0" rx="2" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="3339.0" y="1377.6">N+2 遮挡读</tspan><tspan x="3339.0" y="1389.2">（c8 读的是 N-2 写）</tspan></text>
+<rect x="20.0" y="1396.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1407.4">LDR / 边缘 /</tspan><tspan x="300.0" y="1420.2">混合权重[A]</tspan></text>
+<rect x="331" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2647.0" y="1399.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="2676.0" y="1413.8">L·W</tspan></text>
+<rect x="2711" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2715.0" y="1399.0" width="58.0" height="22.0" rx="4" fill="#e9d5ff" stroke="#7e22ce" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#7e22ce"><tspan x="2744.0" y="1413.8">R·W</tspan></text>
+<rect x="2779" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2783.0" y="1399.0" width="58.0" height="22.0" rx="4" fill="#e9d5ff" stroke="#7e22ce" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#7e22ce"><tspan x="2812.0" y="1413.8">R·W</tspan></text>
+<rect x="2847" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2851.0" y="1399.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2880.0" y="1413.8">R</tspan></text>
+<rect x="2915" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1396" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="20.0" y="1426.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1443.8">UI 顶点/索引环[A]</tspan></text>
+<rect x="331" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="403.0" y="1429.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="432.0" y="1443.8">W</tspan></text>
+<rect x="467" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2919.0" y="1429.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2948.0" y="1443.8">R</tspan></text>
+<rect x="2983" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1426" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="20.0" y="1456.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1473.8">时戳查询池[A]</tspan></text>
+<rect x="331" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="539.0" y="1459.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="568.0" y="1473.8">W</tspan></text>
+<rect x="603" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1423.0" y="1459.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="1452.0" y="1473.8">W</tspan></text>
+<rect x="1487" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1627.0" y="1459.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="1656.0" y="1473.8">W</tspan></text>
+<rect x="1691" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1899.0" y="1459.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="1928.0" y="1473.8">W</tspan></text>
+<rect x="1963" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2171.0" y="1459.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="2200.0" y="1473.8">W</tspan></text>
+<rect x="2235" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2375.0" y="1459.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="2404.0" y="1473.8">W</tspan></text>
+<rect x="2439" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2987.0" y="1459.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="3016.0" y="1473.8">W</tspan></text>
+<rect x="3051" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3123.0" y="1459.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="3152.0" y="1473.8">W</tspan></text>
+<rect x="3187" y="1456" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3256.0" y="1456.0" width="166.0" height="28.0" rx="2" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="3339.0" y="1467.6">N+2 等完 fence</tspan><tspan x="3339.0" y="1479.2">后宿主读回</tspan></text>
+<rect x="20.0" y="1486.0" width="3404.0" height="22.0" rx="2" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="12" text-anchor="start" font-weight="bold" fill="#0f172a"><tspan x="28.0" y="1501.3">全局单份（帧槽间共享）</tspan></text>
+<rect x="20.0" y="1512.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1529.8">对象表 b0</tspan></text>
+<rect x="331" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="335.0" y="1515.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="364.0" y="1529.8">W</tspan></text>
+<rect x="399" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="879.0" y="1515.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="908.0" y="1529.8">R</tspan></text>
+<rect x="943" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="947.0" y="1515.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="976.0" y="1529.8">R</tspan></text>
+<rect x="1011" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1015.0" y="1515.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1044.0" y="1529.8">R</tspan></text>
+<rect x="1079" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1083.0" y="1515.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1112.0" y="1529.8">R</tspan></text>
+<rect x="1147" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1151.0" y="1515.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1180.0" y="1529.8">R</tspan></text>
+<rect x="1215" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1287.0" y="1515.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1316.0" y="1529.8">R</tspan></text>
+<rect x="1351" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1423.0" y="1515.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1452.0" y="1529.8">R</tspan></text>
+<rect x="1487" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1831.0" y="1515.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1860.0" y="1529.8">R</tspan></text>
+<rect x="1895" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2103.0" y="1515.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2132.0" y="1529.8">R</tspan></text>
+<rect x="2167" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1512" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3256.0" y="1512.0" width="166.0" height="28.0" rx="2" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="3339.0" y="1523.6">旧槽进墓地：</tspan><tspan x="3339.0" y="1535.2">全槽 fence 后复用</tspan></text>
+<rect x="20.0" y="1542.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1559.8">顶点 / 索引池</tspan></text>
+<rect x="331" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="335.0" y="1545.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="364.0" y="1559.8">W</tspan></text>
+<rect x="399" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1559.0" y="1545.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1588.0" y="1559.8">R</tspan></text>
+<rect x="1623" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1831.0" y="1545.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1860.0" y="1559.8">R</tspan></text>
+<rect x="1895" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2103.0" y="1545.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2132.0" y="1559.8">R</tspan></text>
+<rect x="2167" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1542" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3256.0" y="1542.0" width="166.0" height="28.0" rx="2" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="3339.0" y="1553.6">旧区间进墓地：</tspan><tspan x="3339.0" y="1565.2">fence+票据双凭据</tspan></text>
+<rect x="20.0" y="1572.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1583.4">bindless 贴图</tspan><tspan x="300.0" y="1596.2">（含 UI 图集）</tspan></text>
+<rect x="331" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="335.0" y="1575.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="364.0" y="1589.8">W·L</tspan></text>
+<rect x="399" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1831.0" y="1575.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="1860.0" y="1589.8">R</tspan></text>
+<rect x="1895" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2103.0" y="1575.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2132.0" y="1589.8">R</tspan></text>
+<rect x="2167" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2919.0" y="1575.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2948.0" y="1589.8">R</tspan></text>
+<rect x="2983" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1572" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3256.0" y="1572.0" width="166.0" height="28.0" rx="2" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="3339.0" y="1583.6">旧图进墓地：</tspan><tspan x="3339.0" y="1595.2">fence+票据双凭据</tspan></text>
+<rect x="20.0" y="1602.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1619.8">阴影图 ×4</tspan></text>
+<rect x="331" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1491.0" y="1605.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="1520.0" y="1619.8">L</tspan></text>
+<rect x="1555" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1559.0" y="1605.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="1588.0" y="1619.8">W</tspan></text>
+<rect x="1623" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1627.0" y="1605.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="1656.0" y="1619.8">L</tspan></text>
+<rect x="1691" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2035.0" y="1605.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2064.0" y="1619.8">R</tspan></text>
+<rect x="2099" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1602" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3256.0" y="1602.0" width="166.0" height="28.0" rx="2" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="3339.0" y="1613.6">下帧 c16 进场屏障</tspan><tspan x="3339.0" y="1625.2">挡 WAR（同队列）</tspan></text>
+<rect x="20.0" y="1632.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1649.8">Bloom 降 ×5 / 升 ×4</tspan></text>
+<rect x="331" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="671" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2443.0" y="1635.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="2472.0" y="1649.8">L·W</tspan></text>
+<rect x="2507" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2511.0" y="1635.0" width="58.0" height="22.0" rx="4" fill="#e9d5ff" stroke="#7e22ce" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#7e22ce"><tspan x="2540.0" y="1649.8">RW</tspan></text>
+<rect x="2575" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2579.0" y="1635.0" width="58.0" height="22.0" rx="4" fill="#e9d5ff" stroke="#7e22ce" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#7e22ce"><tspan x="2608.0" y="1649.8">RW</tspan></text>
+<rect x="2643" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2647.0" y="1635.0" width="58.0" height="22.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="2676.0" y="1649.8">R</tspan></text>
+<rect x="2711" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2915" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2983" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3119" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1632" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3256.0" y="1632.0" width="166.0" height="28.0" rx="2" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="3339.0" y="1643.6">下帧进场屏障</tspan><tspan x="3339.0" y="1655.2">挡 WAR（同队列）</tspan></text>
+<rect x="20.0" y="1662.0" width="306.0" height="28.0" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="end" font-weight="normal" fill="#0f172a"><tspan x="300.0" y="1679.8">交换链图[0]</tspan></text>
+<rect x="331" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="399" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="467" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="535" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="603" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="607.0" y="1665.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="636.0" y="1679.8">L</tspan></text>
+<rect x="671" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="739" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="807" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="875" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="943" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1011" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1079" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1147" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1215" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1283" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1351" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1419" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1487" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1555" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1623" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1691" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1759" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1827" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1895" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="1963" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2031" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2099" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2167" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2235" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2303" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2371" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2439" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2507" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2575" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2643" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2711" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2779" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2847" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2851.0" y="1665.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="2880.0" y="1679.8">W</tspan></text>
+<rect x="2915" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="2919.0" y="1665.0" width="58.0" height="22.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="2948.0" y="1679.8">W</tspan></text>
+<rect x="2983" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3051" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3055.0" y="1665.0" width="58.0" height="22.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="3084.0" y="1679.8">L</tspan></text>
+<rect x="3119" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3187" y="1662" width="66" height="28" fill="#ffffff" stroke="#eef2f7"/>
+<rect x="3256.0" y="1662.0" width="166.0" height="28.0" rx="2" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.0"/>
+<text font-size="9.5" text-anchor="middle" font-weight="normal" fill="#334155"><tspan x="3339.0" y="1673.6">演示引擎读</tspan><tspan x="3339.0" y="1685.2">（render_finished）</tspan></text>
+<line x1="466.0" y1="824.0" x2="466.0" y2="1692.0" stroke="#d97706" stroke-width="2.4" stroke-dasharray="7 4"/>
+<text font-size="10" text-anchor="middle" font-weight="normal" fill="#0f172a"><tspan x="470.0" y="811.6"></tspan></text>
+<line x1="1690.0" y1="824.0" x2="1690.0" y2="1692.0" stroke="#9333ea" stroke-width="2.4" stroke-dasharray="7 4"/>
+<text font-size="11.5" text-anchor="start" font-weight="bold" fill="#b45309"><tspan x="470.0" y="1712.1">▲ 票据门：ALL_COMMANDS —— 上传未完成时整批（含 compute）都不开跑</tspan></text>
+<text font-size="11.5" text-anchor="start" font-weight="bold" fill="#9333ea"><tspan x="1694.0" y="1712.1">▲ 图门：COLOR_ATTACHMENT_OUTPUT —— 首个写颜色的 c19 起等 image_available；c3/c5 屏障 src=CAO 链式同等；c7~c18 compute 与阴影深度不受拦，与等图重叠</tspan></text>
+<rect x="20.0" y="1734.0" width="3404.0" height="120.0" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.0"/>
+<text font-size="11.5" text-anchor="start" font-weight="bold" fill="#0f172a"><tspan x="34.0" y="1756.1">格子：</tspan></text>
+<rect x="82.0" y="1742.0" width="40.0" height="20.0" rx="4" fill="#fecaca" stroke="#b91c1c" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#b91c1c"><tspan x="102.0" y="1755.8">W</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="130.0" y="1756.0">写</tspan></text>
+<rect x="163.5" y="1742.0" width="40.0" height="20.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="183.5" y="1755.8">R</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="211.5" y="1756.0">读</tspan></text>
+<rect x="245.0" y="1742.0" width="40.0" height="20.0" rx="4" fill="#e9d5ff" stroke="#7e22ce" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#7e22ce"><tspan x="265.0" y="1755.8">RW</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="293.0" y="1756.0">读写</tspan></text>
+<rect x="338.0" y="1742.0" width="40.0" height="20.0" rx="4" fill="#fde68a" stroke="#a16207" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#a16207"><tspan x="358.0" y="1755.8">L</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="386.0" y="1756.0">布局迁移（迁移本身是一次写）</tspan></text>
+<rect x="569.0" y="1742.0" width="40.0" height="20.0" rx="4" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="1.0"/>
+<text font-size="10.5" text-anchor="middle" font-weight="bold" fill="#1d4ed8"><tspan x="589.0" y="1755.8">R旧</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="617.0" y="1756.0">读两帧前同槽写入的内容</tspan></text>
+<text font-size="11" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="785.5" y="1756.0">屏障缩写：V 顶点 · C 计算 · F 片段 · I 间接命令读 · R/W 读/写访问（如 →ICR = 计算写交给间接绘制读）；T→C = 传输写交给计算</tspan></text>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="34.0" y="1780.0">1. 帧槽私有物：同槽隔两帧复用，凭据是本槽 fence（CPU 侧 wait_for_slot）。Hi-Z 金字塔、LOD 档位、缺口标记、时戳四样故意跨帧读——读的正是两帧前同槽的结果，fence 同时保证它已写完。</tspan></text>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="34.0" y="1804.0">2. 全局单份物：阴影图与 Bloom 链两帧共用一份，靠同一图形队列的提交序 + 下一帧进场屏障（UNDEFINED，src=片段）挡住写后读的反向竞争（WAR），不需要额外信号量。</tspan></text>
+<text font-size="11.5" text-anchor="start" font-weight="normal" fill="#0f172a"><tspan x="34.0" y="1828.0">3. 传输队列写的对象表 / 池 / 贴图：只写新槽或新区间，被换下的旧条目进墓地，等「全部帧槽 fence + 上传票据」两本账都清才回收——在飞帧可能还在读旧的。</tspan></text>
+</svg>
