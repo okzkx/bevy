@@ -53,6 +53,25 @@ pub(crate) fn reverse_z_depth_attachment(view: vk::ImageView) -> vk::RenderingAt
         })
 }
 
+/// 颜色附件 LOAD + STORE：底子已画好（前一个 pass 的输出），在上面继续画混合进去。
+pub(crate) fn load_color_attachment(view: vk::ImageView) -> vk::RenderingAttachmentInfo<'static> {
+    vk::RenderingAttachmentInfo::default()
+        .image_view(view)
+        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::LOAD)
+        .store_op(vk::AttachmentStoreOp::STORE)
+}
+
+/// 深度附件 LOAD，只测不写：storeOp DONT_CARE 没关系——shader 没写过东西，内容不丢，
+/// 后续 pass 还要采样它。
+pub(crate) fn load_depth_attachment(view: vk::ImageView) -> vk::RenderingAttachmentInfo<'static> {
+    vk::RenderingAttachmentInfo::default()
+        .image_view(view)
+        .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::LOAD)
+        .store_op(vk::AttachmentStoreOp::DONT_CARE)
+}
+
 /// 全幅 viewport，深度范围 `[0,1]`。
 /// 坑：高度用正值，不要改成负高度翻转 Y——Y 已在 shader 里翻过，再翻画面会倒过来（见 gbuffer_pipeline 模块注释）。
 ///

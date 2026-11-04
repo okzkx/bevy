@@ -126,8 +126,8 @@ impl ImageBarrier {
         unsafe { self.record_with_memory(device, cb, &[]) };
     }
 
-    /// 图像屏障和全局内存屏障合成一次 `vkCmdPipelineBarrier` 录出。
-    /// 坑：阶段掩码只取本条的 src/dst，必须同时覆盖 `memory` 里的访问。
+    /// 图像屏障和全局内存依赖合成一次 `vkCmdPipelineBarrier` 录出。
+    /// 坑：阶段掩码只取本条的 src/dst，`memory` 只取 access 掩码——阶段覆盖由本条屏障负责。
     ///
     /// # Safety
     /// 见模块注释。
@@ -135,8 +135,9 @@ impl ImageBarrier {
         &self,
         device: &Device,
         cb: vk::CommandBuffer,
-        memory: &[vk::MemoryBarrier<'_>],
+        memory: &[MemoryBarrierDesc],
     ) {
+        let memory: std::vec::Vec<vk::MemoryBarrier> = memory.iter().map(|d| d.vk_barrier()).collect();
         let barrier = vk::ImageMemoryBarrier::default()
             .old_layout(self.old_layout)
             .new_layout(self.new_layout)
@@ -157,7 +158,7 @@ impl ImageBarrier {
                 self.src_stage,
                 self.dst_stage,
                 vk::DependencyFlags::empty(),
-                memory,
+                &memory,
                 &[],
                 slice::from_ref(&barrier),
             );
@@ -177,12 +178,17 @@ pub(crate) struct MemoryBarrierDesc {
 }
 
 impl MemoryBarrierDesc {
+    /// 借给图像屏障合成录制用：只取 access 掩码，阶段由合成的图像屏障提供。
+    fn vk_barrier(self) -> vk::MemoryBarrier<'static> {
+        vk::MemoryBarrier::default()
+            .src_access_mask(self.src_access)
+            .dst_access_mask(self.dst_access)
+    }
+
     /// # Safety
     /// 见模块注释。
     pub(crate) unsafe fn record(&self, device: &Device, cb: vk::CommandBuffer) {
-        let barrier = vk::MemoryBarrier::default()
-            .src_access_mask(self.src_access)
-            .dst_access_mask(self.dst_access);
+        let barrier = self.vk_barrier();
         unsafe {
             device.cmd_pipeline_barrier(
                 cb,

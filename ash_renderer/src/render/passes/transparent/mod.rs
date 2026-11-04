@@ -18,8 +18,7 @@ mod transparent_targets;
 
 pub use transparent_passes::{TransparentFrame, TransparentPasses};
 pub(crate) use transparent_passes::{
-    record_forward, TRANSPARENT_COLLECT_PIPELINE, TRANSPARENT_GATHER_PIPELINE,
-    TRANSPARENT_SORT_PIPELINE,
+    TRANSPARENT_COLLECT_PIPELINE, TRANSPARENT_GATHER_PIPELINE, TRANSPARENT_SORT_PIPELINE,
 };
 pub use transparent_pipeline::TransparentPipeline;
 pub(crate) use transparent_pipeline::TRANSPARENT_FORWARD_PIPELINE;

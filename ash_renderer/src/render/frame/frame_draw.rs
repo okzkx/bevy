@@ -16,19 +16,17 @@ use bevy::ecs::error::BevyError;
 use crate::common::error::{Result, VulkanError};
 use crate::common::syntax::ResultTierExt;
 use crate::render::core::record::barrier::{ImageBarrier, MemoryBarrierDesc};
-use crate::render::core::record::fullscreen::{
-    record_fullscreen, record_fullscreen_sampled, FullscreenPass,
-};
+use crate::render::core::record::fullscreen::{record_fullscreen, FullscreenPass};
 use crate::render::core::record::graphics::{
-    bind_graphics, bind_vertex_index, color_attachment, full_rect, reverse_z_depth_attachment,
-    set_viewport_scissor, PipelineRef,
+    bind_graphics, bind_vertex_index, color_attachment, full_rect, load_color_attachment,
+    load_depth_attachment, reverse_z_depth_attachment, set_viewport_scissor, PipelineRef,
 };
 use crate::render::core::binding::set_layout::DescSet;
 use crate::render::core::device::transfer::Uploader;
 use crate::render::passes::lighting::cluster::{self, ClusterBuildDraw};
 use crate::render::passes::shadow::shadow_build::{self, ShadowBuildDraw};
 use crate::render::passes::shadow::shadow_map::{self, ShadowWriteDraw};
-use crate::render::passes::transparent::{self, TransparentFrame};
+use crate::render::passes::transparent::TransparentFrame;
 use crate::render::passes::visibility::cull::{self, CullDraw};
 use crate::render::passes::visibility::hiz::HizPyramid;
 use crate::render::passes::visibility::indirect::{self, IndirectDraw};
@@ -404,19 +402,51 @@ impl FramePool {
             sets: &[draw.frame_set, draw.gbuffer.sampled_set(slot), draw.cluster_set, draw.shadow_set],
         });
 
-        // 透明前向层：合成之后在同一 HDR 目标上 LOAD + 混合，深度转回附件只测不写。
+        // 透明前向层：合成之后在同一 HDR 目标上 LOAD + 混合。两次动态渲染之间没有光栅
+        // 序保证，合成写 HDR → 透明混合读写必须显式内存屏障；深度在本段转回附件（只测
+        // 不写），⑥ 段 Hi-Z 归约再转回只读。
         if let Some(t) = draw.transparent.as_ref() {
-            transparent::record_forward(
+            let (vertex_buffer, index_buffer) = draw.pool_buffers()?;
+            // 合成写 HDR → 透明混合读写（两次动态渲染之间没有光栅序保证），与深度
+            // 转回附件合成同一次 vkCmdPipelineBarrier
+            ImageBarrier::depth_read_only_to_attachment(frame.depth.image).record_with_memory(
                 device,
                 cb,
-                t,
-                draw.gbuffer.hdr_view(slot),
-                frame.depth.image,
-                frame.depth.view,
-                extent,
-                &[draw.bindless_set, draw.frame_set, draw.instance_set, draw.cluster_set],
-                draw.pool_buffers()?,
+                &[MemoryBarrierDesc {
+                    src_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    src_access: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    dst_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    dst_access: vk::AccessFlags::COLOR_ATTACHMENT_READ
+                        | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                }],
             );
+            let transparent_attachment = load_color_attachment(draw.gbuffer.hdr_view(slot));
+            let transparent_depth = load_depth_attachment(frame.depth.view);
+            device.cmd_begin_rendering(
+                cb,
+                &vk::RenderingInfo::default()
+                    .render_area(full_rect(extent))
+                    .layer_count(1)
+                    .color_attachments(std::slice::from_ref(&transparent_attachment))
+                    .depth_attachment(&transparent_depth),
+            );
+            bind_graphics(
+                device,
+                cb,
+                &t.pipeline,
+                &[draw.bindless_set, draw.frame_set, draw.instance_set, draw.cluster_set],
+            );
+            set_viewport_scissor(device, cb, extent);
+            bind_vertex_index(device, cb, vertex_buffer, index_buffer);
+            // 一次 indirect 消费透明命令环（非透明行 instanceCount=0）
+            device.cmd_draw_indexed_indirect(
+                cb,
+                t.t_commands,
+                0,
+                t.command_count,
+                INDIRECT_COMMAND_SIZE as u32,
+            );
+            device.cmd_end_rendering(cb);
         }
 
         // HDR 目标 → 只读，供 Bloom 与 tonemap 采样
@@ -454,19 +484,29 @@ impl FramePool {
         // tonemap（HDR + Bloom → ACES → LDR）：LDR 是 UNORM 线性存储，sRGB 编码只在最后写
         // swapchain 的 SRGB view 时做一次。坑：LDR 上一轮停在 SHADER_READ_ONLY，不录 UNDEFINED
         // 进场屏障会触发 VUID-09592 布局不符。出场转只读供 SMAA 采样。
-        record_fullscreen_sampled(
+        // 进场屏障：LDR 上一轮停在 SHADER_READ_ONLY，不录 UNDEFINED 进场会触发
+        // VUID-09592 布局不符；出场转只读供 SMAA 采样。
+        ImageBarrier::discard_to_color(draw.smaa_nb.ldr_image, vk::PipelineStageFlags::TOP_OF_PIPE)
+            .record(device, cb);
+        let ldr_attachment = color_attachment(draw.smaa_nb.ldr_view, None);
+        device.cmd_begin_rendering(
+            cb,
+            &vk::RenderingInfo::default()
+                .render_area(full_rect(draw.smaa_nb.ldr_extent))
+                .layer_count(1)
+                .color_attachments(std::slice::from_ref(&ldr_attachment)),
+        );
+        bind_graphics(
             device,
             cb,
-            draw.smaa_nb.ldr_image,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            &FullscreenPass {
-                view: draw.smaa_nb.ldr_view,
-                extent: draw.smaa_nb.ldr_extent,
-                clear: None,
-                pipeline: draw.tonemap,
-                sets: &[draw.frame_set, draw.gbuffer.sampled_set(slot), draw.bloom_params_set],
-            },
+            &draw.tonemap,
+            &[draw.frame_set, draw.gbuffer.sampled_set(slot), draw.bloom_params_set],
         );
+        set_viewport_scissor(device, cb, draw.smaa_nb.ldr_extent);
+        // 全屏三角形：3 个顶点、无顶点 buffer，VS 按 vertex_index 生成
+        device.cmd_draw(cb, 3, 1, 0, 1);
+        device.cmd_end_rendering(cb);
+        ImageBarrier::color_to_sampled(draw.smaa_nb.ldr_image).record(device, cb);
 
         // SMAA edge → blend（关闭为 None）
         if let Some(smaa) = &draw.smaa_edge_blend {
