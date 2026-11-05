@@ -108,6 +108,14 @@ pub struct FrameDraw<'a> {
     pub timer: Option<&'a GpuTimer>,
 }
 
+/// 一项提交等待：等哪个信号量、从哪个阶段前卡、timeline 等到几号。
+/// binary 信号量 value 填 0 占位（TimelineSemaphoreSubmitInfo 要求与 wait 信号量同长，binary 忽略该值）。
+struct SubmitWait {
+    semaphore: vk::Semaphore,
+    dst_stage: vk::PipelineStageFlags,
+    value: u64,
+}
+
 /// 图形提交对上传队列的跨队列等待：备料时刻的票据快照 + 票据信号量。
 /// 快照前的所有上传都归本帧等（GPU 侧 ALL_COMMANDS 等待，CPU 不阻塞）；这个等待同时保证
 /// transfer 写的跨队列可见性（池/贴图 CONCURRENT 共享，没有所有权屏障）。
@@ -130,19 +138,13 @@ impl UploadWait {
         }
     }
 
-    /// 追加进提交的平行等待三元组；票 0 = 从未上传，不追加（不能等 0 值，VUID-03242）。
-    pub fn push_to(
-        &self,
-        semaphores: &mut Vec<vk::Semaphore>,
-        stages: &mut Vec<vk::PipelineStageFlags>,
-        values: &mut Vec<u64>,
-    ) {
-        if self.ticket == 0 {
-            return;
-        }
-        semaphores.push(self.semaphore);
-        stages.push(vk::PipelineStageFlags::ALL_COMMANDS);
-        values.push(self.ticket);
+    /// 本帧对上传队列的等待项；票 0 = 从未上传，无此项（不能等 0 值，VUID-03242）。
+    fn entry(self) -> Option<SubmitWait> {
+        (self.ticket != 0).then_some(SubmitWait {
+            semaphore: self.semaphore,
+            dst_stage: vk::PipelineStageFlags::ALL_COMMANDS,
+            value: self.ticket,
+        })
     }
 }
 
@@ -547,12 +549,20 @@ impl FramePool {
         // acquire 重叠；② 上传票据（timeline）在 ALL_COMMANDS 等，CPU 不阻塞；这个内存依赖
         // 同时保证 transfer 写池/贴图的跨队列可见性（CONCURRENT 共享没有所有权屏障，全靠
         // 这里）。
-        let (mut wait_semaphores, mut wait_dst_stage, mut wait_values) = (
-            vec![frame.image_available],
-            vec![vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT],
-            vec![0],
-        );
-        draw.upload_wait.push_to(&mut wait_semaphores, &mut wait_dst_stage, &mut wait_values);
+        let mut waits = vec![SubmitWait {
+            semaphore: frame.image_available,
+            dst_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            value: 0,
+        }];
+        waits.extend(draw.upload_wait.entry());
+        let (wait_semaphores, wait_dst_stage, wait_values): (
+            Vec<vk::Semaphore>,
+            Vec<vk::PipelineStageFlags>,
+            Vec<u64>,
+        ) = waits
+            .into_iter()
+            .map(|w| (w.semaphore, w.dst_stage, w.value))
+            .collect();
         let mut timeline_submit =
             vk::TimelineSemaphoreSubmitInfo::default().wait_semaphore_values(&wait_values);
         device.queue_submit(
