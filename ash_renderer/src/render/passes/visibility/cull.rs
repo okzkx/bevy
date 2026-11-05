@@ -173,25 +173,21 @@ impl CullPass {
     }
 }
 
-/// 录制一帧剔除 dispatch（`record_frame` 在渲染进场前调用）。交接屏障罩住
-/// compute 写标记 → 后续 compute 读写：indirect 组装读 marks、写 gap_marks，遮挡
-/// 回写 marks——同 buffer 的后续写要 WAW 依赖，dst access 含 SHADER_WRITE。dst stage
-/// 是超集（含 VS）。host 读不靠它（屏障排不了 host 访问，靠 fence）。
-pub(crate) fn record(
-    device: &ash::Device,
-    command_buffer: vk::CommandBuffer,
-    instance_set: DescSet,
-    shadow_set: DescSet,
-    cull: &CullDraw,
-) {
-    cull.pass.record(
-        device,
-        command_buffer,
-        &[instance_set, shadow_set],
-        &cull.push,
-        cull.groups,
-        Handoff::VertexComputeReadWrite,
-    );
+impl CullDraw {
+    /// 录制一帧剔除 dispatch（`record_frame` 在渲染进场前调用）。交接屏障罩住
+    /// compute 写标记 → 后续 compute 读写：indirect 组装读 marks、写 gap_marks，遮挡
+    /// 回写 marks——同 buffer 的后续写要 WAW 依赖，dst access 含 SHADER_WRITE。dst stage
+    /// 是超集（含 VS）。host 读不靠它（屏障排不了 host 访问，靠 fence）。
+    pub(crate) fn record(&self, device: &ash::Device, command_buffer: vk::CommandBuffer, instance_set: DescSet, shadow_set: DescSet) {
+        self.pass.record(
+            device,
+            command_buffer,
+            &[instance_set, shadow_set],
+            &self.push,
+            self.groups,
+            Handoff::VertexComputeReadWrite,
+        );
+    }
 }
 
 #[cfg(test)]

@@ -29,7 +29,7 @@ use ash_macros::system;
 use crate::{
     common::syntax::fatal,
     scene::InstanceLedger,
-    render::{FrameDraw, HizFrameDraw, PostChainDraw, UiDraw, UploadWait},
+    render::{ClusterFrameDraw, RenderFeatures, HizFrameDraw, PostChainDraw, SceneResources, UiDraw, UploadWait},
 };
 
 use super::drawlist::{self, DrawabilitySources, ParityDirty};
@@ -227,7 +227,8 @@ pub(crate) fn draw_frame(
     let shadow_frame = shadow_frame_draw(shadow, instances, &scene.pool, slot, indirect_count)?;
     let (smaa_edge_blend, smaa_nb) = smaa_draws(post, slot);
 
-    let frame_draw = FrameDraw {
+    // —— ④⑤ 场景资源与规格（feature 各束的共用底座，②⑤⑧ 复绑）
+    let res = SceneResources {
         pipeline: post.gbuffer.pipeline.rec(),
         bindless_set: gpu.tables.descriptor_set(),
         frame_set: gpu.frame_uniform_table.frame_set(slot),
@@ -237,11 +238,25 @@ pub(crate) fn draw_frame(
         // 命令环句柄在 count = 0 时不被读（record_frame 的场景绘制整段跳过）
         indirect_count,
         indirect_buffer: instances.indirect_buffer(slot),
-        // FrameDraw 借 GBufferTargets 引用（record_frame 消费附件视图与采样集）
+        // SceneResources 借 GBufferTargets 引用（record_frame 消费附件视图与采样集）
         gbuffer: &post.gbuffer.targets,
         composite: post.composite.rec(),
-        cluster_set: cluster.clusters.frame_set(slot),
-        cluster_build: create_cluster_build_draw(cluster, indirect_count),
+    };
+    let feature = RenderFeatures {
+        // —— ① 帧首
+        timer: timing.timer.enabled.then_some(&*timing.timer),
+        // —— ② compute 前置
+        frustum_cull: frustum_cull_draw,
+        hiz: HizFrameDraw { occlusion: occl_dispatch, pyramid: &occlusion.hiz },
+        lod: lod_dispatch,
+        indirect: indirect_dispatch,
+        shadow: shadow_frame,
+        cluster: ClusterFrameDraw {
+            build: create_cluster_build_draw(cluster, indirect_count),
+            set: cluster.clusters.frame_set(slot),
+        },
+        transparent: transparent_frame,
+        // —— ⑦⑧ 后链 + UI
         post: PostChainDraw {
             tonemap: post.tonemap.rec(),
             bloom_params_set: post.bloom.params_set(slot),
@@ -255,19 +270,14 @@ pub(crate) fn draw_frame(
             paint,
             buffers: *buffers,
         }),
+        // —— ⑨ 提交
         upload_wait: UploadWait::snapshot(&gpu.uploader),
-        frustum_cull: frustum_cull_draw,
-        shadow: shadow_frame,
-        indirect: indirect_dispatch,
-        lod: lod_dispatch,
-        transparent: transparent_frame,
-        hiz: HizFrameDraw { occlusion: occl_dispatch, pyramid: &occlusion.hiz },
-        timer: timing.timer.enabled.then_some(&*timing.timer),
     };
     gpu.frames
         .record_frame(
             &target,
-            &frame_draw,
+            &feature,
+            &res,
         )?;
     watch.record_done();
 

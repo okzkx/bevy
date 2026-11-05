@@ -199,15 +199,12 @@ impl LodPass {
     }
 }
 
-/// 录制一帧选档 dispatch（遮挡测试之后、build_indirect 之前）。交接屏障罩住档位环
-/// 写 → build_indirect 读。
-pub(crate) fn record(
-    device: &ash::Device,
-    command_buffer: vk::CommandBuffer,
-    instance_set: DescSet,
-    lod: &LodDraw,
-) {
-    lod.pass.record(device, command_buffer, &[instance_set], &lod.push, lod.groups, Handoff::VertexComputeRead);
+impl LodDraw {
+    /// 录制一帧选档 dispatch（遮挡测试之后、build_indirect 之前）。交接屏障罩住档位环
+    /// 写 → build_indirect 读。
+    pub(crate) fn record(&self, device: &ash::Device, command_buffer: vk::CommandBuffer, instance_set: DescSet) {
+        self.pass.record(device, command_buffer, &[instance_set], &self.push, self.groups, Handoff::VertexComputeRead);
+    }
 }
 
 #[cfg(test)]

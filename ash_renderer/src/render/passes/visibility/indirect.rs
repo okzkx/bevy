@@ -111,21 +111,18 @@ impl IndirectPass {
     }
 }
 
-/// 录制一帧命令组装 dispatch（`record_frame` 在剔除 dispatch 之后调用）。交接屏障
-/// 只收口命令环（compute 写 → DRAW_INDIRECT 读）；标记读依赖由 cull::record 的屏障
-/// 承担。坑：标记屏障不盖 indirect 命令消费，这条必须单独立。
-pub(crate) fn record(
-    device: &ash::Device,
-    command_buffer: vk::CommandBuffer,
-    instance_set: DescSet,
-    indirect: &IndirectDraw,
-) {
-    indirect.pass.record(
-        device,
-        command_buffer,
-        &[instance_set],
-        &indirect.push,
-        indirect.groups,
-        Handoff::IndirectCommandRead,
-    );
+impl IndirectDraw {
+    /// 录制一帧命令组装 dispatch（`record_frame` 在剔除 dispatch 之后调用）。交接屏障
+    /// 只收口命令环（compute 写 → DRAW_INDIRECT 读）；标记读依赖由 CullDraw::record 的屏障
+    /// 承担。坑：标记屏障不盖 indirect 命令消费，这条必须单独立。
+    pub(crate) fn record(&self, device: &ash::Device, command_buffer: vk::CommandBuffer, instance_set: DescSet) {
+        self.pass.record(
+            device,
+            command_buffer,
+            &[instance_set],
+            &self.push,
+            self.groups,
+            Handoff::IndirectCommandRead,
+        );
+    }
 }

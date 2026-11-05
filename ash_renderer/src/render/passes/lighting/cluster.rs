@@ -402,14 +402,28 @@ impl ClusterBuildPass {
     }
 }
 
-/// 录制 cluster_build；自带的屏障保证后面的合成与透明片元着色器读到新列表。
-pub(crate) fn record_cluster_build(
-    device: &Device,
-    command_buffer: vk::CommandBuffer,
-    cluster_set: DescSet,
-    draw: &ClusterBuildDraw,
-) {
-    draw.pass.record(device, command_buffer, &[cluster_set], &[], draw.groups, Handoff::ComputeFragmentRead);
+impl ClusterBuildDraw {
+    /// 录制 cluster_build；自带的屏障保证后面的合成与透明片元着色器读到新列表。
+    pub(crate) fn record(&self, device: &Device, command_buffer: vk::CommandBuffer, cluster_set: DescSet) {
+        self.pass.record(device, command_buffer, &[cluster_set], &[], self.groups, Handoff::ComputeFragmentRead);
+    }
+}
+
+/// 一帧光源分簇的录制输入（draw_frame 组装，`record_frame` 消费）。
+pub struct ClusterFrameDraw {
+    /// cluster_build dispatch（空场为 None：没东西要画，不用算光源列表）。
+    pub build: Option<ClusterBuildDraw>,
+    /// 光源分簇集（collect/合成/透明前向恒绑）。
+    pub set: DescSet,
+}
+
+impl ClusterFrameDraw {
+    /// ② 段：光源列表必须在合成和透明前向之前算好（空场跳过）。
+    pub(crate) fn record_build(&self, device: &Device, command_buffer: vk::CommandBuffer) {
+        if let Some(build) = &self.build {
+            build.record(device, command_buffer, self.set);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -52,7 +52,7 @@ pub(crate) static TRANSPARENT_GATHER_PIPELINE: PipelineDesc = PipelineDesc {
 /// collect/gather 的 push 大小：一个 u32 在场行数。
 pub const TRANSPARENT_PUSH_SIZE: u32 = 4;
 
-/// 一帧透明层的录制输入。光源分簇集和 cluster_build 不在这里，在 `FrameDraw`
+/// 一帧透明层的录制输入。光源分簇集和 cluster_build 不在这里，在 `RenderFeatures`
 /// 上，因为不透明合成也要用。
 pub struct TransparentFrame {
     pub transparent_set: DescSet,

@@ -13,7 +13,7 @@
 //!   egui 顶点色是预乘的，src 因子取 ONE（与 egui 官方 wgpu 后端一致）。
 //! - **不剔除**：epaint 不保证 UI 顶点绕向一致。
 //!
-//! UI 录制契约 [`UiPaint`]/[`UiDrawCall`] 也住本模块：录制层 `render::frame::frame_draw`
+//! UI 录制契约 [`UiPaint`]/[`UiDrawCall`] 也住本模块：录制层 `render::frame::record`
 //! 与生产方 `overlay::framework::paint` 都用它，render 不引上层类型。
 
 use ash::{vk, Device};
@@ -94,7 +94,7 @@ pub struct UiDrawCall {
     pub scissor: [u32; 4],
 }
 
-/// 一次 UI 绘制的全部产物（`overlay::framework::paint` 组装，`render::frame::frame_draw` 消费）。
+/// 一次 UI 绘制的全部产物（`overlay::framework::paint` 组装，`render::frame::record` 消费）。
 /// 顶点/索引已由生产方写进 UI 环本帧槽的 buffer。
 pub struct UiPaint {
     /// 图集纹理槽（push 的 tex_index）。

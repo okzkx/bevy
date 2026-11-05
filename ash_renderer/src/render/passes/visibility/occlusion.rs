@@ -202,7 +202,7 @@ impl OcclusionPass {
 
 impl OcclusionDraw {
     /// 录制一帧遮挡 dispatch（视锥剔除之后、build_indirect 之前）。交接屏障罩住合并标记
-    /// 写 → build_indirect 读；cull::record 的屏障只覆盖视锥段，本段的写要自己收口。
+    /// 写 → build_indirect 读；CullDraw::record 的屏障只覆盖视锥段，本段的写要自己收口。
     pub(crate) fn record(&self, device: &ash::Device, command_buffer: vk::CommandBuffer, instance_set: DescSet) {
         self.pass.record(
             device,

@@ -68,7 +68,7 @@ impl ShadowBuildPass {
 
 impl ShadowBuildDraw {
     /// 录制一帧 shadow 命令组装 dispatch。交接屏障罩住 compute 写命令环 → DRAW_INDIRECT
-    /// 读（shadow 命令环是独立 buffer，要单独收口）；标记读依赖由 cull::record 的屏障承担。
+    /// 读（shadow 命令环是独立 buffer，要单独收口）；标记读依赖由 CullDraw::record 的屏障承担。
     pub(crate) fn record(
         &self,
         device: &ash::Device,

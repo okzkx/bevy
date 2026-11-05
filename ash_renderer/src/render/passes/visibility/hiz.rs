@@ -534,7 +534,7 @@ impl HizPyramid {
             MAX_FRAMES_IN_FLIGHT * self.levels as usize,
         )?;
         // 声明布局须与 image 实际布局一致（VUID-00344）：level 0/1 的源 = 深度附件
-        //（DEPTH_READ_ONLY，frame_draw.rs 帧尾屏障落位；[0] 不派发），其余 = 金字塔（恒 GENERAL）
+        //（DEPTH_READ_ONLY，record.rs 帧尾屏障落位；[0] 不派发），其余 = 金字塔（恒 GENERAL）
         for slot in 0..MAX_FRAMES_IN_FLIGHT {
             for level in 0..self.levels as usize {
                 let set = sets[slot * self.levels as usize + level];

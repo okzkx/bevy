@@ -1,5 +1,6 @@
-//! 整帧录制：[`FrameDraw`] 收齐一帧的全部输入，`FramePool::record_frame` 按固定顺序
-//! 录完所有 pass 并提交。
+//! 整帧录制：`FramePool::record_frame` 按九段固定顺序录完所有 pass 并提交。功能输入在
+//! [`RenderFeatures`](super::render_features::RenderFeatures)，场景资源在
+//! [`SceneResources`](super::scene_resources::SceneResources)，本模块只管录制编排。
 //!
 //! 全程用 Vulkan 1.3 动态渲染（无 RenderPass/Framebuffer，`loadOp=CLEAR` 即清屏）。每帧布局：
 //! - 颜色：acquire 后内容不要 → UNDEFINED→COLOR_ATTACHMENT_OPTIMAL 进场，画完 → PRESENT_SRC_KHR；
@@ -8,81 +9,26 @@
 
 use std::slice;
 
-use super::frame_pool::{FramePool, SubmitWait, UploadWait};
+use super::frame_pool::{FramePool, SubmitWait};
+use super::render_features::RenderFeatures;
+use super::scene_resources::SceneResources;
 
 use ash::vk;
 use bevy::ecs::error::BevyError;
 
-use crate::common::error::{Result, VulkanError};
+use crate::common::error::Result;
 use crate::common::syntax::ResultTierExt;
 use crate::render::core::record::barrier::{ImageBarrier, MemoryBarrierDesc};
 use crate::render::core::record::fullscreen::FullscreenPass;
 use crate::render::core::record::graphics::{
     bind_graphics, bind_vertex_index, color_attachment, full_rect, load_color_attachment,
-    load_depth_attachment, reverse_z_depth_attachment, set_viewport_scissor, PipelineRef,
+    load_depth_attachment, reverse_z_depth_attachment, set_viewport_scissor,
 };
-use crate::render::core::binding::set_layout::DescSet;
-use crate::render::passes::lighting::cluster::{self, ClusterBuildDraw};
-use crate::render::passes::shadow::shadow_frame::ShadowFrameDraw;
-use crate::render::passes::transparent::TransparentFrame;
-use crate::render::passes::visibility::cull::{self, CullDraw};
-use crate::render::passes::visibility::hiz_frame::HizFrameDraw;
-use crate::render::passes::visibility::indirect::{self, IndirectDraw};
-use crate::render::passes::visibility::lod::{self, LodDraw};
-use crate::render::passes::post::post_chain::PostChainDraw;
-use crate::render::GBufferTargets;
-use crate::render::passes::overlay::overlay_pipeline::UiDraw;
-use crate::render::stats::perf::{FrameMark, GpuTimer, TimestampPoint};
+use crate::render::stats::perf::{FrameMark, TimestampPoint};
 use crate::render::{PresentTarget, INDIRECT_COMMAND_SIZE};
 
 /// indirect draw 的命令步长（`VkDrawIndexedIndirectCommand` 20B，与命令环同一常量）。
 const INDIRECT_COMMAND_STRIDE: u32 = INDIRECT_COMMAND_SIZE as u32;
-
-/// 一帧录制的全部输入（draw_frame 组装，`record_frame` 消费）。`None` 的可选段整段跳过。
-pub struct FrameDraw<'a> {
-    pub pipeline: PipelineRef,
-    /// bindless 纹理表，整帧绑一次（场景管线 set0 槽）。
-    pub bindless_set: DescSet,
-    /// 本帧槽的每帧 UBO（场景管线 set1 槽）。
-    pub frame_set: DescSet,
-    /// 本帧槽的实例表，对象表 + 本帧各环（场景管线 set2 槽）。
-    pub instance_set: DescSet,
-    pub vertex_buffer: Option<vk::Buffer>,
-    pub index_buffer: Option<vk::Buffer>,
-    /// 在场行数（= GPU 侧命令条数；0 = 空场，场景绘制整段跳过）。
-    pub indirect_count: u32,
-    /// 本帧槽命令环（build_indirect 每帧写）。
-    pub indirect_buffer: vk::Buffer,
-    /// G-buffer 附件 + HDR 中间目标，以及合成/tonemap 用的采样集。
-    pub gbuffer: &'a GBufferTargets,
-    /// 合成管线（G-buffer 光照累积 → HDR；全屏，无深度/混合）。
-    pub composite: PipelineRef,
-    /// 光源分簇集，合成与透明前向都绑。
-    pub cluster_set: DescSet,
-    /// 空场为 None：没东西要画，不用算光源列表。
-    pub cluster_build: Option<ClusterBuildDraw>,
-    /// ⑦⑧ 后链束：Bloom → tonemap → SMAA → neighborhood（全部来自 `post`）。
-    pub post: PostChainDraw,
-    /// 本帧 UI 绘制束（无 UI 为 None）：overlay 线 + 绘制产物 + 顶点/索引环 buffer。
-    pub ui: Option<UiDraw<'a>>,
-    /// 视锥剔除与阴影视锥标记（两者都关闭或空场为 None）。
-    pub frustum_cull: Option<CullDraw>,
-    /// indirect 命令组装（空场为 None）。命令写 → 绘制读的屏障在 indirect::record 内。
-    pub indirect: Option<IndirectDraw>,
-    /// GPU LOD 选档（关闭/空场为 None；关闭时 host 已把档位环填 0）。屏障在 lod::record 内。
-    pub lod: Option<LodDraw>,
-    /// shadow：命令组装 + depth pass（同门 Option）与恒绑 set/深度图。
-    pub shadow: ShadowFrameDraw,
-    /// 透明层：收集/排序/组装 dispatch + 透明绘制（空场为 None）。
-    pub transparent: Option<TransparentFrame>,
-    /// Hi-Z：② 遮挡测试（门控 Option）+ ⑥ 金字塔归约（每帧都录）。
-    pub hiz: HizFrameDraw<'a>,
-    /// 图形提交对上传队列的跨队列等待（备料时刻快照，见 [`UploadWait`]）。
-    pub upload_wait: UploadWait,
-    /// GPU 帧计时：帧首 reset + 原点，段界打点见 [`TimestampPoint`]；None = 队列族不支持
-    /// timestamp。
-    pub timer: Option<&'a GpuTimer>,
-}
 
 impl FramePool {
     /// 录制并提交一帧：进场屏障（颜色+深度+G-buffer）→ compute 段（剔除/遮挡/LOD/indirect 与
@@ -90,16 +36,17 @@ impl FramePool {
     /// Bloom → tonemap → SMAA → neighborhood + UI → 出场屏障 → queue_submit。提交在 GPU 侧等
     /// image_available 与上传票据，完成时 signal `target.render_finished` 与 fence。`target`
     /// 四件套（image/view/extent/render_finished）是本次 acquire 的产物，按 image index 取，
-    /// 不按帧槽轮转。
+    /// 不按帧槽轮转。功能门控走 `feature`，场景资源与规格走 `res`。
     /// 录制或提交任一步失败 = 渲染链无法继续，按致命错误冒泡。
     pub fn record_frame(
         &self,
         target: &PresentTarget,
-        draw: &FrameDraw<'_>,
+        feature: &RenderFeatures<'_>,
+        res: &SceneResources<'_>,
     ) -> Result<(), BevyError> {
         // # Safety:前提由帧循环在调用前建立（draw_frame 先 wait_for_slot 再 acquire_index）
         unsafe {
-            self.record_frame_steps(target, draw)
+            self.record_frame_steps(target, feature, res)
         }
         .or_fatal("录制/提交失败，渲染链无法继续")
     }
@@ -112,29 +59,31 @@ impl FramePool {
     /// ⑤ 合成 + 透明前向
     /// ⑥ Hi-Z 归约
     /// ⑦ Bloom
-    /// ⑧ tonemap/SMAA/neighborhood + UI（⑦⑧ 录制收进 [`PostChainDraw::record`]，
+    /// ⑧ tonemap/SMAA/neighborhood + UI（⑦⑧ 录制收进 [`PostChainDraw::record`](crate::render::passes::post::post_chain::PostChainDraw::record)，
     /// UI 接在 neighborhood 的同一次渲染里）
     /// ⑨ 出场 + 提交。段界 = image layout 迁移点，计时打点挂在段界；
-    /// ②~⑧ 一段对应一个业务模块，段内输入全部来自 `draw`，段间衔接只靠布局屏障；
+    /// ②~⑧ 一段对应一个业务模块，段内输入全部来自 `feature`（功能门控）与 `res`（场景资源），
+/// 间衔接只靠布局屏障；
     /// ①⑨ 是槽基建段（cb/fence/等待列表），消费槽私有物，不属于业务模块。
     /// 机制正本见笔记《整帧录制流程》。
     ///
     /// # Safety
     /// 本槽 fence 已由 `wait_for_slot` 等完（cb 与槽私有附件无 GPU 在用）；`target` 四件套
     /// 属于同一次 `acquire_index` 的 image index，且 acquire 用的是本槽 `image_available`；
-    /// `draw` 内句柄均按当前 slot 取且录制期间存活。
+    /// `feature` 与 `res` 内句柄均按当前 slot 取且录制期间存活。
     #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn record_frame_steps(
         &self,
         target: &PresentTarget,
-        draw: &FrameDraw<'_>,
+        feature: &RenderFeatures<'_>,
+        res: &SceneResources<'_>,
     ) -> Result<()> {
         let frame = &self.frames[self.current];
         let device = &self.device;
         let slot = self.current;
         let cb = frame.command_buffer;
         let extent = target.extent;
-        let mark = FrameMark { cb, slot, timer: draw.timer };
+        let mark = FrameMark { cb, slot, timer: feature.timer };
 
         // ---- ① 进场：cb 开始 → 帧计时 → 三组进场屏障 → 透明排序键预填 ----
         device.begin_command_buffer(
@@ -144,7 +93,7 @@ impl FramePool {
         )?;
 
         // 帧计时：重置 query pool + 原点
-        if let Some(timer) = draw.timer {
+        if let Some(timer) = feature.timer {
             timer.reset_and_start(cb, slot);
         }
 
@@ -169,10 +118,10 @@ impl FramePool {
         // 进场屏障三：G-buffer 三附件 + HDR 目标 UNDEFINED→附件。每帧 loadOp CLEAR 覆写全部
         // 像素，本槽上一轮使用已被 fence 等完（同进场屏障二），旧内容不要。
         for gbuffer_image in [
-            draw.gbuffer.albedo_image(slot),
-            draw.gbuffer.normal_image(slot),
-            draw.gbuffer.matparam_image(slot),
-            draw.gbuffer.hdr_image(slot),
+            res.gbuffer.albedo_image(slot),
+            res.gbuffer.normal_image(slot),
+            res.gbuffer.matparam_image(slot),
+            res.gbuffer.hdr_image(slot),
         ] {
             ImageBarrier::discard_to_color(
                 gbuffer_image,
@@ -187,7 +136,7 @@ impl FramePool {
 
         // 透明排序键预填 -inf：bitonic 全容量升序排序把真实条目推到尾部（gather 反向取），
         // 空位的键必须是 -inf。要在所有 compute dispatch 之前。
-        if let Some(t) = draw.transparent.as_ref() {
+        if let Some(t) = feature.transparent.as_ref() {
             device.cmd_fill_buffer(cb, t.t_keys, 0, vk::WHOLE_SIZE, f32::NEG_INFINITY.to_bits());
             // 填充是 transfer 写，后续 sort/collect 的 compute 读写前必须可见
             MemoryBarrierDesc {
@@ -201,39 +150,36 @@ impl FramePool {
 
         // ---- ② compute 前置：剔除 → 遮挡 → LOD → indirect 组装 → shadow 组装 → 光源列表 → 透明层 ----
         // 顺序即依赖，各步之间的屏障都在各自的 record 内。
-        if let Some(frustum_cull) = &draw.frustum_cull {
-            cull::record(device, cb, draw.instance_set, draw.shadow.set, frustum_cull);
+        if let Some(frustum_cull) = &feature.frustum_cull {
+            frustum_cull.record(device, cb, res.instance_set, feature.shadow.set);
         }
 
         // 读视锥标记与两帧前的 Hi-Z 金字塔
-        draw.hiz.record_occlusion(device, cb, draw.instance_set);
+        feature.hiz.record_occlusion(device, cb, res.instance_set);
 
-        if let Some(lod) = &draw.lod {
-            lod::record(device, cb, draw.instance_set, lod);
+        if let Some(lod) = &feature.lod {
+            lod.record(device, cb, res.instance_set);
         }
 
-        if let Some(indirect) = &draw.indirect {
-            indirect::record(device, cb, draw.instance_set, indirect);
+        if let Some(indirect) = &feature.indirect {
+            indirect.record(device, cb, res.instance_set);
         }
 
-        draw.shadow.record_build(device, cb, draw.instance_set);
+        feature.shadow.record_build(device, cb, res.instance_set);
 
-        // 光源列表必须在合成和透明前向之前算好
-        if let Some(build) = &draw.cluster_build {
-            cluster::record_cluster_build(device, cb, draw.cluster_set, build);
-        }
+        feature.cluster.record_build(device, cb);
 
         // 透明层：collect → sort → gather
-        if let Some(t) = draw.transparent.as_ref() {
+        if let Some(t) = feature.transparent.as_ref() {
             if let Some(collect) = &t.collect {
-                collect.record(device, cb, draw.instance_set, draw.cluster_set, t.transparent_set);
+                collect.record(device, cb, res.instance_set, feature.cluster.set, t.transparent_set);
             }
 
             // 固定容量数组每个非空帧都重排，保证本帧新增的透明行不会以未排序状态进 gather
             t.sort.record(device, cb, t.transparent_set);
 
             if let Some(gather) = &t.gather {
-                gather.record(device, cb, draw.instance_set, t.transparent_set);
+                gather.record(device, cb, res.instance_set, t.transparent_set);
             }
         }
 
@@ -241,7 +187,7 @@ impl FramePool {
 
         // ---- ③ shadow depth：进场 → 逐级联 indirect draw → 出场 ----
         // 进出屏障每帧都录（合成 pass 的 shadow 描述符总是绑定）。
-        draw.shadow.record_depth(device, cb);
+        feature.shadow.record_depth(device, cb);
 
         mark.mark(TimestampPoint::Shadow);
 
@@ -250,9 +196,9 @@ impl FramePool {
         // 远平面），STORE 供合成与 Hi-Z 采样。
         // 附件数必须与管线声明一致（VUID-06179：colorAttachmentCount 相等）
         let gbuffer_attachments = [
-            color_attachment(draw.gbuffer.albedo_view(slot), Some([0.0, 0.0, 0.0, 0.0])),
-            color_attachment(draw.gbuffer.normal_view(slot), Some([0.0, 0.0, 0.0, 0.0])),
-            color_attachment(draw.gbuffer.matparam_view(slot), Some([0.0, 0.0, 0.0, 1.0])),
+            color_attachment(res.gbuffer.albedo_view(slot), Some([0.0, 0.0, 0.0, 0.0])),
+            color_attachment(res.gbuffer.normal_view(slot), Some([0.0, 0.0, 0.0, 0.0])),
+            color_attachment(res.gbuffer.matparam_view(slot), Some([0.0, 0.0, 0.0, 1.0])),
         ];
         let depth_attachment = reverse_z_depth_attachment(frame.depth.view);
         device.cmd_begin_rendering(
@@ -266,18 +212,18 @@ impl FramePool {
 
         // 场景绘制：一次 cmd_draw_indexed_indirect 消费命令环，draw 调用数不随对象数增长。
         // 实例槽号经 firstInstance 进 VS（按 instance_index 读 set2）；不可见行 instanceCount=0。
-        if draw.indirect_count > 0 {
-            let (vertex_buffer, index_buffer) = draw.pool_buffers()?;
-            bind_graphics(device, cb, &draw.pipeline, &[draw.bindless_set, draw.frame_set, draw.instance_set]);
+        if res.indirect_count > 0 {
+            let (vertex_buffer, index_buffer) = res.pool_buffers()?;
+            bind_graphics(device, cb, &res.pipeline, &[res.bindless_set, res.frame_set, res.instance_set]);
             // 坑：viewport 正高度，原因见 set_viewport
             set_viewport_scissor(device, cb, extent);
             // 整池绑一次，每条命令自带 vertexOffset/firstIndex
             bind_vertex_index(device, cb, vertex_buffer, index_buffer);
             device.cmd_draw_indexed_indirect(
                 cb,
-                draw.indirect_buffer,
+                res.indirect_buffer,
                 0,
-                draw.indirect_count,
+                res.indirect_count,
                 INDIRECT_COMMAND_STRIDE,
             );
         }
@@ -295,10 +241,10 @@ impl FramePool {
             ..ImageBarrier::color_to_sampled(image)
         };
         for barrier in [
-            color_to_read(draw.gbuffer.albedo_image(slot)),
-            color_to_read(draw.gbuffer.normal_image(slot)),
+            color_to_read(res.gbuffer.albedo_image(slot)),
+            color_to_read(res.gbuffer.normal_image(slot)),
             // matparam：合成 pass 光照累积的 PBR 入参采样面
-            color_to_read(draw.gbuffer.matparam_image(slot)),
+            color_to_read(res.gbuffer.matparam_image(slot)),
             ImageBarrier::depth_attachment_to_read_only(frame.depth.image),
         ] {
             barrier.record(device, cb);
@@ -308,19 +254,19 @@ impl FramePool {
         // 远平面）的像素当背景。set0 帧 UBO（与场景管线 set1 同一 layout）、set1 G-buffer 采样集、
         // set2 光源分簇、set3 shadow。
         FullscreenPass {
-            view: draw.gbuffer.hdr_view(slot),
+            view: res.gbuffer.hdr_view(slot),
             extent,
             clear: Some(CLEAR_COLOR),
-            pipeline: draw.composite,
-            sets: &[draw.frame_set, draw.gbuffer.sampled_set(slot), draw.cluster_set, draw.shadow.set],
+            pipeline: res.composite,
+            sets: &[res.frame_set, res.gbuffer.sampled_set(slot), feature.cluster.set, feature.shadow.set],
         }
         .record(device, cb);
 
         // 透明前向层：合成之后在同一 HDR 目标上 LOAD + 混合。两次动态渲染之间没有光栅
         // 序保证，合成写 HDR → 透明混合读写必须显式内存屏障；深度在本段转回附件（只测
         // 不写），⑥ 段 Hi-Z 归约再转回只读。
-        if let Some(t) = draw.transparent.as_ref() {
-            let (vertex_buffer, index_buffer) = draw.pool_buffers()?;
+        if let Some(t) = feature.transparent.as_ref() {
+            let (vertex_buffer, index_buffer) = res.pool_buffers()?;
             // 合成写 HDR → 透明混合读写（两次动态渲染之间没有光栅序保证），与深度
             // 转回附件合成同一次 vkCmdPipelineBarrier
             ImageBarrier::depth_read_only_to_attachment(frame.depth.image).record_with_memory(
@@ -334,7 +280,7 @@ impl FramePool {
                         | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
                 }],
             );
-            let transparent_attachment = load_color_attachment(draw.gbuffer.hdr_view(slot));
+            let transparent_attachment = load_color_attachment(res.gbuffer.hdr_view(slot));
             let transparent_depth = load_depth_attachment(frame.depth.view);
             device.cmd_begin_rendering(
                 cb,
@@ -348,7 +294,7 @@ impl FramePool {
                 device,
                 cb,
                 &t.pipeline,
-                &[draw.bindless_set, draw.frame_set, draw.instance_set, draw.cluster_set],
+                &[res.bindless_set, res.frame_set, res.instance_set, feature.cluster.set],
             );
             set_viewport_scissor(device, cb, extent);
             bind_vertex_index(device, cb, vertex_buffer, index_buffer);
@@ -364,13 +310,13 @@ impl FramePool {
         }
 
         // HDR 目标 → 只读，供 Bloom 与 tonemap 采样
-        ImageBarrier::color_to_sampled(draw.gbuffer.hdr_image(slot)).record(device, cb);
+        ImageBarrier::color_to_sampled(res.gbuffer.hdr_image(slot)).record(device, cb);
 
         mark.mark(TimestampPoint::Lighting);
 
         // ---- ⑥ Hi-Z：深度转回只读 → 逐级归约金字塔 ----
         // 透明层用过的深度转回只读，供 Hi-Z 归约（没有透明层时深度一直是只读）
-        if draw.transparent.is_some() {
+        if feature.transparent.is_some() {
             // 透明 pass 测深读过（src 加 READ）；dst 只等 compute（Hi-Z 归约读）。
             // 含 WRITE：迁移要排在 G-buffer pass 的深度 store 之后
             ImageBarrier {
@@ -383,25 +329,25 @@ impl FramePool {
         }
 
         // Hi-Z 归约：逐级重写本帧槽金字塔（屏障在 record_reduction 内）
-        draw.hiz.record_reduction(device, cb, slot);
+        feature.hiz.record_reduction(device, cb, slot);
 
         mark.mark(TimestampPoint::HiZ);
 
         // ---- ⑦⑧ 后链 + UI：Bloom → tonemap → SMAA → neighborhood + UI ----
         // ⑦⑧ 录制收进 PostChainDraw::record；neighborhood 开渲染不关，UI 接在同一次
         // 渲染里按光栅序盖在场景之上。
-        draw.post.record(
+        feature.post.record(
             device,
             cb,
-            draw.frame_set,
-            draw.gbuffer.sampled_set(slot),
+            res.frame_set,
+            res.gbuffer.sampled_set(slot),
             target.view,
             extent,
         );
 
         // UI
-        if let Some(ui) = &draw.ui {
-            ui.record(device, cb, draw.bindless_set, extent);
+        if let Some(ui) = &feature.ui {
+            ui.record(device, cb, res.bindless_set, extent);
         }
 
         device.cmd_end_rendering(cb);
@@ -439,7 +385,7 @@ impl FramePool {
             dst_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             value: 0,
         }];
-        waits.extend(draw.upload_wait.entry());
+        waits.extend(feature.upload_wait.entry());
         let (wait_semaphores, wait_dst_stage, wait_values): (
             Vec<vk::Semaphore>,
             Vec<vk::PipelineStageFlags>,
@@ -464,19 +410,6 @@ impl FramePool {
     }
 }
 
-impl FrameDraw<'_> {
-    /// 顶点/索引池句柄。有在场行时池必然已建，缺席说明上传与绘制状态矛盾，报错退出而不是
-    /// 静默跳过整个场景。
-    fn pool_buffers(&self) -> Result<(vk::Buffer, vk::Buffer)> {
-        let vertex_buffer = self.vertex_buffer.ok_or_else(|| {
-            VulkanError::Contract("在场行非空但顶点池缺席——上传链与绘制链的状态矛盾".into())
-        })?;
-        let index_buffer = self.index_buffer.ok_or_else(|| {
-            VulkanError::Contract("在场行非空但索引池缺席——上传链与绘制链的状态矛盾".into())
-        })?;
-        Ok((vertex_buffer, index_buffer))
-    }
-}
 
 /// 合成 pass 的清屏色（深度为 0 = reverse-Z 远平面的像素当背景）。固定深蓝纯色；
 /// 线性域值——HDR 目标的 SRGB view 在 ROP 写出时才做编码，调色时按线性直觉给值，

@@ -82,9 +82,10 @@ pub(crate) use stats::monitor_history::MonitorHistory;
 // 不导出 LIGHT_TYPE_SPOT：聚光灯还没实现，导出了也没人用
 pub use resident::tables::light_table::{LightRecord, LightTable, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT};
 pub use frame::render_mode::RenderMode;
+pub use frame::scene_resources::SceneResources;
 pub use passes::lighting::cluster::{
-    cluster_reference, pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, ClusterGrid,
-    LightClusters,
+    cluster_reference, pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, ClusterFrameDraw,
+    ClusterGrid, LightClusters,
 };
 pub use passes::transparent::{
     TransparentFrame, TransparentPasses, TransparentPipeline, TransparentTargets,
@@ -101,7 +102,7 @@ pub use passes::gbuffer::gbuffer_targets::{
 };
 pub use self::core::target::depth::DEPTH_FORMAT;
 pub use frame::frame_pool::{Frame, FramePool, UploadWait};
-pub use frame::frame_draw::FrameDraw;
+pub use frame::render_features::RenderFeatures;
 pub use passes::post::post_chain::PostChainDraw;
 pub use passes::overlay::overlay_pipeline::{OverlayPipeline, UiDraw, UiDrawCall, UiPaint};
 pub use passes::overlay::atlas_gpu::AtlasGpu;
