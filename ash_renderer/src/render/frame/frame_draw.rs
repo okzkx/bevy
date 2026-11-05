@@ -30,6 +30,7 @@ use crate::render::passes::visibility::hiz::HizPyramid;
 use crate::render::passes::visibility::indirect::{self, IndirectDraw};
 use crate::render::passes::visibility::lod::{self, LodDraw};
 use crate::render::passes::visibility::occlusion::{self, OcclusionDraw};
+use crate::render::passes::post::post_chain::PostChainDraw;
 use crate::render::GBufferTargets;
 use crate::render::passes::overlay::overlay_pipeline::UiPaint;
 use crate::render::stats::perf::{FrameMark, GpuTimer, TimestampPoint};
@@ -61,16 +62,8 @@ pub struct FrameDraw<'a> {
     pub cluster_set: DescSet,
     /// 空场为 None：没东西要画，不用算光源列表。
     pub cluster_build: Option<ClusterBuildDraw>,
-    /// tonemap 管线（HDR + Bloom → ACES → LDR）。
-    pub tonemap: PipelineRef,
-    /// SMAA edge/blend 两 pass（关闭为 None，neighborhood 直通）。
-    pub smaa_edge_blend: Option<crate::render::passes::post::smaa::SmaaEdgeBlendDraw>,
-    /// neighborhood 混合（终点，写 swapchain，总是录）。
-    pub smaa_nb: crate::render::passes::post::smaa::SmaaNbDraw,
-    /// tonemap 的 bloom 参数集（总是绑；bloom 关闭时 shader 内不采样）。
-    pub bloom_params_set: DescSet,
-    /// Bloom 链（关闭为 None）。
-    pub bloom: Option<crate::render::passes::post::bloom::BloomFrameDraw>,
+    /// ⑦⑧ 后链束：Bloom → tonemap → SMAA → neighborhood（全部来自 `post`）。
+    pub post: PostChainDraw,
     /// overlay 管线。自有 layout（只有 set0），切到它之后 set0 要重绑。
     pub overlay: PipelineRef,
     /// 本帧 UI 绘制产物（无 UI 为 None）。
@@ -127,7 +120,8 @@ impl FramePool {
     /// ⑤ 合成 + 透明前向
     /// ⑥ Hi-Z 归约
     /// ⑦ Bloom
-    /// ⑧ tonemap/SMAA/neighborhood + UI
+    /// ⑧ tonemap/SMAA/neighborhood + UI（⑦⑧ 录制收进 [`PostChainDraw::record`]，
+    /// UI 接在 neighborhood 的同一次渲染里）
     /// ⑨ 出场 + 提交。段界 = image layout 迁移点，计时打点挂在段界；
     /// ②~⑧ 一段对应一个业务模块，段内输入全部来自 `draw`，段间衔接只靠布局屏障；
     /// ①⑨ 是槽基建段（cb/fence/等待列表），消费槽私有物，不属于业务模块。
@@ -406,46 +400,17 @@ impl FramePool {
 
         mark.mark(TimestampPoint::HiZ);
 
-        // ---- ⑦ Bloom：prefilter → 逐级 down → 逐级 up ----
-        if let Some(bloom) = &draw.bloom {
-            bloom.record(device, cb);
-        }
-
-        // ---- ⑧ 后链 + UI：tonemap → SMAA edge/blend → neighborhood + UI ----
-        // tonemap（HDR + Bloom → ACES → LDR）：LDR 是 UNORM 线性存储，sRGB 编码只在最后写
-        // swapchain 的 SRGB view 时做一次。坑：LDR 上一轮停在 SHADER_READ_ONLY，不录 UNDEFINED
-        // 进场屏障会触发 VUID-09592 布局不符。出场转只读供 SMAA 采样。
-        // 进场屏障：LDR 上一轮停在 SHADER_READ_ONLY，不录 UNDEFINED 进场会触发
-        // VUID-09592 布局不符；出场转只读供 SMAA 采样。
-        ImageBarrier::discard_to_color(draw.smaa_nb.ldr_image, vk::PipelineStageFlags::TOP_OF_PIPE)
-            .record(device, cb);
-        let ldr_attachment = color_attachment(draw.smaa_nb.ldr_view, None);
-        device.cmd_begin_rendering(
-            cb,
-            &vk::RenderingInfo::default()
-                .render_area(full_rect(draw.smaa_nb.ldr_extent))
-                .layer_count(1)
-                .color_attachments(std::slice::from_ref(&ldr_attachment)),
-        );
-        bind_graphics(
+        // ---- ⑦⑧ 后链 + UI：Bloom → tonemap → SMAA → neighborhood + UI ----
+        // ⑦⑧ 录制收进 PostChainDraw::record；neighborhood 开渲染不关，UI 接在同一次
+        // 渲染里按光栅序盖在场景之上。
+        draw.post.record(
             device,
             cb,
-            &draw.tonemap,
-            &[draw.frame_set, draw.gbuffer.sampled_set(slot), draw.bloom_params_set],
+            draw.frame_set,
+            draw.gbuffer.sampled_set(slot),
+            target.view,
+            extent,
         );
-        set_viewport_scissor(device, cb, draw.smaa_nb.ldr_extent);
-        // 全屏三角形：3 个顶点、无顶点 buffer，VS 按 vertex_index 生成
-        device.cmd_draw(cb, 3, 1, 0, 1);
-        device.cmd_end_rendering(cb);
-        ImageBarrier::color_to_sampled(draw.smaa_nb.ldr_image).record(device, cb);
-
-        // SMAA edge → blend（关闭为 None）
-        if let Some(smaa) = &draw.smaa_edge_blend {
-            smaa.record(device, cb);
-        }
-
-        // neighborhood 混合（终点）：LDR + blend → swapchain（SMAA 关闭时 shader 内直通）
-        draw.smaa_nb.record(device, cb, target.view, extent);
 
         // UI：接在 neighborhood 的同一次渲染里画，按光栅序盖在场景之上
         if let Some(ui) = draw.ui {

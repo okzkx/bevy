@@ -31,7 +31,7 @@ use ash_macros::system;
 use crate::{
     common::syntax::fatal,
     scene::InstanceLedger,
-    render::{FrameDraw, UploadWait},
+    render::{FrameDraw, PostChainDraw, UploadWait},
 };
 
 use super::drawlist::{self, DrawabilitySources, ParityDirty};
@@ -244,11 +244,13 @@ pub(crate) fn draw_frame(
         composite: post.composite.rec(),
         cluster_set: cluster.clusters.frame_set(slot),
         cluster_build: create_cluster_build_draw(cluster, indirect_count),
-        tonemap: post.tonemap.rec(),
-        bloom_params_set: post.bloom.params_set(slot),
-        bloom: bloom_draw(post, slot),
-        smaa_edge_blend,
-        smaa_nb,
+        post: PostChainDraw {
+            tonemap: post.tonemap.rec(),
+            bloom_params_set: post.bloom.params_set(slot),
+            bloom: bloom_draw(post, slot),
+            smaa_edge_blend,
+            smaa_nb,
+        },
         overlay: overlay.pipeline.rec(),
         ui: ui.as_ref().map(|(paint, _)| paint),
         // ui 为 None 时这两个句柄不被读（record_frame 的 UI 段整段跳过）
