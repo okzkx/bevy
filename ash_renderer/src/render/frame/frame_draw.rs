@@ -101,8 +101,6 @@ pub struct FrameDraw<'a> {
     pub hiz: Option<&'a HizPyramid>,
     /// 图形提交对上传队列的跨队列等待（备料时刻快照，见 [`UploadWait`]）。
     pub upload_wait: UploadWait,
-    /// 清屏颜色（线性；SRGB view 写出时编码）。
-    pub clear: [f32; 4],
     /// GPU 帧计时：帧首 reset + 原点，段界打点见 [`TimestampPoint`]；None = 队列族不支持
     /// timestamp。
     pub timer: Option<&'a GpuTimer>,
@@ -395,7 +393,7 @@ impl FramePool {
         record_fullscreen(device, cb, &FullscreenPass {
             view: draw.gbuffer.hdr_view(slot),
             extent,
-            clear: Some(draw.clear),
+            clear: Some(CLEAR_COLOR),
             pipeline: draw.composite,
             sets: &[draw.frame_set, draw.gbuffer.sampled_set(slot), draw.cluster_set, draw.shadow_set],
         });
@@ -592,3 +590,8 @@ impl FrameDraw<'_> {
         Ok((vertex_buffer, index_buffer))
     }
 }
+
+/// 合成 pass 的清屏色（深度为 0 = reverse-Z 远平面的像素当背景）。固定深蓝纯色；
+/// 线性域值——HDR 目标的 SRGB view 在 ROP 写出时才做编码，调色时按线性直觉给值，
+/// 不要拿 sRGB 十六进制直接换算。
+const CLEAR_COLOR: [f32; 4] = [0.02, 0.06, 0.14, 1.0];

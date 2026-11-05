@@ -260,7 +260,6 @@ pub(crate) fn draw_frame(
             .map(|(_, buffers)| *buffers)
             .unwrap_or((vk::Buffer::null(), vk::Buffer::null())),
         upload_wait: UploadWait::snapshot(&gpu.uploader),
-        clear: CLEAR_COLOR,
         frustum_cull: frustum_cull_draw,
         shadow_build: shadow_build_dispatch,
         shadow: shadow_write,
@@ -298,6 +297,3 @@ pub(crate) fn draw_frame(
     }
 }
 
-/// 清屏色：固定深蓝纯色。线性域值——SRGB view 在 ROP 写出时才做编码
-///（render/frame/frame_draw.rs），调色时按线性直觉给值，不要拿 sRGB 十六进制直接换算。
-const CLEAR_COLOR: [f32; 4] = [0.02, 0.06, 0.14, 1.0];
