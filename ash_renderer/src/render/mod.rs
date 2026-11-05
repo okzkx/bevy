@@ -119,4 +119,4 @@ pub use passes::shadow::cascades::{
 pub use self::core::device::memory::buffer::GpuBuffer;
 pub use self::core::device::memory::contract::{align_up, MemoryContract};
 pub use self::core::device::memory::role::BufferRole;
-pub use self::core::device::swapchain::{AcquireOutcome, Swapchain, SWAPCHAIN_COLOR_FORMAT};
+pub use self::core::device::swapchain::{AcquireOutcome, PresentTarget, Swapchain, SWAPCHAIN_COLOR_FORMAT};

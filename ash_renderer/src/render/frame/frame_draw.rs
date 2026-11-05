@@ -35,7 +35,7 @@ use crate::render::passes::visibility::occlusion::{self, OcclusionDraw};
 use crate::render::GBufferTargets;
 use crate::render::passes::overlay::overlay_pipeline::UiPaint;
 use crate::render::stats::perf::{GpuTimer, TimestampPoint};
-use crate::render::{Context, Ticket, INDIRECT_COMMAND_SIZE};
+use crate::render::{Context, PresentTarget, Ticket, INDIRECT_COMMAND_SIZE};
 
 /// indirect draw 的命令步长（`VkDrawIndexedIndirectCommand` 20B，与命令环同一常量）。
 const INDIRECT_COMMAND_STRIDE: u32 = INDIRECT_COMMAND_SIZE as u32;
@@ -166,21 +166,19 @@ impl FramePool {
     /// 录制并提交一帧：进场屏障（颜色+深度+G-buffer）→ compute 段（剔除/遮挡/LOD/indirect 与
     /// shadow 命令组装/光源列表/透明）→ shadow depth → G-buffer → 合成 + 透明层 → Hi-Z 归约 →
     /// Bloom → tonemap → SMAA → neighborhood + UI → 出场屏障 → queue_submit。提交在 GPU 侧等
-    /// image_available 与上传票据，完成时 signal render_finished 与 fence。`render_finished`
-    /// 由调用方按 acquire 的 image index 从 Swapchain 取，不按帧槽轮转。
+    /// image_available 与上传票据，完成时 signal `target.render_finished` 与 fence。`target`
+    /// 四件套（image/view/extent/render_finished）是本次 acquire 的产物，按 image index 取，
+    /// 不按帧槽轮转。
     /// 录制或提交任一步失败 = 渲染链无法继续，按致命错误冒泡。
     pub fn record_frame(
         &self,
         ctx: &Context,
-        render_finished: vk::Semaphore,
-        swapchain_image: vk::Image,
-        swapchain_view: vk::ImageView,
-        extent: vk::Extent2D,
+        target: &PresentTarget,
         draw: &FrameDraw<'_>,
     ) -> Result<(), BevyError> {
         // # Safety:前提由帧循环在调用前建立（draw_frame 先 wait_for_slot 再 acquire_index）
         unsafe {
-            self.record_frame_steps(ctx, render_finished, swapchain_image, swapchain_view, extent, draw)
+            self.record_frame_steps(ctx, target, draw)
         }
         .or_fatal("录制/提交失败，渲染链无法继续")
     }
@@ -200,23 +198,21 @@ impl FramePool {
     /// 机制正本见笔记《整帧录制流程》。
     ///
     /// # Safety
-    /// 本槽 fence 已由 `wait_for_slot` 等完（cb 与槽私有附件无 GPU 在用）；`swapchain_image`/
-    /// `swapchain_view`/`render_finished` 属于同一次 `acquire_index` 的 image index，且 acquire
-    /// 用的是本槽 `image_available`；`draw` 内句柄均按当前 slot 取且录制期间存活。
+    /// 本槽 fence 已由 `wait_for_slot` 等完（cb 与槽私有附件无 GPU 在用）；`target` 四件套
+    /// 属于同一次 `acquire_index` 的 image index，且 acquire 用的是本槽 `image_available`；
+    /// `draw` 内句柄均按当前 slot 取且录制期间存活。
     #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn record_frame_steps(
         &self,
         ctx: &Context,
-        render_finished: vk::Semaphore,
-        swapchain_image: vk::Image,
-        swapchain_view: vk::ImageView,
-        extent: vk::Extent2D,
+        target: &PresentTarget,
         draw: &FrameDraw<'_>,
     ) -> Result<()> {
         let frame = &self.frames[self.current];
         let device = &self.device;
         let slot = self.current;
         let cb = frame.command_buffer;
+        let extent = target.extent;
         let mark = FrameMark { cb, slot, timer: draw.timer };
 
         // ---- ① 进场：cb 开始 → 帧计时 → 三组进场屏障 → 透明排序键预填 ----
@@ -235,7 +231,7 @@ impl FramePool {
         // 提交在 COLOR_ATTACHMENT_OUTPUT 等 image_available，所以 srcStage 也取这里；
         // dst_access 含 COLOR_ATTACHMENT_WRITE，衔接后面的 loadOp 清屏。
         ImageBarrier::discard_to_color(
-            swapchain_image,
+            target.image,
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
         )
         .record(device, cb);
@@ -514,7 +510,7 @@ impl FramePool {
         }
 
         // neighborhood 混合（终点）：LDR + blend → swapchain（SMAA 关闭时 shader 内直通）
-        draw.smaa_nb.record(device, cb, swapchain_view, extent);
+        draw.smaa_nb.record(device, cb, target.view, extent);
 
         // UI：接在 neighborhood 的同一次渲染里画，按光栅序盖在场景之上
         if let Some(ui) = draw.ui {
@@ -527,7 +523,7 @@ impl FramePool {
 
         // ---- ⑨ 出场 + 提交：swapchain → PRESENT_SRC_KHR → 结束 cb → 重置 fence → 提交 ----
         ImageBarrier {
-            image: swapchain_image,
+            image: target.image,
             aspect: vk::ImageAspectFlags::COLOR,
             old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
@@ -565,7 +561,7 @@ impl FramePool {
                 .wait_semaphores(&wait_semaphores)
                 .wait_dst_stage_mask(&wait_dst_stage)
                 .command_buffers(slice::from_ref(&frame.command_buffer))
-                .signal_semaphores(slice::from_ref(&render_finished))
+                .signal_semaphores(slice::from_ref(&target.render_finished))
                 .push_next(&mut timeline_submit)],
             frame.in_flight,
         )?;

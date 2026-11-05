@@ -224,10 +224,8 @@ pub(crate) fn draw_frame(
     // —— 录制 + 提交。上传票据在 GPU 侧等待（ALL_COMMANDS），CPU 不阻塞。
     // 坑：image_available 已被置位、image 已到手，从这里起任何失败都只能致命退出，
     // 不能 warn 后继续（理由见模块文档）。
-    let swapchain_image = gpu.swapchain.images[index as usize];
-    let swapchain_view = gpu.swapchain.views[index as usize];
-    // 本帧的 render_finished 与 image 同号（按 image 分配），录制提交与 present 共用
-    let render_finished = gpu.swapchain.render_finished[index as usize];
+    // 本帧呈现目标与 render_finished 同号（按 image 分配），录制提交与 present 共用
+    let target = gpu.swapchain.target(index);
     let instances = &scene.instance_tables;
     let transparent_frame =
         transparent_draw(transparent, slot, indirect_count)?;
@@ -279,17 +277,14 @@ pub(crate) fn draw_frame(
     gpu.frames
         .record_frame(
             &gpu.ctx,
-            render_finished,
-            swapchain_image,
-            swapchain_view,
-            extent,
+            &target,
             &frame_draw,
         )?;
     watch.record_done();
 
     // —— present：OUT_OF_DATE 已在 present_digest 内标过时（下个帧首重建）；真失败
     // 先暂存——提交已发生，advance 必须照常推进保持帧槽账本一致，收尾后在系统末尾冒泡。
-    let present_failure = gpu.swapchain.present_digest(gpu.ctx.queue, render_finished, index);
+    let present_failure = gpu.swapchain.present_digest(gpu.ctx.queue, target.render_finished, index);
     watch.present_done();
 
     // —— 帧样本入账：只进计量。让路帧（最小化/acquire 过时）不经过此处。
