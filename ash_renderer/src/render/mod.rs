@@ -107,6 +107,7 @@ pub use passes::overlay::ui_vertex_ring::UiVertexRing;
 pub(crate) use passes::overlay::ui_vertex_ring::UiVertex;
 pub use passes::gbuffer::gbuffer_pipeline::GBufferPipeline;
 pub use passes::shadow::shadow_map::{ShadowPipeline, ShadowTargets, ShadowWriteDraw};
+pub use passes::shadow::shadow_frame::{ShadowFrameDraw, ShadowPasses};
 pub use passes::post::smaa::{
     SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
 };

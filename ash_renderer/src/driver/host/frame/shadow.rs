@@ -1,5 +1,5 @@
 //! 级联阴影的帧侧单元：取用束（ShadowInput）、shadow UBO 写入（级联拟合落账）与
-//! shadow depth pass 录制输入准备（shadow_write_draw）。depth-only 管线与
+//! shadow 录制束组装（shadow_frame_draw）。depth-only 管线与
 //! 命令组装 compute 在 [`crate::render::passes::shadow`]。
 
 use bevy::{ecs::system::SystemParam, math::Mat4, prelude::*};
@@ -8,8 +8,9 @@ use crate::{
     common::syntax::{OptionTierExt, ResultTierExt},
     render::{
         cascade_matrices, frustum_planes, pack_shadow_uniforms, InstanceTables, MeshPool,
-        ShadowBuildPass, ShadowCascadeInput, ShadowCascades, ShadowPipeline, ShadowSettings,
-        ShadowTargets, ShadowUniformsData, ShadowWriteDraw, SHADOW_CASCADES, SHADOW_MAP_SIZE,
+        ShadowBuildPass, ShadowCascadeInput, ShadowCascades, ShadowFrameDraw, ShadowPasses,
+        ShadowPipeline, ShadowSettings, ShadowTargets, ShadowUniformsData, ShadowWriteDraw,
+        SHADOW_CASCADES, SHADOW_MAP_SIZE,
     },
 };
 
@@ -73,32 +74,39 @@ impl ShadowInput<'_> {
     }
 }
 
-/// shadow depth pass 输入：在场行 > 0 且开关开才录四级联绘制；关 = composite
-/// 侧 shader 旁路 shadow 采样。
-pub(super) fn shadow_write_draw(
+/// 一帧 shadow 录制束：在场行 > 0 且开关开才录命令组装 + 四级联绘制（同门）；关 =
+/// composite 侧 shader 旁路 shadow 采样，但 set 与深度图仍恒绑恒录屏障。
+pub(super) fn shadow_frame_draw(
     shadow: &ShadowInput,
     instances: &InstanceTables,
     pool: &MeshPool,
     slot: usize,
     count: u32,
-) -> Result<Option<ShadowWriteDraw>, BevyError> {
-    if !(shadow.settings.enabled && count > 0) {
-        return Ok(None);
-    }
+) -> Result<ShadowFrameDraw, BevyError> {
     let targets = &shadow.targets;
-    Ok(Some(ShadowWriteDraw {
-        pipeline: shadow.pipeline.rec(),
-        instance_set: instances.frame_set(slot),
-        shadow_set: targets.frame_set(slot),
-        views: std::array::from_fn(|c| targets.map_view(c)),
+    let passes = if shadow.settings.enabled && count > 0 {
+        Some(ShadowPasses {
+            build: shadow.build_pass.draw(count),
+            write: ShadowWriteDraw {
+                pipeline: shadow.pipeline.rec(),
+                instance_set: instances.frame_set(slot),
+                views: std::array::from_fn(|c| targets.map_view(c)),
+                commands: std::array::from_fn(|c| targets.command(slot, c)),
+                command_count: count,
+                vertex_buffer: pool
+                    .vertex_buffer()
+                    .ok_or_fatal("shadow 输入在场行非空但顶点池缺席——状态矛盾")?,
+                index_buffer: pool
+                    .index_buffer()
+                    .ok_or_fatal("shadow 输入在场行非空但索引池缺席——状态矛盾")?,
+            },
+        })
+    } else {
+        None
+    };
+    Ok(ShadowFrameDraw {
+        passes,
+        set: targets.frame_set(slot),
         images: std::array::from_fn(|c| targets.map_image(c)),
-        commands: std::array::from_fn(|c| targets.command(slot, c)),
-        command_count: count,
-        vertex_buffer: pool
-            .vertex_buffer()
-            .ok_or_fatal("shadow 输入在场行非空但顶点池缺席——状态矛盾")?,
-        index_buffer: pool
-            .index_buffer()
-            .ok_or_fatal("shadow 输入在场行非空但索引池缺席——状态矛盾")?,
-    }))
+    })
 }

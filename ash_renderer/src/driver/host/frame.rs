@@ -64,7 +64,7 @@ use self::overlay::create_overlay_draw;
 use self::post::{bloom_draw, smaa_draws};
 use self::resize_gate::rebuild_size_dependent;
 use self::scene::{scene_world_aabb, FrameView};
-use self::shadow::shadow_write_draw;
+use self::shadow::shadow_frame_draw;
 use self::stopwatch::FrameStopwatch;
 use self::transparent::transparent_draw;
 
@@ -211,11 +211,6 @@ pub(crate) fn draw_frame(
         &mut logs.indirect_first_submit,
     )?;
 
-    // shadow 命令组装：读 shadow 标记 + LOD 档位环，逐在场行 × 每 cascade
-    // 组装命令（无遮挡参与、LOD 再粗一档）。空场/关闭 = None（shadow pass 整段跳过）。
-    let shadow_build_dispatch = (shadow.settings.enabled && indirect_count > 0)
-        .then(|| shadow.build_pass.draw(indirect_count));
-
     // —— overlay 绘制：图集整传（可能多一张 transfer 票据，本帧 upload_wait 快照必须在此后取，
     // 见 UploadWait::snapshot）→ 镶嵌 → 顶点环写入。UI 数据缺席 = None（record_frame 的
     // UI 段整段跳过）。
@@ -229,7 +224,9 @@ pub(crate) fn draw_frame(
     let instances = &scene.instance_tables;
     let transparent_frame =
         transparent_draw(transparent, slot, indirect_count)?;
-    let shadow_write = shadow_write_draw(shadow, instances, &scene.pool, slot, indirect_count)?;
+    // shadow：命令组装（读 shadow 标记 + LOD 档位环，逐在场行 × 每 cascade，无遮挡参与、
+    // LOD 再粗一档）与 depth pass 同门；空场/关闭整段跳过，set 与深度图屏障恒录。
+    let shadow_frame = shadow_frame_draw(shadow, instances, &scene.pool, slot, indirect_count)?;
     let (smaa_edge_blend, smaa_nb) = smaa_draws(post, slot);
 
     let frame_draw = FrameDraw {
@@ -261,10 +258,7 @@ pub(crate) fn draw_frame(
             .unwrap_or((vk::Buffer::null(), vk::Buffer::null())),
         upload_wait: UploadWait::snapshot(&gpu.uploader),
         frustum_cull: frustum_cull_draw,
-        shadow_build: shadow_build_dispatch,
-        shadow: shadow_write,
-        shadow_set: shadow.targets.frame_set(slot),
-        shadow_images: std::array::from_fn(|c| shadow.targets.map_image(c)),
+        shadow: shadow_frame,
         indirect: indirect_dispatch,
         occlusion: occl_dispatch,
         lod: lod_dispatch,

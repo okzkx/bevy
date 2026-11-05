@@ -14,7 +14,6 @@ use bevy::log::info;
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::device::memory::buffer::GpuBuffer;
-use crate::render::core::record::barrier::ImageBarrier;
 use crate::render::core::record::graphics::{
     bind_graphics, bind_vertex_index, full_rect, reverse_z_depth_attachment, set_viewport_scissor,
     PipelineRef,
@@ -67,10 +66,7 @@ pub(crate) static SHADOW_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
 pub struct ShadowWriteDraw {
     pub pipeline: PipelineRef,
     pub instance_set: DescSet,
-    pub shadow_set: DescSet,
     pub views: [vk::ImageView; SHADOW_CASCADES],
-    /// 深度图本体（布局屏障用——view 之外屏障吃 image）。
-    pub images: [vk::Image; SHADOW_CASCADES],
     pub commands: [vk::Buffer; SHADOW_CASCADES],
     /// 顶点/索引池（indirect 命令引脚定位到池内——与主管线同一池契约）。
     pub vertex_buffer: vk::Buffer,
@@ -335,29 +331,13 @@ impl ShadowPipeline {
     }
 }
 
-/// 录制 shadow depth 段（G-buffer 之前）：进场屏障 → 每个级联一次动态渲染 + 一次
-/// indirect draw（reverse-Z，clear 0）→ 出场屏障。进出屏障每帧都录，`shadow` 为
-/// None（pass 跳过）也一样：合成 pass 的 shadow 描述符总是绑定，布局必须始终是
-/// SHADER_READ_ONLY。UNDEFINED 作 oldLayout 从任何状态都合法（每帧 CLEAR 重写）。
-pub(crate) fn record(
-    device: &Device,
-    cb: vk::CommandBuffer,
-    images: &[vk::Image],
-    shadow: Option<&ShadowWriteDraw>,
-) {
-    unsafe {
-        // 进场：→ DEPTH_ATTACHMENT。深度图跨帧共享（不分帧槽）：等上一帧的片元
-        // 采样读完再覆写（WAR）
-        for &shadow_image in images {
-            ImageBarrier::discard_to_depth_attachment(
-                shadow_image,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-            )
-            .record(device, cb);
-        }
-        if let Some(shadow) = shadow {
+impl ShadowWriteDraw {
+    /// 逐级联一次动态渲染 + 一次 indirect draw（reverse-Z，clear 0）。布局屏障由调用方
+    /// [`ShadowFrameDraw::record_depth`](super::shadow_frame::ShadowFrameDraw::record_depth) 恒录。
+    pub(crate) fn record(&self, device: &Device, cb: vk::CommandBuffer, shadow_set: DescSet) {
+        unsafe {
             let map_extent = vk::Extent2D { width: SHADOW_MAP_SIZE, height: SHADOW_MAP_SIZE };
-            for (c, map_view) in shadow.views.iter().enumerate() {
+            for (c, map_view) in self.views.iter().enumerate() {
                 let shadow_depth_attachment = reverse_z_depth_attachment(*map_view);
                 device.cmd_begin_rendering(
                     cb,
@@ -366,32 +346,28 @@ pub(crate) fn record(
                         .layer_count(1)
                         .depth_attachment(&shadow_depth_attachment),
                 );
-                bind_graphics(device, cb, &shadow.pipeline, &[shadow.instance_set, shadow.shadow_set]);
-                bind_vertex_index(device, cb, shadow.vertex_buffer, shadow.index_buffer);
+                bind_graphics(device, cb, &self.pipeline, &[self.instance_set, shadow_set]);
+                bind_vertex_index(device, cb, self.vertex_buffer, self.index_buffer);
                 set_viewport_scissor(device, cb, map_extent);
                 // 4B push = 级联索引
                 let mut cascade_push = [0u8; 4];
                 put_u32(&mut cascade_push, 0, c as u32);
                 device.cmd_push_constants(
                     cb,
-                    shadow.pipeline.layout,
+                    self.pipeline.layout,
                     vk::ShaderStageFlags::VERTEX,
                     0,
                     &cascade_push,
                 );
                 device.cmd_draw_indexed_indirect(
                     cb,
-                    shadow.commands[c],
+                    self.commands[c],
                     0,
-                    shadow.command_count,
+                    self.command_count,
                     INDIRECT_COMMAND_SIZE as u32,
                 );
                 device.cmd_end_rendering(cb);
             }
-        }
-        // 出场：→ SHADER_READ_ONLY 供合成采样（同样每帧都录）
-        for &shadow_image in images {
-            ImageBarrier::depth_attachment_to_sampled(shadow_image).record(device, cb);
         }
     }
 }

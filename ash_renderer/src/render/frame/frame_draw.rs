@@ -23,8 +23,7 @@ use crate::render::core::record::graphics::{
 };
 use crate::render::core::binding::set_layout::DescSet;
 use crate::render::passes::lighting::cluster::{self, ClusterBuildDraw};
-use crate::render::passes::shadow::shadow_build::{self, ShadowBuildDraw};
-use crate::render::passes::shadow::shadow_map::{self, ShadowWriteDraw};
+use crate::render::passes::shadow::shadow_frame::ShadowFrameDraw;
 use crate::render::passes::transparent::TransparentFrame;
 use crate::render::passes::visibility::cull::{self, CullDraw};
 use crate::render::passes::visibility::hiz::HizPyramid;
@@ -86,14 +85,8 @@ pub struct FrameDraw<'a> {
     pub occlusion: Option<OcclusionDraw>,
     /// GPU LOD 选档（关闭/空场为 None；关闭时 host 已把档位环填 0）。屏障在 lod::record 内。
     pub lod: Option<LodDraw>,
-    /// shadow 命令组装（关闭/空场为 None）。屏障在 shadow_build::record 内。
-    pub shadow_build: Option<ShadowBuildDraw>,
-    /// shadow depth pass（关闭/空场为 None）。
-    pub shadow: Option<ShadowWriteDraw>,
-    /// shadow 描述符集（合成 pass 总是绑；关闭时 shader 内不采样）。
-    pub shadow_set: DescSet,
-    /// 级联深度图。shadow 描述符总是绑定，所以每帧都录布局屏障，哪怕 pass 跳过。
-    pub shadow_images: [vk::Image; 4],
+    /// shadow：命令组装 + depth pass（同门 Option）与恒绑 set/深度图。
+    pub shadow: ShadowFrameDraw,
     /// 透明层：收集/排序/组装 dispatch + 透明绘制（空场为 None）。
     pub transparent: Option<TransparentFrame>,
     /// Hi-Z 金字塔归约，渲染后重写本帧槽；屏障在 hiz::record_reduction 内。
@@ -224,7 +217,7 @@ impl FramePool {
         // ---- ② compute 前置：剔除 → 遮挡 → LOD → indirect 组装 → shadow 组装 → 光源列表 → 透明层 ----
         // 顺序即依赖，各步之间的屏障都在各自的 record 内。
         if let Some(frustum_cull) = &draw.frustum_cull {
-            cull::record(device, cb, draw.instance_set, draw.shadow_set, frustum_cull);
+            cull::record(device, cb, draw.instance_set, draw.shadow.set, frustum_cull);
         }
 
         // 读视锥标记与两帧前的 Hi-Z 金字塔
@@ -240,9 +233,7 @@ impl FramePool {
             indirect::record(device, cb, draw.instance_set, indirect);
         }
 
-        if let Some(sb) = &draw.shadow_build {
-            shadow_build::record(device, cb, draw.instance_set, draw.shadow_set, sb);
-        }
+        draw.shadow.record_build(device, cb, draw.instance_set);
 
         // 光源列表必须在合成和透明前向之前算好
         if let Some(build) = &draw.cluster_build {
@@ -267,7 +258,7 @@ impl FramePool {
 
         // ---- ③ shadow depth：进场 → 逐级联 indirect draw → 出场 ----
         // 进出屏障每帧都录（合成 pass 的 shadow 描述符总是绑定）。
-        shadow_map::record(device, cb, &draw.shadow_images, draw.shadow.as_ref());
+        draw.shadow.record_depth(device, cb);
 
         mark.mark(TimestampPoint::Shadow);
 
@@ -338,7 +329,7 @@ impl FramePool {
             extent,
             clear: Some(CLEAR_COLOR),
             pipeline: draw.composite,
-            sets: &[draw.frame_set, draw.gbuffer.sampled_set(slot), draw.cluster_set, draw.shadow_set],
+            sets: &[draw.frame_set, draw.gbuffer.sampled_set(slot), draw.cluster_set, draw.shadow.set],
         }
         .record(device, cb);
 

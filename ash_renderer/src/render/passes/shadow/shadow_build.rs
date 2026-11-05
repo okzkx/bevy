@@ -66,21 +66,23 @@ impl ShadowBuildPass {
     }
 }
 
-/// 录制一帧 shadow 命令组装 dispatch。交接屏障罩住 compute 写命令环 → DRAW_INDIRECT
-/// 读（shadow 命令环是独立 buffer，要单独收口）；标记读依赖由 cull::record 的屏障承担。
-pub(crate) fn record(
-    device: &ash::Device,
-    command_buffer: vk::CommandBuffer,
-    instance_set: DescSet,
-    shadow_set: DescSet,
-    build: &ShadowBuildDraw,
-) {
-    build.pass.record(
-        device,
-        command_buffer,
-        &[instance_set, shadow_set],
-        &build.push,
-        build.groups,
-        Handoff::IndirectCommandRead,
-    );
+impl ShadowBuildDraw {
+    /// 录制一帧 shadow 命令组装 dispatch。交接屏障罩住 compute 写命令环 → DRAW_INDIRECT
+    /// 读（shadow 命令环是独立 buffer，要单独收口）；标记读依赖由 cull::record 的屏障承担。
+    pub(crate) fn record(
+        &self,
+        device: &ash::Device,
+        command_buffer: vk::CommandBuffer,
+        instance_set: DescSet,
+        shadow_set: DescSet,
+    ) {
+        self.pass.record(
+            device,
+            command_buffer,
+            &[instance_set, shadow_set],
+            &self.push,
+            self.groups,
+            Handoff::IndirectCommandRead,
+        );
+    }
 }
