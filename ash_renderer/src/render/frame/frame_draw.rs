@@ -34,7 +34,7 @@ use crate::render::passes::post::post_chain::PostChainDraw;
 use crate::render::GBufferTargets;
 use crate::render::passes::overlay::overlay_pipeline::UiDraw;
 use crate::render::stats::perf::{FrameMark, GpuTimer, TimestampPoint};
-use crate::render::{Context, PresentTarget, INDIRECT_COMMAND_SIZE};
+use crate::render::{PresentTarget, INDIRECT_COMMAND_SIZE};
 
 /// indirect draw 的命令步长（`VkDrawIndexedIndirectCommand` 20B，与命令环同一常量）。
 const INDIRECT_COMMAND_STRIDE: u32 = INDIRECT_COMMAND_SIZE as u32;
@@ -97,13 +97,12 @@ impl FramePool {
     /// 录制或提交任一步失败 = 渲染链无法继续，按致命错误冒泡。
     pub fn record_frame(
         &self,
-        ctx: &Context,
         target: &PresentTarget,
         draw: &FrameDraw<'_>,
     ) -> Result<(), BevyError> {
         // # Safety:前提由帧循环在调用前建立（draw_frame 先 wait_for_slot 再 acquire_index）
         unsafe {
-            self.record_frame_steps(ctx, target, draw)
+            self.record_frame_steps(target, draw)
         }
         .or_fatal("录制/提交失败，渲染链无法继续")
     }
@@ -130,7 +129,6 @@ impl FramePool {
     #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn record_frame_steps(
         &self,
-        ctx: &Context,
         target: &PresentTarget,
         draw: &FrameDraw<'_>,
     ) -> Result<()> {
@@ -460,7 +458,7 @@ impl FramePool {
         let mut timeline_submit =
             vk::TimelineSemaphoreSubmitInfo::default().wait_semaphore_values(&wait_values);
         device.queue_submit(
-            ctx.queue,
+            self.queue,
             &[vk::SubmitInfo::default()
                 .wait_semaphores(&wait_semaphores)
                 .wait_dst_stage_mask(&wait_dst_stage)

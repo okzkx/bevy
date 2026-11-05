@@ -268,7 +268,6 @@ pub(crate) fn draw_frame(
     };
     gpu.frames
         .record_frame(
-            &gpu.ctx,
             &target,
             &frame_draw,
         )?;
