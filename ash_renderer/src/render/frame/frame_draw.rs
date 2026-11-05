@@ -16,7 +16,7 @@ use bevy::ecs::error::BevyError;
 use crate::common::error::{Result, VulkanError};
 use crate::common::syntax::ResultTierExt;
 use crate::render::core::record::barrier::{ImageBarrier, MemoryBarrierDesc};
-use crate::render::core::record::fullscreen::{record_fullscreen, FullscreenPass};
+use crate::render::core::record::fullscreen::FullscreenPass;
 use crate::render::core::record::graphics::{
     bind_graphics, bind_vertex_index, color_attachment, full_rect, load_color_attachment,
     load_depth_attachment, reverse_z_depth_attachment, set_viewport_scissor, PipelineRef,
@@ -390,13 +390,14 @@ impl FramePool {
         // 合成 pass（全屏，无深度附件）：读 G-buffer 算光照写 HDR 目标；depth==0（reverse-Z
         // 远平面）的像素当背景。set0 帧 UBO（与场景管线 set1 同一 layout）、set1 G-buffer 采样集、
         // set2 光源分簇、set3 shadow。
-        record_fullscreen(device, cb, &FullscreenPass {
+        FullscreenPass {
             view: draw.gbuffer.hdr_view(slot),
             extent,
             clear: Some(CLEAR_COLOR),
             pipeline: draw.composite,
             sets: &[draw.frame_set, draw.gbuffer.sampled_set(slot), draw.cluster_set, draw.shadow_set],
-        });
+        }
+        .record(device, cb);
 
         // 透明前向层：合成之后在同一 HDR 目标上 LOAD + 混合。两次动态渲染之间没有光栅
         // 序保证，合成写 HDR → 透明混合读写必须显式内存屏障；深度在本段转回附件（只测
