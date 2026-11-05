@@ -26,10 +26,9 @@ use crate::render::passes::lighting::cluster::{self, ClusterBuildDraw};
 use crate::render::passes::shadow::shadow_frame::ShadowFrameDraw;
 use crate::render::passes::transparent::TransparentFrame;
 use crate::render::passes::visibility::cull::{self, CullDraw};
-use crate::render::passes::visibility::hiz::HizPyramid;
+use crate::render::passes::visibility::hiz_frame::HizFrameDraw;
 use crate::render::passes::visibility::indirect::{self, IndirectDraw};
 use crate::render::passes::visibility::lod::{self, LodDraw};
-use crate::render::passes::visibility::occlusion::{self, OcclusionDraw};
 use crate::render::passes::post::post_chain::PostChainDraw;
 use crate::render::GBufferTargets;
 use crate::render::passes::overlay::overlay_pipeline::UiDraw;
@@ -70,16 +69,14 @@ pub struct FrameDraw<'a> {
     pub frustum_cull: Option<CullDraw>,
     /// indirect 命令组装（空场为 None）。命令写 → 绘制读的屏障在 indirect::record 内。
     pub indirect: Option<IndirectDraw>,
-    /// Hi-Z 遮挡测试（关闭/降级/空场为 None）。屏障在 occlusion::record 内。
-    pub occlusion: Option<OcclusionDraw>,
     /// GPU LOD 选档（关闭/空场为 None；关闭时 host 已把档位环填 0）。屏障在 lod::record 内。
     pub lod: Option<LodDraw>,
     /// shadow：命令组装 + depth pass（同门 Option）与恒绑 set/深度图。
     pub shadow: ShadowFrameDraw,
     /// 透明层：收集/排序/组装 dispatch + 透明绘制（空场为 None）。
     pub transparent: Option<TransparentFrame>,
-    /// Hi-Z 金字塔归约，渲染后重写本帧槽；屏障在 hiz::record_reduction 内。
-    pub hiz: Option<&'a HizPyramid>,
+    /// Hi-Z：② 遮挡测试（门控 Option）+ ⑥ 金字塔归约（每帧都录）。
+    pub hiz: HizFrameDraw<'a>,
     /// 图形提交对上传队列的跨队列等待（备料时刻快照，见 [`UploadWait`]）。
     pub upload_wait: UploadWait,
     /// GPU 帧计时：帧首 reset + 原点，段界打点见 [`TimestampPoint`]；None = 队列族不支持
@@ -209,9 +206,7 @@ impl FramePool {
         }
 
         // 读视锥标记与两帧前的 Hi-Z 金字塔
-        if let Some(occlusion) = &draw.occlusion {
-            occlusion::record(device, cb, draw.instance_set, occlusion);
-        }
+        draw.hiz.record_occlusion(device, cb, draw.instance_set);
 
         if let Some(lod) = &draw.lod {
             lod::record(device, cb, draw.instance_set, lod);
@@ -388,9 +383,7 @@ impl FramePool {
         }
 
         // Hi-Z 归约：逐级重写本帧槽金字塔（屏障在 record_reduction 内）
-        if let Some(hiz) = draw.hiz {
-            hiz.record_reduction(device, cb, slot);
-        }
+        draw.hiz.record_reduction(device, cb, slot);
 
         mark.mark(TimestampPoint::HiZ);
 

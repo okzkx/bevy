@@ -39,6 +39,7 @@ pub use passes::visibility::cull::{
 pub use passes::visibility::hiz::{
     occluded_reverse_z, occlusion_mip_level, reduce_tile_reverse_z, HizCensus, HizPyramid,
 };
+pub use passes::visibility::hiz_frame::HizFrameDraw;
 // 诊断回读助手：BRP 读数方法族（remote/）与 render 内部共用，crate 级重出口。
 pub(crate) use self::core::device::readback::readback_buffer;
 pub use passes::visibility::indirect::{IndirectDraw, IndirectPass, IndirectStats};

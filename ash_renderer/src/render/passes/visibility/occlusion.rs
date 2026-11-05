@@ -182,7 +182,7 @@ impl OcclusionPass {
         Ok(Self { pipeline: ComputePipeline::new(ctx, &OCCLUSION_PIPELINE, layouts)? })
     }
 
-    /// 组一帧 dispatch 输入。draw_frame 消费，录制走 [`record`]。
+    /// 组一帧 dispatch 输入。draw_frame 消费，录制走 [`OcclusionDraw::record`]。
     #[must_use]
     pub fn draw(
         &self,
@@ -200,22 +200,19 @@ impl OcclusionPass {
     }
 }
 
-/// 录制一帧遮挡 dispatch（视锥剔除之后、build_indirect 之前）。交接屏障罩住合并标记
-/// 写 → build_indirect 读；cull::record 的屏障只覆盖视锥段，本段的写要自己收口。
-pub(crate) fn record(
-    device: &ash::Device,
-    command_buffer: vk::CommandBuffer,
-    instance_set: DescSet,
-    occlusion: &OcclusionDraw,
-) {
-    occlusion.pass.record(
-        device,
-        command_buffer,
-        &[instance_set, occlusion.hiz_set],
-        &occlusion.push,
-        occlusion.groups,
-        Handoff::VertexComputeRead,
-    );
+impl OcclusionDraw {
+    /// 录制一帧遮挡 dispatch（视锥剔除之后、build_indirect 之前）。交接屏障罩住合并标记
+    /// 写 → build_indirect 读；cull::record 的屏障只覆盖视锥段，本段的写要自己收口。
+    pub(crate) fn record(&self, device: &ash::Device, command_buffer: vk::CommandBuffer, instance_set: DescSet) {
+        self.pass.record(
+            device,
+            command_buffer,
+            &[instance_set, self.hiz_set],
+            &self.push,
+            self.groups,
+            Handoff::VertexComputeRead,
+        );
+    }
 }
 
 #[cfg(test)]

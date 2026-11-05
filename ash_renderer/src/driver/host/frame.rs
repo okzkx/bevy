@@ -29,7 +29,7 @@ use ash_macros::system;
 use crate::{
     common::syntax::fatal,
     scene::InstanceLedger,
-    render::{FrameDraw, PostChainDraw, UiDraw, UploadWait},
+    render::{FrameDraw, HizFrameDraw, PostChainDraw, UiDraw, UploadWait},
 };
 
 use super::drawlist::{self, DrawabilitySources, ParityDirty};
@@ -259,11 +259,9 @@ pub(crate) fn draw_frame(
         frustum_cull: frustum_cull_draw,
         shadow: shadow_frame,
         indirect: indirect_dispatch,
-        occlusion: occl_dispatch,
         lod: lod_dispatch,
         transparent: transparent_frame,
-        // 归约链恒录，warmup 走账与录制一一对应（录制后 note_reduced）
-        hiz: Some(&*occlusion.hiz),
+        hiz: HizFrameDraw { occlusion: occl_dispatch, pyramid: &occlusion.hiz },
         timer: timing.timer.enabled.then_some(&*timing.timer),
     };
     gpu.frames
