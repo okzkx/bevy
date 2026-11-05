@@ -102,7 +102,7 @@ pub use self::core::target::depth::DEPTH_FORMAT;
 pub use frame::frame_pool::{Frame, FramePool, UploadWait};
 pub use frame::frame_draw::FrameDraw;
 pub use passes::post::post_chain::PostChainDraw;
-pub use passes::overlay::overlay_pipeline::{OverlayPipeline, UiDrawCall, UiPaint};
+pub use passes::overlay::overlay_pipeline::{OverlayPipeline, UiDraw, UiDrawCall, UiPaint};
 pub use passes::overlay::atlas_gpu::AtlasGpu;
 pub use passes::overlay::ui_vertex_ring::UiVertexRing;
 pub(crate) use passes::overlay::ui_vertex_ring::UiVertex;

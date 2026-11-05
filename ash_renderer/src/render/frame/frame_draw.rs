@@ -32,7 +32,7 @@ use crate::render::passes::visibility::lod::{self, LodDraw};
 use crate::render::passes::visibility::occlusion::{self, OcclusionDraw};
 use crate::render::passes::post::post_chain::PostChainDraw;
 use crate::render::GBufferTargets;
-use crate::render::passes::overlay::overlay_pipeline::UiPaint;
+use crate::render::passes::overlay::overlay_pipeline::UiDraw;
 use crate::render::stats::perf::{FrameMark, GpuTimer, TimestampPoint};
 use crate::render::{Context, PresentTarget, INDIRECT_COMMAND_SIZE};
 
@@ -64,12 +64,8 @@ pub struct FrameDraw<'a> {
     pub cluster_build: Option<ClusterBuildDraw>,
     /// ⑦⑧ 后链束：Bloom → tonemap → SMAA → neighborhood（全部来自 `post`）。
     pub post: PostChainDraw,
-    /// overlay 管线。自有 layout（只有 set0），切到它之后 set0 要重绑。
-    pub overlay: PipelineRef,
-    /// 本帧 UI 绘制产物（无 UI 为 None）。
-    pub ui: Option<&'a UiPaint>,
-    /// 本帧槽 UI 顶点/索引 buffer（`ui` 为 Some 时本帧已写入）。
-    pub ui_buffers: (vk::Buffer, vk::Buffer),
+    /// 本帧 UI 绘制束（无 UI 为 None）：overlay 线 + 绘制产物 + 顶点/索引环 buffer。
+    pub ui: Option<UiDraw<'a>>,
     /// 视锥剔除与阴影视锥标记（两者都关闭或空场为 None）。
     pub frustum_cull: Option<CullDraw>,
     /// indirect 命令组装（空场为 None）。命令写 → 绘制读的屏障在 indirect::record 内。
@@ -412,9 +408,9 @@ impl FramePool {
             extent,
         );
 
-        // UI：接在 neighborhood 的同一次渲染里画，按光栅序盖在场景之上
-        if let Some(ui) = draw.ui {
-            ui.record(device, cb, draw.overlay, draw.bindless_set, extent, draw.ui_buffers);
+        // UI
+        if let Some(ui) = &draw.ui {
+            ui.record(device, cb, draw.bindless_set, extent);
         }
 
         device.cmd_end_rendering(cb);

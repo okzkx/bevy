@@ -163,6 +163,33 @@ impl UiPaint {
     }
 }
 
+/// ⑧ UI 绘制束：overlay 管线 + 本帧 UI 绘制产物 + 顶点/索引环 buffer（同生同灭，
+/// 无 UI 整段跳过）。
+pub struct UiDraw<'a> {
+    /// overlay 管线。自有 layout（只有 set0），切到它之后 set0 要重绑。
+    pub overlay: PipelineRef,
+    /// 本帧 UI 绘制产物。
+    pub paint: &'a UiPaint,
+    /// 本帧槽 UI 顶点/索引 buffer（本帧已写入）。
+    pub buffers: (vk::Buffer, vk::Buffer),
+}
+
+impl UiDraw<'_> {
+    /// 录制 UI 绘制，接在 neighborhood 的同一次渲染里（渲染实例由调用方开，按光栅序
+    /// 盖在场景之上）。描述符绑定跟随 overlay 的 pipeline layout，set0 重绑在
+    /// [`UiPaint::record`] 内。
+    pub fn record(
+        &self,
+        device: &Device,
+        cb: vk::CommandBuffer,
+        bindless_set: DescSet,
+        extent: vk::Extent2D,
+    ) {
+        self.paint
+            .record(device, cb, self.overlay, bindless_set, extent, self.buffers);
+    }
+}
+
 /// overlay 图形管线 + pipeline layout（只声明 set0 + 16B push）。
 #[derive(bevy::prelude::Resource)]
 pub struct OverlayPipeline {

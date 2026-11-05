@@ -24,14 +24,12 @@ use bevy::{
     prelude::*,
 };
 
-use ash::vk;
-
 use ash_macros::system;
 
 use crate::{
     common::syntax::fatal,
     scene::InstanceLedger,
-    render::{FrameDraw, PostChainDraw, UploadWait},
+    render::{FrameDraw, PostChainDraw, UiDraw, UploadWait},
 };
 
 use super::drawlist::{self, DrawabilitySources, ParityDirty};
@@ -251,13 +249,12 @@ pub(crate) fn draw_frame(
             smaa_edge_blend,
             smaa_nb,
         },
-        overlay: overlay.pipeline.rec(),
-        ui: ui.as_ref().map(|(paint, _)| paint),
-        // ui 为 None 时这两个句柄不被读（record_frame 的 UI 段整段跳过）
-        ui_buffers: ui
-            .as_ref()
-            .map(|(_, buffers)| *buffers)
-            .unwrap_or((vk::Buffer::null(), vk::Buffer::null())),
+        // 图集整传 → 镶嵌 → 顶点环写入后才有 UI 产物；无 UI 跳过
+        ui: ui.as_ref().map(|(paint, buffers)| UiDraw {
+            overlay: overlay.pipeline.rec(),
+            paint,
+            buffers: *buffers,
+        }),
         upload_wait: UploadWait::snapshot(&gpu.uploader),
         frustum_cull: frustum_cull_draw,
         shadow: shadow_frame,
