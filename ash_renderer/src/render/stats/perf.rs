@@ -367,6 +367,22 @@ impl Drop for GpuTimer {
     }
 }
 
+/// 段界打点器：cb 与帧槽固定，只差打哪个点。队列族不支持 timestamp（`timer` 为
+/// None）时静默跳过。
+pub(crate) struct FrameMark<'a> {
+    pub(crate) cb: vk::CommandBuffer,
+    pub(crate) slot: usize,
+    pub(crate) timer: Option<&'a GpuTimer>,
+}
+
+impl FrameMark<'_> {
+    pub(crate) fn mark(&self, point: TimestampPoint) {
+        if let Some(timer) = self.timer {
+            timer.mark(self.cb, self.slot, point);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::wrapping_timestamp_delta;

@@ -99,8 +99,8 @@ pub use passes::gbuffer::gbuffer_targets::{
     GBufferTargets, ALBEDO_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
 };
 pub use self::core::target::depth::DEPTH_FORMAT;
-pub use frame::frame_pool::{Frame, FramePool};
-pub use frame::frame_draw::{FrameDraw, UploadWait};
+pub use frame::frame_pool::{Frame, FramePool, UploadWait};
+pub use frame::frame_draw::FrameDraw;
 pub use passes::overlay::overlay_pipeline::{OverlayPipeline, UiDrawCall, UiPaint};
 pub use passes::overlay::atlas_gpu::AtlasGpu;
 pub use passes::overlay::ui_vertex_ring::UiVertexRing;

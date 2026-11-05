@@ -8,7 +8,7 @@
 
 use std::slice;
 
-use super::frame_pool::FramePool;
+use super::frame_pool::{FramePool, SubmitWait, UploadWait};
 
 use ash::vk;
 use bevy::ecs::error::BevyError;
@@ -22,7 +22,6 @@ use crate::render::core::record::graphics::{
     load_depth_attachment, reverse_z_depth_attachment, set_viewport_scissor, PipelineRef,
 };
 use crate::render::core::binding::set_layout::DescSet;
-use crate::render::core::device::transfer::Uploader;
 use crate::render::passes::lighting::cluster::{self, ClusterBuildDraw};
 use crate::render::passes::shadow::shadow_build::{self, ShadowBuildDraw};
 use crate::render::passes::shadow::shadow_map::{self, ShadowWriteDraw};
@@ -34,8 +33,8 @@ use crate::render::passes::visibility::lod::{self, LodDraw};
 use crate::render::passes::visibility::occlusion::{self, OcclusionDraw};
 use crate::render::GBufferTargets;
 use crate::render::passes::overlay::overlay_pipeline::UiPaint;
-use crate::render::stats::perf::{GpuTimer, TimestampPoint};
-use crate::render::{Context, PresentTarget, Ticket, INDIRECT_COMMAND_SIZE};
+use crate::render::stats::perf::{FrameMark, GpuTimer, TimestampPoint};
+use crate::render::{Context, PresentTarget, INDIRECT_COMMAND_SIZE};
 
 /// indirect draw 的命令步长（`VkDrawIndexedIndirectCommand` 20B，与命令环同一常量）。
 const INDIRECT_COMMAND_STRIDE: u32 = INDIRECT_COMMAND_SIZE as u32;
@@ -104,62 +103,6 @@ pub struct FrameDraw<'a> {
     /// GPU 帧计时：帧首 reset + 原点，段界打点见 [`TimestampPoint`]；None = 队列族不支持
     /// timestamp。
     pub timer: Option<&'a GpuTimer>,
-}
-
-/// 一项提交等待：等哪个信号量、从哪个阶段前卡、timeline 等到几号。
-/// binary 信号量 value 填 0 占位（TimelineSemaphoreSubmitInfo 要求与 wait 信号量同长，binary 忽略该值）。
-struct SubmitWait {
-    semaphore: vk::Semaphore,
-    dst_stage: vk::PipelineStageFlags,
-    value: u64,
-}
-
-/// 图形提交对上传队列的跨队列等待：备料时刻的票据快照 + 票据信号量。
-/// 快照前的所有上传都归本帧等（GPU 侧 ALL_COMMANDS 等待，CPU 不阻塞）；这个等待同时保证
-/// transfer 写的跨队列可见性（池/贴图 CONCURRENT 共享，没有所有权屏障）。
-/// fallback 白图在初始化时就上传了，正常帧票据非 0；0 只在启动后从未上传时出现。
-#[derive(Clone, Copy)]
-pub struct UploadWait {
-    /// 备料时刻已发出的最高票据（0 = 从未上传）。
-    ticket: Ticket,
-    /// 上传队列的 timeline 票据信号量（全工程唯一，每帧引用同一个）。
-    semaphore: vk::Semaphore,
-}
-
-impl UploadWait {
-    /// 备料点取快照。时序契约：必须在 overlay 图集整传之后取——图集批可能多发一张
-    /// 票据，取早了本帧 UI 贴图不在等待值里，图形队列读到未完成的 transfer 写。
-    pub fn snapshot(uploader: &Uploader) -> Self {
-        Self {
-            ticket: uploader.last_issued_ticket(),
-            semaphore: uploader.ticket_semaphore(),
-        }
-    }
-
-    /// 本帧对上传队列的等待项；票 0 = 从未上传，无此项（不能等 0 值，VUID-03242）。
-    fn entry(self) -> Option<SubmitWait> {
-        (self.ticket != 0).then_some(SubmitWait {
-            semaphore: self.semaphore,
-            dst_stage: vk::PipelineStageFlags::ALL_COMMANDS,
-            value: self.ticket,
-        })
-    }
-}
-
-/// 段界打点器：cb 与帧槽固定，只差打哪个点。队列族不支持 timestamp（`timer` 为
-/// None）时静默跳过。
-struct FrameMark<'a> {
-    cb: vk::CommandBuffer,
-    slot: usize,
-    timer: Option<&'a GpuTimer>,
-}
-
-impl FrameMark<'_> {
-    fn mark(&self, point: TimestampPoint) {
-        if let Some(timer) = self.timer {
-            timer.mark(self.cb, self.slot, point);
-        }
-    }
 }
 
 impl FramePool {
