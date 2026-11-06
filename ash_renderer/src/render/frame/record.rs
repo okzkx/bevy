@@ -256,7 +256,8 @@ impl FramePool {
         FullscreenPass {
             view: res.gbuffer.hdr_view(slot),
             extent,
-            clear: Some(CLEAR_COLOR),
+            // 清屏色按线性域给值——HDR 目标的 SRGB view 在 ROP 写出时才编码，别拿 sRGB 十六进制直接换算。
+            clear: Some([0.02, 0.06, 0.14, 1.0]),
             pipeline: res.composite,
             sets: &[res.frame_set, res.gbuffer.sampled_set(slot), feature.cluster.set, feature.shadow.set],
         }
@@ -409,9 +410,3 @@ impl FramePool {
         Ok(())
     }
 }
-
-
-/// 合成 pass 的清屏色（深度为 0 = reverse-Z 远平面的像素当背景）。固定深蓝纯色；
-/// 线性域值——HDR 目标的 SRGB view 在 ROP 写出时才做编码，调色时按线性直觉给值，
-/// 不要拿 sRGB 十六进制直接换算。
-const CLEAR_COLOR: [f32; 4] = [0.02, 0.06, 0.14, 1.0];
