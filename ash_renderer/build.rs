@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use naga::back::spv;
 use naga::valid::{Capabilities, Validator, ValidationFlags};
 
-// SPIR-V 语法常量（值由规范规定，与 examples/bindless_probe.rs 同表）。
+// SPIR-V 语法常量（值由 SPIR-V 规范钉死）。
 const OP_CAPABILITY: u16 = 17;
 const OP_EXTENSION: u16 = 10;
 const CAP_RUNTIME_DESCRIPTOR_ARRAY: u32 = 5302;
@@ -38,10 +38,6 @@ const EXT_DESCRIPTOR_INDEXING: &str = "SPV_EXT_descriptor_indexing";
 
 /// 公共片段导入指令（独占一行，前导空白允许）。
 const IMPORT_DIRECTIVE: &str = "// #import ";
-
-/// 不产 spv 的入口：`examples/bindless_probe.rs` 以 `include_str!` 读入源码后自行
-/// 编译、扫描与 spirv-val，构建脚本的产物无人消费。
-const STANDALONE_SOURCES: &[&str] = &["bindless_probe_fixed", "bindless_probe_runtime"];
 
 fn main() {
     let shaders_dir = Path::new("shaders");
@@ -70,9 +66,6 @@ fn main() {
     for path in &wgsl_paths {
         let stem = path.file_stem().expect("有扩展名的路径必有文件名").to_string_lossy().into_owned();
         println!("cargo:rerun-if-changed={}", path.display());
-        if STANDALONE_SOURCES.contains(&stem.as_str()) {
-            continue;
-        }
         let source = expand_imports(path, &common_dir);
         let expanded = out_dir.join(format!("{stem}.expanded.wgsl"));
         write_file(&expanded, &source);
@@ -361,7 +354,7 @@ fn run_spirv_val(val_exe: &Path, words: &[u32]) -> Result<(), String> {
     }
 }
 
-/// 最小确定性补丁（与 examples/bindless_probe.rs 组 B 相同）：capability 段注入缺失的
+/// 最小确定性补丁：capability 段注入缺失的
 /// RuntimeDescriptorArray / SampledImageArrayNonUniformIndexing + 扩展段注入
 /// SPV_EXT_descriptor_indexing。SPIR-V 逻辑布局要求 capability 在 extension 之前，
 /// 所以分两个插入点拼接。

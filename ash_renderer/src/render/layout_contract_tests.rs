@@ -4,7 +4,7 @@
 
 use ash::vk::{self, Handle};
 
-use super::layout_registry::{ALL_PIPELINES, ALL_SETS, PROBE_ONLY};
+use super::layout_registry::{ALL_PIPELINES, ALL_SETS};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::shader_abi;
 use crate::render::core::binding::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
@@ -68,9 +68,6 @@ fn every_set_declaration_is_valid_and_uniquely_named() {
 #[test]
 fn every_shader_entry_has_a_pipeline() {
     for shader in shader_abi::ALL {
-        if PROBE_ONLY.iter().any(|s| std::ptr::eq(*s, *shader)) {
-            continue;
-        }
         for entry in shader.entries {
             let used = ALL_PIPELINES
                 .iter()

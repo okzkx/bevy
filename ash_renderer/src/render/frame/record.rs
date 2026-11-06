@@ -132,7 +132,7 @@ impl FramePool {
 
         // 贴图不需要进场屏障：图像 CONCURRENT 双族共享，不做所有权转移；上传后的
         // TRANSFER_DST→SHADER_READ_ONLY 在 uploader 的 transfer 提交内完成，跨队列可见性
-        // 由提交时的票据等待保证（EXCLUSIVE 方案的对照实验在 examples/image_probe 组 C）。
+        // 由提交时的票据等待保证（EXCLUSIVE 方案需逐图所有权转移，CONCURRENT 免除）。
 
         // 透明排序键预填 -inf：bitonic 全容量升序排序把真实条目推到尾部（gather 反向取），
         // 空位的键必须是 -inf。要在所有 compute dispatch 之前。
