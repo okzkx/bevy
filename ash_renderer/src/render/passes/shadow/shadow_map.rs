@@ -1,5 +1,5 @@
-//! shadow 资源族与 depth-only 绘制管线：四张级联深度图、shadow UBO、标记环、命令环、
-//! 描述符集。shadow 域的 binding 全收在本 set，不动 instance set2：b0 UBO、b1..4 级联
+//! shadow 资源族与 depth-only 绘制管线及其录制：四张级联深度图、shadow UBO、标记环、命令环、
+//! 描述符集。shadow 域的 binding 全收在本 set，不动实例集：b0 UBO、b1..4 级联
 //! 深度图（合成采样）、b5 交错标记环（cull 写/host 读）、b6..9 四 cascade 命令环
 //! （shadow_build 写/shadow draw 读）。
 //!
@@ -11,15 +11,19 @@
 use ash::{vk, Device};
 use bevy::log::info;
 
+use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::device::memory::buffer::GpuBuffer;
+use crate::render::core::record::graphics::{
+    bind_graphics, bind_vertex_index, full_rect, reverse_z_depth_attachment, set_viewport_scissor,
+    PipelineRef,
+};
 use crate::render::core::device::memory::role::BufferRole;
 use crate::render::passes::shadow::cascades::{SHADOW_CASCADES, SHADOW_MAP_SIZE, SHADOW_UBO_SIZE};
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
 use crate::render::core::target::depth::{DepthTarget, DEPTH_FORMAT};
 use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
-use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
@@ -61,11 +65,8 @@ pub(crate) static SHADOW_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
 #[derive(Clone, Copy)]
 pub struct ShadowWriteDraw {
     pub pipeline: PipelineRef,
-    pub set2: DescSet,
-    pub shadow_set: DescSet,
+    pub instance_set: DescSet,
     pub views: [vk::ImageView; SHADOW_CASCADES],
-    /// 深度图本体（布局屏障用——view 之外屏障吃 image）。
-    pub images: [vk::Image; SHADOW_CASCADES],
     pub commands: [vk::Buffer; SHADOW_CASCADES],
     /// 顶点/索引池（indirect 命令引脚定位到池内——与主管线同一池契约）。
     pub vertex_buffer: vk::Buffer,
@@ -229,7 +230,7 @@ impl Drop for ShadowTargets {
     }
 }
 
-/// shadow 域 depth-only 绘制管线 + layout（[set2 实例表, shadow set] + 4B push =
+/// shadow 域 depth-only 绘制管线 + layout（[instance_set 实例表, shadow set] + 4B push =
 /// cascade 索引）。无色附件，深度 D32 reverse-Z（清 0 + GREATER，与主链同向）。
 #[derive(bevy::prelude::Resource)]
 pub struct ShadowPipeline {
@@ -318,7 +319,7 @@ impl ShadowPipeline {
         let pipeline = create_graphics_pipeline(device, &info)?;
         info!(
             "shadow 管线就绪: depth-only dynamic rendering（D32 reverse-Z GREATER），\
-             顶点输入 32B 交错 pos 位，4B push cascade 索引，[set2, shadow set]"
+             顶点输入 32B 交错 pos 位，4B push cascade 索引，[instance_set, shadow set]"
         );
         Ok(Self { handle: PipelineHandle::new(device, layout, pipeline, SHADOW_WRITE_PIPELINE.sets) })
     }
@@ -327,5 +328,46 @@ impl ShadowPipeline {
     #[must_use]
     pub(crate) fn rec(&self) -> PipelineRef {
         self.handle.rec()
+    }
+}
+
+impl ShadowWriteDraw {
+    /// 逐级联一次动态渲染 + 一次 indirect draw（reverse-Z，clear 0）。布局屏障由调用方
+    /// [`ShadowFrameDraw::record_depth`](super::shadow_frame::ShadowFrameDraw::record_depth) 恒录。
+    pub(crate) fn record(&self, device: &Device, cb: vk::CommandBuffer, shadow_set: DescSet) {
+        unsafe {
+            let map_extent = vk::Extent2D { width: SHADOW_MAP_SIZE, height: SHADOW_MAP_SIZE };
+            for (c, map_view) in self.views.iter().enumerate() {
+                let shadow_depth_attachment = reverse_z_depth_attachment(*map_view);
+                device.cmd_begin_rendering(
+                    cb,
+                    &vk::RenderingInfo::default()
+                        .render_area(full_rect(map_extent))
+                        .layer_count(1)
+                        .depth_attachment(&shadow_depth_attachment),
+                );
+                bind_graphics(device, cb, &self.pipeline, &[self.instance_set, shadow_set]);
+                bind_vertex_index(device, cb, self.vertex_buffer, self.index_buffer);
+                set_viewport_scissor(device, cb, map_extent);
+                // 4B push = 级联索引
+                let mut cascade_push = [0u8; 4];
+                put_u32(&mut cascade_push, 0, c as u32);
+                device.cmd_push_constants(
+                    cb,
+                    self.pipeline.layout,
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    &cascade_push,
+                );
+                device.cmd_draw_indexed_indirect(
+                    cb,
+                    self.commands[c],
+                    0,
+                    self.command_count,
+                    INDIRECT_COMMAND_SIZE as u32,
+                );
+                device.cmd_end_rendering(cb);
+            }
+        }
     }
 }

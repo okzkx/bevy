@@ -4,7 +4,7 @@
 //! 资源操作全部走 [`crate::render`] 的 pool/uploader/images 出口。
 //!
 //! 时序:PostUpdate 账本对账 → Last:准备 + 上传提交 → 同帧图形提交(draw 挂 ticket
-//! 信号量等待,见 render/frame/frame_draw.rs)。排序在 [`AshUploadPlugin`] 声明。
+//! 信号量等待,见 render/frame/record.rs)。排序在 [`AshUploadPlugin`] 声明。
 //!
 //! 失败分流:资产未到货/转换拒绝 = 循环内逐项降级,就地 warn 下帧重试,不进错误通道;
 //! 提前 return 的 Vulkan/账本失败 = `or_fatal`/`ok_or_fatal` 冒泡致命退出。提交失败不
@@ -671,7 +671,7 @@ fn upload_batch(data: &mut UploadData, scan: &RowScan, ready: ReadyAssets) -> Re
     }
     // 跨族内存可见性不靠 release/acquire 成对:图像与池一样走 CONCURRENT 双族共享,
     // 批次的图像收尾是纯布局转换,可见性由图形提交等票据信号量收口(见
-    // render/frame/frame_draw.rs 提交段注释)。
+    // render/frame/record.rs 提交段注释)。
     // 一次合批 = 一个 staging 范围 + 一次 transfer 提交;staging 非空必有提交
     let batch = UploadBatch {
         staging,

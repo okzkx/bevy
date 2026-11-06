@@ -6,8 +6,10 @@ use std::slice;
 use ash::{vk, Device};
 
 use crate::render::core::binding::set_layout::DescSet;
-use crate::render::core::record::barrier::{image_barrier, ImageBarrier};
-use crate::render::core::record::graphics::{bind_graphics, full_rect, set_viewport_scissor, PipelineRef};
+use crate::render::core::record::barrier::ImageBarrier;
+use crate::render::core::record::graphics::{
+    bind_graphics, color_attachment, full_rect, set_viewport_scissor, PipelineRef,
+};
 
 /// 全屏三角形 pass 的参数：一个颜色附件（写完保留，无深度）、管线、从 set 0 起绑定的描述符集。
 pub(crate) struct FullscreenPass<'a> {
@@ -19,14 +21,16 @@ pub(crate) struct FullscreenPass<'a> {
     pub sets: &'a [DescSet],
 }
 
-/// 录一个完整的全屏 pass（[`record_fullscreen_open`] 之后结束渲染）。
-///
-/// # Safety
-/// `cb` 处于录制状态，句柄合法且活到命令执行完；`pass.view` 须已处于 COLOR_ATTACHMENT_OPTIMAL 布局。
-pub(crate) unsafe fn record_fullscreen(device: &Device, cb: vk::CommandBuffer, pass: &FullscreenPass<'_>) {
-    unsafe {
-        record_fullscreen_open(device, cb, pass);
-        device.cmd_end_rendering(cb);
+impl FullscreenPass<'_> {
+    /// 录一个完整的全屏 pass（开渲染到关渲染；同一次渲染里接着画别的用 [`record_fullscreen_open`]）。
+    ///
+    /// # Safety
+    /// `cb` 处于录制状态，句柄合法且活到命令执行完；`view` 须已处于 COLOR_ATTACHMENT_OPTIMAL 局。
+    pub(crate) unsafe fn record(&self, device: &Device, cb: vk::CommandBuffer) {
+        unsafe {
+            record_fullscreen_open(device, cb, self);
+            device.cmd_end_rendering(cb);
+        }
     }
 }
 
@@ -34,22 +38,13 @@ pub(crate) unsafe fn record_fullscreen(device: &Device, cb: vk::CommandBuffer, p
 /// 调用方可以在同一次渲染里接着画别的，最后自己调 `cmd_end_rendering`。
 ///
 /// # Safety
-/// 同 [`record_fullscreen`]。
+/// 同 [`FullscreenPass::record`]。
 pub(crate) unsafe fn record_fullscreen_open(
     device: &Device,
     cb: vk::CommandBuffer,
     pass: &FullscreenPass<'_>,
 ) {
-    let attachment = vk::RenderingAttachmentInfo::default()
-        .image_view(pass.view)
-        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .store_op(vk::AttachmentStoreOp::STORE);
-    let attachment = match pass.clear {
-        Some(float32) => attachment
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32 } }),
-        None => attachment.load_op(vk::AttachmentLoadOp::DONT_CARE),
-    };
+    let attachment = color_attachment(pass.view, pass.clear);
     unsafe {
         device.cmd_begin_rendering(
             cb,
@@ -69,7 +64,7 @@ pub(crate) unsafe fn record_fullscreen_open(
 /// 内容每轮都重写，所以不管 `image` 上一轮停在什么布局，从 UNDEFINED 进都合法。
 ///
 /// # Safety
-/// 同 [`record_fullscreen`]；`image` 是 `pass.view` 所属的图像。
+/// 同 [`FullscreenPass::record`]；`image` 是 `pass.view` 所属的图像。
 pub(crate) unsafe fn record_fullscreen_sampled(
     device: &Device,
     cb: vk::CommandBuffer,
@@ -78,8 +73,8 @@ pub(crate) unsafe fn record_fullscreen_sampled(
     pass: &FullscreenPass<'_>,
 ) {
     unsafe {
-        image_barrier(device, cb, &ImageBarrier::discard_to_color(image, entry_src_stage));
-        record_fullscreen(device, cb, pass);
-        image_barrier(device, cb, &ImageBarrier::color_to_sampled(image));
+        ImageBarrier::discard_to_color(image, entry_src_stage).record(device, cb);
+        pass.record(device, cb);
+        ImageBarrier::color_to_sampled(image).record(device, cb);
     }
 }

@@ -13,7 +13,7 @@
 //!   egui 顶点色是预乘的，src 因子取 ONE（与 egui 官方 wgpu 后端一致）。
 //! - **不剔除**：epaint 不保证 UI 顶点绕向一致。
 //!
-//! UI 录制契约 [`UiPaint`]/[`UiDrawCall`] 也住本模块：录制层 `render::frame::frame_draw`
+//! UI 录制契约 [`UiPaint`]/[`UiDrawCall`] 也住本模块：录制层 `render::frame::record`
 //! 与生产方 `overlay::framework::paint` 都用它，render 不引上层类型。
 
 use ash::{vk, Device};
@@ -25,9 +25,11 @@ use crate::common::error::Result;
 use crate::render::Context;
 
 use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
-use crate::render::core::record::graphics::PipelineRef;
+use crate::render::core::record::graphics::{
+    bind_graphics, bind_vertex_index, set_viewport, PipelineRef,
+};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
-use crate::render::core::binding::set_layout::{stages, SetLayouts};
+use crate::render::core::binding::set_layout::{stages, DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
 use crate::render::resident::tables::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
 
@@ -92,7 +94,7 @@ pub struct UiDrawCall {
     pub scissor: [u32; 4],
 }
 
-/// 一次 UI 绘制的全部产物（`overlay::framework::paint` 组装，`render::frame::frame_draw` 消费）。
+/// 一次 UI 绘制的全部产物（`overlay::framework::paint` 组装，`render::frame::record` 消费）。
 /// 顶点/索引已由生产方写进 UI 环本帧槽的 buffer。
 pub struct UiPaint {
     /// 图集纹理槽（push 的 tex_index）。
@@ -103,6 +105,89 @@ pub struct UiPaint {
     pub screen_pt: [f32; 2],
     /// 每个 clip 一条 draw，各带自己的 scissor。
     pub draws: Vec<UiDrawCall>,
+}
+
+impl UiPaint {
+    /// 录制 UI 绘制，接在 neighborhood 的同一次渲染里（渲染实例由调用方开，按光栅序
+    /// 盖在场景之上）。顶点/索引在本帧槽的 UI 环 buffer（`buffers`）里。
+    pub fn record(
+        &self,
+        device: &Device,
+        cb: vk::CommandBuffer,
+        overlay: PipelineRef,
+        bindless_set: DescSet,
+        extent: vk::Extent2D,
+        buffers: (vk::Buffer, vk::Buffer),
+    ) {
+        unsafe {
+            // 描述符绑定跟随 pipeline layout：切到 overlay 管线后 set0 要按它的 layout 重绑
+            bind_graphics(device, cb, &overlay, &[bindless_set]);
+            // 场景分支不一定跑过，UI 自己设 viewport
+            set_viewport(device, cb, extent);
+            bind_vertex_index(device, cb, buffers.0, buffers.1);
+            // push 常量整帧不变，循环外打包一次
+            let ui_push = pack_ui_push(self.screen_pt, self.atlas_texture, self.atlas_sampler);
+            for call in &self.draws {
+                // 每个 clip 设一次 scissor（零尺寸 = 全裁）
+                device.cmd_set_scissor(
+                    cb,
+                    0,
+                    &[vk::Rect2D {
+                        offset: vk::Offset2D {
+                            x: call.scissor[0] as i32,
+                            y: call.scissor[1] as i32,
+                        },
+                        extent: vk::Extent2D {
+                            width: call.scissor[2],
+                            height: call.scissor[3],
+                        },
+                    }],
+                );
+                device.cmd_push_constants(
+                    cb,
+                    overlay.layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    &ui_push,
+                );
+                device.cmd_draw_indexed(
+                    cb,
+                    call.index_count,
+                    1,
+                    call.first_index,
+                    call.vertex_base as i32,
+                    0,
+                );
+            }
+        }
+    }
+}
+
+/// ⑧ UI 绘制束：overlay 管线 + 本帧 UI 绘制产物 + 顶点/索引环 buffer（同生同灭，
+/// 无 UI 整段跳过）。
+pub struct UiDraw<'a> {
+    /// overlay 管线。自有 layout（只有 set0），切到它之后 set0 要重绑。
+    pub overlay: PipelineRef,
+    /// 本帧 UI 绘制产物。
+    pub paint: &'a UiPaint,
+    /// 本帧槽 UI 顶点/索引 buffer（本帧已写入）。
+    pub buffers: (vk::Buffer, vk::Buffer),
+}
+
+impl UiDraw<'_> {
+    /// 录制 UI 绘制，接在 neighborhood 的同一次渲染里（渲染实例由调用方开，按光栅序
+    /// 盖在场景之上）。描述符绑定跟随 overlay 的 pipeline layout，set0 重绑在
+    /// [`UiPaint::record`] 内。
+    pub fn record(
+        &self,
+        device: &Device,
+        cb: vk::CommandBuffer,
+        bindless_set: DescSet,
+        extent: vk::Extent2D,
+    ) {
+        self.paint
+            .record(device, cb, self.overlay, bindless_set, extent, self.buffers);
+    }
 }
 
 /// overlay 图形管线 + pipeline layout（只声明 set0 + 16B push）。

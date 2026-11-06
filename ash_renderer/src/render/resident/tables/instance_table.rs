@@ -443,9 +443,9 @@ impl InstanceTables {
         SetLayout::new(&INSTANCE_SET_DESC, self.set2_layout)
     }
 
-    /// 第 `frame` 帧槽的 set2。
+    /// 第 `frame` 帧槽的实例集。
     #[must_use]
-    pub fn frame_set2(&self, frame: usize) -> DescSet {
+    pub fn frame_set(&self, frame: usize) -> DescSet {
         DescSet::new(&INSTANCE_SET_DESC, self.frame_sets[frame])
     }
 

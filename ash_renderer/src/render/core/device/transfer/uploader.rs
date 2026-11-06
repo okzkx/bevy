@@ -39,6 +39,9 @@ pub struct Uploader {
     ticket_semaphore: vk::Semaphore,
     /// 下一个要 signal 的票据；0 保留给空批次。
     next_ticket: Ticket,
+    /// 最近一次 mip 续批在 graphics 队列发布的票据（0 = 没有）。后续 transfer 提交
+    /// 须等它：两条队列上的 signal 不按提交顺序结算，不等就可能先 signal 更大的值。
+    chain_ticket: Ticket,
     /// 每个槽位的 staging 初始容量，空间不足时再扩容。
     staging_capacity: u64,
     /// 扩容 staging 槽时使用的设备内存属性。
@@ -164,6 +167,7 @@ impl Uploader {
             blit_pool,
             ticket_semaphore,
             next_ticket: 1,
+            chain_ticket: 0,
             staging_capacity,
             contract: contract.clone(),
         })
@@ -265,6 +269,8 @@ impl Uploader {
             self.slots[index].staging = Some(grown);
         }
         let ticket = self.next_ticket;
+        // 上一次续批还没完成就等它，保证票据按值单调兑现（已完成则不挂等待）。
+        let chain_wait = (self.chain_ticket > completed).then_some(self.chain_ticket);
         let queue = self.queue;
         let queue_family = self.queue_family;
         let semaphore = self.ticket_semaphore;
@@ -359,14 +365,21 @@ impl Uploader {
             }
             device.end_command_buffer(slot.command_buffer)?;
 
-            // signal 票据数须与信号量数一致。
+            // signal/wait 票据数须与各自信号量数一致；无续批要等时 wait 两组都为空。
+            let waits: &[vk::Semaphore] = if chain_wait.is_some() { slice::from_ref(&semaphore) } else { &[] };
+            let wait_values: Vec<Ticket> = chain_wait.into_iter().collect();
+            let wait_stages: &[vk::PipelineStageFlags] =
+                if chain_wait.is_some() { &[vk::PipelineStageFlags::TRANSFER] } else { &[] };
             let mut timeline_submit = vk::TimelineSemaphoreSubmitInfo::default()
+                .wait_semaphore_values(&wait_values)
                 .signal_semaphore_values(slice::from_ref(&ticket));
             let cbs = slice::from_ref(&slot.command_buffer);
             let signals = slice::from_ref(&semaphore);
             device.queue_submit(
                 queue,
                 &[vk::SubmitInfo::default()
+                    .wait_semaphores(waits)
+                    .wait_dst_stage_mask(wait_stages)
                     .command_buffers(cbs)
                     .signal_semaphores(signals)
                     .push_next(&mut timeline_submit)],
@@ -386,6 +399,7 @@ impl Uploader {
         let published = ticket + 1;
         self.slots[index].in_flight = Some(published);
         self.next_ticket = published + 1;
+        self.chain_ticket = published;
         info!("mip 生成续批:graphics 队列 blit {} 张(transfer 票据 #{ticket} → 发布票据 #{published})", chained.len());
         Ok(Some(published))
     }

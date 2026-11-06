@@ -26,6 +26,20 @@ pub enum PresentOutcome {
     Suboptimal,
 }
 
+/// 一次 acquire 的整套产物：本帧的呈现目标与提交信号量。四个值同属一个 image index，
+/// 跟着 acquire 走、不按帧槽轮转（与帧槽对象的分界见 `frame/frame_pool.rs` 模块注释）。
+#[derive(Debug, Clone, Copy)]
+pub struct PresentTarget {
+    /// 本帧渲染写入的 swapchain image。
+    pub image: vk::Image,
+    /// 同一张图的 SRGB view（写入用）。
+    pub view: vk::ImageView,
+    /// 当前呈现尺寸（视口/清屏区）。
+    pub extent: vk::Extent2D,
+    /// 渲染完成信号量：queue_submit signal，present 等它。
+    pub render_finished: vk::Semaphore,
+}
+
 /// `Swapchain::new` 中途失败时的回滚护栏：析构时销毁已建成的对象；成功后把句柄取走，析构即空操作。
 struct SwapchainBuildGuard {
     fns: swapchain::Device,
@@ -311,6 +325,7 @@ impl Swapchain {
     /// - `Suboptimal`：置位 `out_of_date` 照常画完本帧，下个帧首重建；
     /// - `OUT_OF_DATE`：置位后本帧作废让路（Warn），重建交给下个帧首（幂等）；
     /// - 其余失败致命。
+    ///
     /// 坑：本帧没拿到图、后续步骤都没跑，让路安全；acquire 成功之后的失败必须致命
     /// （提交侧约定，见 `driver/host/frame.rs` 模块文档）。
     pub fn acquire_index(&mut self, semaphore: vk::Semaphore) -> Result<u32, BevyError> {
@@ -327,6 +342,17 @@ impl Swapchain {
                 Err(warning("swapchain 过时，本帧作废让路，下个帧首重建"))
             }
             Err(e) => Err(fatal("acquire 失败，渲染链无法继续", e)),
+        }
+    }
+
+    /// 按 acquire 返回的 index 取本帧呈现目标（image/view/render_finished 与 image 同号，
+    /// extent 取当前值）。
+    pub fn target(&self, index: u32) -> PresentTarget {
+        PresentTarget {
+            image: self.images[index as usize],
+            view: self.views[index as usize],
+            extent: self.extent,
+            render_finished: self.render_finished[index as usize],
         }
     }
 

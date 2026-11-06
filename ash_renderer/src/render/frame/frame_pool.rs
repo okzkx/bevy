@@ -21,8 +21,49 @@ use bevy::log::info;
 
 use crate::common::error::Result;
 use crate::common::syntax::ResultTierExt;
+use crate::render::core::device::transfer::Uploader;
 use crate::render::core::target::depth::DepthTarget;
-use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
+use crate::render::{Context, MAX_FRAMES_IN_FLIGHT, Ticket};
+
+/// 一项提交等待：等哪个信号量、从哪个阶段前卡、timeline 等到几号。
+/// binary 信号量 value 填 0 占位（TimelineSemaphoreSubmitInfo 要求与 wait 信号量同长，binary 忽略该值）。
+pub(crate) struct SubmitWait {
+    pub(crate) semaphore: vk::Semaphore,
+    pub(crate) dst_stage: vk::PipelineStageFlags,
+    pub(crate) value: u64,
+}
+
+/// 图形提交对上传队列的跨队列等待：备料时刻的票据快照 + 票据信号量。
+/// 快照前的所有上传都归本帧等（GPU 侧 ALL_COMMANDS 等待，CPU 不阻塞）；这个等待同时保证
+/// transfer 写的跨队列可见性（池/贴图 CONCURRENT 共享，没有所有权屏障）。
+/// fallback 白图在初始化时就上传了，正常帧票据非 0；0 只在启动后从未上传时出现。
+#[derive(Clone, Copy)]
+pub struct UploadWait {
+    /// 备料时刻已发出的最高票据（0 = 从未上传）。
+    ticket: Ticket,
+    /// 上传队列的 timeline 票据信号量（全工程唯一，每帧引用同一个）。
+    semaphore: vk::Semaphore,
+}
+
+impl UploadWait {
+    /// 备料点取快照。时序契约：必须在 overlay 图集整传之后取——图集批可能多发一张
+    /// 票据，取早了本帧 UI 贴图不在等待值里，图形队列读到未完成的 transfer 写。
+    pub fn snapshot(uploader: &Uploader) -> Self {
+        Self {
+            ticket: uploader.last_issued_ticket(),
+            semaphore: uploader.ticket_semaphore(),
+        }
+    }
+
+    /// 本帧对上传队列的等待项；票 0 = 从未上传，无此项（不能等 0 值，VUID-03242）。
+    pub(super) fn entry(self) -> Option<SubmitWait> {
+        (self.ticket != 0).then_some(SubmitWait {
+            semaphore: self.semaphore,
+            dst_stage: vk::PipelineStageFlags::ALL_COMMANDS,
+            value: self.ticket,
+        })
+    }
+}
 
 /// 一组在飞资源（同步方向见模块注释）。
 pub struct Frame {
@@ -60,6 +101,8 @@ impl Drop for FramePoolBuildGuard<'_> {
 #[derive(bevy::prelude::Resource)]
 pub struct FramePool {
     pub(super) device: Device,
+    /// 图形队列（本池提交帧用；全程不变，与 device 同为出生一次的固定物）。
+    pub(super) queue: vk::Queue,
     command_pool: vk::CommandPool,
     pub(super) frames: Vec<Frame>,
     /// 当前帧槽号，与 swapchain 的 image index 无关。
@@ -130,6 +173,7 @@ impl FramePool {
         );
         Ok(Self {
             device: ctx.device.clone(),
+            queue: ctx.queue,
             command_pool,
             frames,
             current: 0,

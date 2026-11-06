@@ -6,7 +6,7 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
     common::syntax::ResultTierExt,
-    render::{InstanceTables, TransparentFrame, TransparentPasses, TransparentPipeline, TransparentTargets},
+    render::{TransparentFrame, TransparentPasses, TransparentPipeline, TransparentTargets},
 };
 
 /// 透明层：透明命令链资源、三条 compute 管线和透明前向管线。
@@ -30,7 +30,6 @@ impl TransparentInput<'_> {
 /// 在场行 > 0 才录透明层；在场行数超过透明行容量时报错退出。
 pub(super) fn transparent_draw(
     transparent: &TransparentInput,
-    instances: &InstanceTables,
     slot: usize,
     count: u32,
 ) -> Result<Option<TransparentFrame>, BevyError> {
@@ -47,7 +46,6 @@ pub(super) fn transparent_draw(
         ),
         gather: Some(passes.gather(count)),
         sort: passes.sort_plan(),
-        set2: instances.frame_set2(slot),
         pipeline: transparent.pipeline.rec(),
         t_commands: targets.command_buffer(slot),
         t_keys: targets.key_buffer(slot),

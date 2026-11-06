@@ -2,6 +2,7 @@
 
 pub(crate) mod cull;
 pub(crate) mod hiz;
+pub(crate) mod hiz_frame;
 pub(crate) mod indirect;
 pub(crate) mod lod;
 pub(crate) mod occlusion;

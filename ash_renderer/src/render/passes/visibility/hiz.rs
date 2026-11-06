@@ -24,6 +24,7 @@ use crate::common::syntax::unwrap_or_return;
 
 use crate::render::resident::assets::image_spec::full_mip_chain;
 use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::record::compute::Handoff;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
@@ -418,18 +419,7 @@ impl HizPyramid {
                 // 级间屏障：本级写 → 下级 textureLoad。末级没有这条：它的写 → 下一轮
                 // 遮挡读由下一轮 cull 的全局内存屏障罩住（遮挡只在 cull 开时派发）
                 if level + 1 < self.levels {
-                    let barrier = vk::MemoryBarrier::default()
-                        .src_access_mask(A::SHADER_WRITE)
-                        .dst_access_mask(A::SHADER_READ);
-                    device.cmd_pipeline_barrier(
-                        cb,
-                        S::COMPUTE_SHADER,
-                        S::COMPUTE_SHADER,
-                        vk::DependencyFlags::empty(),
-                        slice::from_ref(&barrier),
-                        &[],
-                        &[],
-                    );
+                    Handoff::ComputeRead.barrier().record(device, cb);
                 }
             }
         }
@@ -544,7 +534,7 @@ impl HizPyramid {
             MAX_FRAMES_IN_FLIGHT * self.levels as usize,
         )?;
         // 声明布局须与 image 实际布局一致（VUID-00344）：level 0/1 的源 = 深度附件
-        //（DEPTH_READ_ONLY，frame_draw.rs 帧尾屏障落位；[0] 不派发），其余 = 金字塔（恒 GENERAL）
+        //（DEPTH_READ_ONLY，record.rs 帧尾屏障落位；[0] 不派发），其余 = 金字塔（恒 GENERAL）
         for slot in 0..MAX_FRAMES_IN_FLIGHT {
             for level in 0..self.levels as usize {
                 let set = sets[slot * self.levels as usize + level];

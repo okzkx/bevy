@@ -23,6 +23,55 @@ pub(crate) fn full_rect(extent: vk::Extent2D) -> vk::Rect2D {
     }
 }
 
+/// 颜色附件：COLOR_ATTACHMENT_OPTIMAL + STORE。`Some` 先清成这个颜色；`None` = DONT_CARE，
+/// 前提是这个 pass 会写满每个像素。
+pub(crate) fn color_attachment(
+    view: vk::ImageView,
+    clear: Option<[f32; 4]>,
+) -> vk::RenderingAttachmentInfo<'static> {
+    let attachment = vk::RenderingAttachmentInfo::default()
+        .image_view(view)
+        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .store_op(vk::AttachmentStoreOp::STORE);
+    match clear {
+        Some(float32) => attachment
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32 } }),
+        None => attachment.load_op(vk::AttachmentLoadOp::DONT_CARE),
+    }
+}
+
+/// 深度附件：清 0（reverse-Z 远平面）+ STORE，写完留给后续采样。
+pub(crate) fn reverse_z_depth_attachment(view: vk::ImageView) -> vk::RenderingAttachmentInfo<'static> {
+    vk::RenderingAttachmentInfo::default()
+        .image_view(view)
+        .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .clear_value(vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue { depth: 0.0, stencil: 0 },
+        })
+}
+
+/// 颜色附件 LOAD + STORE：底子已画好（前一个 pass 的输出），在上面继续画混合进去。
+pub(crate) fn load_color_attachment(view: vk::ImageView) -> vk::RenderingAttachmentInfo<'static> {
+    vk::RenderingAttachmentInfo::default()
+        .image_view(view)
+        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::LOAD)
+        .store_op(vk::AttachmentStoreOp::STORE)
+}
+
+/// 深度附件 LOAD，只测不写：storeOp DONT_CARE 没关系——shader 没写过东西，内容不丢，
+/// 后续 pass 还要采样它。
+pub(crate) fn load_depth_attachment(view: vk::ImageView) -> vk::RenderingAttachmentInfo<'static> {
+    vk::RenderingAttachmentInfo::default()
+        .image_view(view)
+        .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::LOAD)
+        .store_op(vk::AttachmentStoreOp::DONT_CARE)
+}
+
 /// 全幅 viewport，深度范围 `[0,1]`。
 /// 坑：高度用正值，不要改成负高度翻转 Y——Y 已在 shader 里翻过，再翻画面会倒过来（见 gbuffer_pipeline 模块注释）。
 ///

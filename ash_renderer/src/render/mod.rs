@@ -39,6 +39,7 @@ pub use passes::visibility::cull::{
 pub use passes::visibility::hiz::{
     occluded_reverse_z, occlusion_mip_level, reduce_tile_reverse_z, HizCensus, HizPyramid,
 };
+pub use passes::visibility::hiz_frame::HizFrameDraw;
 // 诊断回读助手：BRP 读数方法族（remote/）与 render 内部共用，crate 级重出口。
 pub(crate) use self::core::device::readback::readback_buffer;
 pub use passes::visibility::indirect::{IndirectDraw, IndirectPass, IndirectStats};
@@ -81,9 +82,10 @@ pub(crate) use stats::monitor_history::MonitorHistory;
 // 不导出 LIGHT_TYPE_SPOT：聚光灯还没实现，导出了也没人用
 pub use resident::tables::light_table::{LightRecord, LightTable, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT};
 pub use frame::render_mode::RenderMode;
+pub use frame::scene_resources::SceneResources;
 pub use passes::lighting::cluster::{
-    cluster_reference, pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, ClusterGrid,
-    LightClusters,
+    cluster_reference, pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, ClusterFrameDraw,
+    ClusterGrid, LightClusters,
 };
 pub use passes::transparent::{
     TransparentFrame, TransparentPasses, TransparentPipeline, TransparentTargets,
@@ -95,19 +97,20 @@ pub use passes::post::bloom::{
     pack_bloom_params, BloomFrameDraw, BloomPipelines, BloomParamsData, BloomSettings,
     BloomTargets, TonemapCurve,
 };
-pub(crate) use passes::post::bloom::BLOOM_LEVELS;
 pub use passes::gbuffer::gbuffer_targets::{
     GBufferTargets, ALBEDO_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
 };
 pub use self::core::target::depth::DEPTH_FORMAT;
-pub use frame::frame_pool::{Frame, FramePool};
-pub use frame::frame_draw::FrameDraw;
-pub use passes::overlay::overlay_pipeline::{OverlayPipeline, UiDrawCall, UiPaint};
+pub use frame::frame_pool::{Frame, FramePool, UploadWait};
+pub use frame::render_features::RenderFeatures;
+pub use passes::post::post_chain::PostChainDraw;
+pub use passes::overlay::overlay_pipeline::{OverlayPipeline, UiDraw, UiDrawCall, UiPaint};
 pub use passes::overlay::atlas_gpu::AtlasGpu;
 pub use passes::overlay::ui_vertex_ring::UiVertexRing;
 pub(crate) use passes::overlay::ui_vertex_ring::UiVertex;
 pub use passes::gbuffer::gbuffer_pipeline::GBufferPipeline;
 pub use passes::shadow::shadow_map::{ShadowPipeline, ShadowTargets, ShadowWriteDraw};
+pub use passes::shadow::shadow_frame::{ShadowFrameDraw, ShadowPasses};
 pub use passes::post::smaa::{
     SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
 };
@@ -120,4 +123,4 @@ pub use passes::shadow::cascades::{
 pub use self::core::device::memory::buffer::GpuBuffer;
 pub use self::core::device::memory::contract::{align_up, MemoryContract};
 pub use self::core::device::memory::role::BufferRole;
-pub use self::core::device::swapchain::{AcquireOutcome, Swapchain, SWAPCHAIN_COLOR_FORMAT};
+pub use self::core::device::swapchain::{AcquireOutcome, PresentTarget, Swapchain, SWAPCHAIN_COLOR_FORMAT};

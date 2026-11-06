@@ -24,14 +24,12 @@ use bevy::{
     prelude::*,
 };
 
-use ash::vk;
-
 use ash_macros::system;
 
 use crate::{
     common::syntax::fatal,
     scene::InstanceLedger,
-    render::FrameDraw,
+    render::{ClusterFrameDraw, RenderFeatures, HizFrameDraw, PostChainDraw, SceneResources, UiDraw, UploadWait},
 };
 
 use super::drawlist::{self, DrawabilitySources, ParityDirty};
@@ -64,7 +62,7 @@ use self::overlay::create_overlay_draw;
 use self::post::{bloom_draw, smaa_draws};
 use self::resize_gate::rebuild_size_dependent;
 use self::scene::{scene_world_aabb, FrameView};
-use self::shadow::shadow_write_draw;
+use self::shadow::shadow_frame_draw;
 use self::stopwatch::FrameStopwatch;
 use self::transparent::transparent_draw;
 
@@ -211,85 +209,81 @@ pub(crate) fn draw_frame(
         &mut logs.indirect_first_submit,
     )?;
 
-    // shadow 命令组装：读 shadow 标记 + LOD 档位环，逐在场行 × 每 cascade
-    // 组装命令（无遮挡参与、LOD 再粗一档）。空场/关闭 = None（shadow pass 整段跳过）。
-    let shadow_build_dispatch = (shadow.settings.enabled && indirect_count > 0)
-        .then(|| shadow.build_pass.draw(indirect_count));
-
-    // —— overlay 绘制：图集整传（可能多一张 transfer 票据，所以本帧 wait_ticket 必须
-    // 在此后取）→ 镶嵌 → 顶点环写入。UI 数据缺席 = None（record_frame 的 UI 段整段跳过）。
+    // —— overlay 绘制：图集整传（可能多一张 transfer 票据，本帧 upload_wait 快照必须在此后取，
+    // 见 UploadWait::snapshot）→ 镶嵌 → 顶点环写入。UI 数据缺席 = None（record_frame 的
+    // UI 段整段跳过）。
     let ui = create_overlay_draw(&gpu.ctx, &mut gpu.tables, &mut gpu.uploader, overlay, slot, extent)?;
 
     // —— 录制 + 提交。上传票据在 GPU 侧等待（ALL_COMMANDS），CPU 不阻塞。
     // 坑：image_available 已被置位、image 已到手，从这里起任何失败都只能致命退出，
     // 不能 warn 后继续（理由见模块文档）。
-    let image = gpu.swapchain.images[index as usize];
-    let target_view = gpu.swapchain.views[index as usize];
-    // 本帧的 render_finished 与 image 同号（按 image 分配），录制提交与 present 共用
-    let render_finished = gpu.swapchain.render_finished[index as usize];
+    // 本帧呈现目标与 render_finished 同号（按 image 分配），录制提交与 present 共用
+    let target = gpu.swapchain.target(index);
     let instances = &scene.instance_tables;
     let transparent_frame =
-        transparent_draw(transparent, instances, slot, indirect_count)?;
-    let shadow_write = shadow_write_draw(shadow, instances, &scene.pool, slot, indirect_count)?;
+        transparent_draw(transparent, slot, indirect_count)?;
+    // shadow：命令组装（读 shadow 标记 + LOD 档位环，逐在场行 × 每 cascade，无遮挡参与、
+    // LOD 再粗一档）与 depth pass 同门；空场/关闭整段跳过，set 与深度图屏障恒录。
+    let shadow_frame = shadow_frame_draw(shadow, instances, &scene.pool, slot, indirect_count)?;
     let (smaa_edge_blend, smaa_nb) = smaa_draws(post, slot);
 
-    let frame_draw = FrameDraw {
+    // —— ④⑤ 场景资源与规格（feature 各束的共用底座，②⑤⑧ 复绑）
+    let res = SceneResources {
         pipeline: post.gbuffer.pipeline.rec(),
-        set0: gpu.tables.descriptor_set(),
-        set1: gpu.frame_uniform_table.frame_set(slot),
-        set2: instances.frame_set2(slot),
+        bindless_set: gpu.tables.descriptor_set(),
+        frame_set: gpu.frame_uniform_table.frame_set(slot),
+        instance_set: instances.frame_set(slot),
         vertex_buffer: scene.pool.vertex_buffer(),
         index_buffer: scene.pool.index_buffer(),
         // 命令环句柄在 count = 0 时不被读（record_frame 的场景绘制整段跳过）
         indirect_count,
         indirect_buffer: instances.indirect_buffer(slot),
-        // FrameDraw 借 GBufferTargets 引用（record_frame 消费附件视图与采样集）
+        // SceneResources 借 GBufferTargets 引用（record_frame 消费附件视图与采样集）
         gbuffer: &post.gbuffer.targets,
         composite: post.composite.rec(),
-        cluster_set: cluster.clusters.frame_set(slot),
-        cluster_build: create_cluster_build_draw(cluster, indirect_count),
-        tonemap: post.tonemap.rec(),
-        bloom_params_set: post.bloom.params_set(slot),
-        bloom: bloom_draw(post, slot),
-        smaa_edge_blend,
-        smaa_nb,
-        overlay: overlay.pipeline.rec(),
-        ui: ui.as_ref().map(|(paint, _)| paint),
-        // ui 为 None 时这两个句柄不被读（record_frame 的 UI 段整段跳过）
-        ui_buffers: ui
-            .as_ref()
-            .map(|(_, buffers)| *buffers)
-            .unwrap_or((vk::Buffer::null(), vk::Buffer::null())),
-        wait_ticket: gpu.uploader.last_issued_ticket(),
-        ticket_semaphore: gpu.uploader.ticket_semaphore(),
-        clear: CLEAR_COLOR,
-        frustum_cull: frustum_cull_draw,
-        shadow_build: shadow_build_dispatch,
-        shadow: shadow_write,
-        shadow_set: shadow.targets.frame_set(slot),
-        shadow_images: std::array::from_fn(|c| shadow.targets.map_image(c)),
-        indirect: indirect_dispatch,
-        occlusion: occl_dispatch,
-        lod: lod_dispatch,
-        transparent: transparent_frame,
-        // 归约链恒录，warmup 走账与录制一一对应（录制后 note_reduced）
-        hiz: Some(&*occlusion.hiz),
+    };
+    let feature = RenderFeatures {
+        // —— ① 帧首
         timer: timing.timer.enabled.then_some(&*timing.timer),
+        // —— ② compute 前置
+        frustum_cull: frustum_cull_draw,
+        hiz: HizFrameDraw { occlusion: occl_dispatch, pyramid: &occlusion.hiz },
+        lod: lod_dispatch,
+        indirect: indirect_dispatch,
+        shadow: shadow_frame,
+        cluster: ClusterFrameDraw {
+            build: create_cluster_build_draw(cluster, indirect_count),
+            set: cluster.clusters.frame_set(slot),
+        },
+        transparent: transparent_frame,
+        // —— ⑦⑧ 后链 + UI
+        post: PostChainDraw {
+            tonemap: post.tonemap.rec(),
+            bloom_params_set: post.bloom.params_set(slot),
+            bloom: bloom_draw(post, slot),
+            smaa_edge_blend,
+            smaa_nb,
+        },
+        // 图集整传 → 镶嵌 → 顶点环写入后才有 UI 产物；无 UI 跳过
+        ui: ui.as_ref().map(|(paint, buffers)| UiDraw {
+            overlay: overlay.pipeline.rec(),
+            paint,
+            buffers: *buffers,
+        }),
+        // —— ⑨ 提交
+        upload_wait: UploadWait::snapshot(&gpu.uploader),
     };
     gpu.frames
         .record_frame(
-            &gpu.ctx,
-            render_finished,
-            image,
-            target_view,
-            extent,
-            &frame_draw,
+            &target,
+            &feature,
+            &res,
         )?;
     watch.record_done();
 
     // —— present：OUT_OF_DATE 已在 present_digest 内标过时（下个帧首重建）；真失败
     // 先暂存——提交已发生，advance 必须照常推进保持帧槽账本一致，收尾后在系统末尾冒泡。
-    let present_failure = gpu.swapchain.present_digest(gpu.ctx.queue, render_finished, index);
+    let present_failure = gpu.swapchain.present_digest(gpu.ctx.queue, target.render_finished, index);
     watch.present_done();
 
     // —— 帧样本入账：只进计量。让路帧（最小化/acquire 过时）不经过此处。
@@ -303,6 +297,3 @@ pub(crate) fn draw_frame(
     }
 }
 
-/// 清屏色：固定深蓝纯色。线性域值——SRGB view 在 ROP 写出时才做编码
-///（render/frame/frame_draw.rs），调色时按线性直觉给值，不要拿 sRGB 十六进制直接换算。
-const CLEAR_COLOR: [f32; 4] = [0.02, 0.06, 0.14, 1.0];

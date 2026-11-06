@@ -20,6 +20,7 @@ use crate::render::core::device::memory::role::BufferRole;
 use crate::render::{Context, HDR_FORMAT, MAX_FRAMES_IN_FLIGHT};
 
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
+use crate::render::core::record::fullscreen::{record_fullscreen_sampled, FullscreenPass};
 use crate::render::core::target::color::ColorTarget;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::record::graphics::PipelineRef;
@@ -502,4 +503,57 @@ pub struct BloomFrameDraw {
     pub views_up: [vk::ImageView; BLOOM_LEVELS - 1],
     /// 各级 extent（viewport 用）。
     pub extents: [vk::Extent2D; BLOOM_LEVELS],
+}
+
+impl BloomFrameDraw {
+    /// 录制 Bloom 链：prefilter → 逐级 down → 逐级 up。prefilter 读 HDR 提取亮部写
+    /// down0；up 上采样下一级并叠加同级 down。各级目标每次 UNDEFINED→COLOR 进、
+    /// →SHADER_READ_ONLY 出。
+    pub fn record(&self, device: &Device, cb: vk::CommandBuffer) {
+        unsafe {
+            let prefilter = (
+                self.images_down[0],
+                self.views_down[0],
+                self.extents[0],
+                self.prefilter,
+                self.gbuffer_set,
+            );
+            let downs = (1..BLOOM_LEVELS).map(|i| {
+                (
+                    self.images_down[i],
+                    self.views_down[i],
+                    self.extents[i],
+                    self.down,
+                    self.down_sets[i - 1],
+                )
+            });
+            let ups = (0..BLOOM_LEVELS - 1).rev().map(|i| {
+                (
+                    self.images_up[i],
+                    self.views_up[i],
+                    self.extents[i],
+                    self.up,
+                    self.up_sets[i],
+                )
+            });
+            for (target, target_view, target_extent, pipeline, set) in
+                std::iter::once(prefilter).chain(downs).chain(ups)
+            {
+                record_fullscreen_sampled(
+                    device,
+                    cb,
+                    target,
+                    // bloom 目标不分帧槽：等上一帧的片元采样读完再覆写（WAR）
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    &FullscreenPass {
+                        view: target_view,
+                        extent: target_extent,
+                        clear: None,
+                        pipeline,
+                        sets: &[set],
+                    },
+                );
+            }
+        }
+    }
 }

@@ -50,6 +50,18 @@ GPU 前端从 `buffer[offset]` 起顺序消费 `drawCount` 个 `VkDrawIndexedInd
 - mesh 数据不重复：N 行命令的 `firstIndex/vertexOffset` 指向 MeshPool 里同一份顶点/索引——显存共享一份，重复的只是 20B 命令头。
 - 合批对照（`instanceCount > 1` 的传统 instancing 形状）：需要 per-instance buffer 按 `SV_InstanceID` 索引取参数，省 drawCount 但**合批内实例同生死**，逐实例剔除成果漏掉——与"剔除粒度必须跟能省掉的账单同粒度"（6.1）冲突，故不取。
 
+**命令消费的三层分工**（谁在读、读什么，各不相同）：
+
+| 内容 | 谁消费 | 从哪取 |
+|---|---|---|
+| mesh 几何（取哪段索引/顶点） | **固定功能前端**（不是 shader） | 命令环 5 字段 → 绑定的顶点/索引池；索引 fetch、顶点 fetch、装配全在可编程管线之前 |
+| 实例身份 → 变换/材质槽 | VS | `objects[instance_index]` / `models[instance_index]`（set2，id = `firstInstance` = 槽号） |
+| 贴图/采样器 | FS | 材质环按 `material_index` → bindless 大数组按记录内槽号（set0）——id 套 id |
+| 帧常量（view_proj 等） | 全体 | set1 帧 UBO，绑定即得，无 per-instance 寻址 |
+| 光源列表 | FS | 分簇集按屏幕 tile + 深度片寻址（per-pixel，非 per-instance） |
+
+一句话：命令环只负责"这个实例是谁（槽号）+ 用哪段几何（池内 pin）"，其余全是 shader 沿槽号在常驻表里自己走的 id 链——**每实例的差异全部住在表里，命令和 shader 都不重复携带**。
+
 ## §4 两份知识、一次拼装
 
 CPU 发布的是**数据行本体**（不是指针——显存里没有指回 CPU 的东西），GPU 在两个阶段各取各的：
@@ -78,12 +90,52 @@ build_indirect 是独立 pass（独立 dispatch），不是 cull 顺带写命令
 
 把 build_indirect 升级成"前缀和压缩成仅可见行 + 末尾原子写 count"，`drawCount` 变成执行期从 countBuffer 现读（`vkCmdDrawIndexedIndirectCount`，`maxDrawCount` 硬上界）。它是同一条"决策点后移"逻辑的自然延伸——`vkCmdDrawIndexedIndirect` 后移了"每条画几个"，这一步把"画几条"这个最后的 CPU 侧常量也后移到 GPU 执行时。取舍判据：命令条数上界本来就是 CPU 在账信息（在场行数）时，后移无必要——本工程选 `cmd_draw_indexed_indirect`（CPU 传在场行数上界 N）；翻案条件 = 压缩合批后 `instanceCount=0` 空条成为浪费大头。收益 = 省空命令前端扫描 + CPU 免算上界；代价 = compute 侧压缩趟 + count 写读依赖 + `draw_indirect_count` 特性门 + CPU 失去实际条数（诊断改走回读）。**判定线（间接 `indirect.rs:9-10` 已钉）：条数只有 GPU 知道时（压缩合批）才需要**——当前规模（万级行、空条判零退出）不触发。
 
+## §6 vkCmdDrawIndexedIndirect 的 API 形状
+
+```c
+void vkCmdDrawIndexedIndirect(
+    VkCommandBuffer cb,
+    VkBuffer       buffer,    // INDIRECT_COMMAND 用途的 buffer
+    VkDeviceSize   offset,    // 4 对齐
+    uint32_t       drawCount, // 条数（N，录制期常量）
+    uint32_t       stride);   // 条距，4 的倍数，允许 > 20B（垫开对齐）
+```
+
+**结构体本身被规范冻结**：`VkDrawIndexedIndirectCommand` 是 `vulkan_core.h` 里的 C 结构体，字段、顺序、大小全定死——5 × u32 = 20B，全 u32 无对齐坑。没有版本号、没有自描述头，**布局就是 ABI 契约**：GPU compute 按这个序写原始字节，驱动前端命令解析器按同一布局读，这是 shader 字节镜像（`instance.wgsl`）合法的根据。会变的只是周边参数（条数/条距/偏移/特性门：`drawCount > 1` 需 `multi_draw_indirect`）。
+
+```c
+typedef struct VkDrawIndexedIndirectCommand {
+    uint32_t indexCount;     // 0B  本条画多少索引（本工程 = LOD 档位 pin 的 index_count）
+    uint32_t instanceCount;  // 4B  画几个实例（本工程恒 0/1：可见 = 1，被剔/透明 = 0——GPU 侧杀 draw 的开关）
+    uint32_t firstIndex;     // 8B  索引池内起始索引（本工程 = LOD pin）
+    int32_t  vertexOffset;   // 12B 顶点池内偏移（本工程 = LOD pin 的 vertex_base）
+    uint32_t firstInstance;  // 16B 实例起始号（本工程 = 实例槽号，VS 按 instance_index 读对象表）
+} VkDrawIndexedIndirectCommand;
+```
+
+五个字段就是相对 `vkCmdDrawIndexed` 的全部实参——一次 indirect 批内，pipeline/descriptor set/顶点索引绑定对 N 条统一生效，这五个字段是唯一的 per-draw 变量；`vertexOffset` 是有符号的（负值合法），其余无符号。
+
+同族兄弟结构各自固定、互不通用：`VkDrawIndirectCommand`（非索引，4 字段 16B）、`VkDispatchIndirectCommand`（3 字段 12B，`cmd_dispatch_indirect` 用）；`DrawIndirectCount` **不换结构**，只把条数来源换成 countBuffer 现读。真正引入新命令格式的是 DGC（`VK_EXT_device_generated_commands`，预处理命令序列，另一套体系）。
+
+## §7 Unity 用法对照（官方文档核实）
+
+Unity 的间接绘制 API 表面同形，语义不同——**buffer 内容和 Vulkan 同形，但不是可执行命令流**：
+
+- **旧 API `Graphics.DrawMeshInstancedIndirect`（已标 obsolete）**：`bufferWithArgs` 必须含 5 个整数，字段序与 `VkDrawIndexedIndirectCommand` 相同（index count per instance / instance count / start index location / base vertex location / start instance location，D3D 命名）。但一次调用 = **一个 CPU 点名的 Mesh + Material 的一次绘制**，buffer 只给这一次 draw 的参数；bounds 也由 CPU 传（整批包围盒，文档明说实例不再被视锥/遮挡剔除）。
+- **现代 API `Graphics.RenderMeshIndirect`**：commandBuffer 存 `GraphicsBuffer.IndirectDrawIndexedArgs` 结构体（文档警告布局随平台变，须用结构体、不可摆原始 int），一次调用可执行 `commandCount` 条命令——但仍是"**同一个 Mesh 画多次**"，每条命令只有数量类参数，mesh 身份在 CPU 参数里。
+- **本质差**：Vulkan 环是**命令流**，每条自带 mesh 身份（`firstIndex/vertexOffset` 指向池内不同 mesh、`firstInstance` 带实例槽号），一次调用画 N 个不同 mesh；Unity buffer 是**指定 mesh 的参数表**——谁画（mesh/material/bounds）是 CPU 每次调用声明的，buffer 只定"画几次/从哪取索引"。所以 draw call 数：本工程不随对象数增长；Unity 的 GPU-driven 形状下仍随 mesh 种类（批次）数增长，后移的只有 instanceCount（现代 API 加了 commandCount 维度，但限同一 mesh）。
+- **per-instance 身份同构**：Unity shader 靠 `unity_InstanceID` + 自带 `StructuredBuffer`（需 include `UnityIndirect.cginc` 声明 `UNITY_INDIRECT_DRAW_ARGS`）；本工程 `firstInstance = 槽号` 直读对象表。两者都是"GPU 数数，CPU 不管"，差的只是身份载体归谁（引擎内置约定 vs 命令内嵌）。
+
+一句话：Vulkan 把"选哪个 mesh、哪个管线、哪些实例"全部放进 buffer；Unity 把这些留在 C# 参数里，buffer 只放数量。这就是"Unity 里 Buffer 不是绘制指令"的准确含义——同一串 20B 字节，消费方一个是 GPU 前端，一个是 Unity 渲染器给固定 mesh 挑参数。
+
 ## 涉及源码 / 来源
 
+- `ash_renderer/shaders/common/mesh.wgsl`——id 链消费端：`mesh_vertex` 按 `instance_index` 读对象表/模型环，`sample_surface` 材质记录 → bindless 大数组
 - `ash_renderer/shaders/build_indirect.wgsl:63-70`——instanceCount 产地（可见/透明/被剔三态 select）
-- `ash_renderer/src/render/frame/frame_draw.rs:400`——`cmd_draw_indexed_indirect(cb, buf, 0, indirect_count, 20B)`
-- `ash_renderer/src/driver/host/frame.rs:490`——`indirect_count = assembly.slots.len()`（N 的出处）
+- `ash_renderer/src/render/frame/frame_draw.rs:327`——`cmd_draw_indexed_indirect(cb, buf, 0, indirect_count, 20B)`
+- `ash_renderer/src/driver/host/frame.rs:204`——`indirect_count = assembly.slots.len()`（N 的出处）
 - `ash_renderer/src/render/passes/visibility/indirect.rs:9-14`——条数判定线、firstInstance 携带槽号、instanceCount 恒 1/0
 - `ash_renderer/src/driver/host/drawlist.rs:238/:272`——在场环发布、mesh 偏移打包（CPU 原料发布）
-- `ash_renderer/src/render/resident/tables/instance_table.rs:14`——命令环角色与写读权
+- `ash_renderer/src/render/resident/tables/instance_table.rs:15`——命令环角色与写读权
+- Vulkan API 形状与 Unity 对照：Vulkan 1.3 规范 `VkDrawIndexedIndirectCommand` 定义；Unity 官方文档 `Graphics.DrawMeshInstancedIndirect`（bufferWithArgs 五整数、obsolete 指向 RenderMeshIndirect）与 `Graphics.RenderMeshIndirect`（IndirectDrawIndexedArgs 结构体、commandCount 多命令、同一 Mesh）——2026-11-04 核实
 - 姊妹篇：[GPU-Driven 本质](GPU-Driven%20本质.md)（决策点后移与控制面/数据面分家）、[为什么没有全上 GPU 驱动](为什么没有全上%20GPU%20驱动.md)（读数不投票与回读墙）、6.1 段《遮挡剔除的成本、覆盖与粒度》《Hi-Z 遮挡原理》（成本/粒度/滞后正本）
