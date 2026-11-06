@@ -32,8 +32,8 @@ use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::core::binding::shader_abi;
 
-const SMAA_AREA_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_area_lut.png");
-const SMAA_SEARCH_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/_smaa_search_lut.png");
+const SMAA_AREA_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/post/smaa/_smaa_area_lut.png");
+const SMAA_SEARCH_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/post/smaa/_smaa_search_lut.png");
 
 const SMAA_BINDING_TEX0: u32 = 0;
 const SMAA_BINDING_INFO: u32 = 1;

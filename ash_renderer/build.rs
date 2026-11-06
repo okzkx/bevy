@@ -1,5 +1,5 @@
-//! 着色器编译管线：`shaders/*.wgsl`（入口模块；`read_dir` 不递归，`shaders/common/`
-//! 下的公共片段不单独编译）→ 展开 `// #import <name>` → naga 30.0.1（wgsl-in →
+//! 着色器编译管线：`shaders/<分类>/` 下的入口模块（递归枚举；`shaders/common/`
+//! 是公共片段库，只被 #import 展开，不作入口编译）→ 展开 `// #import <name>` → naga 30.0.1（wgsl-in →
 //! spv-out）→ spirv-val 校验 →（被 VUID-04680 拒的 runtime 模块）capability 补丁 →
 //! 复跑 spirv-val → `OUT_DIR/<stem>.spv`（小端词流），由
 //! `include_bytes!(concat!(env!("OUT_DIR"), "/<stem>.spv"))` 消费。
@@ -47,11 +47,24 @@ fn main() {
     // 递归扫描，含 common/），逐文件声明保留（内容变更精确触发）。
     println!("cargo:rerun-if-changed={}", shaders_dir.display());
     println!("cargo:rerun-if-env-changed=VULKAN_SDK");
-    let mut wgsl_paths: Vec<PathBuf> = std::fs::read_dir(shaders_dir)
-        .unwrap_or_else(|e| panic!("读 {shaders_dir:?} 失败: {e}"))
-        .map(|e| e.unwrap_or_else(|e| panic!("枚举 {shaders_dir:?} 条目失败: {e}")).path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "wgsl"))
-        .collect();
+    // 递归枚举分类子目录；`common/` 是公共片段库，不入入口清单。
+    let mut wgsl_paths: Vec<PathBuf> = Vec::new();
+    let mut dirs = vec![shaders_dir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("读 {dir:?} 失败: {e}"))
+            .map(|e| e.unwrap_or_else(|e| panic!("枚举 {dir:?} 条目失败: {e}")).path())
+            .collect::<Vec<_>>();
+        for path in entries {
+            if path.is_dir() {
+                if path != common_dir {
+                    dirs.push(path);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "wgsl") {
+                wgsl_paths.push(path);
+            }
+        }
+    }
     wgsl_paths.sort();
     assert!(
         !wgsl_paths.is_empty(),
@@ -63,8 +76,16 @@ fn main() {
     }
     let mut abi_table = String::new();
     let mut abi_names: Vec<String> = Vec::new();
+    // 入口身份只由文件名（stem）决定：OUT_DIR 产物与 ABI 表静态项都以它命名，
+    // 引入分类子目录后跨目录重名会静默碰撞，这里显式拦住。
+    let mut seen_stems: Vec<String> = Vec::new();
     for path in &wgsl_paths {
         let stem = path.file_stem().expect("有扩展名的路径必有文件名").to_string_lossy().into_owned();
+        assert!(
+            !seen_stems.contains(&stem),
+            "入口重名 {stem:?}（stem 是 OUT_DIR 产物与 ABI 表的全局名字，不同分类目录也不允许重名）"
+        );
+        seen_stems.push(stem.clone());
         println!("cargo:rerun-if-changed={}", path.display());
         let source = expand_imports(path, &common_dir);
         let expanded = out_dir.join(format!("{stem}.expanded.wgsl"));
