@@ -8,7 +8,8 @@ use serde_json::{json, Value};
 
 use crate::scene::{spawn_lod_ladder, spawn_test_shape, TestShape};
 
-use super::{objects::object_op_error, params::parse_params};
+use super::objects::object_op_error;
+use crate::remote::common::params::parse_params;
 
 use ash_macros::system;
 

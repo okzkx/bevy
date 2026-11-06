@@ -9,7 +9,7 @@ use ash_macros::system;
 
 use crate::render::{BloomSettings, RenderMode, SmaaSettings, TonemapCurve};
 
-use super::params::{invalid_params, parse_enabled, parse_params, res_mut};
+use crate::remote::common::params::{invalid_params, parse_enabled, parse_params, res_mut};
 
 /// `ash_renderer/bloom_set`：Bloom/tonemap 开关、曲线与增益。
 /// 请求 `{"enabled": bool, "strength": f32?, "tonemap": bool?,

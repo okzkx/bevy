@@ -21,7 +21,7 @@ use crate::{
     render::{BindlessTextureTable, ImageCache, InstanceTables, MeshPool, OBJECT_TABLE_CAPACITY},
 };
 
-use super::params::{invalid_params, parse_params};
+use crate::remote::common::params::{invalid_params, parse_params};
 
 use ash_macros::system;
 

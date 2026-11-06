@@ -20,7 +20,7 @@ use crate::render::{
 };
 use crate::scene::InstanceLedger;
 
-use super::{
+use crate::remote::common::{
     params::{internal_err, parse_params_or_default, res, res_mut},
     readback::{bytes_at, f32_at, read_buffer, u32_at, words},
 };

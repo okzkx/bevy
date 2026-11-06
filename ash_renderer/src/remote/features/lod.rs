@@ -22,7 +22,7 @@ use crate::{
     },
 };
 
-use super::{
+use crate::remote::common::{
     params::{invalid_params, parse_enabled, parse_params, res, res_mut},
     readback::{read_buffer, u32_at},
     reference::{brp_view_proj, clamp_rect_to_screen},

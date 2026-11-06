@@ -17,7 +17,7 @@ use ash_macros::system;
 use crate::scene::{GapMode, GapSnapshot, InstanceLedger, ResidencySettings, ResidencyStats};
 use crate::render::MAX_LOD_LEVELS;
 
-use super::params::{invalid_params, parse_params, res, res_mut};
+use crate::remote::common::params::{invalid_params, parse_params, res, res_mut};
 
 /// `ash_renderer/gap_stats`：缺口请求聚合读数（只读）——模式快照 + 快照槽
 /// 数 + 本 tick 触发行数/累计/陈旧丢弃。

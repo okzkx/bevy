@@ -12,7 +12,7 @@ use crate::render::{
     Context, EguiPassTiming, FrameSyncSettings, ImageCache, MeshPool, MonitorHistory, PerfLedger,
 };
 
-use super::params::parse_params_or_default;
+use crate::remote::common::params::parse_params_or_default;
 
 /// `ash_renderer/monitor_stats`：持续监控快照（只读）。fps 取监控历史最近
 /// 采样（≤0.5s 陈旧）；显存堆级读数现查（VK_EXT_memory_budget 缺席为 null）；

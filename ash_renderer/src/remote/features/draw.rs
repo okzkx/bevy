@@ -13,7 +13,7 @@ use ash_macros::system;
 use crate::scene::{DrawListVerify, InstanceLedger};
 use crate::render::{CullDiagnostics, IndirectStats};
 
-use super::params::parse_enabled;
+use crate::remote::common::params::parse_enabled;
 
 /// 组装对照模式的计量读回（draw_stats 与 drawlist_verify_set 共用）。
 fn verify_json(verify: &DrawListVerify) -> Value {

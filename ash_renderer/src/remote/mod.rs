@@ -7,54 +7,41 @@
 //!
 //! | 子模块 | 职责 |
 //! |---|---|
-//! | [`scene`] | 场景直控：层级树读、Transform/相机/太阳方向写 |
-//! | [`mouse`] | 虚拟鼠标：注入 `Messages<WindowEvent>`，与 bevy_winit 同层 |
-//! | [`objects`] | 对象生命周期：spawn 克隆/换柄 + increment_stats 账本读数 |
-//! | [`shapes`] | 测试实体：spawn_shape 五形状 + 颜色/PBR 参数、spawn_lod 阶梯体 |
-//! | [`generate`] | 大场景生成：generate_scene 批量铺实例、chunk 生成/盘点/整块删除 |
-//! | [`assets`] | 资产内容变更与运行期动态加载：mutate/load_mesh/load_image/load_world/reload |
-//! | [`cull`] | 视锥/遮挡剔除：cull_stats 对照、开关、Hi-Z 读回与遮挡判定参照 |
-//! | [`lod`] | LOD：lod_census 档位对照、开关与判据参数 |
-//! | [`cluster`] | cluster 光照与透明层：灯表增删改读、cluster/透明排序对照 |
-//! | [`shadow`] | 阴影：开关 + 逐 cascade 标记对照 |
-//! | [`render_settings`] | 画面设置：Bloom/tonemap、SMAA、着色调试模式 |
-//! | [`draw`] | indirect 闭环读数与组装对照开关 |
-//! | [`residency`] | 驻留管理器读数与设置 |
-//! | [`gap`] | GPU 缺口请求读数与模式 |
-//! | [`ring_census`](mod@ring_census) | 环与常驻表 GPU 内容 vs 宿主期望字节对账 |
-//! | [`perf`] | 性能读数、原始样本导出与 workload 变更形态开关 |
-//! | [`monitor`] | 持续监控读数（与 egui 监控窗口同账）与帧率同步开关 |
-//! | [`layout_contract`](mod@layout_contract) | 描述符集布局与管线配方清单 |
+//! | [`edit::scene`] | 场景直控：层级树读、Transform/相机/太阳方向写 |
+//! | [`edit::mouse`] | 拟鼠标：注入 `Messages<WindowEvent>`，与 bevy_winit 同层 |
+//! | [`edit::objects`] | 对象生命周期：spawn 克隆/换柄 + increment_stats 账本读数 |
+//! | [`edit::shapes`] | 测试实体：spawn_shape 五形状 + 颜色/PBR 参数、spawn_lod 阶梯体 |
+//! | [`edit::generate`] | 大场景生成：generate_scene 批量铺实例、chunk 生成/盘点/整块删除 |
+//! | [`edit::assets`] | 资产内容变更与运行期动态加载：mutate/load_mesh/load_image/load_world/reload |
+//! | [`features::cull`] | 视锥/遮挡剔除：cull_stats 对照、开关、Hi-Z 读回与遮挡判定参照 |
+//! | [`features::lod`] | LOD：lod_census 档位对照、开关与判据参数 |
+//! | [`features::cluster`] | cluster 光照与透明层：灯表增删改读、cluster/透明排序对照 |
+//! | [`features::shadow`] | 阴影：开关 + 逐 cascade 标记对照 |
+//! | [`features::render_settings`] | 画面设置：Bloom/tonemap、SMAA、着色调试模式 |
+//! | [`features::draw`] | indirect 闭环读数与组装对照开关 |
+//! | [`features::residency`] | 驻留管理器读数与设置 |
+//! | [`features::gap`] | GPU 缺口请求读数与模式 |
+//! | [`census::ring_census`](mod@census::ring_census) | 环与常驻表 GPU 内容 vs 宿主期望字节对账 |
+//! | [`census::perf`] | 性能读数、原始样本导出与 workload 变更形态开关 |
+//! | [`census::monitor`] | 持续监控读数（与 egui 监控窗口同账）与帧率同步开关 |
+//! | [`census::layout_contract`](mod@census::layout_contract) | 描述符集布局与管线配方清单 |
 //!
-//! 公共件：`params`（参数解析与协议错误）、`readback`（GPU 读回与字节解析）、
-//! `reference`（CPU 参照用相机矩阵与投屏钳制）。
+//! 分组目录：`edit`（场景编辑写通道，操作本体在 scene 机制层）/ `features`
+//! （渲染功能读数与开关）/ `census`（全帧对账与监控）/ `common`（公共标准件）。
+//!
+//! 公共件收在 [`common`]：`params`（参数解析与协议错误）、`readback`（GPU 读回
+//! 与字节解析）、`reference`（CPU 参照用相机矩阵与投屏钳制）。
 //!
 //! 机制与边界（详见 `.agents/docs/笔记/Bevy/bevy_remote：BRP远程协议与自定义方法.md`）：
 //! handler 本身是 Bevy system，跑在 `RemoteLast`（Last 之后）按帧节拍执行——写值
 //! 下一帧生效，参数即请求 `params` 的 JSON、返回值即响应。协议层错误一律回
 //! `BrpError`，不 panic。安全边界：只绑 loopback、无鉴权，仅限本机调试。
 
-mod assets;
-mod cluster;
-mod cull;
-mod draw;
-mod gap;
-mod generate;
-mod layout_contract;
-mod lod;
-mod monitor;
-mod mouse;
-mod objects;
-mod params;
-mod perf;
-mod readback;
-mod reference;
-mod render_settings;
-mod residency;
-mod ring_census;
-mod scene;
-mod shadow;
-mod shapes;
+mod census;
+mod common;
+mod edit;
+mod features;
+
 
 use bevy::{
     prelude::*,
@@ -66,24 +53,30 @@ use bevy::{
 };
 
 use self::{
-    assets::{load_image_cmd, load_mesh_cmd, load_world_cmd, mutate_asset_cmd, reload_asset_cmd},
-    cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
-    cluster::{cluster_census, light_remove, light_spawn, light_stats, light_update, transparent_sort_check},
-    draw::{draw_stats, drawlist_verify_set},
-    generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
-    gap::{gap_census, gap_set, gap_stats},
-    layout_contract::layout_contract,
-    lod::{lod_census, lod_set_enabled, lod_set_params},
-    monitor::{frame_sync_cmd, monitor_stats},
-    mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
-    objects::{increment_stats, replace_handles, spawn_primitive},
-    perf::{perf_samples, perf_stats, workload},
-    render_settings::{bloom_set, set_render_mode, smaa_set},
-    residency::{residency_set, residency_stats},
-    ring_census::ring_census,
-    scene::{scene_tree, set_camera, set_transform, sun_get, sun_set},
-    shadow::{shadow_set, shadow_stats},
-    shapes::{spawn_lod, spawn_shape},
+    census::{
+        layout_contract::layout_contract,
+        monitor::{frame_sync_cmd, monitor_stats},
+        perf::{perf_samples, perf_stats, workload},
+        ring_census::ring_census,
+    },
+    edit::{
+        assets::{load_image_cmd, load_mesh_cmd, load_world_cmd, mutate_asset_cmd, reload_asset_cmd},
+        generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
+        mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
+        objects::{increment_stats, replace_handles, spawn_primitive},
+        scene::{scene_tree, set_camera, set_transform, sun_get, sun_set},
+        shapes::{spawn_lod, spawn_shape},
+    },
+    features::{
+        cluster::{cluster_census, light_remove, light_spawn, light_stats, light_update, transparent_sort_check},
+        cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
+        draw::{draw_stats, drawlist_verify_set},
+        gap::{gap_census, gap_set, gap_stats},
+        lod::{lod_census, lod_set_enabled, lod_set_params},
+        render_settings::{bloom_set, set_render_mode, smaa_set},
+        residency::{residency_set, residency_stats},
+        shadow::{shadow_set, shadow_stats},
+    },
 };
 
 /// BRP 远程通道插件：装协议 + HTTP 传输 + 全部自定义方法。宿主 main 照插件清单

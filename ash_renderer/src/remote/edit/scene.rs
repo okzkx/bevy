@@ -16,7 +16,7 @@ use crate::scene::{
     TransformEditError, TREE_MAX_DEPTH,
 };
 
-use super::params::{invalid_params, parse_params, parse_params_or_default};
+use crate::remote::common::params::{invalid_params, parse_params, parse_params_or_default};
 
 /// `ash_renderer/scene_tree`：场景层级树（只读）。索引与 egui 层级树页共用
 /// [`SceneTreeIndex`]——CLI 树与面板树看到同一棵树、同一套"相关"语义。根 =

@@ -17,7 +17,7 @@ use crate::{
     render::MeshPool,
 };
 
-use super::{
+use crate::remote::common::{
     params::{invalid_params, parse_params, res, res_mut},
     reference::no_camera,
 };

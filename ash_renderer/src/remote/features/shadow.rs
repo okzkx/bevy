@@ -17,7 +17,7 @@ use crate::{
     },
     scene::InstanceLedger,
 };
-use super::{
+use crate::remote::common::{
     params::{parse_enabled, res, res_mut},
     readback::{f32_at, read_buffer, u32_at},
 };

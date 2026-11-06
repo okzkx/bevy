@@ -21,7 +21,7 @@ use crate::render::{
 };
 use crate::scene::InstanceLedger;
 
-use super::{
+use crate::remote::common::{
     params::{internal_err, invalid_params, parse_params, res, res_mut},
     readback::{read_buffer, u32_at, words},
     reference::brp_view_proj,

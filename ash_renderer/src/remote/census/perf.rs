@@ -15,7 +15,7 @@ use crate::{
     render::{FrameSample, GpuTimer, ImageCache, MeshPool, PerfLedger},
 };
 
-use super::params::{invalid_params, parse_params, parse_params_or_default, res_mut};
+use crate::remote::common::params::{invalid_params, parse_params, parse_params_or_default, res_mut};
 
 /// PerfLedger 环形窗口容量（= render 内 `PerfLedger::CAPACITY`，未导出）。
 const PERF_WINDOW: usize = 2048;

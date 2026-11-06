@@ -21,10 +21,8 @@ use crate::scene::{
     ChunkGenParams, SceneGenParams,
 };
 
-use super::{
-    objects::object_op_error,
-    params::{invalid_params, parse_params},
-};
+use super::objects::object_op_error;
+use crate::remote::common::params::{invalid_params, parse_params};
 
 /// 生成源实体：显式给定直接用，缺省取场景里第一个可渲染 primitive。
 fn source_or_first_primitive(world: &mut World, source: Option<Entity>) -> Result<Entity, BrpError> {

@@ -16,10 +16,8 @@ use crate::scene::{
     MutateAsset,
 };
 
-use super::{
-    objects::{material_id_string, object_op_error},
-    params::{invalid_params, parse_params, res},
-};
+use super::objects::{material_id_string, object_op_error};
+use crate::remote::common::params::{invalid_params, parse_params, res};
 
 use ash_macros::system;
 
