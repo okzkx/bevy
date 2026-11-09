@@ -1,6 +1,6 @@
 //! 实体层级树页：World 全部实体按 [`Children`]/[`ChildOf`]
 //! 关系递归展示，节点带 Name（无名按组件角色命名）+ 组件标签；点选节点落
-//! [`SelectedEntity`] 资源，面板下部是属性区——组件全清单、渲染语义
+//! [`SelectedEntity`] 资源。左栏层级树，右栏属性区——组件全清单、渲染语义
 //! 行（Mesh/材质/贴图槽）与 Transform 编辑（DragValue，写经
 //! [`crate::scene`] 的 Transform 编辑封装）。
 //!
@@ -172,8 +172,7 @@ pub(in crate::overlay) struct EntityTreePage<'a> {
 }
 
 impl EntityTreePage<'_> {
-    /// 面板本体：拍平行数组的视口裁剪渲染（`show_rows` 只构建可见行，
-    /// 与实体总数解耦）+ 属性区。返回一次 Transform 编辑（有拖改时），
+    /// 面板本体：左树右属性两栏。返回一次 Transform 编辑（有拖改时），
     /// 由 pass 落进编辑队列——本函数不碰写路径（展开态账与本缓存除外）。
     pub(in crate::overlay) fn show(self, ui: &mut egui::Ui) -> Option<(Entity, TransformEdit)> {
         let Self {
@@ -182,54 +181,79 @@ impl EntityTreePage<'_> {
             details,
             drag,
         } = self;
-        ui.monospace(format!("相关 {} / 全部 {}", state.relevant, state.total));
-        // 等高行高：可交互行（selectable_label）以 interact_size 为下限，
-        // 取两者大者保证逐行 stride 与声明一致（滚动算术不失真）。
-        let row_height = ui
-            .spacing()
-            .interact_size
-            .y
-            .max(ui.text_style_height(&egui::TextStyle::Monospace));
-        // 本帧点中的折叠行（展开/收起）——闭包只读行切片，写回在
-        // 闭包外做（展开态账 + 置脏，下帧重建生效）。
-        let mut toggles: Vec<Entity> = Vec::new();
-        egui::ScrollArea::vertical()
-            .id_salt("实体层级树")
-            .max_height(380.0) // points
-            .show_rows(ui, row_height, state.rows.len(), |ui, range| {
-                for TreeRow {
-                    entity,
-                    depth,
-                    label,
-                    has_children,
-                    expanded,
-                } in &state.rows[range]
-                {
-                    let is_selected = selected.0 == Some(*entity);
-                    ui.horizontal(|ui| {
-                        ui.set_height(row_height);
-                        ui.add_space(*depth as f32 * ROW_INDENT);
-                        if *has_children {
-                            let arrow = if *expanded { "▼ " } else { "▶ " };
-                            if ui
-                                .selectable_label(is_selected, format!("{arrow}{label}"))
-                                .clicked()
-                            {
-                                selected.0 = Some(*entity);
-                                toggles.push(*entity);
-                            }
-                        } else if ui.selectable_label(is_selected, label).clicked() {
+        let height = ui.available_height();
+        ui.horizontal_top(|ui| {
+            // 左栏：层级树（定宽）
+            ui.allocate_ui_with_layout(
+                egui::vec2(TREE_WIDTH, height),
+                egui::Layout::top_down_justified(egui::Align::Min),
+                |ui| show_tree(ui, selected, state),
+            );
+            ui.separator();
+            // 右栏：属性区占满剩余宽高
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), height),
+                egui::Layout::top_down_justified(egui::Align::Min),
+                |ui| show_details_panel(ui, details, selected, drag),
+            )
+            .inner
+        })
+        .inner
+    }
+}
+
+/// 左栏层级树宽度（points）。
+const TREE_WIDTH: f32 = 240.0;
+
+/// 左栏：计数行 + 拍平行数组的视口裁剪渲染（`show_rows` 只构建可见行，
+/// 与实体总数解耦），展开/收起写回展开态账。
+fn show_tree(ui: &mut egui::Ui, selected: &mut SelectedEntity, state: &mut EntityTreeState) {
+    ui.monospace(format!("相关 {} / 全部 {}", state.relevant, state.total));
+    // 等高行高：可交互行（selectable_label）以 interact_size 为下限，
+    // 取两者大者保证逐行 stride 与声明一致（滚动算术不失真）。
+    let row_height = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(ui.text_style_height(&egui::TextStyle::Monospace));
+    // 本帧点中的折叠行（展开/收起）——闭包只读行切片，写回在
+    // 闭包外做（展开态账 + 置脏，下帧重建生效）。
+    let mut toggles: Vec<Entity> = Vec::new();
+    egui::ScrollArea::vertical()
+        .id_salt("实体层级树")
+        .max_height(ui.available_height())
+        .show_rows(ui, row_height, state.rows.len(), |ui, range| {
+            for TreeRow {
+                entity,
+                depth,
+                label,
+                has_children,
+                expanded,
+            } in &state.rows[range]
+            {
+                let is_selected = selected.0 == Some(*entity);
+                ui.horizontal(|ui| {
+                    ui.set_height(row_height);
+                    ui.add_space(*depth as f32 * ROW_INDENT);
+                    if *has_children {
+                        let arrow = if *expanded { "▼ " } else { "▶ " };
+                        if ui
+                            .selectable_label(is_selected, format!("{arrow}{label}"))
+                            .clicked()
+                        {
                             selected.0 = Some(*entity);
+                            toggles.push(*entity);
                         }
-                    });
-                }
-            });
-        for entity in toggles {
-            let open = state.expanded.entry(entity).or_insert(true);
-            *open = !*open;
-            state.dirty = true;
-        }
-        show_details(ui, details, selected, drag)
+                    } else if ui.selectable_label(is_selected, label).clicked() {
+                        selected.0 = Some(*entity);
+                    }
+                });
+            }
+        });
+    for entity in toggles {
+        let open = state.expanded.entry(entity).or_insert(true);
+        *open = !*open;
+        state.dirty = true;
     }
 }
 
@@ -389,6 +413,21 @@ fn reflect_field_rows(v: &dyn PartialReflect) -> Vec<(String, String)> {
     }
 }
 
+/// 栏属性区外壳：整栏一滚——树独立滚、属性区独立滚，组件清单不再自挂
+/// ScrollArea，随属性区一起滚。返回一次编辑（有拖改时）。
+fn show_details_panel(
+    ui: &mut egui::Ui,
+    details: &SelectedDetails,
+    selected: &mut SelectedEntity,
+    drag: &mut TransformDragCache,
+) -> Option<(Entity, TransformEdit)> {
+    egui::ScrollArea::vertical()
+        .id_salt("实体属性")
+        .auto_shrink([false, false])
+        .show(ui, |ui| show_details(ui, details, selected, drag))
+        .inner
+}
+
 /// 属性区：快照渲染（头部/渲染语义/全局平移/组件清单）+ Transform
 /// 编辑（DragValue 读快照副本）。返回一次编辑（有拖改时），写路径归
 /// [`crate::scene`] 的 Transform 编辑封装——本函数零 World 访问，纯渲染。
@@ -398,7 +437,6 @@ fn show_details(
     selected: &mut SelectedEntity,
     drag: &mut TransformDragCache,
 ) -> Option<(Entity, TransformEdit)> {
-    ui.separator();
     let Some(entity) = details.entity else {
         ui.weak("点选节点查看属性（编辑目标从这里来）");
         return None;
@@ -476,32 +514,27 @@ fn show_details(
     // 组件全清单：archetype 口径；注册的折叠出字段行，未注册只报名字
     ui.separator();
     ui.strong(format!("组件 {}", details.component_rows.len()));
-    egui::ScrollArea::vertical()
-        .id_salt("组件清单")
-        .max_height(260.0) // points
-        .show(ui, |ui| {
-            for row in &details.component_rows {
-                match &row.fields {
-                    Some(fields) => {
-                        egui::CollapsingHeader::new(egui::RichText::new(&row.name).monospace())
-                            // id_salt 混实体号：同短名组件的折叠状态不跨实体互串
-                            .id_salt(format!("{}/{}", entity.index(), row.name))
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                for (fname, fvalue) in fields {
-                                    ui.horizontal(|ui| {
-                                        ui.monospace(fname.as_str());
-                                        ui.weak(fvalue.as_str());
-                                    });
-                                }
+    for row in &details.component_rows {
+        match &row.fields {
+            Some(fields) => {
+                egui::CollapsingHeader::new(egui::RichText::new(&row.name).monospace())
+                    // id_salt 混实体号：同短名组件的折叠状态不跨实体互串
+                    .id_salt(format!("{}/{}", entity.index(), row.name))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        for (fname, fvalue) in fields {
+                            ui.horizontal(|ui| {
+                                ui.monospace(fname.as_str());
+                                ui.weak(fvalue.as_str());
                             });
-                    }
-                    None => {
-                        ui.monospace(row.name.as_str());
-                    }
-                }
+                        }
+                    });
             }
-        });
+            None => {
+                ui.monospace(row.name.as_str());
+            }
+        }
+    }
     edit
 }
 
