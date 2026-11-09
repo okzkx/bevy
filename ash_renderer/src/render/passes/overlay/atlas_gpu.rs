@@ -5,6 +5,8 @@
 
 use bevy::prelude::*;
 
+use std::collections::HashMap;
+
 use crate::common::error::Result;
 use crate::render::{BindlessTextureTable, GpuImage, SlotBinding, Ticket, Uploader};
 
@@ -12,6 +14,9 @@ use crate::render::{BindlessTextureTable, GpuImage, SlotBinding, Ticket, Uploade
 pub struct AtlasGpu {
     /// 当前在用的图集代（最近一次整传）。
     current: Option<AtlasSlot>,
+    /// 用户贴图（egui 用户纹理，键 = Managed 序号；产出方 `overlay::framework::paint`
+    /// 负责整传与释放，本表只管 GPU 资源与槽位寿命）。
+    user: HashMap<u64, AtlasSlot>,
     /// 换下的旧代及其上传票据，绘制和上传都完成后才销毁（[`Self::drain_graveyard`]）；
     /// 不排空会随重传次数无界增长。
     graveyard: Vec<(GpuImage, Ticket)>,
@@ -41,6 +46,42 @@ impl AtlasGpu {
     /// 当前代的槽位绑定（None = 从未整传）。
     pub(crate) fn current_slots(&self) -> Option<SlotBinding> {
         self.current.as_ref().map(|slot| slot.slots)
+    }
+
+    /// 用户贴图的槽位绑定（None = 未整传/已释放）。
+    pub(crate) fn user_slots(&self, id: u64) -> Option<SlotBinding> {
+        self.user.get(&id).map(|slot| slot.slots)
+    }
+
+    /// 用户贴图就位：整传提交成功且槽位发布后调用。同 id 重传 = 旧资源进 graveyard。
+    pub(crate) fn install_user(
+        &mut self,
+        tables: &mut BindlessTextureTable,
+        id: u64,
+        image: GpuImage,
+        ticket: Ticket,
+        slots: SlotBinding,
+    ) {
+        if let Some(old) = self.user.insert(
+            id,
+            AtlasSlot {
+                image,
+                ticket,
+                slots,
+            },
+        ) {
+            tables.retire(old.slots);
+            self.graveyard.push((old.image, old.ticket));
+        }
+    }
+
+    /// 释放用户贴图（产出方收到 egui free 增量时调用）：槽位交回表，GPU 资源
+    /// 连同票据进 graveyard 等统一排空。未登记的 id 静默跳过（幂等）。
+    pub(crate) fn free_user(&mut self, tables: &mut BindlessTextureTable, id: u64) {
+        if let Some(slot) = self.user.remove(&id) {
+            tables.retire(slot.slots);
+            self.graveyard.push((slot.image, slot.ticket));
+        }
     }
 
     /// 新代就位：整传提交成功且槽位发布后调用，已传代数推进到 `generation`。

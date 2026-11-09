@@ -2,7 +2,8 @@
 //!
 //! - **set0 与场景管线共用**：layout 只声明常驻表 set0（UI 无 UBO）。切换管线后 set0
 //!   要按本管线的 layout 重绑（同一个集，不同 layout 对象）。
-//! - **push 16B**：screen_size @0 + tex_index @8 + sampler_index @12，整帧 UI 一次；
+//! - **push 16B**：screen_size @0 + tex_index @8 + sampler_index @12，逐 draw 打包
+//!   （每个 clip 自带纹理/采样器槽位：Managed(0) = 字体图集，其余 = 用户贴图槽）；
 //!   screen_size 用 points（与顶点 pos 同域，tessellate 不按 ppp 缩放顶点）。
 //!   `overlay_draw.wgsl` 的 PushParams、[`UiPushLayout`] 的 `offset_of!` 断言与本配方
 //!   三处要一起改。
@@ -84,7 +85,8 @@ pub(crate) fn pack_ui_push(
     out
 }
 
-/// 一个 UI clip 的 draw 参数：UI 环内的索引/顶点定位 + scissor（物理像素）。
+/// 一个 UI clip 的 draw 参数：UI 环内的索引/顶点定位 + scissor（物理像素）+
+/// 本 clip 采样用的纹理/采样器槽位（字体图集或用户贴图）。
 #[derive(Clone, Copy, Debug)]
 pub struct UiDrawCall {
     pub index_count: u32,
@@ -92,18 +94,18 @@ pub struct UiDrawCall {
     pub vertex_base: u32,
     /// (x, y, w, h) 物理像素，左上原点——Vulkan scissor 同域。
     pub scissor: [u32; 4],
+    /// b0 贴图数组下标（push 的 tex_index）。
+    pub texture: u32,
+    /// b1 采样器数组下标（push 的 sampler_index）。
+    pub sampler: u32,
 }
 
 /// 一次 UI 绘制的全部产物（`overlay::framework::paint` 组装，`render::frame::record` 消费）。
 /// 顶点/索引已由生产方写进 UI 环本帧槽的 buffer。
 pub struct UiPaint {
-    /// 图集纹理槽（push 的 tex_index）。
-    pub atlas_texture: u32,
-    /// 图集采样器槽（push 的 sampler_index）。
-    pub atlas_sampler: u32,
     /// 屏幕尺寸，单位 points（push 的 screen_size；已除过 ppp）。
     pub screen_pt: [f32; 2],
-    /// 每个 clip 一条 draw，各带自己的 scissor。
+    /// 每个 clip 一条 draw，各带自己的 scissor 与纹理/采样器槽位。
     pub draws: Vec<UiDrawCall>,
 }
 
@@ -125,10 +127,9 @@ impl UiPaint {
             // 场景分支不一定跑过，UI 自己设 viewport
             set_viewport(device, cb, extent);
             bind_vertex_index(device, cb, buffers.0, buffers.1);
-            // push 常量整帧不变，循环外打包一次
-            let ui_push = pack_ui_push(self.screen_pt, self.atlas_texture, self.atlas_sampler);
             for call in &self.draws {
-                // 每个 clip 设一次 scissor（零尺寸 = 全裁）
+                // 每个 clip 设一次 scissor（零尺寸 = 全裁）+ 打包本 clip 的 push
+                //（screen_size 整帧同值，纹理/采样器槽位逐 clip 各自的）
                 device.cmd_set_scissor(
                     cb,
                     0,
@@ -143,6 +144,7 @@ impl UiPaint {
                         },
                     }],
                 );
+                let ui_push = pack_ui_push(self.screen_pt, call.texture, call.sampler);
                 device.cmd_push_constants(
                     cb,
                     overlay.layout,

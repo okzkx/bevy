@@ -39,7 +39,7 @@ pub(super) fn create_overlay_draw(
         ctx,
         &ui_data.egui,
         &mut ui_data.frame,
-        &ui_data.mirror,
+        &mut ui_data.mirror,
         &mut ui_data.gpu,
         &mut ui_data.ring,
         tables,
