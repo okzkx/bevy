@@ -10,9 +10,10 @@
 
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use bevy::{
-    asset::AssetId,
+    asset::{AssetId, UntypedAssetId},
     ecs::{
         lifecycle::{DespawnEvent, InsertEvent, RemoveEvent},
         reflect::{AppTypeRegistry, ReflectComponent},
@@ -23,6 +24,7 @@ use bevy::{
     prelude::*,
     reflect::{PartialReflect, ReflectRef},
 };
+use wgpu_types::TextureFormat;
 
 use ash_macros::system;
 
@@ -167,6 +169,8 @@ pub(in crate::overlay) struct EntityTreePage<'a> {
     pub(in crate::overlay) state: &'a mut EntityTreeState,
     /// 属性区快照（采集系统产）。
     pub(in crate::overlay) details: &'a SelectedDetails,
+    /// 贴图预览句柄缓存（UI 侧首见建句柄，采集侧按快照收缩）。
+    pub(in crate::overlay) previews: &'a mut TexturePreviewHandles,
     /// 旋转拖拽缓存（拖拽期内冻结欧拉表示分支）。
     pub(in crate::overlay) drag: &'a mut TransformDragCache,
 }
@@ -179,6 +183,7 @@ impl EntityTreePage<'_> {
             selected,
             state,
             details,
+            previews,
             drag,
         } = self;
         let height = ui.available_height();
@@ -194,7 +199,7 @@ impl EntityTreePage<'_> {
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), height),
                 egui::Layout::top_down_justified(egui::Align::Min),
-                |ui| show_details_panel(ui, details, selected, drag),
+                |ui| show_details_panel(ui, details, previews, selected, drag),
             )
             .inner
         })
@@ -270,15 +275,50 @@ pub(in crate::overlay) struct SelectedDetails {
     exists: bool,
     name: Option<String>,
     children: Option<usize>,
-    mesh: Option<AssetId<Mesh>>,
-    material: Option<AssetId<StandardMaterial>>,
-    /// 材质五贴图槽里非空的：槽名 + 图 AssetId——比官方反射展示更贴本渲染器。
-    textures: Vec<(&'static str, AssetId<Image>)>,
+    /// 网格资产名（None = 无 Mesh 或查不到路径）。
+    mesh_name: Option<String>,
+    /// 材质资产名（None = 无材质或查不到路径）。
+    material_name: Option<String>,
+    /// 材质五贴图槽里非空的：槽名 + 资产名 + 预览缩略图——比官方反射展示更贴本渲染器。
+    textures: Vec<TextureSlotRow>,
     local: Option<TransformVals>,
     global_translation: Option<Vec3>,
     /// 组件全清单（archetype 口径，零反射全量）。
     component_rows: Vec<ComponentRow>,
 }
+
+/// 贴图槽快照行：槽名 + 资产 id（预览句柄缓存的键）+ 资产名 + 预览缩略图
+///（None = 格式不支持/CPU 数据缺席）。
+struct TextureSlotRow {
+    label: &'static str,
+    id: AssetId<Image>,
+    name: Option<String>,
+    thumb: Option<Arc<TextureThumb>>,
+}
+
+/// 预览缩略图：降采样后的 RGBA8 行主序字节（gamma 域原样，egui Color32 同域）。
+pub(in crate::overlay) struct TextureThumb {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+/// 缩略图边长（降采样目标，正方形贴图即该边长；非正方形按比例缩）。
+const THUMB_EDGE: u32 = 64;
+
+/// 缩略图显示边长（points）。
+const THUMB_PT: f32 = 48.0;
+
+/// 缩略图采集缓存（采集系统侧）：AssetId → 降采样产物（None = 不支持）。
+/// 资产内容对给定 id 不可变，缓存按当前快照的 id 清单保留，换选中即收缩。
+#[derive(Resource, Default)]
+pub(in crate::overlay) struct TextureThumbnails(HashMap<AssetId<Image>, Option<Arc<TextureThumb>>>);
+
+/// 缩略图 egui 纹理句柄缓存（UI 侧）：AssetId → 句柄。`load_texture` 只在
+/// 首见发生（TexturesDelta 整图增量一次），采集系统按当前 id 清单 retain，
+/// 句柄丢弃的 free 增量由绘制段销毁 GPU 资源。
+#[derive(Resource, Default)]
+pub(in crate::overlay) struct TexturePreviewHandles(HashMap<AssetId<Image>, egui::TextureHandle>);
 
 /// Transform 三组量的纯数值形态：编辑控件直接喂快照副本。
 #[derive(Clone, Copy)]
@@ -346,23 +386,26 @@ pub(in crate::overlay) fn collect_selected_details(world: &mut World) {
         world.insert_resource(details);
         return;
     };
+    // —— 采样段（全程只读）：快照纯数据 + 资产 id 清单 ——
     details.name = er.get::<Name>().map(|n| n.as_str().to_owned());
     details.children = er.get::<Children>().map(|c| c.len());
-    details.mesh = er.get::<Mesh3d>().map(|m| m.0.id());
-    details.material = er
+    let mesh_id = er.get::<Mesh3d>().map(|m| m.0.id());
+    let material_id = er
         .get::<MeshMaterial3d<StandardMaterial>>()
         .map(|m| m.0.id());
-    let mat = details.material.and_then(|id| {
-        world
-            .get_resource::<Assets<StandardMaterial>>()
-            .and_then(|assets| assets.get(id))
-    });
-    if let Some(mat) = mat {
-        details.textures = TEXTURE_SLOTS
-            .iter()
-            .filter_map(|(label, get)| get(mat).as_ref().map(|h| (*label, h.id())))
-            .collect();
-    }
+    let texture_ids: Vec<(&'static str, AssetId<Image>)> = material_id
+        .and_then(|id| {
+            world
+                .get_resource::<Assets<StandardMaterial>>()
+                .and_then(|assets| assets.get(id))
+        })
+        .map(|mat| {
+            TEXTURE_SLOTS
+                .iter()
+                .filter_map(|(label, get)| get(mat).as_ref().map(|h| (*label, h.id())))
+                .collect()
+        })
+        .unwrap_or_default();
     if let Some(t) = er.get::<Transform>() {
         let (yaw, pitch, roll) = t.rotation.to_euler(EulerRot::YXZ);
         details.local = Some(TransformVals {
@@ -373,7 +416,115 @@ pub(in crate::overlay) fn collect_selected_details(world: &mut World) {
     }
     details.global_translation = er.get::<GlobalTransform>().map(|g| g.translation());
     details.component_rows = component_rows(world, &er);
+    // —— 落名段（可动缓存账）：资产名 + 缩略图缓存回填 + 句柄账按当前清单收缩 ——
+    details.mesh_name = mesh_id.and_then(|id| asset_display_name(world, id));
+    details.material_name = material_id.and_then(|id| asset_display_name(world, id));
+    let keep: HashSet<AssetId<Image>> = texture_ids.iter().map(|(_, id)| *id).collect();
+    // 相位一（只读）：缓存命中的直接取，未命中的现算（本帧落账，下帧起命中）
+    let mut thumbs: HashMap<AssetId<Image>, Option<Arc<TextureThumb>>> = HashMap::new();
+    {
+        let cache = world.resource::<TextureThumbnails>();
+        let images = world.get_resource::<Assets<Image>>();
+        for &(_, id) in &texture_ids {
+            let hit = cache.0.get(&id).cloned().flatten();
+            thumbs.insert(
+                id,
+                hit.or_else(|| {
+                    images
+                        .and_then(|assets| assets.get(id))
+                        .and_then(make_thumbnail)
+                        .map(Arc::new)
+                }),
+            );
+        }
+    }
+    details.textures = texture_ids
+        .into_iter()
+        .map(|(label, id)| TextureSlotRow {
+            label,
+            id,
+            name: asset_display_name(world, id),
+            thumb: thumbs.get(&id).cloned().flatten(),
+        })
+        .collect();
+    // 相位二（写）：缓存回填 + 收缩到当前清单（句柄丢弃的 free 增量由绘制段销毁）
+    {
+        let mut cache = world.resource_mut::<TextureThumbnails>();
+        for (id, thumb) in thumbs {
+            cache.0.insert(id, thumb);
+        }
+        cache.0.retain(|id, _| keep.contains(id));
+    }
+    world
+        .resource_mut::<TexturePreviewHandles>()
+        .0
+        .retain(|id, _| keep.contains(id));
     world.insert_resource(details);
+}
+
+/// 资产显示名：AssetServer 路径账里的标签（glTF 子资产如 "Mesh12/Primitive3"）
+/// 或文件名；查不到路径（进程内造的资产）返回 None。
+fn asset_display_name(world: &World, id: impl Into<UntypedAssetId>) -> Option<String> {
+    let server = world.get_resource::<AssetServer>()?;
+    let path = server.get_path(id)?;
+    match path.label() {
+        Some(label) => Some(label.to_owned()),
+        None => path
+            .path()
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned()),
+    }
+}
+
+/// 降采样成最长边 [`THUMB_EDGE`] 的缩略图（块内 4×4 采样取平均，成本与源尺寸
+/// 无关）。仅支持 8bit RGBA 与单层 2D；压缩/浮点/数组纹理返回 None，属性区
+/// 只显示名字。
+fn make_thumbnail(image: &Image) -> Option<TextureThumb> {
+    if !matches!(
+        image.texture_descriptor.format,
+        TextureFormat::Rgba8Unorm | TextureFormat::Rgba8UnormSrgb
+    ) {
+        return None;
+    }
+    let size = image.texture_descriptor.size;
+    if size.depth_or_array_layers != 1 {
+        return None;
+    }
+    let (w, h) = (size.width.max(1), size.height.max(1));
+    // mip0 在最前（LayerThenMips），按字节量截取
+    let mip0 = image.data.as_ref()?.get(..w as usize * h as usize * 4)?;
+    let longest = w.max(h) as usize;
+    let out_w = ((w as usize * THUMB_EDGE as usize).div_ceil(longest)).min(THUMB_EDGE as usize);
+    let out_h = ((h as usize * THUMB_EDGE as usize).div_ceil(longest)).min(THUMB_EDGE as usize);
+    const SAMPLES: usize = 4; // 块内每轴采样数
+    let mut rgba = vec![0u8; out_w * out_h * 4];
+    for (oy, row) in rgba.chunks_mut(out_w * 4).enumerate() {
+        let by0 = oy * h as usize / out_h;
+        let by1 = (((oy + 1) * h as usize) / out_h).clamp(by0 + 1, h as usize);
+        for (ox, px) in row.chunks_mut(4).enumerate() {
+            let bx0 = ox * w as usize / out_w;
+            let bx1 = (((ox + 1) * w as usize) / out_w).clamp(bx0 + 1, w as usize);
+            let mut acc = [0u32; 4];
+            for iy in 0..SAMPLES {
+                let y = (by0 + (by1 - by0) * iy / SAMPLES).min(h as usize - 1);
+                for ix in 0..SAMPLES {
+                    let x = (bx0 + (bx1 - bx0) * ix / SAMPLES).min(w as usize - 1);
+                    let src = (y * w as usize + x) * 4;
+                    for (c, a) in acc.iter_mut().enumerate() {
+                        *a += u32::from(mip0[src + c]);
+                    }
+                }
+            }
+            for (o, a) in px.iter_mut().zip(acc) {
+                *o = (a / (SAMPLES * SAMPLES) as u32) as u8;
+            }
+        }
+    }
+    Some(TextureThumb {
+        width: out_w as u32,
+        height: out_h as u32,
+        rgba,
+    })
 }
 
 /// 组件全清单：archetype 口径（`EntityRef::archetype().components()`），零反射
@@ -418,13 +569,14 @@ fn reflect_field_rows(v: &dyn PartialReflect) -> Vec<(String, String)> {
 fn show_details_panel(
     ui: &mut egui::Ui,
     details: &SelectedDetails,
+    previews: &mut TexturePreviewHandles,
     selected: &mut SelectedEntity,
     drag: &mut TransformDragCache,
 ) -> Option<(Entity, TransformEdit)> {
     egui::ScrollArea::vertical()
         .id_salt("实体属性")
         .auto_shrink([false, false])
-        .show(ui, |ui| show_details(ui, details, selected, drag))
+        .show(ui, |ui| show_details(ui, details, previews, selected, drag))
         .inner
 }
 
@@ -434,6 +586,7 @@ fn show_details_panel(
 fn show_details(
     ui: &mut egui::Ui,
     details: &SelectedDetails,
+    previews: &mut TexturePreviewHandles,
     selected: &mut SelectedEntity,
     drag: &mut TransformDragCache,
 ) -> Option<(Entity, TransformEdit)> {
@@ -453,14 +606,22 @@ fn show_details(
     if let Some(children) = details.children {
         ui.monospace(format!("子节点 {children}"));
     }
-    if let Some(mesh) = details.mesh {
-        ui.monospace(format!("Mesh   {mesh:?}"));
+    if let Some(name) = &details.mesh_name {
+        ui.monospace(format!("网格   {name}"));
     }
-    if let Some(mat) = details.material {
-        ui.monospace(format!("材质   {mat:?}"));
+    if let Some(name) = &details.material_name {
+        ui.monospace(format!("材质   {name}"));
     }
-    for (label, image) in &details.textures {
-        ui.monospace(format!("贴图   {label}  {image:?}"));
+    for row in &details.textures {
+        ui.horizontal(|ui| {
+            if let Some(thumb) = &row.thumb {
+                show_thumb(ui, previews, row.id, thumb);
+            }
+            ui.monospace(match &row.name {
+                Some(name) => format!("贴图 {} {name}", row.label),
+                None => format!("贴图 {}", row.label),
+            });
+        });
     }
     // Transform 编辑：读快照值进副本，任一量被拖改即整组回写（未动的分量发原值，
     // 等价于原地）；旋转三元组须同表示分支，由 TransformDragCache 接管
@@ -554,4 +715,28 @@ fn drag_vec3(ui: &mut egui::Ui, v: &mut [f32; 3], speed: f32, suffix: &str) -> [
         }
     });
     dragged
+}
+
+/// 贴图预览小图：缩略图字节 → egui 纹理（句柄按 AssetId 缓存，首见才
+/// `load_texture`——整图增量一次，绘制段随后发布成独立 bindless 槽位）。
+fn show_thumb(
+    ui: &mut egui::Ui,
+    previews: &mut TexturePreviewHandles,
+    id: AssetId<Image>,
+    thumb: &TextureThumb,
+) {
+    let handle = previews.0.entry(id).or_insert_with(|| {
+        ui.ctx().load_texture(
+            format!("贴图预览 {id:?}"),
+            egui::ColorImage::from_rgba_unmultiplied(
+                [thumb.width as usize, thumb.height as usize],
+                &thumb.rgba,
+            ),
+            egui::TextureOptions::LINEAR,
+        )
+    });
+    ui.add(egui::Image::new((
+        handle.id(),
+        egui::vec2(THUMB_PT, THUMB_PT),
+    )));
 }

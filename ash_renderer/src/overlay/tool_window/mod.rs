@@ -28,7 +28,8 @@ use crate::render::{
 use crate::scene::{TransformEditQueue, WorkloadSettings};
 use culling::CullingPage;
 use entity_tree::{
-    EntityTreePage, EntityTreeState, SelectedDetails, SelectedEntity, TransformDragCache,
+    EntityTreePage, EntityTreeState, SelectedDetails, SelectedEntity, TexturePreviewHandles,
+    TextureThumbnails, TransformDragCache,
 };
 use frame_stats::{ChunkRows, FpsMeter, FrameStatsPage, PerfPanelCache, RendererStats};
 use monitor::MonitorPage;
@@ -180,6 +181,9 @@ pub(in crate::overlay) fn insert_tool_window_resources(commands: &mut Commands) 
     // 采集系统每帧重写，Startup 先落空壳
     commands.insert_resource(SelectedDetails::default());
     commands.insert_resource(TransformDragCache::default());
+    // 贴图预览：采集侧缩略图缓存 + UI 侧句柄缓存
+    commands.insert_resource(TextureThumbnails::default());
+    commands.insert_resource(TexturePreviewHandles::default());
     commands.insert_resource(FpsMeter::default());
     // 随 fps 快照节奏采样，窗口显隐不影响记账
     commands.insert_resource(MonitorHistory::default());
@@ -205,6 +209,8 @@ pub(in crate::overlay) struct ToolWindowParams<'w, 's> {
     tree_state: ResMut<'w, EntityTreeState>,
     /// 属性快照（采集系统产，只读消费）
     details: Res<'w, SelectedDetails>,
+    /// 图预览句柄缓存（UI 侧首见建句柄，采集侧收缩）
+    previews: ResMut<'w, TexturePreviewHandles>,
     drag_cache: ResMut<'w, TransformDragCache>,
     /// Transform 编辑排队（pass 产，编辑落地系统消费）
     edit_queue: ResMut<'w, TransformEditQueue>,
@@ -306,6 +312,7 @@ impl ToolWindowParams<'_, '_> {
                     selected: &mut self.selected,
                     state: &mut self.tree_state,
                     details: &self.details,
+                    previews: &mut self.previews,
                     drag: &mut self.drag_cache,
                 }
                 .show(body);
