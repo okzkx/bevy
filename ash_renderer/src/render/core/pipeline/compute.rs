@@ -25,15 +25,33 @@ impl ComputePipeline {
     pub(crate) fn new(ctx: &Context, desc: &PipelineDesc, layouts: &SetLayouts) -> Result<Self> {
         desc.build(ctx, layouts, |layout, stages| {
             let &[stage] = stages else {
-                return Err(VulkanError::Init(format!("compute 管线 {} 须恰好一个入口", desc.label)));
+                return Err(VulkanError::Init(format!(
+                    "compute 管线 {} 须恰好一个入口",
+                    desc.label
+                )));
             };
-            let info = vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout);
-            match unsafe { ctx.device.create_compute_pipelines(vk::PipelineCache::null(), &[info], None) } {
+            let info = vk::ComputePipelineCreateInfo::default()
+                .stage(stage)
+                .layout(layout);
+            match unsafe {
+                ctx.device
+                    .create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
+            } {
                 Ok(mut pipelines) => pipelines
                     .pop()
-                    .map(|pipeline| Self { device: ctx.device.clone(), handles: ComputeHandles { pipeline, layout, sets: desc.sets } })
+                    .map(|pipeline| Self {
+                        device: ctx.device.clone(),
+                        handles: ComputeHandles {
+                            pipeline,
+                            layout,
+                            sets: desc.sets,
+                        },
+                    })
                     .ok_or_else(|| {
-                        VulkanError::Init(format!("compute 管线 {} 创建成功却未返回句柄", desc.label))
+                        VulkanError::Init(format!(
+                            "compute 管线 {} 创建成功却未返回句柄",
+                            desc.label
+                        ))
                     }),
                 Err((pipelines, e)) => {
                     for p in pipelines {
@@ -58,7 +76,8 @@ impl Drop for ComputePipeline {
         // 先拆管线再拆 layout。
         unsafe {
             self.device.destroy_pipeline(self.handles.pipeline, None);
-            self.device.destroy_pipeline_layout(self.handles.layout, None);
+            self.device
+                .destroy_pipeline_layout(self.handles.layout, None);
         }
     }
 }

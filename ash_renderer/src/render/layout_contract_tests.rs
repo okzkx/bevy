@@ -6,8 +6,10 @@ use ash::vk::{self, Handle};
 
 use super::layout_registry::{ALL_PIPELINES, ALL_SETS};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::binding::set_layout::{
+    BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts,
+};
 use crate::render::core::binding::shader_abi;
-use crate::render::core::binding::set_layout::{BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
 use crate::render::passes::gbuffer::gbuffer_pipeline::GBUFFER_WRITE_PIPELINE;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
 use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET_DESC;
@@ -15,10 +17,14 @@ use crate::render::passes::lighting::composite_pipeline::GBUFFER_COMPOSITE_PIPEL
 use crate::render::passes::overlay::overlay_pipeline::OVERLAY_PIPELINE;
 use crate::render::passes::post::bloom::BLOOM_UP_SET_DESC;
 use crate::render::passes::post::present_tonemap_pipeline::PRESENT_TONEMAP_PIPELINE;
-use crate::render::passes::shadow::shadow_map::{SHADOW_SET_DESC, SHADOW_WRITE_PIPELINE, SHADOW_BINDING_UNIFORM};
+use crate::render::passes::shadow::shadow_map::{
+    SHADOW_BINDING_UNIFORM, SHADOW_SET_DESC, SHADOW_WRITE_PIPELINE,
+};
 use crate::render::passes::transparent::TRANSPARENT_SET_DESC;
 use crate::render::passes::visibility::cull::CULL_PIPELINE;
-use crate::render::resident::tables::bindless_texture_table::{BINDLESS_TEXTURE_SET_DESC, TABLE_CAPACITY};
+use crate::render::resident::tables::bindless_texture_table::{
+    BINDLESS_TEXTURE_SET_DESC, TABLE_CAPACITY,
+};
 use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
 use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 
@@ -40,7 +46,10 @@ fn variant(desc: &PipelineDesc, change: impl FnOnce(&mut PipelineDesc)) -> Vec<S
 }
 
 fn assert_rejected(problems: &[String], needle: &str) {
-    assert!(problems.iter().any(|p| p.contains(needle)), "期望被拒并提到「{needle}」，实际：{problems:#?}");
+    assert!(
+        problems.iter().any(|p| p.contains(needle)),
+        "期望被拒并提到「{needle}」，实际：{problems:#?}"
+    );
 }
 
 #[test]
@@ -55,12 +64,26 @@ fn every_pipeline_matches_shader_abi() {
 #[test]
 fn every_set_declaration_is_valid_and_uniquely_named() {
     for (i, desc) in ALL_SETS.iter().enumerate() {
-        assert!(desc.problems().is_empty(), "{}: {:?}", desc.name, desc.problems());
-        assert!(ALL_SETS[..i].iter().all(|d| d.name != desc.name), "{} 重名", desc.name);
+        assert!(
+            desc.problems().is_empty(),
+            "{}: {:?}",
+            desc.name,
+            desc.problems()
+        );
+        assert!(
+            ALL_SETS[..i].iter().all(|d| d.name != desc.name),
+            "{} 重名",
+            desc.name
+        );
     }
     for desc in ALL_PIPELINES {
         for set in desc.sets {
-            assert!(ALL_SETS.iter().any(|d| std::ptr::eq(*d, *set)), "{} 用了未登记的 {}", desc.label, set.name);
+            assert!(
+                ALL_SETS.iter().any(|d| std::ptr::eq(*d, *set)),
+                "{} 用了未登记的 {}",
+                desc.label,
+                set.name
+            );
         }
     }
 }
@@ -69,24 +92,42 @@ fn every_set_declaration_is_valid_and_uniquely_named() {
 fn every_shader_entry_has_a_pipeline() {
     for shader in shader_abi::ALL {
         for entry in shader.entries {
-            let used = ALL_PIPELINES
-                .iter()
-                .any(|d| std::ptr::eq(d.shader, *shader) && d.entries.iter().any(|e| e.to_str() == Ok(entry.name)));
-            assert!(used, "{} 的入口 {} 没有任何管线配方使用", shader.name, entry.name);
+            let used = ALL_PIPELINES.iter().any(|d| {
+                std::ptr::eq(d.shader, *shader)
+                    && d.entries.iter().any(|e| e.to_str() == Ok(entry.name))
+            });
+            assert!(
+                used,
+                "{} 的入口 {} 没有任何管线配方使用",
+                shader.name, entry.name
+            );
         }
     }
 }
 
 #[test]
 fn rejects_sets_in_wrong_order() {
-    let problems = variant(&GBUFFER_WRITE_PIPELINE, |d| d.sets = sets!(&FRAME_UNIFORM_SET_DESC, &BINDLESS_TEXTURE_SET_DESC, &INSTANCE_SET_DESC));
-    assert_rejected(&problems, "shader 是 SampledImage，frame 声明的是 UniformBuffer");
+    let problems = variant(&GBUFFER_WRITE_PIPELINE, |d| {
+        d.sets = sets!(
+            &FRAME_UNIFORM_SET_DESC,
+            &BINDLESS_TEXTURE_SET_DESC,
+            &INSTANCE_SET_DESC
+        )
+    });
+    assert_rejected(
+        &problems,
+        "shader 是 SampledImage，frame 声明的是 UniformBuffer",
+    );
 }
 
 #[test]
 fn rejects_missing_set() {
     let problems = variant(&GBUFFER_COMPOSITE_PIPELINE, |d| {
-        d.sets = sets!(&FRAME_UNIFORM_SET_DESC, &GBUFFER_SAMPLED_SET_DESC, &LIGHT_CLUSTER_SET_DESC);
+        d.sets = sets!(
+            &FRAME_UNIFORM_SET_DESC,
+            &GBUFFER_SAMPLED_SET_DESC,
+            &LIGHT_CLUSTER_SET_DESC
+        );
     });
     assert_rejected(&problems, "@group(3) @binding(0)：管线只声明了 3 个 set");
 }
@@ -100,18 +141,36 @@ fn rejects_missing_binding() {
             BindingDesc::new(1, DescKind::StorageBuffer, ALL_STAGES),
         ],
     );
-    let problems = variant(&GBUFFER_WRITE_PIPELINE, |d| d.sets = sets!(&BINDLESS_TEXTURE_SET_DESC, &FRAME_UNIFORM_SET_DESC, &NO_B2_SET_DESC));
-    assert_rejected(&problems, "@group(2) @binding(2)：instance_without_b2 里没有这个 binding");
+    let problems = variant(&GBUFFER_WRITE_PIPELINE, |d| {
+        d.sets = sets!(
+            &BINDLESS_TEXTURE_SET_DESC,
+            &FRAME_UNIFORM_SET_DESC,
+            &NO_B2_SET_DESC
+        )
+    });
+    assert_rejected(
+        &problems,
+        "@group(2) @binding(2)：instance_without_b2 里没有这个 binding",
+    );
 }
 
 #[test]
 fn rejects_wrong_descriptor_kind() {
-    static FRAME_AS_STORAGE_SET_DESC: SetLayoutDesc =
-        SetLayoutDesc::new("frame_as_storage", &[BindingDesc::new(0, DescKind::StorageBuffer, ALL_STAGES)]);
+    static FRAME_AS_STORAGE_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
+        "frame_as_storage",
+        &[BindingDesc::new(0, DescKind::StorageBuffer, ALL_STAGES)],
+    );
     let problems = variant(&PRESENT_TONEMAP_PIPELINE, |d| {
-        d.sets = sets!(&FRAME_AS_STORAGE_SET_DESC, &GBUFFER_SAMPLED_SET_DESC, &BLOOM_UP_SET_DESC);
+        d.sets = sets!(
+            &FRAME_AS_STORAGE_SET_DESC,
+            &GBUFFER_SAMPLED_SET_DESC,
+            &BLOOM_UP_SET_DESC
+        );
     });
-    assert_rejected(&problems, "shader 是 UniformBuffer，frame_as_storage 声明的是 StorageBuffer");
+    assert_rejected(
+        &problems,
+        "shader 是 UniformBuffer，frame_as_storage 声明的是 StorageBuffer",
+    );
 }
 
 #[test]
@@ -125,9 +184,16 @@ fn rejects_missing_stage() {
         ],
     );
     let problems = variant(&GBUFFER_WRITE_PIPELINE, |d| {
-        d.sets = sets!(&BINDLESS_TEXTURE_SET_DESC, &FRAME_UNIFORM_SET_DESC, &INSTANCE_COMPUTE_ONLY_SET_DESC);
+        d.sets = sets!(
+            &BINDLESS_TEXTURE_SET_DESC,
+            &FRAME_UNIFORM_SET_DESC,
+            &INSTANCE_COMPUTE_ONLY_SET_DESC
+        );
     });
-    assert_rejected(&problems, "vs_main @group(2) @binding(0)：instance_compute_only 的可见阶段");
+    assert_rejected(
+        &problems,
+        "vs_main @group(2) @binding(0)：instance_compute_only 的可见阶段",
+    );
 }
 
 #[test]
@@ -135,62 +201,104 @@ fn rejects_runtime_array_without_partially_bound() {
     static BINDLESS_FULLY_BOUND_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
         "bindless_fully_bound",
         &[
-            BindingDesc::new(0, DescKind::SampledImage, ALL_STAGES).array(16, vk::DescriptorBindingFlags::empty()),
-            BindingDesc::new(1, DescKind::Sampler, ALL_STAGES).array(16, vk::DescriptorBindingFlags::empty()),
+            BindingDesc::new(0, DescKind::SampledImage, ALL_STAGES)
+                .array(16, vk::DescriptorBindingFlags::empty()),
+            BindingDesc::new(1, DescKind::Sampler, ALL_STAGES)
+                .array(16, vk::DescriptorBindingFlags::empty()),
         ],
     );
-    let problems = variant(&OVERLAY_PIPELINE, |d| d.sets = sets!(&BINDLESS_FULLY_BOUND_SET_DESC));
-    assert_rejected(&problems, "shader 是 runtime 数组，bindless_fully_bound 缺 PARTIALLY_BOUND");
+    let problems = variant(&OVERLAY_PIPELINE, |d| {
+        d.sets = sets!(&BINDLESS_FULLY_BOUND_SET_DESC)
+    });
+    assert_rejected(
+        &problems,
+        "shader 是 runtime 数组，bindless_fully_bound 缺 PARTIALLY_BOUND",
+    );
 }
 
 #[test]
 fn rejects_array_count_for_single_binding() {
     static FRAME_ARRAY_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
         "frame_array",
-        &[BindingDesc::new(0, DescKind::UniformBuffer, ALL_STAGES).array(2, vk::DescriptorBindingFlags::empty())],
+        &[BindingDesc::new(0, DescKind::UniformBuffer, ALL_STAGES)
+            .array(2, vk::DescriptorBindingFlags::empty())],
     );
     let problems = variant(&PRESENT_TONEMAP_PIPELINE, |d| {
-        d.sets = sets!(&FRAME_ARRAY_SET_DESC, &GBUFFER_SAMPLED_SET_DESC, &BLOOM_UP_SET_DESC);
+        d.sets = sets!(
+            &FRAME_ARRAY_SET_DESC,
+            &GBUFFER_SAMPLED_SET_DESC,
+            &BLOOM_UP_SET_DESC
+        );
     });
     assert_rejected(&problems, "shader 不是数组，frame_array 声明了 2 个");
 }
 
 #[test]
 fn rejects_bad_push_range() {
-    assert_rejected(&variant(&CULL_PIPELINE, |d| d.push = None), "管线没声明 push 范围");
-    let small = PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: 16 };
-    assert_rejected(&variant(&CULL_PIPELINE, |d| d.push = Some(small)), "push 范围只有 16B");
-    let wrong_stage = PushRange { stages: vk::ShaderStageFlags::FRAGMENT, size: 4 };
-    assert_rejected(&variant(&SHADOW_WRITE_PIPELINE, |d| d.push = Some(wrong_stage)), "不含 VERTEX");
+    assert_rejected(
+        &variant(&CULL_PIPELINE, |d| d.push = None),
+        "管线没声明 push 范围",
+    );
+    let small = PushRange {
+        stages: vk::ShaderStageFlags::COMPUTE,
+        size: 16,
+    };
+    assert_rejected(
+        &variant(&CULL_PIPELINE, |d| d.push = Some(small)),
+        "push 范围只有 16B",
+    );
+    let wrong_stage = PushRange {
+        stages: vk::ShaderStageFlags::FRAGMENT,
+        size: 4,
+    };
+    assert_rejected(
+        &variant(&SHADOW_WRITE_PIPELINE, |d| d.push = Some(wrong_stage)),
+        "不含 VERTEX",
+    );
 }
 
 #[test]
 fn rejects_unknown_entry() {
-    assert_rejected(&variant(&CULL_PIPELINE, |d| d.entries = &[c"main"]), "cull 里没有入口 main");
+    assert_rejected(
+        &variant(&CULL_PIPELINE, |d| d.entries = &[c"main"]),
+        "cull 里没有入口 main",
+    );
 }
 
 #[test]
 fn rejects_bad_set_declarations() {
     static UAB_WITHOUT_POOL_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
         "uab_without_pool",
-        &[BindingDesc::new(0, DescKind::SampledImage, ALL_STAGES).array(4, vk::DescriptorBindingFlags::UPDATE_AFTER_BIND)],
+        &[BindingDesc::new(0, DescKind::SampledImage, ALL_STAGES)
+            .array(4, vk::DescriptorBindingFlags::UPDATE_AFTER_BIND)],
     );
-    assert_rejected(&UAB_WITHOUT_POOL_SET_DESC.problems(), "布局缺 UPDATE_AFTER_BIND_POOL");
+    assert_rejected(
+        &UAB_WITHOUT_POOL_SET_DESC.problems(),
+        "布局缺 UPDATE_AFTER_BIND_POOL",
+    );
     static UAB_ON_STORAGE_SET_DESC: SetLayoutDesc = SetLayoutDesc {
         name: "uab_on_storage",
         bindings: &[BindingDesc::new(0, DescKind::StorageBuffer, ALL_STAGES)
             .array(1, vk::DescriptorBindingFlags::UPDATE_AFTER_BIND)],
         flags: vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL,
     };
-    assert_rejected(&UAB_ON_STORAGE_SET_DESC.problems(), "设备没启用这一类的 UPDATE_AFTER_BIND");
+    assert_rejected(
+        &UAB_ON_STORAGE_SET_DESC.problems(),
+        "设备没启用这一类的 UPDATE_AFTER_BIND",
+    );
     static DUPLICATE_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
         "duplicate",
-        &[BindingDesc::new(0, DescKind::Sampler, ALL_STAGES), BindingDesc::new(0, DescKind::Sampler, ALL_STAGES)],
+        &[
+            BindingDesc::new(0, DescKind::Sampler, ALL_STAGES),
+            BindingDesc::new(0, DescKind::Sampler, ALL_STAGES),
+        ],
     );
     assert_rejected(&DUPLICATE_SET_DESC.problems(), "b0 重复声明");
     // 管线对账连带检查它引用的声明
     assert_rejected(
-        &variant(&OVERLAY_PIPELINE, |d| d.sets = sets!(&UAB_WITHOUT_POOL_SET_DESC)),
+        &variant(&OVERLAY_PIPELINE, |d| {
+            d.sets = sets!(&UAB_WITHOUT_POOL_SET_DESC)
+        }),
         "uab_without_pool: b0 带 UPDATE_AFTER_BIND",
     );
 }
@@ -206,14 +314,27 @@ fn pool_sizes_and_flags_derive_from_declarations() {
 
     // shadow 每份集 = 1 UBO + 4 阴影图 + 5 storage；×2 份
     let sizes = SHADOW_SET_DESC.pool_sizes_vec(2);
-    let get = |ty| sizes.iter().find(|s| s.ty == ty).map(|s| s.descriptor_count);
+    let get = |ty| {
+        sizes
+            .iter()
+            .find(|s| s.ty == ty)
+            .map(|s| s.descriptor_count)
+    };
     assert_eq!(get(vk::DescriptorType::UNIFORM_BUFFER), Some(2));
     assert_eq!(get(vk::DescriptorType::SAMPLED_IMAGE), Some(8));
     assert_eq!(get(vk::DescriptorType::STORAGE_BUFFER), Some(10));
 
     // 合并：一份常驻双表（每 binding 满载 TABLE_CAPACITY）+ 2 帧槽 UBO
-    let merged = merged_pool_sizes(&[(&BINDLESS_TEXTURE_SET_DESC, 1), (&FRAME_UNIFORM_SET_DESC, 2)]);
-    let get = |ty| merged.iter().find(|s| s.ty == ty).map(|s| s.descriptor_count);
+    let merged = merged_pool_sizes(&[
+        (&BINDLESS_TEXTURE_SET_DESC, 1),
+        (&FRAME_UNIFORM_SET_DESC, 2),
+    ]);
+    let get = |ty| {
+        merged
+            .iter()
+            .find(|s| s.ty == ty)
+            .map(|s| s.descriptor_count)
+    };
     assert_eq!(get(vk::DescriptorType::SAMPLED_IMAGE), Some(TABLE_CAPACITY));
     assert_eq!(get(vk::DescriptorType::SAMPLER), Some(TABLE_CAPACITY));
     assert_eq!(get(vk::DescriptorType::UNIFORM_BUFFER), Some(2));
@@ -233,7 +354,11 @@ fn writer_validates_writes_against_declaration() {
     let mut w = DescriptorWriter::new(&SHADOW_SET_DESC, set);
     w.buffer(0, vk::Buffer::from_raw(1), 0, 64);
     for c in 0..4u32 {
-        w.image(1 + c, vk::ImageView::from_raw(10 + c as u64), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        w.image(
+            1 + c,
+            vk::ImageView::from_raw(10 + c as u64),
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        );
         w.buffer(6 + c, vk::Buffer::from_raw(20 + c as u64), 0, 128);
     }
     w.buffer(5, vk::Buffer::from_raw(30), 0, 128);
@@ -241,7 +366,11 @@ fn writer_validates_writes_against_declaration() {
 
     // 种类错：往 UBO 槽写图
     let mut w = DescriptorWriter::new(&SHADOW_SET_DESC, set);
-    w.image(SHADOW_BINDING_UNIFORM, vk::ImageView::from_raw(1), vk::ImageLayout::GENERAL);
+    w.image(
+        SHADOW_BINDING_UNIFORM,
+        vk::ImageView::from_raw(1),
+        vk::ImageLayout::GENERAL,
+    );
     assert!(matches!(w.check(), Err(VulkanError::Init(_))));
 
     // binding 不存在
@@ -257,25 +386,52 @@ fn writer_validates_writes_against_declaration() {
 
     // PARTIALLY_BOUND 不要求写满：bindless 只按槽发布
     let mut w = DescriptorWriter::new(&BINDLESS_TEXTURE_SET_DESC, set);
-    w.image_at(0, 5, vk::ImageView::from_raw(1), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+    w.image_at(
+        0,
+        5,
+        vk::ImageView::from_raw(1),
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+    );
     w.sampler_at(1, 5, vk::Sampler::from_raw(2));
     assert!(w.check().is_ok());
 
     // 数组元素越界
     let mut w = DescriptorWriter::new(&BINDLESS_TEXTURE_SET_DESC, set);
-    w.image_at(0, TABLE_CAPACITY, vk::ImageView::from_raw(1), vk::ImageLayout::GENERAL);
+    w.image_at(
+        0,
+        TABLE_CAPACITY,
+        vk::ImageView::from_raw(1),
+        vk::ImageLayout::GENERAL,
+    );
     assert!(w.check().is_err());
 }
 
 #[test]
 fn registry_resolves_by_declaration_identity() {
-    static IMPOSTOR_SET_DESC: SetLayoutDesc =
-        SetLayoutDesc::new("frame", &[BindingDesc::new(0, DescKind::UniformBuffer, ALL_STAGES)]);
+    static IMPOSTOR_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
+        "frame",
+        &[BindingDesc::new(0, DescKind::UniformBuffer, ALL_STAGES)],
+    );
     let fake = vk::DescriptorSetLayout::from_raw(1);
-    let layouts = SetLayouts::new([SetLayout::new(&FRAME_UNIFORM_SET_DESC, fake)]).expect("单条登记");
+    let layouts =
+        SetLayouts::new([SetLayout::new(&FRAME_UNIFORM_SET_DESC, fake)]).expect("单条登记");
     assert_eq!(layouts.get(&FRAME_UNIFORM_SET_DESC).ok(), Some(fake));
-    assert!(layouts.get(&IMPOSTOR_SET_DESC).is_err(), "同名不同声明不能顶替");
-    assert!(layouts.get(&BINDLESS_TEXTURE_SET_DESC).is_err(), "未登记的声明要报错");
-    assert!(SetLayouts::new([SetLayout::new(&FRAME_UNIFORM_SET_DESC, fake), SetLayout::new(&FRAME_UNIFORM_SET_DESC, fake)]).is_err());
-    assert!(SetLayouts::new([SetLayout::new(&FRAME_UNIFORM_SET_DESC, vk::DescriptorSetLayout::null())]).is_err());
+    assert!(
+        layouts.get(&IMPOSTOR_SET_DESC).is_err(),
+        "同名不同声明不能顶替"
+    );
+    assert!(
+        layouts.get(&BINDLESS_TEXTURE_SET_DESC).is_err(),
+        "未登记的声明要报错"
+    );
+    assert!(SetLayouts::new([
+        SetLayout::new(&FRAME_UNIFORM_SET_DESC, fake),
+        SetLayout::new(&FRAME_UNIFORM_SET_DESC, fake)
+    ])
+    .is_err());
+    assert!(SetLayouts::new([SetLayout::new(
+        &FRAME_UNIFORM_SET_DESC,
+        vk::DescriptorSetLayout::null()
+    )])
+    .is_err());
 }

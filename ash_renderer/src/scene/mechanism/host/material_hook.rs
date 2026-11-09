@@ -7,7 +7,9 @@ use bevy::{
         extensions::{ErasedGltfExtensionHandler, GltfExtensionHandler, GltfExtensionHandlers},
         // 此处的 gltf-rs 类型与 bevy::gltf 下的同名资产类型不是同一组类型。
         gltf,
-        GltfAssetLabel, GltfLoaderSettings, GltfMaterial,
+        GltfAssetLabel,
+        GltfLoaderSettings,
+        GltfMaterial,
     },
     pbr::{gltf::standard_material_from_gltf_material, MeshMaterial3d, StandardMaterial},
     prelude::*,
@@ -100,7 +102,11 @@ fn report_material_seam(
         .and_then(|h| h.0.try_read())
         .map(|list| list.len())
         .unwrap_or(0);
-    let container = if materials.is_some() { "已注册" } else { "未注册" };
+    let container = if materials.is_some() {
+        "已注册"
+    } else {
+        "未注册"
+    };
     if hook_count != 1 {
         warn!(
             "材质缝自检异常：GltfExtensionHandlers 挂载 {hook_count} 个 handler（期望 1 = \

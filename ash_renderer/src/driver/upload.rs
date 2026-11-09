@@ -22,27 +22,23 @@
 use std::collections::HashSet;
 
 use bevy::{
-    app::OnAppExitSystems,
-    asset::AssetId,
-    ecs::system::SystemParam,
-    image::Image,
-    pbr::StandardMaterial,
-    prelude::*,
+    app::OnAppExitSystems, asset::AssetId, ecs::system::SystemParam, image::Image,
+    pbr::StandardMaterial, prelude::*,
 };
 
 use ash_macros::system;
 
 use crate::{
     common::syntax::{OnceLog, OptionTierExt, ResultTierExt},
+    render::{
+        convert_mesh, image_spec, pack_object_record, sampler_key, AtlasGpu, BindlessTextureTable,
+        Context, ConvertedMesh, FramePool, GpuImage, ImageCache, ImageSpec, InstanceTables,
+        MeshPool, PoolRange, StagingCopy, StagingImageCopy, UploadBatch, Uploader, MAX_LOD_LEVELS,
+        OBJECT_RECORD_SIZE,
+    },
     scene::{
         anchor_level, AssetInvalidations, AssetReadiness, AssetRetirements, InstanceLedger,
         InstanceRow, LodDemand, LodGroups, ResidencySet,
-    },
-    render::{
-        convert_mesh, image_spec, pack_object_record, sampler_key, AtlasGpu, BindlessTextureTable,
-        Context, ConvertedMesh, FramePool, GpuImage, ImageCache, ImageSpec, InstanceTables, MeshPool,
-        PoolRange, StagingCopy, StagingImageCopy, UploadBatch, Uploader, MAX_LOD_LEVELS,
-        OBJECT_RECORD_SIZE,
     },
 };
 
@@ -214,7 +210,12 @@ fn flush_uploads(mut data: UploadData, mut state: Local<UploadState>) -> Result<
     reclaim_retired(&mut data, drained_slots);
     // overlay 图集旧代:同样要等帧侧 + 上传票据。旧代的描述符槽已在整传帧交回表,由下一轮
     // drain_retired_slots 归还
-    let UploadData { atlas, uploader, frames, .. } = &mut data;
+    let UploadData {
+        atlas,
+        uploader,
+        frames,
+        ..
+    } = &mut data;
     if let Some(atlas) = atlas {
         atlas
             .drain_graveyard(uploader, &mut || frames.wait_all_inflight())
@@ -224,15 +225,19 @@ fn flush_uploads(mut data: UploadData, mut state: Local<UploadState>) -> Result<
     // 脏集清空且账本非空 = 全部资产驻留,此后每帧盘点 0 行、上传 0B。必须放空批早退
     // 之前:清空脏集的那帧多半就是空批帧
     if data.ledger.dirty_count() == 0 && !data.ledger.is_empty() {
-        state.settled_logged.log(|| info!(
+        state.settled_logged.log(|| {
+            info!(
             "增量链首次清空:账本 {} 行全部资产驻留,脏集空——稳态帧零盘点零上传(作为增量判定基准)",
             data.ledger.len()
-        ));
+        )
+        });
     }
     let ready = prepare_assets(&mut data, &mut scan, &mut state);
-    if ready.converted.is_empty() && ready.image_specs.is_empty() && scan.staged_records.is_empty() {
+    if ready.converted.is_empty() && ready.image_specs.is_empty() && scan.staged_records.is_empty()
+    {
         // 空批不提交;pending 帧末对账照走,未到货的等待帧数照常累计
-        data.readiness.reconcile(&ready.marked_meshes, &ready.marked_images);
+        data.readiness
+            .reconcile(&ready.marked_meshes, &ready.marked_images);
         return Ok(());
     }
     upload_batch(&mut data, &scan, ready)
@@ -246,7 +251,14 @@ fn flush_uploads(mut data: UploadData, mut state: Local<UploadState>) -> Result<
 /// 返回归还的描述符槽数。
 fn drain_graveyards(data: &mut UploadData) -> Result<usize, BevyError> {
     let UploadData {
-        ledger, instance_tables, frames, pool, image_cache, tables, uploader, ..
+        ledger,
+        instance_tables,
+        frames,
+        pool,
+        image_cache,
+        tables,
+        uploader,
+        ..
     } = data;
     let mut wait_draws = || frames.wait_all_inflight();
     image_cache
@@ -274,7 +286,14 @@ fn drain_graveyards(data: &mut UploadData) -> Result<usize, BevyError> {
 /// 误判为已完成。
 fn reclaim_retired(data: &mut UploadData, drained_slots: usize) {
     let UploadData {
-        ledger, invalidations, retirements, lod_groups, pool, image_cache, tables, ..
+        ledger,
+        invalidations,
+        retirements,
+        lod_groups,
+        pool,
+        image_cache,
+        tables,
+        ..
     } = data;
     let mut reclaimed = 0u64;
     for id in retirements.take_meshes() {
@@ -342,7 +361,8 @@ fn scan_dirty_rows(data: &mut UploadData) -> Result<RowScan, BevyError> {
     }
     // 重试队列规模唯一写点:必须在空批早退之前,否则空批帧的该字段滞留上帧值
     data.ledger.stats.dirty_rows = data.ledger.dirty_count();
-    data.readiness.note_failed_rows_cleared(scan.failed_settled_rows);
+    data.readiness
+        .note_failed_rows_cleared(scan.failed_settled_rows);
     Ok(scan)
 }
 
@@ -357,7 +377,14 @@ fn scan_mesh_legs(
     legs: &mut RowLegs,
     scan: &mut RowScan,
 ) -> (AssetId<Mesh>, MeshLeg) {
-    let UploadData { pool, invalidations, readiness, lod_groups, lod_demand, .. } = data;
+    let UploadData {
+        pool,
+        invalidations,
+        readiness,
+        lod_groups,
+        lod_demand,
+        ..
+    } = data;
     let mesh_id = row.mesh.id();
     let demand_bits = lod_demand
         .active
@@ -398,11 +425,13 @@ fn scan_mesh_legs(
         if MeshLeg::of(level_id, pool, invalidations, readiness) == MeshLeg::Pending
             && scan.lod_seen.insert(level_id)
         {
-            scan.fresh_meshes.push((level_id, handle.clone(), pool.resident(level_id).is_some()));
+            scan.fresh_meshes
+                .push((level_id, handle.clone(), pool.resident(level_id).is_some()));
         }
     }
     if legs.tally(anchor_leg) && scan.seen.insert(anchor_id) {
-        scan.fresh_meshes.push((anchor_id, anchor_handle, pool.resident(anchor_id).is_some()));
+        scan.fresh_meshes
+            .push((anchor_id, anchor_handle, pool.resident(anchor_id).is_some()));
     }
     // 基准高档腿:位图点名才进本批;未点名不算 pending(行可绘性由锚腿承载,期望档位
     // 变化时会重新置脏)
@@ -412,7 +441,8 @@ fn scan_mesh_legs(
     {
         let base_leg = MeshLeg::of(mesh_id, pool, invalidations, readiness);
         if legs.tally(base_leg) && scan.seen.insert(mesh_id) {
-            scan.fresh_meshes.push((mesh_id, row.mesh.clone(), pool.resident(mesh_id).is_some()));
+            scan.fresh_meshes
+                .push((mesh_id, row.mesh.clone(), pool.resident(mesh_id).is_some()));
         }
     }
     (anchor_id, anchor_leg)
@@ -421,7 +451,13 @@ fn scan_mesh_legs(
 /// 盘点一行的贴图腿:material 柄 → 五槽解引用,未驻留或持失效凭据的身份进本批。材质
 /// 未到货 = 行保持脏标下帧重试(材质已失败则记失败腿)。
 fn scan_texture_legs(data: &UploadData, row: &InstanceRow, legs: &mut RowLegs, scan: &mut RowScan) {
-    let UploadData { std_materials, invalidations, readiness, image_cache, .. } = data;
+    let UploadData {
+        std_materials,
+        invalidations,
+        readiness,
+        image_cache,
+        ..
+    } = data;
     match std_materials.get(&row.material) {
         Some(material) => {
             for handle in texture_slots(material).into_iter().flatten() {
@@ -463,7 +499,12 @@ fn ensure_object_record(
     anchor_id: AssetId<Mesh>,
     scan: &mut RowScan,
 ) -> Result<(), BevyError> {
-    let UploadData { ledger, instance_tables, pool, .. } = data;
+    let UploadData {
+        ledger,
+        instance_tables,
+        pool,
+        ..
+    } = data;
     // 腿判定刚确认驻留,取不到是状态矛盾
     let anchor_slot = pool
         .resident(anchor_id)
@@ -509,7 +550,12 @@ fn prepare_assets(
     scan: &mut RowScan,
     state: &mut UploadState,
 ) -> ReadyAssets {
-    let UploadData { meshes, image_assets, readiness, .. } = data;
+    let UploadData {
+        meshes,
+        image_assets,
+        readiness,
+        ..
+    } = data;
     let mut ready = ReadyAssets::default();
     for (id, handle, replace) in scan.fresh_meshes.drain(..) {
         match meshes.get(&handle) {
@@ -551,25 +597,42 @@ fn prepare_assets(
 }
 
 /// 容量保证 → 建图 → 排批 → 一次 transfer 提交 → 驻留登记与槽位发布 → 销账与计量。
-fn upload_batch(data: &mut UploadData, scan: &RowScan, ready: ReadyAssets) -> Result<(), BevyError> {
+fn upload_batch(
+    data: &mut UploadData,
+    scan: &RowScan,
+    ready: ReadyAssets,
+) -> Result<(), BevyError> {
     let UploadData {
-        image_assets, ledger, invalidations, readiness, instance_tables, lod_groups, ctx, frames,
-        pool, image_cache, tables, uploader, ..
+        image_assets,
+        ledger,
+        invalidations,
+        readiness,
+        instance_tables,
+        lod_groups,
+        ctx,
+        frames,
+        pool,
+        image_cache,
+        tables,
+        uploader,
+        ..
     } = data;
     let ReadyAssets {
-        converted, image_specs, pending_meshes, pending_images, marked_meshes, marked_images,
+        converted,
+        image_specs,
+        pending_meshes,
+        pending_images,
+        marked_meshes,
+        marked_images,
     } = ready;
     let staged_records = &scan.staged_records;
     // 容量保证:初次懒建或维护迁移,迁移销毁旧池前要等"图形最后使用"
     let (vertex_bytes, index_bytes) = converted.iter().fold((0u64, 0u64), |(v, i), (_, c, _)| {
         (v + c.vertices.len() as u64, i + c.indices.len() as u64)
     });
-    pool.ensure_capacity(
-        uploader,
-        vertex_bytes,
-        index_bytes,
-        &mut || frames.wait_all_inflight(),
-    )
+    pool.ensure_capacity(uploader, vertex_bytes, index_bytes, &mut || {
+        frames.wait_all_inflight()
+    })
     .or_fatal("池容量保证失败,上传链无法继续")?;
     let vertex_buffer = pool
         .vertex_buffer()
@@ -630,9 +693,9 @@ fn upload_batch(data: &mut UploadData, scan: &RowScan, ready: ReadyAssets) -> Re
     }
     for ((id, handle, spec, _), (_, gpu)) in image_specs.iter().zip(&gpu_images) {
         // 上一阶段已验 Some,同一次系统调用内资产不变,取不到是状态矛盾
-        let image = image_assets.get(handle).ok_or_fatal(format!(
-            "贴图 {id:?} 在规格映射与排批之间消失,状态矛盾"
-        ))?;
+        let image = image_assets
+            .get(handle)
+            .ok_or_fatal(format!("贴图 {id:?} 在规格映射与排批之间消失,状态矛盾"))?;
         let bytes = image
             .data
             .as_ref()
@@ -768,11 +831,14 @@ fn upload_batch(data: &mut UploadData, scan: &RowScan, ready: ReadyAssets) -> Re
     stats.upload_batches_total += 1;
     stats.upload_bytes_total += batch_bytes;
     stats.last_batch_bytes = batch_bytes;
-    stats.object_slots = usize::try_from(instance_tables.used_object_slots())
-        .unwrap_or(usize::MAX);
-    stats.material_slots = usize::try_from(instance_tables.used_material_slots())
-        .unwrap_or(usize::MAX);
-    let RowScan { materials_pending, failed_settled_rows, .. } = scan;
+    stats.object_slots = usize::try_from(instance_tables.used_object_slots()).unwrap_or(usize::MAX);
+    stats.material_slots =
+        usize::try_from(instance_tables.used_material_slots()).unwrap_or(usize::MAX);
+    let RowScan {
+        materials_pending,
+        failed_settled_rows,
+        ..
+    } = scan;
     info!(
         "上传批次 #{ticket}:mesh {} 个(其中换内容 {replaced_meshes},顶点 {vertex_bytes}B / 索引 {index_bytes}B)\
          + 贴图 {} 张(其中换内容重传 {replaced_images},{image_bytes}B,sRGB 角色 {srgb_count} / 线性 {},mip 链 {mip_chained} 张)\

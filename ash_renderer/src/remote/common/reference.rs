@@ -28,5 +28,8 @@ pub(crate) fn brp_view_proj(world: &mut World, consequence: &str) -> Result<Mat4
 /// 尺寸偏大，与 GPU 判档/选层对不上。
 pub(crate) fn clamp_rect_to_screen(px_min: Vec2, px_max: Vec2, screen: [f32; 2]) -> (Vec2, Vec2) {
     let screen = Vec2::from_array(screen);
-    (px_min.clamp(Vec2::ZERO, screen), px_max.clamp(Vec2::ZERO, screen))
+    (
+        px_min.clamp(Vec2::ZERO, screen),
+        px_max.clamp(Vec2::ZERO, screen),
+    )
 }

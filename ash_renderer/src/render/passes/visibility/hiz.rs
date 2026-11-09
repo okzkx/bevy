@@ -22,14 +22,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::common::error::{Result, VulkanError};
 use crate::common::syntax::unwrap_or_return;
 
-use crate::render::resident::assets::image_spec::full_mip_chain;
-use crate::render::core::pipeline::compute::ComputePipeline;
-use crate::render::core::record::compute::Handoff;
-use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::pipeline_layout::PipelineDesc;
+use crate::render::core::binding::set_layout::{
+    BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts,
+};
 use crate::render::core::binding::shader_abi;
 use crate::render::core::device::readback::OneShotReadback;
+use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::record::compute::Handoff;
+use crate::render::resident::assets::image_spec::full_mip_chain;
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
 const CS: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
@@ -44,8 +46,10 @@ pub(crate) static HIZ_REDUCE_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
 );
 
 /// 遮挡测试读整条金字塔：b0 全 mip 采样视图。
-pub(crate) static HIZ_OCCLUSION_SET_DESC: SetLayoutDesc =
-    SetLayoutDesc::new("hiz_occlusion", &[BindingDesc::new(0, DescKind::SampledImage, CS)]);
+pub(crate) static HIZ_OCCLUSION_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
+    "hiz_occlusion",
+    &[BindingDesc::new(0, DescKind::SampledImage, CS)],
+);
 
 pub(crate) static HIZ_DOWNSAMPLE_PIPELINE: PipelineDesc = PipelineDesc {
     label: "hiz_downsample",
@@ -203,7 +207,11 @@ impl HizPyramid {
                     .mip_level(level)
                     .layer_count(1),
             )
-            .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
+            .image_extent(vk::Extent3D {
+                width: w,
+                height: h,
+                depth: 1,
+            });
         let mut bytes = vec![0u8; byte_size as usize];
         unsafe {
             let readback = OneShotReadback::begin(ctx, byte_size)?;
@@ -236,7 +244,12 @@ impl HizPyramid {
             );
             readback.finish_and_read(ctx, &mut bytes)?;
         }
-        let floats = bytes.as_chunks::<4>().0.iter().map(|c| f32::from_ne_bytes(*c)).collect();
+        let floats = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_ne_bytes(*c))
+            .collect();
         Ok((w, h, floats))
     }
 
@@ -297,7 +310,9 @@ impl HizPyramid {
             device: ctx.device.clone(),
             slots: Vec::new(),
             views: Vec::new(),
-            initialized: (0..MAX_FRAMES_IN_FLIGHT).map(|_| AtomicBool::new(false)).collect(),
+            initialized: (0..MAX_FRAMES_IN_FLIGHT)
+                .map(|_| AtomicBool::new(false))
+                .collect(),
             warmup: MAX_FRAMES_IN_FLIGHT as u32,
             levels,
             extent,
@@ -361,7 +376,12 @@ impl HizPyramid {
     ///
     /// # Errors
     /// 等待排空或新资源创建失败。
-    pub fn rebuild(&mut self, ctx: &Context, extent: vk::Extent2D, depth_images: &[vk::Image]) -> Result<()> {
+    pub fn rebuild(
+        &mut self,
+        ctx: &Context,
+        extent: vk::Extent2D,
+        depth_images: &[vk::Image],
+    ) -> Result<()> {
         if self.extent == extent {
             return Ok(());
         }
@@ -369,17 +389,16 @@ impl HizPyramid {
         self.drop_resources();
         self.extent = extent;
         self.levels = full_mip_chain(extent.width, extent.height);
-        self.initialized = (0..MAX_FRAMES_IN_FLIGHT).map(|_| AtomicBool::new(false)).collect();
+        self.initialized = (0..MAX_FRAMES_IN_FLIGHT)
+            .map(|_| AtomicBool::new(false))
+            .collect();
         self.warmup = MAX_FRAMES_IN_FLIGHT as u32;
         self.build_images_and_views(ctx, depth_images)?;
         self.write_reduction_sets(ctx)?;
         self.build_occlusion_sets(ctx)?;
         info!(
             "Hi-Z 金字塔随 swapchain 重建: {}x{} ×{} 级（{} 帧槽，warmup 重置，遮挡测试随后就绪）",
-            extent.width,
-            extent.height,
-            self.levels,
-            MAX_FRAMES_IN_FLIGHT,
+            extent.width, extent.height, self.levels, MAX_FRAMES_IN_FLIGHT,
         );
         Ok(())
     }
@@ -394,11 +413,12 @@ impl HizPyramid {
         unsafe {
             // 进场：首用 UNDEFINED→GENERAL；之后恒 GENERAL，只让归约写排在本帧
             // 更早的遮挡读之后
-            let (old_layout, src_stage, src_access) = if self.initialized[slot].swap(true, Ordering::Relaxed) {
-                (L::GENERAL, S::COMPUTE_SHADER, A::SHADER_READ)
-            } else {
-                (L::UNDEFINED, S::TOP_OF_PIPE, A::empty())
-            };
+            let (old_layout, src_stage, src_access) =
+                if self.initialized[slot].swap(true, Ordering::Relaxed) {
+                    (L::GENERAL, S::COMPUTE_SHADER, A::SHADER_READ)
+                } else {
+                    (L::UNDEFINED, S::TOP_OF_PIPE, A::empty())
+                };
             pyramid_barrier(
                 device,
                 cb,
@@ -416,8 +436,8 @@ impl HizPyramid {
                 reduction.bind(device, cb, &[DescSet::new(&HIZ_REDUCE_SET_DESC, set)]);
                 let (w, h) = self.level_dims(level);
                 device.cmd_dispatch(cb, w.div_ceil(8), h.div_ceil(8), 1); // 8 = workgroup 边长
-                // 级间屏障：本级写 → 下级 textureLoad。末级没有这条：它的写 → 下一轮
-                // 遮挡读由下一轮 cull 的全局内存屏障罩住（遮挡只在 cull 开时派发）
+                                                                          // 级间屏障：本级写 → 下级 textureLoad。末级没有这条：它的写 → 下一轮
+                                                                          // 遮挡读由下一轮 cull 的全局内存屏障罩住（遮挡只在 cull 开时派发）
                 if level + 1 < self.levels {
                     Handoff::ComputeRead.barrier().record(device, cb);
                 }
@@ -466,7 +486,11 @@ impl HizPyramid {
             }?;
             let memory = unsafe { create_bound_memory(ctx, image) }
                 .inspect_err(|_| unsafe { device.destroy_image(image, None) })?;
-            slots.push(HizImage { device: device.clone(), image, memory });
+            slots.push(HizImage {
+                device: device.clone(),
+                image,
+                memory,
+            });
         }
         self.slots = slots;
         let mut views = Vec::with_capacity(self.slots.len());
@@ -474,19 +498,30 @@ impl HizPyramid {
             let image = hiz_image.image;
             let mut current = HizViews {
                 device: device.clone(),
-                occlusion: unsafe { create_view(device, image, HIZ_FORMAT, color_range(0, self.levels)) }?,
+                occlusion: unsafe {
+                    create_view(device, image, HIZ_FORMAT, color_range(0, self.levels))
+                }?,
                 storage: Vec::with_capacity(self.levels as usize),
                 src: Vec::with_capacity(self.levels as usize),
             };
             for level in 0..self.levels {
-                current.storage.push(unsafe { create_view(device, image, HIZ_FORMAT, color_range(level, 1)) }?);
+                current.storage.push(unsafe {
+                    create_view(device, image, HIZ_FORMAT, color_range(level, 1))
+                }?);
                 // level 0/1 的源 = 深度附件（D32，DEPTH aspect），L≥2 = 上一级
                 let source = if level <= 1 {
                     let depth = vk::ImageSubresourceRange::default()
                         .aspect_mask(vk::ImageAspectFlags::DEPTH)
                         .level_count(1)
                         .layer_count(1);
-                    unsafe { create_view(device, depth_images[slot], crate::render::DEPTH_FORMAT, depth) }
+                    unsafe {
+                        create_view(
+                            device,
+                            depth_images[slot],
+                            crate::render::DEPTH_FORMAT,
+                            depth,
+                        )
+                    }
                 } else {
                     unsafe { create_view(device, image, HIZ_FORMAT, color_range(level - 1, 1)) }
                 };
@@ -504,8 +539,15 @@ impl HizPyramid {
     fn build_reduction_pipeline(&mut self, ctx: &Context) -> Result<()> {
         let device = &ctx.device;
         self.reduction.set_layout = HIZ_REDUCE_SET_DESC.create(device)?;
-        let layouts = SetLayouts::new([SetLayout::new(&HIZ_REDUCE_SET_DESC, self.reduction.set_layout)])?;
-        self.reduction.pipeline = Some(ComputePipeline::new(ctx, &HIZ_DOWNSAMPLE_PIPELINE, &layouts)?);
+        let layouts = SetLayouts::new([SetLayout::new(
+            &HIZ_REDUCE_SET_DESC,
+            self.reduction.set_layout,
+        )])?;
+        self.reduction.pipeline = Some(ComputePipeline::new(
+            ctx,
+            &HIZ_DOWNSAMPLE_PIPELINE,
+            &layouts,
+        )?);
         let max_dim = ctx.limits().max_image_dimension2_d;
         self.reduction.pool_levels = full_mip_chain(max_dim, max_dim);
         self.reduction.pool = create_pool(
@@ -562,9 +604,15 @@ impl HizPyramid {
         let device = &ctx.device;
         if self.occlusion_pool == vk::DescriptorPool::null() {
             self.occlusion_layout = HIZ_OCCLUSION_SET_DESC.create(device)?;
-            self.occlusion_pool = create_pool(device, &HIZ_OCCLUSION_SET_DESC, MAX_FRAMES_IN_FLIGHT as u32)?;
+            self.occlusion_pool =
+                create_pool(device, &HIZ_OCCLUSION_SET_DESC, MAX_FRAMES_IN_FLIGHT as u32)?;
         }
-        self.occlusion_sets = realloc_sets(device, self.occlusion_pool, self.occlusion_layout, MAX_FRAMES_IN_FLIGHT)?;
+        self.occlusion_sets = realloc_sets(
+            device,
+            self.occlusion_pool,
+            self.occlusion_layout,
+            MAX_FRAMES_IN_FLIGHT,
+        )?;
         for (set, views) in self.occlusion_sets.iter().zip(&self.views) {
             let mut writer = DescriptorWriter::new(&HIZ_OCCLUSION_SET_DESC, *set);
             writer.image(0, views.occlusion, vk::ImageLayout::GENERAL);
@@ -587,10 +635,14 @@ impl Drop for HizPyramid {
         self.reduction.pipeline = None;
         // new 中途失败时部分句柄是 null，destroy null 是规范允许的 no-op
         unsafe {
-            self.device.destroy_descriptor_set_layout(self.reduction.set_layout, None);
-            self.device.destroy_descriptor_pool(self.reduction.pool, None);
-            self.device.destroy_descriptor_pool(self.occlusion_pool, None);
-            self.device.destroy_descriptor_set_layout(self.occlusion_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.reduction.set_layout, None);
+            self.device
+                .destroy_descriptor_pool(self.reduction.pool, None);
+            self.device
+                .destroy_descriptor_pool(self.occlusion_pool, None);
+            self.device
+                .destroy_descriptor_set_layout(self.occlusion_layout, None);
         }
     }
 }
@@ -607,7 +659,9 @@ fn color_range(first_level: u32, level_count: u32) -> vk::ImageSubresourceRange 
 /// 单布局 pool：恰好容纳 `max_sets` 套 `desc`。
 fn create_pool(device: &Device, desc: &SetLayoutDesc, max_sets: u32) -> Result<vk::DescriptorPool> {
     let pool_sizes = desc.pool_sizes_vec(max_sets);
-    let info = vk::DescriptorPoolCreateInfo::default().max_sets(max_sets).pool_sizes(&pool_sizes);
+    let info = vk::DescriptorPoolCreateInfo::default()
+        .max_sets(max_sets)
+        .pool_sizes(&pool_sizes);
     Ok(unsafe { device.create_descriptor_pool(&info, None) }?)
 }
 
@@ -620,7 +674,9 @@ fn realloc_sets(
     count: usize,
 ) -> Result<Vec<vk::DescriptorSet>> {
     let layouts = vec![layout; count];
-    let info = vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts);
+    let info = vk::DescriptorSetAllocateInfo::default()
+        .descriptor_pool(pool)
+        .set_layouts(&layouts);
     unsafe {
         device.reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty())?;
         Ok(device.allocate_descriptor_sets(&info)?)
@@ -798,10 +854,18 @@ mod tests {
     /// mip 层选择：ceil(log2(最大边))，**下限 1**（level 0 不派发）、clamp 进级数。
     #[test]
     fn mip_level_selection() {
-        assert_eq!(occlusion_mip_level(1.0, 1.0, 11), 1, "≤2 px → level 1（下限）");
+        assert_eq!(
+            occlusion_mip_level(1.0, 1.0, 11),
+            1,
+            "≤2 px → level 1（下限）"
+        );
         assert_eq!(occlusion_mip_level(128.0, 64.0, 11), 7, "128 px → 2^7");
         assert_eq!(occlusion_mip_level(64.0, 128.0, 11), 7, "最大边定层");
-        assert_eq!(occlusion_mip_level(100.0, 100.0, 11), 7, "ceil(log2 100) = 7");
+        assert_eq!(
+            occlusion_mip_level(100.0, 100.0, 11),
+            7,
+            "ceil(log2 100) = 7"
+        );
         assert_eq!(occlusion_mip_level(4096.0, 4096.0, 11), 10, "clamp 进级数");
         assert_eq!(occlusion_mip_level(0.0, 0.0, 11), 1, "退化 AABB → 下限 1");
     }

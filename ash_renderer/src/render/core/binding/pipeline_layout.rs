@@ -43,7 +43,11 @@ impl PipelineDesc {
     pub(crate) fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
         for desc in self.sets {
-            out.extend(desc.problems().into_iter().map(|p| format!("{}: {p}", desc.name)));
+            out.extend(
+                desc.problems()
+                    .into_iter()
+                    .map(|p| format!("{}: {p}", desc.name)),
+            );
         }
         // 附件格式形状：有顶点入口的（图形）至少声明颜色或深度之一（depth-only
         // 合法），纯 compute 的必须没有
@@ -75,30 +79,55 @@ impl PipelineDesc {
                     continue;
                 };
                 if b.kind != r.kind {
-                    out.push(format!("{at}：shader 是 {:?}，{} 声明的是 {:?}", r.kind, set.name, b.kind));
+                    out.push(format!(
+                        "{at}：shader 是 {:?}，{} 声明的是 {:?}",
+                        r.kind, set.name, b.kind
+                    ));
                 }
                 match r.array {
                     ArrayShape::Single if b.count != 1 => {
-                        out.push(format!("{at}：shader 不是数组，{} 声明了 {} 个", set.name, b.count));
+                        out.push(format!(
+                            "{at}：shader 不是数组，{} 声明了 {} 个",
+                            set.name, b.count
+                        ));
                     }
-                    ArrayShape::Runtime if !b.flags.contains(vk::DescriptorBindingFlags::PARTIALLY_BOUND) => {
-                        out.push(format!("{at}：shader 是 runtime 数组，{} 缺 PARTIALLY_BOUND", set.name));
+                    ArrayShape::Runtime
+                        if !b
+                            .flags
+                            .contains(vk::DescriptorBindingFlags::PARTIALLY_BOUND) =>
+                    {
+                        out.push(format!(
+                            "{at}：shader 是 runtime 数组，{} 缺 PARTIALLY_BOUND",
+                            set.name
+                        ));
                     }
                     _ => {}
                 }
                 if !b.stages.contains(entry.stage) {
-                    out.push(format!("{at}：{} 的可见阶段 {:?} 不含 {:?}", set.name, b.stages, entry.stage));
+                    out.push(format!(
+                        "{at}：{} 的可见阶段 {:?} 不含 {:?}",
+                        set.name, b.stages, entry.stage
+                    ));
                 }
             }
             if entry.immediate_size > 0 {
                 match self.push {
-                    None => out.push(format!("{name} 用了 {}B push，管线没声明 push 范围", entry.immediate_size)),
+                    None => out.push(format!(
+                        "{name} 用了 {}B push，管线没声明 push 范围",
+                        entry.immediate_size
+                    )),
                     Some(push) => {
                         if push.size < entry.immediate_size {
-                            out.push(format!("{name} 用了 {}B push，push 范围只有 {}B", entry.immediate_size, push.size));
+                            out.push(format!(
+                                "{name} 用了 {}B push，push 范围只有 {}B",
+                                entry.immediate_size, push.size
+                            ));
                         }
                         if !push.stages.contains(entry.stage) {
-                            out.push(format!("{name} 用了 push，push 范围阶段 {:?} 不含 {:?}", push.stages, entry.stage));
+                            out.push(format!(
+                                "{name} 用了 push，push 范围阶段 {:?} 不含 {:?}",
+                                push.stages, entry.stage
+                            ));
                         }
                     }
                 }
@@ -131,11 +160,20 @@ impl PipelineDesc {
     fn create_layout(&self, ctx: &Context, layouts: &SetLayouts) -> Result<vk::PipelineLayout> {
         self.check()?;
         let device = &ctx.device;
-        let set_layouts = self.sets.iter().map(|d| layouts.get(d)).collect::<Result<Vec<_>>>()?;
+        let set_layouts = self
+            .sets
+            .iter()
+            .map(|d| layouts.get(d))
+            .collect::<Result<Vec<_>>>()?;
         let push_ranges: Vec<vk::PushConstantRange> = self
             .push
             .iter()
-            .map(|p| vk::PushConstantRange::default().stage_flags(p.stages).offset(0).size(p.size))
+            .map(|p| {
+                vk::PushConstantRange::default()
+                    .stage_flags(p.stages)
+                    .offset(0)
+                    .size(p.size)
+            })
             .collect();
         let info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&set_layouts)
@@ -155,7 +193,10 @@ impl PipelineDesc {
         &self,
         ctx: &Context,
         layouts: &SetLayouts,
-        assemble: impl FnOnce(vk::PipelineLayout, &[vk::PipelineShaderStageCreateInfo<'static>]) -> Result<T>,
+        assemble: impl FnOnce(
+            vk::PipelineLayout,
+            &[vk::PipelineShaderStageCreateInfo<'static>],
+        ) -> Result<T>,
     ) -> Result<T> {
         let layout = self.create_layout(ctx, layouts)?;
         let device = &ctx.device;
@@ -165,7 +206,12 @@ impl PipelineDesc {
                 .iter()
                 .filter_map(|name| {
                     let entry = self.shader.entry(name.to_str().ok()?)?;
-                    Some(vk::PipelineShaderStageCreateInfo::default().stage(entry.stage).module(module).name(name))
+                    Some(
+                        vk::PipelineShaderStageCreateInfo::default()
+                            .stage(entry.stage)
+                            .module(module)
+                            .name(name),
+                    )
                 })
                 .collect();
             let result = assemble(layout, &stages);

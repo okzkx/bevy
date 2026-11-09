@@ -62,7 +62,11 @@ impl CullingPage<'_> {
         ui.checkbox(&mut lod_settings.enabled, "GPU LOD 选档");
         ui.monospace(format!(
             "{}（阈值 {:.0}px，迟滞 {:.2}）",
-            if lod_diag.dispatched { "dispatch" } else { "关" },
+            if lod_diag.dispatched {
+                "dispatch"
+            } else {
+                "关"
+            },
             lod_settings.threshold_px,
             lod_settings.hysteresis,
         ));

@@ -209,11 +209,7 @@ pub fn generate_chunks(
             let origin = Vec3::new(cx as f32 * extent, 0.0, cz as f32 * extent);
             let root = world
                 .spawn((
-                    SceneChunk {
-                        id,
-                        origin,
-                        extent,
-                    },
+                    SceneChunk { id, origin, extent },
                     Transform::from_translation(origin),
                     Name::new(format!("chunk{id}")),
                 ))
@@ -241,7 +237,9 @@ pub fn generate_chunks(
     }
     // chunk_grid 已校验为正，至少会生成一个根实体。
     let (Some(first_root), Some(last_root)) = (first_root, last_root) else {
-        return Err(ObjectOpError::InvalidParams("chunk 生成未产出任何块".into()));
+        return Err(ObjectOpError::InvalidParams(
+            "chunk 生成未产出任何块".into(),
+        ));
     };
     Ok(ChunkGenReadback {
         chunks: total_chunks,
@@ -276,7 +274,11 @@ pub fn chunk_census(world: &mut World) -> Vec<ChunkCensusRow> {
             origin: chunk.origin,
             extent: chunk.extent,
             members: children
-                .map(|c| c.iter().filter(|e| world.get::<Mesh3d>(*e).is_some()).count())
+                .map(|c| {
+                    c.iter()
+                        .filter(|e| world.get::<Mesh3d>(*e).is_some())
+                        .count()
+                })
                 .unwrap_or(0),
         })
         .collect();

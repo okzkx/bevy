@@ -127,7 +127,10 @@ impl Plugin for AshAssetEventPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AssetInvalidations>()
             .init_resource::<AssetRetirements>()
-            .add_systems(PostUpdate, propagate_asset_changes.after(super::ledger::update_ledger));
+            .add_systems(
+                PostUpdate,
+                propagate_asset_changes.after(super::ledger::update_ledger),
+            );
     }
 }
 
@@ -169,17 +172,26 @@ fn propagate_asset_changes(
     for event in mesh_failures.read() {
         failures += 1;
         readiness.note_failure_mesh(event.id);
-        warn!("资产加载失败 mesh {:?}（{}），出重试队列不再重试", event.id, event.error);
+        warn!(
+            "资产加载失败 mesh {:?}（{}），出重试队列不再重试",
+            event.id, event.error
+        );
     }
     for event in material_failures.read() {
         failures += 1;
         readiness.note_failure_material(event.id);
-        warn!("资产加载失败 材质 {:?}（{}），出重试队列不再重试", event.id, event.error);
+        warn!(
+            "资产加载失败 材质 {:?}（{}），出重试队列不再重试",
+            event.id, event.error
+        );
     }
     for event in image_failures.read() {
         failures += 1;
         readiness.note_failure_image(event.id);
-        warn!("资产加载失败贴图 {:?}（{}），出重试队列不再重试", event.id, event.error);
+        warn!(
+            "资产加载失败贴图 {:?}（{}），出重试队列不再重试",
+            event.id, event.error
+        );
     }
     if failures > 0 {
         info!("资产失败读侧:本帧 {failures} 个身份进 failed 集，行是否出队由 flush 盘点决定");
@@ -188,8 +200,7 @@ fn propagate_asset_changes(
     let mut invalidating_count = 0usize; // mesh+image 的 Modified（进失效集，计量口径）
     let mut ignored_count = 0usize;
     // 事件总数按"收到计"取消费前的 reader 剩余量（全部变体进总数）
-    let asset_events_frame =
-        mesh_events.len() + material_events.len() + image_events.len();
+    let asset_events_frame = mesh_events.len() + material_events.len() + image_events.len();
     let mut modified_materials: HashSet<AssetId<StandardMaterial>> = HashSet::new();
     // 复活联动集（无条件参与）：failed 身份有新内容进场（修复后重载的 Added）或
     // 同身份重插（卸载后 `Assets::insert`）——出 failed 集 + 引用行重挂脏标。不联动
@@ -276,8 +287,7 @@ fn propagate_asset_changes(
         stats.asset_events_total += asset_events_frame as u64;
         stats.asset_dirty_rows = 0;
         stats.asset_invalidations_total += invalidating_count as u64;
-        stats.asset_invalidations_current =
-            invalidations.meshes.len() + invalidations.images.len();
+        stats.asset_invalidations_current = invalidations.meshes.len() + invalidations.images.len();
     }
     if modified_count == 0
         && modified_materials.is_empty()
@@ -295,7 +305,8 @@ fn propagate_asset_changes(
     // 或失效"判定，材质行重挂后若全部身份照旧驻留，就地清标零动作。
     let mut hit_rows: Vec<Entity> = Vec::new();
     for (entity, row) in ledger.rows() {
-        let mesh_hit = invalidations.mesh_pending(row.mesh.id()) || revived_meshes.contains(&row.mesh.id());
+        let mesh_hit =
+            invalidations.mesh_pending(row.mesh.id()) || revived_meshes.contains(&row.mesh.id());
         let material_hit = modified_materials.contains(&row.material.id());
         let image_hit = std_materials.get(&row.material).is_some_and(|m| {
             material_texture_slots(m)
@@ -324,7 +335,9 @@ fn propagate_asset_changes(
 
 /// 材质五槽的资产身份（与 upload.rs 的 `TEXTURE_SLOTS` 同清单——槽清单是
 /// 共享口径，改动必须同步）。
-pub(crate) fn material_texture_slots(m: &StandardMaterial) -> impl Iterator<Item = AssetId<Image>> + '_ {
+pub(crate) fn material_texture_slots(
+    m: &StandardMaterial,
+) -> impl Iterator<Item = AssetId<Image>> + '_ {
     [
         &m.base_color_texture,
         &m.metallic_roughness_texture,

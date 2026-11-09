@@ -38,10 +38,18 @@ pub(crate) fn apply_frame_sync(
         let wait = settings
             .refresh_millihertz
             .filter(|mhz| *mhz > 0)
-            .map_or_else(fallback_wait, |mhz| Duration::from_secs_f64(1000.0 / f64::from(mhz)));
-        (UpdateMode::reactive(wait), UpdateMode::reactive_low_power(wait))
+            .map_or_else(fallback_wait, |mhz| {
+                Duration::from_secs_f64(1000.0 / f64::from(mhz))
+            });
+        (
+            UpdateMode::reactive(wait),
+            UpdateMode::reactive_low_power(wait),
+        )
     } else {
-        (UpdateMode::Continuous, UpdateMode::reactive_low_power(fallback_wait()))
+        (
+            UpdateMode::Continuous,
+            UpdateMode::reactive_low_power(fallback_wait()),
+        )
     };
     if winit.focused_mode != focused || winit.unfocused_mode != unfocused {
         winit.focused_mode = focused;

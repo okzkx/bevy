@@ -27,11 +27,13 @@ pub(super) fn create_indirect_draw(
     first: &mut OnceLog,
 ) -> Result<Option<IndirectDraw>, BevyError> {
     let dispatch = if count > 0 {
-        first.log(|| info!(
-            "indirect 提交首跑：在场行 {count}，命令环 {}B/条，\
+        first.log(|| {
+            info!(
+                "indirect 提交首跑：在场行 {count}，命令环 {}B/条，\
              图形侧一次 cmd_draw_indexed_indirect（图形 push range 归零，firstInstance 携带槽号）",
-            INDIRECT_COMMAND_SIZE,
-        ));
+                INDIRECT_COMMAND_SIZE,
+            )
+        });
         Some(
             indirect
                 .pass

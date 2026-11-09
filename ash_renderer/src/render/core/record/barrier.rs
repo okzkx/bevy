@@ -137,7 +137,8 @@ impl ImageBarrier {
         cb: vk::CommandBuffer,
         memory: &[MemoryBarrierDesc],
     ) {
-        let memory: std::vec::Vec<vk::MemoryBarrier> = memory.iter().map(|d| d.vk_barrier()).collect();
+        let memory: std::vec::Vec<vk::MemoryBarrier> =
+            memory.iter().map(|d| d.vk_barrier()).collect();
         let barrier = vk::ImageMemoryBarrier::default()
             .old_layout(self.old_layout)
             .new_layout(self.new_layout)

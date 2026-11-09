@@ -11,11 +11,13 @@ use serde_json::{json, Value};
 use ash_macros::system;
 
 use crate::{
-    scene::{InstanceLedger, WorkloadSettings},
     render::{FrameSample, GpuTimer, ImageCache, MeshPool, PerfLedger},
+    scene::{InstanceLedger, WorkloadSettings},
 };
 
-use crate::remote::common::params::{invalid_params, parse_params, parse_params_or_default, res_mut};
+use crate::remote::common::params::{
+    invalid_params, parse_params, parse_params_or_default, res_mut,
+};
 
 /// PerfLedger 环形窗口容量（= render 内 `PerfLedger::CAPACITY`，未导出）。
 const PERF_WINDOW: usize = 2048;
@@ -33,7 +35,11 @@ fn mean_and_len(ledger: &PerfLedger, field: impl Fn(&FrameSample) -> f32) -> (f3
 
 /// 分位数三元组（p50/p95/p99）+ 均值，从 PerfLedger 现算（保留三位小数）。
 fn percentile_block(ledger: &PerfLedger, field: impl Fn(&FrameSample) -> f32) -> Value {
-    let pick = |p: f32| ledger.percentile(p, &field).map(|v| (v * 1000.0).round() / 1000.0);
+    let pick = |p: f32| {
+        ledger
+            .percentile(p, &field)
+            .map(|v| (v * 1000.0).round() / 1000.0)
+    };
     let (mean, n) = mean_and_len(ledger, &field);
     json!({
         "p50": pick(0.50),

@@ -26,9 +26,7 @@ use bevy::{
 
 use ash_macros::system;
 
-use crate::scene::{
-    EntityRow, SceneTreeIndex, SceneTreeNode, TransformEdit, TREE_MAX_DEPTH,
-};
+use crate::scene::{EntityRow, SceneTreeIndex, SceneTreeNode, TransformEdit, TREE_MAX_DEPTH};
 
 /// 树内点选的实体。选中实体 despawn 后由详情区检空清账，
 /// 不残留死引用；Transform 编辑以它为目标。
@@ -105,7 +103,10 @@ impl EntityTreeState {
         if depth > TREE_MAX_DEPTH || !seen.insert(entity) {
             return;
         }
-        let Some(SceneTreeNode { label, children, .. }) = nodes.get(&entity) else {
+        let Some(SceneTreeNode {
+            label, children, ..
+        }) = nodes.get(&entity)
+        else {
             return;
         };
         let has_children = !children.is_empty();
@@ -175,7 +176,12 @@ impl EntityTreePage<'_> {
     /// 与实体总数解耦）+ 属性区。返回一次 Transform 编辑（有拖改时），
     /// 由 pass 落进编辑队列——本函数不碰写路径（展开态账与本缓存除外）。
     pub(in crate::overlay) fn show(self, ui: &mut egui::Ui) -> Option<(Entity, TransformEdit)> {
-        let Self { selected, state, details, drag } = self;
+        let Self {
+            selected,
+            state,
+            details,
+            drag,
+        } = self;
         ui.monospace(format!("相关 {} / 全部 {}", state.relevant, state.total));
         // 等高行高：可交互行（selectable_label）以 interact_size 为下限，
         // 取两者大者保证逐行 stride 与声明一致（滚动算术不失真）。
@@ -191,7 +197,14 @@ impl EntityTreePage<'_> {
             .id_salt("实体层级树")
             .max_height(380.0) // points
             .show_rows(ui, row_height, state.rows.len(), |ui, range| {
-                for TreeRow { entity, depth, label, has_children, expanded } in &state.rows[range] {
+                for TreeRow {
+                    entity,
+                    depth,
+                    label,
+                    has_children,
+                    expanded,
+                } in &state.rows[range]
+                {
                     let is_selected = selected.0 == Some(*entity);
                     ui.horizontal(|ui| {
                         ui.set_height(row_height);
@@ -312,7 +325,9 @@ pub(in crate::overlay) fn collect_selected_details(world: &mut World) {
     details.name = er.get::<Name>().map(|n| n.as_str().to_owned());
     details.children = er.get::<Children>().map(|c| c.len());
     details.mesh = er.get::<Mesh3d>().map(|m| m.0.id());
-    details.material = er.get::<MeshMaterial3d<StandardMaterial>>().map(|m| m.0.id());
+    details.material = er
+        .get::<MeshMaterial3d<StandardMaterial>>()
+        .map(|m| m.0.id());
     let mat = details.material.and_then(|id| {
         world
             .get_resource::<Assets<StandardMaterial>>()
@@ -421,17 +436,19 @@ fn show_details(
         let mut rot_dragged = [false; 3];
         {
             let drag_euler: &mut [f32; 3] = &mut drag.0.get_or_insert((entity, t.euler_yxz_deg)).1;
-            egui::Grid::new("transform_edit").num_columns(4).show(ui, |ui| {
-                ui.monospace("平移");
-                drag_vec3(ui, &mut translation, 0.05, "");
-                ui.end_row();
-                ui.monospace("旋转");
-                rot_dragged = drag_vec3(ui, drag_euler, 1.0, "°");
-                ui.end_row();
-                ui.monospace("缩放");
-                drag_vec3(ui, &mut scale, 0.02, "");
-                ui.end_row();
-            });
+            egui::Grid::new("transform_edit")
+                .num_columns(4)
+                .show(ui, |ui| {
+                    ui.monospace("平移");
+                    drag_vec3(ui, &mut translation, 0.05, "");
+                    ui.end_row();
+                    ui.monospace("旋转");
+                    rot_dragged = drag_vec3(ui, drag_euler, 1.0, "°");
+                    ui.end_row();
+                    ui.monospace("缩放");
+                    drag_vec3(ui, &mut scale, 0.02, "");
+                    ui.end_row();
+                });
         }
         // 回写取拖拽框落在本帧的值（缓存内持续累加）；本帧无人按住旋转 =
         // 拖拽结束，缓存作废，下帧从快照重建（显示回落当前表示分支）
@@ -451,7 +468,10 @@ fn show_details(
         }
     }
     if let Some(g) = details.global_translation {
-        ui.monospace(format!("全局  平移 ({:+.3}, {:+.3}, {:+.3})", g.x, g.y, g.z));
+        ui.monospace(format!(
+            "全局  平移 ({:+.3}, {:+.3}, {:+.3})",
+            g.x, g.y, g.z
+        ));
     }
     // 组件全清单：archetype 口径；注册的折叠出字段行，未注册只报名字
     ui.separator();

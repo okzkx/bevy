@@ -29,10 +29,7 @@ const CAMERA_TARGET: Vec3 = Vec3::new(0.0, 3.0, 0.0);
 /// 不用 `Camera3d`：它带渲染图等渲染族组件，这里只消费 Camera+Projection+Transform；
 /// "无渲染图的 Camera 会报错"出自渲染侧系统，禁渲染后不触发。
 #[system]
-pub(super) fn spawn_camera(
-    mut commands: Commands,
-    windows: Query<&Window, With<PrimaryWindow>>,
-) {
+pub(super) fn spawn_camera(mut commands: Commands, windows: Query<&Window, With<PrimaryWindow>>) {
     // 宽高比初值：渲染族禁用后官方不再维护，Startup 先按主窗口写一次，resize 由
     // 机制侧宽高比同步接管。宽高比错了，VP 矩阵的横向视野就错。
     let mut projection = Projection::default();
@@ -68,9 +65,7 @@ pub(super) fn spawn_camera(
 /// 精确指向 [`CAMERA_TARGET`]——相机是无父链的根实体，GlobalTransform 种子值
 /// 即终值。带父链的传播验证归机制侧账本。
 #[system]
-pub(super) fn report_camera_setup(
-    cameras: Query<(&GlobalTransform, &Projection), With<Camera>>,
-) {
+pub(super) fn report_camera_setup(cameras: Query<(&GlobalTransform, &Projection), With<Camera>>) {
     let Ok((cam_tf, projection)) = cameras.single() else {
         warn!(
             "相机就位核验未过：相机 {} 台（期望 1）",
@@ -87,9 +82,7 @@ pub(super) fn report_camera_setup(
     let expected = (CAMERA_TARGET - CAMERA_POS).normalize_or_zero();
     let deviation = (*cam_tf.forward()).angle_between(expected).to_degrees();
     if deviation > 1.0 {
-        warn!(
-            "相机朝向核验越线：前向与位置→注视点夹角 {deviation:.4}° > 1°（朝向语义被破坏）"
-        );
+        warn!("相机朝向核验越线：前向与位置→注视点夹角 {deviation:.4}° > 1°（朝向语义被破坏）");
     }
     info!(
         "相机就位：1 台 @ {} 前向 {} 与位置→注视点夹角 {deviation:.4}°（looking_at 语义），{aspect}",

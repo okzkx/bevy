@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 
 use naga::back::spv;
-use naga::valid::{Capabilities, Validator, ValidationFlags};
+use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 // SPIR-V 语法常量（值由 SPIR-V 规范钉死）。
 const OP_CAPABILITY: u16 = 17;
@@ -53,7 +53,10 @@ fn main() {
     while let Some(dir) = dirs.pop() {
         let entries = std::fs::read_dir(&dir)
             .unwrap_or_else(|e| panic!("读 {dir:?} 失败: {e}"))
-            .map(|e| e.unwrap_or_else(|e| panic!("枚举 {dir:?} 条目失败: {e}")).path())
+            .map(|e| {
+                e.unwrap_or_else(|e| panic!("枚举 {dir:?} 条目失败: {e}"))
+                    .path()
+            })
             .collect::<Vec<_>>();
         for path in entries {
             if path.is_dir() {
@@ -80,7 +83,11 @@ fn main() {
     // 引入分类子目录后跨目录重名会静默碰撞，这里显式拦住。
     let mut seen_stems: Vec<String> = Vec::new();
     for path in &wgsl_paths {
-        let stem = path.file_stem().expect("有扩展名的路径必有文件名").to_string_lossy().into_owned();
+        let stem = path
+            .file_stem()
+            .expect("有扩展名的路径必有文件名")
+            .to_string_lossy()
+            .into_owned();
         assert!(
             !seen_stems.contains(&stem),
             "入口重名 {stem:?}（stem 是 OUT_DIR 产物与 ABI 表的全局名字，不同分类目录也不允许重名）"
@@ -147,13 +154,19 @@ fn expand_into(
             "{path:?}: 非法片段名 `{name}`（只允许 [A-Za-z0-9_]，对应 shaders/common/<name>.wgsl）"
         );
         if stack.iter().any(|n| n == name) {
-            panic!("{path:?}: 公共片段循环引用 {} -> {name}", stack.join(" -> "));
+            panic!(
+                "{path:?}: 公共片段循环引用 {} -> {name}",
+                stack.join(" -> ")
+            );
         }
         if done.iter().any(|n| n == name) {
             continue;
         }
         let fragment = common_dir.join(format!("{name}.wgsl"));
-        assert!(fragment.is_file(), "{path:?}: 导入的片段 {fragment:?} 不存在");
+        assert!(
+            fragment.is_file(),
+            "{path:?}: 导入的片段 {fragment:?} 不存在"
+        );
         println!("cargo:rerun-if-changed={}", fragment.display());
         stack.push(name.to_owned());
         out.push_str(&format!("// ---- #import {name} begin\n"));
@@ -191,7 +204,9 @@ fn compile(source: &str, expanded: &Path, stem: &str) -> (Vec<u32>, String) {
     let mut options = spv::Options::default();
     // 坑：全部管线的正高度 viewport 朝向依赖 naga 对 @builtin(position) 注入的 Y 翻转；
     // 默认值已含此位，显式写出防默认值变动后画面整体上下颠倒。
-    options.flags.insert(spv::WriterFlags::ADJUST_COORDINATE_SPACE);
+    options
+        .flags
+        .insert(spv::WriterFlags::ADJUST_COORDINATE_SPACE);
     let words = match spv::write_vec(&module, &info, &options, None) {
         Ok(w) => w,
         Err(e) => panic!("[{stem}] SPIR-V 生成失败: {e}"),
@@ -215,7 +230,10 @@ fn reflect_abi(module: &naga::Module, info: &naga::valid::ModuleInfo, stem: &str
             naga::ShaderStage::Vertex => "VERTEX",
             naga::ShaderStage::Fragment => "FRAGMENT",
             naga::ShaderStage::Compute => "COMPUTE",
-            other => panic!("[{stem}] 入口 {} 的阶段 {other:?} 未接入 ABI 表", entry.name),
+            other => panic!(
+                "[{stem}] 入口 {} 的阶段 {other:?} 未接入 ABI 表",
+                entry.name
+            ),
         };
         let uses = info.get_entry_point(index);
         let mut resources: Vec<(u32, u32, &str, &str)> = Vec::new();
@@ -228,7 +246,9 @@ fn reflect_abi(module: &naga::Module, info: &naga::valid::ModuleInfo, stem: &str
                 immediate_size = module.types[var.ty].inner.size(module.to_ctx());
                 continue;
             }
-            let Some(binding) = &var.binding else { continue };
+            let Some(binding) = &var.binding else {
+                continue;
+            };
             let (kind, array) = resource_kind(module, var, stem);
             resources.push((binding.group, binding.binding, kind, array));
         }
@@ -249,7 +269,11 @@ fn reflect_abi(module: &naga::Module, info: &naga::valid::ModuleInfo, stem: &str
 }
 
 /// 全局量 → (描述符种类, 数组形状) 的源码名。binding_array 剥一层取元素种类。
-fn resource_kind(module: &naga::Module, var: &naga::GlobalVariable, stem: &str) -> (&'static str, &'static str) {
+fn resource_kind(
+    module: &naga::Module,
+    var: &naga::GlobalVariable,
+    stem: &str,
+) -> (&'static str, &'static str) {
     let (base, array) = match &module.types[var.ty].inner {
         naga::TypeInner::BindingArray { base, size } => {
             let array = match size {
@@ -351,11 +375,10 @@ fn locate_spirv_val() -> Option<PathBuf> {
 /// 跑一次 spirv-val：词流写临时 .spv，--target-env vulkan1.3。被拒返回 Err 文本。
 fn run_spirv_val(val_exe: &Path, words: &[u32]) -> Result<(), String> {
     // 临时文件名混 pid：并发 cargo 调用（多 target/多工作区）不互踩同一 .spv
-    let spv_path = std::env::temp_dir().join(format!(
-        "ash_renderer_build_val_{}.spv",
-        std::process::id()
-    ));
-    std::fs::write(&spv_path, words_to_bytes(words)).map_err(|e| format!("写临时 .spv 失败: {e}"))?;
+    let spv_path =
+        std::env::temp_dir().join(format!("ash_renderer_build_val_{}.spv", std::process::id()));
+    std::fs::write(&spv_path, words_to_bytes(words))
+        .map_err(|e| format!("写临时 .spv 失败: {e}"))?;
     let result = std::process::Command::new(val_exe)
         .arg("--target-env")
         .arg("vulkan1.3")
@@ -408,7 +431,10 @@ fn patch_descriptor_indexing(words: &[u32]) -> Vec<u32> {
         }
     }
     let mut extra_caps: Vec<u32> = Vec::new();
-    for cap in [CAP_RUNTIME_DESCRIPTOR_ARRAY, CAP_SAMPLED_IMAGE_ARRAY_NON_UNIFORM] {
+    for cap in [
+        CAP_RUNTIME_DESCRIPTOR_ARRAY,
+        CAP_SAMPLED_IMAGE_ARRAY_NON_UNIFORM,
+    ] {
         if !caps_present.contains(&cap) {
             // OpCapability 恒 2 字:(wordcount<<16)|opcode
             extra_caps.push((2u32 << 16) | u32::from(OP_CAPABILITY));

@@ -29,9 +29,9 @@ mod stats;
 #[cfg(test)]
 mod layout_contract_tests;
 
+pub use self::core::binding::set_layout::{SetLayout, SetLayouts};
 pub use self::core::device::context::{Context, MAX_FRAMES_IN_FLIGHT};
 pub use self::core::target::color::HDR_FORMAT;
-pub use self::core::binding::set_layout::{SetLayout, SetLayouts};
 pub(crate) use layout_registry::{ALL_PIPELINES, ALL_SETS};
 pub use passes::visibility::cull::{
     aabb_visible, frustum_planes, CullDiagnostics, CullDraw, CullPass, CullSettings,
@@ -42,6 +42,11 @@ pub use passes::visibility::hiz::{
 pub use passes::visibility::hiz_frame::HizFrameDraw;
 // 诊断回读助手：BRP 读数方法族（remote/）与 render 内部共用，crate 级重出口。
 pub(crate) use self::core::device::readback::readback_buffer;
+pub(crate) use core::device::transfer::Ticket;
+pub use core::device::transfer::{
+    CopyRegion, ImageRelease, Release, StagingCopy, StagingImageCopy, UploadBatch, Uploader,
+};
+pub use frame::frame_sync_settings::FrameSyncSettings;
 pub use passes::visibility::indirect::{IndirectDraw, IndirectPass, IndirectStats};
 pub use passes::visibility::lod::{
     lod_hysteresis_level, lod_raw_level, LodDiagnostics, LodDraw, LodPass, LodSettings,
@@ -50,77 +55,76 @@ pub use passes::visibility::occlusion::{
     aabb_screen_rect, OcclusionDiagnostics, OcclusionDraw, OcclusionFallback, OcclusionPass,
     OcclusionSettings,
 };
-pub use resident::tables::bindless_texture_table::{BindlessTextureTable, TABLE_CAPACITY};
+pub use resident::assets::image_spec::{image_spec, ImageSpec, ImageSpecError};
+pub use resident::assets::images::{GpuImage, ImageCache};
+pub use resident::assets::mesh_convert::{
+    convert_mesh, ConvertedMesh, MeshConvertError, VERTEX_STRIDE,
+};
+pub use resident::assets::pool::{MeshPool, MeshSlot, PoolRange};
+pub use resident::sampler::{sampler_key, SamplerKey};
 pub(crate) use resident::tables::bindless_texture_table::SlotBinding;
+pub use resident::tables::bindless_texture_table::{BindlessTextureTable, TABLE_CAPACITY};
 pub use resident::tables::frame_uniform_table::{
     pack_frame_uniforms, FrameUniformTable, FrameUniformsData, PLACEHOLDER_DIR_TO_LIGHT,
 };
 pub(crate) use resident::tables::frame_uniform_table::{
-    FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC,
-    FRAME_MODE_NORMAL, FRAME_MODE_POSITION, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS,
-    FRAME_MODE_UNLIT,
+    FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC, FRAME_MODE_NORMAL,
+    FRAME_MODE_POSITION, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
 };
-pub use resident::assets::image_spec::{image_spec, ImageSpecError, ImageSpec};
-pub use resident::assets::images::{GpuImage, ImageCache};
-pub use resident::sampler::{sampler_key, SamplerKey};
 pub use resident::tables::instance_table::{
     conservative_world_aabb, pack_lod_entry, pack_material_record, pack_model, pack_object_record,
     InstanceTables, GAP_MARK_SIZE, INDIRECT_COMMAND_SIZE, LOD_ENTRY_SIZE, LOD_LEVEL_SIZE,
-    LOD_TABLE_STRIDE, MARK_SIZE, MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS,
-    MODEL_STRIDE, NO_TEXTURE_INDEX, OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY,
+    LOD_TABLE_STRIDE, MARK_SIZE, MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS, MODEL_STRIDE,
+    NO_TEXTURE_INDEX, OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY,
 };
-pub use resident::assets::mesh_convert::{convert_mesh, ConvertedMesh, MeshConvertError, VERTEX_STRIDE};
-pub use resident::assets::pool::{MeshPool, MeshSlot, PoolRange};
-pub use core::device::transfer::{
-    CopyRegion, ImageRelease, Release, StagingCopy, StagingImageCopy, UploadBatch, Uploader,
-};
-pub(crate) use core::device::transfer::Ticket;
-pub use stats::perf::{FrameSample, GpuTimer, PerfLedger};
 pub use stats::egui_pass_timing::EguiPassTiming;
-pub use frame::frame_sync_settings::FrameSyncSettings;
 pub(crate) use stats::monitor_history::MonitorHistory;
+pub use stats::perf::{FrameSample, GpuTimer, PerfLedger};
 // 不导出 LIGHT_TYPE_SPOT：聚光灯还没实现，导出了也没人用
-pub use resident::tables::light_table::{LightRecord, LightTable, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT};
-pub use frame::render_mode::RenderMode;
-pub use frame::scene_resources::SceneResources;
-pub use passes::lighting::cluster::{
-    cluster_reference, pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, ClusterFrameDraw,
-    ClusterGrid, LightClusters,
-};
-pub use passes::transparent::{
-    TransparentFrame, TransparentPasses, TransparentPipeline, TransparentTargets,
-    TRANSPARENT_CAPACITY,
-};
-pub use passes::lighting::composite_pipeline::CompositePipeline;
-pub use passes::post::present_tonemap_pipeline::PresentTonemapPipeline;
-pub use passes::post::bloom::{
-    pack_bloom_params, BloomFrameDraw, BloomPipelines, BloomParamsData, BloomSettings,
-    BloomTargets, TonemapCurve,
-};
-pub use passes::gbuffer::gbuffer_targets::{
-    GBufferTargets, ALBEDO_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
+pub use self::core::device::memory::buffer::GpuBuffer;
+pub use self::core::device::memory::contract::{align_up, MemoryContract};
+pub use self::core::device::memory::role::BufferRole;
+pub use self::core::device::swapchain::{
+    AcquireOutcome, PresentTarget, Swapchain, SWAPCHAIN_COLOR_FORMAT,
 };
 pub use self::core::target::depth::DEPTH_FORMAT;
 pub use frame::frame_pool::{Frame, FramePool, UploadWait};
 pub use frame::render_features::RenderFeatures;
-pub use passes::post::post_chain::PostChainDraw;
-pub use passes::overlay::overlay_pipeline::{OverlayPipeline, UiDraw, UiDrawCall, UiPaint};
-pub use passes::overlay::atlas_gpu::AtlasGpu;
-pub use passes::overlay::ui_vertex_ring::UiVertexRing;
-pub(crate) use passes::overlay::ui_vertex_ring::UiVertex;
+pub use frame::render_mode::RenderMode;
+pub use frame::scene_resources::SceneResources;
 pub use passes::gbuffer::gbuffer_pipeline::GBufferPipeline;
-pub use passes::shadow::shadow_map::{ShadowPipeline, ShadowTargets, ShadowWriteDraw};
-pub use passes::shadow::shadow_frame::{ShadowFrameDraw, ShadowPasses};
+pub use passes::gbuffer::gbuffer_targets::{
+    GBufferTargets, ALBEDO_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
+};
+pub use passes::lighting::cluster::{
+    cluster_reference, pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, ClusterFrameDraw,
+    ClusterGrid, LightClusters,
+};
+pub use passes::lighting::composite_pipeline::CompositePipeline;
+pub use passes::overlay::atlas_gpu::AtlasGpu;
+pub use passes::overlay::overlay_pipeline::{OverlayPipeline, UiDraw, UiDrawCall, UiPaint};
+pub(crate) use passes::overlay::ui_vertex_ring::UiVertex;
+pub use passes::overlay::ui_vertex_ring::UiVertexRing;
+pub use passes::post::bloom::{
+    pack_bloom_params, BloomFrameDraw, BloomParamsData, BloomPipelines, BloomSettings,
+    BloomTargets, TonemapCurve,
+};
+pub use passes::post::post_chain::PostChainDraw;
+pub use passes::post::present_tonemap_pipeline::PresentTonemapPipeline;
 pub use passes::post::smaa::{
     SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
 };
-pub use passes::shadow::shadow_build::ShadowBuildPass;
 pub use passes::shadow::cascades::{
-    cascade_matrices, pack_shadow_uniforms, ShadowCascadeInput,
-    ShadowCascades, ShadowSettings, ShadowUniformsData, SHADOW_CASCADES,
-    SHADOW_MAP_SIZE, SHADOW_UBO_SIZE,
+    cascade_matrices, pack_shadow_uniforms, ShadowCascadeInput, ShadowCascades, ShadowSettings,
+    ShadowUniformsData, SHADOW_CASCADES, SHADOW_MAP_SIZE, SHADOW_UBO_SIZE,
 };
-pub use self::core::device::memory::buffer::GpuBuffer;
-pub use self::core::device::memory::contract::{align_up, MemoryContract};
-pub use self::core::device::memory::role::BufferRole;
-pub use self::core::device::swapchain::{AcquireOutcome, PresentTarget, Swapchain, SWAPCHAIN_COLOR_FORMAT};
+pub use passes::shadow::shadow_build::ShadowBuildPass;
+pub use passes::shadow::shadow_frame::{ShadowFrameDraw, ShadowPasses};
+pub use passes::shadow::shadow_map::{ShadowPipeline, ShadowTargets, ShadowWriteDraw};
+pub use passes::transparent::{
+    TransparentFrame, TransparentPasses, TransparentPipeline, TransparentTargets,
+    TRANSPARENT_CAPACITY,
+};
+pub use resident::tables::light_table::{
+    LightRecord, LightTable, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT,
+};

@@ -5,8 +5,8 @@
 use ash::vk;
 
 use crate::common::error::{Result, VulkanError};
-use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::set_layout::DescSet;
+use crate::render::core::record::graphics::PipelineRef;
 use crate::render::GBufferTargets;
 
 /// ④⑤ 不透明场景链的资源与规格（draw_frame 备料，`record_frame` 消费）：场景管线与三集、
@@ -45,4 +45,3 @@ impl SceneResources<'_> {
         Ok((vertex_buffer, index_buffer))
     }
 }
-

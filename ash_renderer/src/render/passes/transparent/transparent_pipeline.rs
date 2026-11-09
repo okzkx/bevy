@@ -4,23 +4,28 @@ use ash::{vk, Device};
 use bevy::log::info;
 
 use crate::common::error::Result;
-use crate::render::Context;
-use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
-use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
+use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::record::graphics::PipelineRef;
 use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET_DESC;
 use crate::render::resident::tables::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
 use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
 use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
+use crate::render::Context;
 
 /// set 依次为 set0/set1/set2 和光源分簇集。
 pub(crate) static TRANSPARENT_FORWARD_PIPELINE: PipelineDesc = PipelineDesc {
     label: "transparent_forward",
     shader: &shader_abi::TRANSPARENT_FORWARD,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&BINDLESS_TEXTURE_SET_DESC, &FRAME_UNIFORM_SET_DESC, &INSTANCE_SET_DESC, &LIGHT_CLUSTER_SET_DESC],
+    sets: &[
+        &BINDLESS_TEXTURE_SET_DESC,
+        &FRAME_UNIFORM_SET_DESC,
+        &INSTANCE_SET_DESC,
+        &LIGHT_CLUSTER_SET_DESC,
+    ],
     push: None,
     color_formats: &[crate::render::HDR_FORMAT],
     depth_format: Some(crate::render::core::target::depth::DEPTH_FORMAT),
@@ -104,14 +109,18 @@ impl TransparentPipeline {
             .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
             .alpha_blend_op(vk::BlendOp::ADD)
             .color_write_mask(vk::ColorComponentFlags::RGBA)];
-        let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
-            .attachments(&blend_attachment);
+        let color_blend =
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachment);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(TRANSPARENT_FORWARD_PIPELINE.color_formats)
-            .depth_attachment_format(TRANSPARENT_FORWARD_PIPELINE.depth_format.unwrap_or(vk::Format::UNDEFINED));
+            .depth_attachment_format(
+                TRANSPARENT_FORWARD_PIPELINE
+                    .depth_format
+                    .unwrap_or(vk::Format::UNDEFINED),
+            );
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)
             .vertex_input_state(&vertex_input)
@@ -131,7 +140,12 @@ impl TransparentPipeline {
             TRANSPARENT_FORWARD_PIPELINE.depth_format
         );
         Ok(Self {
-            handle: PipelineHandle::new(device, layout, pipeline, TRANSPARENT_FORWARD_PIPELINE.sets),
+            handle: PipelineHandle::new(
+                device,
+                layout,
+                pipeline,
+                TRANSPARENT_FORWARD_PIPELINE.sets,
+            ),
         })
     }
 

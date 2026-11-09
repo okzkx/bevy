@@ -87,7 +87,12 @@ pub fn spawn_test_shape(
     // unique 为每个实体创建独立 mesh 资产；默认复用缓存 mesh。
     // 坑：Assets<Mesh>/Assets<StandardMaterial> 须已初始化，否则 resource_mut 会 panic。
     let (mesh_handle, mesh_created) = if unique {
-        (world.resource_mut::<Assets<Mesh>>().add(build_shape_mesh(shape)?), true)
+        (
+            world
+                .resource_mut::<Assets<Mesh>>()
+                .add(build_shape_mesh(shape)?),
+            true,
+        )
     } else {
         match world
             .get_resource::<TestShapeAssets>()
@@ -184,7 +189,10 @@ fn build_shape_mesh(shape: TestShape) -> Result<Mesh, ObjectOpError> {
 mod tests {
     use super::{spawn_test_shape, TestShape};
     use crate::scene::mechanism::{apply_transform_edit, TransformEdit};
-    use bevy::{math::{EulerRot, Quat, Vec3}, prelude::*};
+    use bevy::{
+        math::{EulerRot, Quat, Vec3},
+        prelude::*,
+    };
 
     #[test]
     fn spawn_shape_rotation_tuple_matches_transform_edit_order() {
@@ -208,7 +216,10 @@ mod tests {
         apply_transform_edit(
             &mut world,
             readback.entity,
-            TransformEdit { rotation_euler_deg: Some(euler), ..Default::default() },
+            TransformEdit {
+                rotation_euler_deg: Some(euler),
+                ..Default::default()
+            },
         )
         .expect("新实体应包含 Transform");
         let from_spawn = world.get::<Transform>(readback.entity).unwrap().rotation;

@@ -21,31 +21,38 @@ use ash::{vk, Device, Instance};
 use bevy::image::ImageSamplerDescriptor;
 use bevy::log::info;
 
+use crate::common::error::{Result, VulkanError};
+use crate::render::core::binding::descriptor_writer::DescriptorWriter;
+use crate::render::core::binding::set_layout::{
+    stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc,
+};
+use crate::render::core::device::memory::contract::MemoryContract;
+use crate::render::core::device::transfer::{StagingImageCopy, UploadBatch, Uploader};
 use crate::render::resident::assets::image_spec::ImageSpec;
 use crate::render::resident::assets::images::GpuImage;
 use crate::render::resident::sampler::{sampler_key, SamplerKey};
 use crate::render::resident::slot_allocator::SlotAllocator;
-use crate::render::core::device::transfer::{StagingImageCopy, UploadBatch, Uploader};
-use crate::common::error::{Result, VulkanError};
-use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
-use crate::render::core::device::memory::contract::MemoryContract;
 
 /// set0 两个数组的长度：贴图槽数 = 采样器槽数。
 pub const TABLE_CAPACITY: u32 = 1024;
 
 /// 取超集：探针走 compute、主渲染走 graphics；只影响驱动优化，不影响合法性。
-const ALL_STAGES: vk::ShaderStageFlags =
-    stages(&[vk::ShaderStageFlags::COMPUTE, vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT]);
+const ALL_STAGES: vk::ShaderStageFlags = stages(&[
+    vk::ShaderStageFlags::COMPUTE,
+    vk::ShaderStageFlags::VERTEX,
+    vk::ShaderStageFlags::FRAGMENT,
+]);
 const UAB_PARTIALLY: vk::DescriptorBindingFlags = vk::DescriptorBindingFlags::from_raw(
-    vk::DescriptorBindingFlags::UPDATE_AFTER_BIND.as_raw() | vk::DescriptorBindingFlags::PARTIALLY_BOUND.as_raw(),
+    vk::DescriptorBindingFlags::UPDATE_AFTER_BIND.as_raw()
+        | vk::DescriptorBindingFlags::PARTIALLY_BOUND.as_raw(),
 );
 
 /// set0：b0 贴图数组、b1 采样器数组。
 pub(crate) static BINDLESS_TEXTURE_SET_DESC: SetLayoutDesc = SetLayoutDesc {
     name: "bindless",
     bindings: &[
-        BindingDesc::new(0, DescKind::SampledImage, ALL_STAGES).array(TABLE_CAPACITY, UAB_PARTIALLY),
+        BindingDesc::new(0, DescKind::SampledImage, ALL_STAGES)
+            .array(TABLE_CAPACITY, UAB_PARTIALLY),
         BindingDesc::new(1, DescKind::Sampler, ALL_STAGES).array(TABLE_CAPACITY, UAB_PARTIALLY),
     ],
     flags: vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL,
@@ -105,10 +112,19 @@ impl BindlessTextureTable {
         capacity: u32,
     ) -> Result<Self> {
         if capacity > TABLE_CAPACITY {
-            return Err(VulkanError::Init(format!("槽位预算 {capacity} 超过 set0 布局长度 {TABLE_CAPACITY}")));
+            return Err(VulkanError::Init(format!(
+                "槽位预算 {capacity} 超过 set0 布局长度 {TABLE_CAPACITY}"
+            )));
         }
         check_uab_limits(instance, physical_device)?;
-        let fallback = upload_fallback(device, instance, physical_device, contract, uploader, graphics_family)?;
+        let fallback = upload_fallback(
+            device,
+            instance,
+            physical_device,
+            contract,
+            uploader,
+            graphics_family,
+        )?;
         let mut tables = Self {
             device: device.clone(),
             layout: BINDLESS_TEXTURE_SET_DESC.create(device)?,
@@ -143,7 +159,10 @@ impl BindlessTextureTable {
             )
         }
         .map_err(VulkanError::from)?[0];
-        let slots = tables.publish(tables.fallback.view(), &sampler_key(&ImageSamplerDescriptor::linear()))?;
+        let slots = tables.publish(
+            tables.fallback.view(),
+            &sampler_key(&ImageSamplerDescriptor::linear()),
+        )?;
         debug_assert_eq!(slots, Self::fallback_slots(), "fallback 必须占槽 0");
         info!(
             "常驻描述符表就绪:set0 双表(容量 {capacity}×2,UAB+PARTIALLY_BOUND);fallback 白图占槽 0"
@@ -204,8 +223,13 @@ impl BindlessTextureTable {
     /// # Errors
     /// 槽容量用完、采样器创建失败（已分的槽原样归还）。
     pub fn publish(&mut self, view: vk::ImageView, key: &SamplerKey) -> Result<SlotBinding> {
-        let texture = self.texture_slots.alloc().ok_or_else(|| capacity_error("贴图", &self.texture_slots))?;
-        let (sampler, handle) = self.acquire_sampler(key).inspect_err(|_| self.texture_slots.release(texture))?;
+        let texture = self
+            .texture_slots
+            .alloc()
+            .ok_or_else(|| capacity_error("贴图", &self.texture_slots))?;
+        let (sampler, handle) = self
+            .acquire_sampler(key)
+            .inspect_err(|_| self.texture_slots.release(texture))?;
         // 写入和声明对不上才会失败，属于代码错误，不回滚槽位
         let mut writer = DescriptorWriter::new(&BINDLESS_TEXTURE_SET_DESC, self.set);
         writer.image_at(0, texture, view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
@@ -236,7 +260,10 @@ impl BindlessTextureTable {
     ///
     /// # Errors
     /// 等待失败（待回收账原样保留，下次重试）。
-    pub fn drain_retired_slots(&mut self, wait_draws: &mut dyn FnMut() -> Result<()>) -> Result<usize> {
+    pub fn drain_retired_slots(
+        &mut self,
+        wait_draws: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<usize> {
         if self.retired_slot_count() == 0 {
             return Ok(0);
         }
@@ -255,10 +282,22 @@ impl BindlessTextureTable {
             shared.users += 1;
             return Ok((slot, shared.handle));
         }
-        let slot = self.sampler_slots.alloc().ok_or_else(|| capacity_error("采样器", &self.sampler_slots))?;
-        let handle = key.create_sampler(&self.device).inspect_err(|_| self.sampler_slots.release(slot))?;
+        let slot = self
+            .sampler_slots
+            .alloc()
+            .ok_or_else(|| capacity_error("采样器", &self.sampler_slots))?;
+        let handle = key
+            .create_sampler(&self.device)
+            .inspect_err(|_| self.sampler_slots.release(slot))?;
         self.sampler_slot_by_key.insert(*key, slot);
-        self.samplers.insert(slot, SharedSampler { key: *key, handle, users: 1 });
+        self.samplers.insert(
+            slot,
+            SharedSampler {
+                key: *key,
+                handle,
+                users: 1,
+            },
+        );
         Ok((slot, handle))
     }
 }
@@ -299,15 +338,41 @@ fn check_uab_limits(instance: &Instance, physical_device: vk::PhysicalDevice) ->
     let need = u64::from(TABLE_CAPACITY);
     // 每阶段和每 set 是两道独立的限制；全池总额按两张表满载算
     let checks = [
-        ("每阶段 sampledImages", di_props.max_per_stage_descriptor_update_after_bind_sampled_images, need),
-        ("每 set sampledImages", di_props.max_descriptor_set_update_after_bind_sampled_images, need),
-        ("每阶段 samplers", di_props.max_per_stage_descriptor_update_after_bind_samplers, need),
-        ("每 set samplers", di_props.max_descriptor_set_update_after_bind_samplers, need),
-        ("全池总额", di_props.max_update_after_bind_descriptors_in_all_pools, need * 2),
+        (
+            "每阶段 sampledImages",
+            di_props.max_per_stage_descriptor_update_after_bind_sampled_images,
+            need,
+        ),
+        (
+            "每 set sampledImages",
+            di_props.max_descriptor_set_update_after_bind_sampled_images,
+            need,
+        ),
+        (
+            "每阶段 samplers",
+            di_props.max_per_stage_descriptor_update_after_bind_samplers,
+            need,
+        ),
+        (
+            "每 set samplers",
+            di_props.max_descriptor_set_update_after_bind_samplers,
+            need,
+        ),
+        (
+            "全池总额",
+            di_props.max_update_after_bind_descriptors_in_all_pools,
+            need * 2,
+        ),
     ];
-    let report: Vec<String> = checks.iter().map(|(name, have, need)| format!("{name} {have}/{need}")).collect();
+    let report: Vec<String> = checks
+        .iter()
+        .map(|(name, have, need)| format!("{name} {have}/{need}"))
+        .collect();
     info!("UAB 限额核对(实测/需要):{}", report.join(" | "));
-    if let Some((name, have, need)) = checks.iter().find(|(_, have, need)| u64::from(*have) < *need) {
+    if let Some((name, have, need)) = checks
+        .iter()
+        .find(|(_, have, need)| u64::from(*have) < *need)
+    {
         return Err(VulkanError::Init(format!(
             "UAB 限额不够布局长度 {TABLE_CAPACITY}:{name} 实测 {have} < 需要 {need}"
         )));

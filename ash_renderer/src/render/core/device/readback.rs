@@ -28,7 +28,12 @@ pub(crate) fn readback_buffer(ctx: &Context, src: vk::Buffer, out: &mut [u8]) ->
         }
         .record(device, readback.cb);
         let region = vk::BufferCopy::default().size(byte_size);
-        device.cmd_copy_buffer(readback.cb, src, readback.staging, std::slice::from_ref(&region));
+        device.cmd_copy_buffer(
+            readback.cb,
+            src,
+            readback.staging,
+            std::slice::from_ref(&region),
+        );
         readback.finish_and_read(ctx, out)
     }
 }
@@ -129,7 +134,8 @@ impl<'a> OneShotReadback<'a> {
                 self.fence,
             )?;
             device.wait_for_fences(std::slice::from_ref(&self.fence), true, u64::MAX)?;
-            let ptr = device.map_memory(self.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())?;
+            let ptr =
+                device.map_memory(self.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())?;
             let range = vk::MappedMemoryRange::default()
                 .memory(self.memory)
                 .offset(0)

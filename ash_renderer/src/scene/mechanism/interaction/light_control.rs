@@ -4,11 +4,11 @@
 //! 不抓取指针；拖出窗口时没有增量，光标重新进入时可能产生较大位移。
 
 use bevy::{
-    light::DirectionalLight,
-    prelude::*,
-    math::ops,
-    window::{PrimaryWindow, Window},
     input::{mouse::MouseButton, ButtonInput},
+    light::DirectionalLight,
+    math::ops,
+    prelude::*,
+    window::{PrimaryWindow, Window},
 };
 
 use super::camera_control::{active_window, DragSession, FULL_TURN_PER_HEIGHT};
@@ -142,7 +142,10 @@ mod tests {
     /// 平视相机下向右拖动，太阳沿屏幕右侧移动且仰角不变。
     #[test]
     fn drag_right_moves_sun_screen_right_level_camera() {
-        let mut orbit = SunOrbit { azimuth: 0.0, elevation: 0.5 };
+        let mut orbit = SunOrbit {
+            azimuth: 0.0,
+            elevation: 0.5,
+        };
         let d0 = orbit.sun_dir();
         light_rotate(&mut orbit, Vec2::new(100.0, 0.0), 0.01, Vec3::X, Vec3::Y);
         let d1 = orbit.sun_dir();
@@ -153,9 +156,16 @@ mod tests {
     /// 平视相机下拖 = 太阳降低，且夹在地平线不再往下。
     #[test]
     fn drag_down_lowers_sun_clamped_at_horizon() {
-        let mut orbit = SunOrbit { azimuth: 0.0, elevation: 0.3 };
+        let mut orbit = SunOrbit {
+            azimuth: 0.0,
+            elevation: 0.3,
+        };
         light_rotate(&mut orbit, Vec2::new(0.0, 50.0), 0.01, Vec3::X, Vec3::Y);
-        assert!(orbit.elevation < 0.3, "下拖仰角应下降，实际 {}", orbit.elevation);
+        assert!(
+            orbit.elevation < 0.3,
+            "下拖仰角应下降，实际 {}",
+            orbit.elevation
+        );
         light_rotate(&mut orbit, Vec2::new(0.0, 100.0), 0.01, Vec3::X, Vec3::Y);
         assert_eq!(orbit.elevation, MIN_SUN_ELEVATION, "仰角应夹在地平线");
     }
@@ -163,7 +173,10 @@ mod tests {
     /// 俯视相机右拖时，天顶附近的太阳仍应向屏幕右侧移动。
     #[test]
     fn drag_right_moves_sun_screen_right_topdown_camera() {
-        let mut orbit = SunOrbit { azimuth: 0.0, elevation: 1.4 };
+        let mut orbit = SunOrbit {
+            azimuth: 0.0,
+            elevation: 1.4,
+        };
         let d0 = orbit.sun_dir();
         light_rotate(&mut orbit, Vec2::new(100.0, 0.0), 0.01, Vec3::X, -Vec3::Z);
         let d1 = orbit.sun_dir();
@@ -176,7 +189,10 @@ mod tests {
     /// 写回朝向：灯光 forward = 太阳方向的反向（沿 forward 照射语义）。
     #[test]
     fn apply_rotation_points_forward_away_from_sun() {
-        let orbit = SunOrbit { azimuth: 0.5, elevation: 0.4 };
+        let orbit = SunOrbit {
+            azimuth: 0.5,
+            elevation: 0.4,
+        };
         let mut transform = Transform::IDENTITY;
         apply_sun_rotation(&orbit, &mut transform);
         let forward = *transform.forward();

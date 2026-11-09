@@ -44,8 +44,8 @@ pub use mechanism::{
 };
 
 // mechanism/interaction
+pub(crate) use mechanism::{apply_camera_command, CameraCommandError, CameraOrbitCommand};
 pub use mechanism::{
     apply_sun_rotation, clamp_elevation, AshCameraControlPlugin, AshLightControlPlugin,
     PointerCapture, PointerCaptureSet, SunOrbit,
 };
-pub(crate) use mechanism::{apply_camera_command, CameraCommandError, CameraOrbitCommand};

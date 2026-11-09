@@ -9,7 +9,8 @@ use crate::render::{RenderMode, PLACEHOLDER_DIR_TO_LIGHT};
 use super::{frame_logs::FrameLogs, scene::FrameView};
 
 /// 方向光查询（取第一盏，方向 = 实体 `back()`）。
-pub(super) type LightQuery<'w, 's> = Query<'w, 's, (&'static GlobalTransform, &'static DirectionalLight)>;
+pub(super) type LightQuery<'w, 's> =
+    Query<'w, 's, (&'static GlobalTransform, &'static DirectionalLight)>;
 
 /// 本帧光照输入（帧 UBO 与级联拟合同源）。
 pub(super) struct FrameLight {
@@ -38,7 +39,12 @@ impl FrameLight {
                 let [r, g, b, a] = LinearRgba::from(light.color).to_f32_array();
                 (
                     [back.x, back.y, back.z, 0.0],
-                    [r * light.illuminance, g * light.illuminance, b * light.illuminance, a],
+                    [
+                        r * light.illuminance,
+                        g * light.illuminance,
+                        b * light.illuminance,
+                        a,
+                    ],
                 )
             }
             None => (PLACEHOLDER_DIR_TO_LIGHT, [0.0; 4]),
@@ -53,7 +59,9 @@ impl FrameLight {
             .map(|a| (a.color, a.brightness))
             .or(global_ambient.map(|g| (g.color, g.brightness)));
         let ambient_color = match ambient {
-            Some((color, brightness)) => LinearRgba::from(color).to_f32_array().map(|c| c * brightness),
+            Some((color, brightness)) => LinearRgba::from(color)
+                .to_f32_array()
+                .map(|c| c * brightness),
             None => {
                 logs.warned_no_ambient.log(|| {
                     warn!("环境光缺席：GlobalAmbientLight 资源与相机 AmbientLight 均无，环境项归零")
@@ -62,16 +70,26 @@ impl FrameLight {
             }
         };
         if light_count > 0 {
-            logs.lights_logged.log(|| info!(
-                "灯光 UBO 汇总：方向光 {light_count} 盏（dir_to_light = back()，light = {}）；\
+            logs.lights_logged.log(|| {
+                info!(
+                    "灯光 UBO 汇总：方向光 {light_count} 盏（dir_to_light = back()，light = {}）；\
                  环境 = {}（来源 {}）；材质模式 = {}（ASH_RENDER_MODE）",
-                fmt_vec4(light_color),
-                fmt_vec4(ambient_color),
-                if view.ambient_override.is_some() { "相机 AmbientLight" } else { "GlobalAmbientLight" },
-                render_mode.label(),
-            ));
+                    fmt_vec4(light_color),
+                    fmt_vec4(ambient_color),
+                    if view.ambient_override.is_some() {
+                        "相机 AmbientLight"
+                    } else {
+                        "GlobalAmbientLight"
+                    },
+                    render_mode.label(),
+                )
+            });
         }
-        Self { dir_to_light, light_color, ambient_color }
+        Self {
+            dir_to_light,
+            light_color,
+            ambient_color,
+        }
     }
 }
 

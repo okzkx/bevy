@@ -157,7 +157,8 @@ impl AssemblyCache {
     /// 材质表展开。变化帧 O(可绘行)，稳定帧不进此路（容量复用）。
     fn rebuild_products(&mut self) {
         self.slots.clear();
-        self.slots.extend(self.drawable.values().map(|(slot, _, _)| *slot));
+        self.slots
+            .extend(self.drawable.values().map(|(slot, _, _)| *slot));
         self.materials.clear();
         self.materials.extend(self.material_refs.keys().copied());
     }

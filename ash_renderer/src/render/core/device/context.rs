@@ -160,8 +160,11 @@ impl Context {
 
         // ---- Instance ----
         // debug_utils 常开（被动扩展）：对象命名供验证层报错与 RenderDoc 按名字显示
-        let ext_names: Vec<*const c_char> =
-            vec![surface::NAME.as_ptr(), win32_surface::NAME.as_ptr(), debug_utils::NAME.as_ptr()];
+        let ext_names: Vec<*const c_char> = vec![
+            surface::NAME.as_ptr(),
+            win32_surface::NAME.as_ptr(),
+            debug_utils::NAME.as_ptr(),
+        ];
         let layer_names: Vec<*const c_char> = if validation {
             vec![VALIDATION_LAYER.as_ptr()]
         } else {
@@ -355,30 +358,91 @@ impl Context {
         }
         // 20 个分位的支持情况全部记日志，以后要多启用哪一位先查这行
         let di_all: [(&str, u32); 20] = [
-            ("inAttArrDynIdx", vk12_query.shader_input_attachment_array_dynamic_indexing),
-            ("uniTexelArrDynIdx", vk12_query.shader_uniform_texel_buffer_array_dynamic_indexing),
-            ("stoTexelArrDynIdx", vk12_query.shader_storage_texel_buffer_array_dynamic_indexing),
-            ("uniBufArrNonUni", vk12_query.shader_uniform_buffer_array_non_uniform_indexing),
-            ("smpImgArrNonUni", vk12_query.shader_sampled_image_array_non_uniform_indexing),
-            ("stoBufArrNonUni", vk12_query.shader_storage_buffer_array_non_uniform_indexing),
-            ("stoImgArrNonUni", vk12_query.shader_storage_image_array_non_uniform_indexing),
-            ("inAttArrNonUni", vk12_query.shader_input_attachment_array_non_uniform_indexing),
-            ("uniTexelArrNonUni", vk12_query.shader_uniform_texel_buffer_array_non_uniform_indexing),
-            ("stoTexelArrNonUni", vk12_query.shader_storage_texel_buffer_array_non_uniform_indexing),
-            ("uniBufUAB", vk12_query.descriptor_binding_uniform_buffer_update_after_bind),
-            ("smpImgUAB", vk12_query.descriptor_binding_sampled_image_update_after_bind),
-            ("stoImgUAB", vk12_query.descriptor_binding_storage_image_update_after_bind),
-            ("stoBufUAB", vk12_query.descriptor_binding_storage_buffer_update_after_bind),
-            ("uniTexelUAB", vk12_query.descriptor_binding_uniform_texel_buffer_update_after_bind),
-            ("stoTexelUAB", vk12_query.descriptor_binding_storage_texel_buffer_update_after_bind),
-            ("updUnusedPending", vk12_query.descriptor_binding_update_unused_while_pending),
-            ("partiallyBound", vk12_query.descriptor_binding_partially_bound),
-            ("varDescCount", vk12_query.descriptor_binding_variable_descriptor_count),
+            (
+                "inAttArrDynIdx",
+                vk12_query.shader_input_attachment_array_dynamic_indexing,
+            ),
+            (
+                "uniTexelArrDynIdx",
+                vk12_query.shader_uniform_texel_buffer_array_dynamic_indexing,
+            ),
+            (
+                "stoTexelArrDynIdx",
+                vk12_query.shader_storage_texel_buffer_array_dynamic_indexing,
+            ),
+            (
+                "uniBufArrNonUni",
+                vk12_query.shader_uniform_buffer_array_non_uniform_indexing,
+            ),
+            (
+                "smpImgArrNonUni",
+                vk12_query.shader_sampled_image_array_non_uniform_indexing,
+            ),
+            (
+                "stoBufArrNonUni",
+                vk12_query.shader_storage_buffer_array_non_uniform_indexing,
+            ),
+            (
+                "stoImgArrNonUni",
+                vk12_query.shader_storage_image_array_non_uniform_indexing,
+            ),
+            (
+                "inAttArrNonUni",
+                vk12_query.shader_input_attachment_array_non_uniform_indexing,
+            ),
+            (
+                "uniTexelArrNonUni",
+                vk12_query.shader_uniform_texel_buffer_array_non_uniform_indexing,
+            ),
+            (
+                "stoTexelArrNonUni",
+                vk12_query.shader_storage_texel_buffer_array_non_uniform_indexing,
+            ),
+            (
+                "uniBufUAB",
+                vk12_query.descriptor_binding_uniform_buffer_update_after_bind,
+            ),
+            (
+                "smpImgUAB",
+                vk12_query.descriptor_binding_sampled_image_update_after_bind,
+            ),
+            (
+                "stoImgUAB",
+                vk12_query.descriptor_binding_storage_image_update_after_bind,
+            ),
+            (
+                "stoBufUAB",
+                vk12_query.descriptor_binding_storage_buffer_update_after_bind,
+            ),
+            (
+                "uniTexelUAB",
+                vk12_query.descriptor_binding_uniform_texel_buffer_update_after_bind,
+            ),
+            (
+                "stoTexelUAB",
+                vk12_query.descriptor_binding_storage_texel_buffer_update_after_bind,
+            ),
+            (
+                "updUnusedPending",
+                vk12_query.descriptor_binding_update_unused_while_pending,
+            ),
+            (
+                "partiallyBound",
+                vk12_query.descriptor_binding_partially_bound,
+            ),
+            (
+                "varDescCount",
+                vk12_query.descriptor_binding_variable_descriptor_count,
+            ),
             ("runtimeDescArray", vk12_query.runtime_descriptor_array),
         ];
         info!(
             "descriptor indexing 分位支持(20/20): {}",
-            di_all.iter().map(|(n, v)| format!("{n}={}", *v != 0)).collect::<Vec<_>>().join(" ")
+            di_all
+                .iter()
+                .map(|(n, v)| format!("{n}={}", *v != 0))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
         // 逐位显式启用用到的 feature
         let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default()
@@ -404,8 +468,9 @@ impl Context {
         }
         // swapchain 用 B8G8R8A8_UNORM 图像，渲染时套同一张图的 B8G8R8A8_SRGB view 写入。
         // 坑：view 换格式要求图像带 MUTABLE_FORMAT，swapchain 图像靠本扩展加格式清单（见 swapchain.rs）实现；不支持就报错退出
-        let device_ext_props = unsafe { instance.enumerate_device_extension_properties(physical_device) }
-            .map_err(|e| VulkanError::Init(format!("枚举设备扩展失败: {e}")))?;
+        let device_ext_props =
+            unsafe { instance.enumerate_device_extension_properties(physical_device) }
+                .map_err(|e| VulkanError::Init(format!("枚举设备扩展失败: {e}")))?;
         let has_device_ext = |name: &std::ffi::CStr| {
             device_ext_props
                 .iter()
@@ -426,7 +491,9 @@ impl Context {
         if budget_enabled {
             dev_exts.push(ash::ext::memory_budget::NAME.as_ptr());
         } else {
-            info!("VK_EXT_memory_budget 设备不支持：显存 budget/usage 读数不可用（监控面板隐藏该行）");
+            info!(
+                "VK_EXT_memory_budget 设备不支持：显存 budget/usage 读数不可用（监控面板隐藏该行）"
+            );
         }
         let device = unsafe {
             instance.create_device(
@@ -503,8 +570,12 @@ impl Context {
     /// 给 Vulkan 对象挂调试名（best-effort：失败只影响报错可读性，不致命）。
     /// 对象类型从句柄类型推导（ash 的 Handle trait）。
     pub(crate) fn name_object<H: vk::Handle>(&self, handle: H, name: &str) {
-        let Ok(c) = std::ffi::CString::new(name) else { return };
-        let info = vk::DebugUtilsObjectNameInfoEXT::default().object_handle(handle).object_name(c.as_c_str());
+        let Ok(c) = std::ffi::CString::new(name) else {
+            return;
+        };
+        let info = vk::DebugUtilsObjectNameInfoEXT::default()
+            .object_handle(handle)
+            .object_name(c.as_c_str());
         let _ = unsafe { self.debug_device.set_debug_utils_object_name(&info) };
     }
 
@@ -516,7 +587,10 @@ impl Context {
         let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
         let mut props = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
         // Safety：同 new 里建 memory_contract 处
-        unsafe { self.instance.get_physical_device_memory_properties2(self.physical_device, &mut props) };
+        unsafe {
+            self.instance
+                .get_physical_device_memory_properties2(self.physical_device, &mut props)
+        };
         let heaps = &props.memory_properties;
         Some(
             heaps.memory_heaps[..heaps.memory_heap_count as usize]
@@ -535,7 +609,11 @@ impl Context {
     /// 物理设备 limits，设备存活期内不变。
     pub fn limits(&self) -> vk::PhysicalDeviceLimits {
         // Safety：同 new 里建 memory_contract 处
-        unsafe { self.instance.get_physical_device_properties(self.physical_device) }.limits
+        unsafe {
+            self.instance
+                .get_physical_device_properties(self.physical_device)
+        }
+        .limits
     }
 
     /// transfer 写、graphics 读的资源（池 buffer、贴图）创建时用的共享族列表。

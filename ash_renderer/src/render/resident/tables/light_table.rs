@@ -16,10 +16,10 @@ use bevy::log::info;
 
 use crate::common::bytes::{put_u32, put_vec4};
 use crate::common::error::{Result, VulkanError};
-use crate::render::resident::slot_allocator::SlotAllocator;
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::contract::MemoryContract;
 use crate::render::core::device::memory::role::BufferRole;
+use crate::render::resident::slot_allocator::SlotAllocator;
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
 /// 光源表容量（槽位数）。
@@ -93,7 +93,10 @@ impl LightTable {
             "光源常驻表就绪:{LIGHT_TABLE_CAPACITY} 槽 ×{LIGHT_RECORD_SIZE}B ×{MAX_FRAMES_IN_FLIGHT} 帧槽\
              (HOST_VISIBLE,脏行增量重写,fence 纪律同模型环;方向光不进表,set1 UBO 单光现役链保留)"
         );
-        Ok(Self { rings, ledger: LightLedger::new() })
+        Ok(Self {
+            rings,
+            ledger: LightLedger::new(),
+        })
     }
 
     /// 分配槽位并写记录。
@@ -167,7 +170,9 @@ impl LightTable {
     pub fn write_dirty(&mut self, frame: usize) -> Result<()> {
         let n = self.rings.len();
         let ring = &mut self.rings[frame % n];
-        self.ledger.flush_dirty(|offset, bytes| ring.write(offset, bytes)).map(|_| ())
+        self.ledger
+            .flush_dirty(|offset, bytes| ring.write(offset, bytes))
+            .map(|_| ())
     }
 }
 
@@ -194,7 +199,9 @@ impl LightLedger {
 
     fn spawn(&mut self, record: LightRecord) -> Result<u32> {
         let slot = self.slots.alloc().ok_or_else(|| {
-            VulkanError::Capacity(format!("光源表容量耗尽:{LIGHT_TABLE_CAPACITY} 槽——显式报错,不静默截断"))
+            VulkanError::Capacity(format!(
+                "光源表容量耗尽:{LIGHT_TABLE_CAPACITY} 槽——显式报错,不静默截断"
+            ))
         })?;
         self.records.resize(self.slots.high_water() as usize, None);
         self.records[slot as usize] = Some(record);
@@ -243,7 +250,9 @@ impl LightLedger {
             return Ok(0);
         }
         for (slot, remaining) in &mut self.dirty {
-            let bytes = self.records[*slot as usize].unwrap_or(LightRecord::DEAD).pack();
+            let bytes = self.records[*slot as usize]
+                .unwrap_or(LightRecord::DEAD)
+                .pack();
             write(u64::from(*slot) * LIGHT_RECORD_SIZE, &bytes)?;
             *remaining = remaining.saturating_sub(1);
             self.dirty_writes_total += 1;
@@ -301,7 +310,11 @@ mod tests {
             })
             .unwrap();
         assert_eq!(s0, s1, "优先复用回收槽");
-        let entry = ledger.dirty.iter().find(|(s, _)| *s == s1).expect("脏行在账");
+        let entry = ledger
+            .dirty
+            .iter()
+            .find(|(s, _)| *s == s1)
+            .expect("脏行在账");
         assert_eq!(entry.1, 2, "复用 spawn 重置剩余写");
     }
 

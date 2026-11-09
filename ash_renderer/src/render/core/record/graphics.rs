@@ -34,22 +34,31 @@ pub(crate) fn color_attachment(
         .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
         .store_op(vk::AttachmentStoreOp::STORE);
     match clear {
-        Some(float32) => attachment
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32 } }),
+        Some(float32) => {
+            attachment
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .clear_value(vk::ClearValue {
+                    color: vk::ClearColorValue { float32 },
+                })
+        }
         None => attachment.load_op(vk::AttachmentLoadOp::DONT_CARE),
     }
 }
 
 /// 深度附件：清 0（reverse-Z 远平面）+ STORE，写完留给后续采样。
-pub(crate) fn reverse_z_depth_attachment(view: vk::ImageView) -> vk::RenderingAttachmentInfo<'static> {
+pub(crate) fn reverse_z_depth_attachment(
+    view: vk::ImageView,
+) -> vk::RenderingAttachmentInfo<'static> {
     vk::RenderingAttachmentInfo::default()
         .image_view(view)
         .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
         .load_op(vk::AttachmentLoadOp::CLEAR)
         .store_op(vk::AttachmentStoreOp::STORE)
         .clear_value(vk::ClearValue {
-            depth_stencil: vk::ClearDepthStencilValue { depth: 0.0, stencil: 0 },
+            depth_stencil: vk::ClearDepthStencilValue {
+                depth: 0.0,
+                stencil: 0,
+            },
         })
 }
 
@@ -123,7 +132,14 @@ pub(crate) unsafe fn bind_graphics(
     let raw: Vec<vk::DescriptorSet> = sets.iter().map(|s| s.raw()).collect();
     unsafe {
         device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
-        device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::GRAPHICS, pipeline.layout, 0, &raw, &[]);
+        device.cmd_bind_descriptor_sets(
+            cb,
+            vk::PipelineBindPoint::GRAPHICS,
+            pipeline.layout,
+            0,
+            &raw,
+            &[],
+        );
     }
 }
 

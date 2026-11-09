@@ -10,15 +10,19 @@
 //! [`crate::scene::spawn_primitive_clone`] 等封装（egui 面板共用），
 //! 本模块只是协议薄壳。
 
-use bevy::{pbr::StandardMaterial, prelude::*, remote::{BrpError, BrpResult}};
+use bevy::{
+    pbr::StandardMaterial,
+    prelude::*,
+    remote::{BrpError, BrpResult},
+};
 use serde_json::{json, Value};
 
 use crate::{
+    render::{BindlessTextureTable, ImageCache, InstanceTables, MeshPool, OBJECT_TABLE_CAPACITY},
     scene::{
         replace_handles as apply_handle_swap, spawn_primitive_clone, AssetReadiness,
         AssetRetirements, HandleSwapReadback, InstanceLedger, ObjectOpError,
     },
-    render::{BindlessTextureTable, ImageCache, InstanceTables, MeshPool, OBJECT_TABLE_CAPACITY},
 };
 
 use crate::remote::common::params::{invalid_params, parse_params};
@@ -53,9 +57,9 @@ pub(crate) fn object_op_error(err: ObjectOpError) -> BrpError {
         ObjectOpError::MaterialAssetMissing(e) => {
             BrpError::component_error(format!("实体 {e:?} 的材质资产不在容器中，槽写拒绝"))
         }
-        ObjectOpError::InvalidAssetPath(what) => invalid_params(format!(
-            "资产路径解析失败（坏标签/坏 source 语法）：{what}"
-        )),
+        ObjectOpError::InvalidAssetPath(what) => {
+            invalid_params(format!("资产路径解析失败（坏标签/坏 source 语法）：{what}"))
+        }
         ObjectOpError::InvalidParams(what) => invalid_params(what),
         ObjectOpError::ChunkMissing(id) => invalid_params(format!(
             "chunk {id} 不在场（ash_renderer/chunk_census 可查在场块）"
@@ -78,8 +82,13 @@ pub(crate) fn material_id_string(world: &World, entity: Entity) -> String {
 pub(crate) fn spawn_primitive(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: SpawnPrimitiveParams = parse_params(params, "params 缺失：需要 source")?;
     let offset = p.offset.map(Vec3::from_array).unwrap_or(Vec3::ZERO);
-    let entity = spawn_primitive_clone(world, p.source, offset, p.name_suffix.as_deref().unwrap_or("（副本）"))
-        .map_err(object_op_error)?;
+    let entity = spawn_primitive_clone(
+        world,
+        p.source,
+        offset,
+        p.name_suffix.as_deref().unwrap_or("（副本）"),
+    )
+    .map_err(object_op_error)?;
     // 刚克隆成功，组件必在；查无按空串读回，不报错
     let mesh = world
         .get::<Mesh3d>(entity)
@@ -110,7 +119,8 @@ struct ReplaceHandlesParams {
 pub(crate) fn replace_handles(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: ReplaceHandlesParams = parse_params(params, "params 缺失：需要 entity 与至少一项 from")?;
     let HandleSwapReadback { mesh, material } =
-        apply_handle_swap(world, p.entity, p.mesh_from, p.material_from).map_err(object_op_error)?;
+        apply_handle_swap(world, p.entity, p.mesh_from, p.material_from)
+            .map_err(object_op_error)?;
     Ok(json!({
         "entity": p.entity.to_string(),
         "mesh": mesh.map(|id| id.to_string()),

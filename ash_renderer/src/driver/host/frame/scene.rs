@@ -125,7 +125,9 @@ impl<'a> FrameView<'a> {
 
     /// 相机世界位置（w = 0；相机缺席帧 zeros 兜底）。
     pub(super) fn camera_pos4(&self) -> [f32; 4] {
-        self.camera.map(|c| c.pos.extend(0.0).to_array()).unwrap_or([0.0; 4])
+        self.camera
+            .map(|c| c.pos.extend(0.0).to_array())
+            .unwrap_or([0.0; 4])
     }
 }
 
@@ -162,7 +164,9 @@ impl FrameUniformTable {
 pub(super) fn scene_world_aabb(ledger: &InstanceLedger, pool: &MeshPool) -> Option<(Vec3, Vec3)> {
     let mut scene_aabb: Option<(Vec3, Vec3)> = None;
     for (_, row) in ledger.rows() {
-        let Some(mesh_slot) = pool.resident(row.mesh.id()) else { continue };
+        let Some(mesh_slot) = pool.resident(row.mesh.id()) else {
+            continue;
+        };
         let (wmin, wmax) =
             conservative_world_aabb(&row.model, mesh_slot.local_aabb.0, mesh_slot.local_aabb.1);
         let (wmin, wmax) = (Vec3::from_array(wmin), Vec3::from_array(wmax));

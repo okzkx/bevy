@@ -10,5 +10,7 @@ pub use object_ops::{
 };
 pub(crate) use object_ops::{primitive_parts, HandleSwapReadback, ObjectOpError};
 pub(crate) use scene_tree::{EntityRow, SceneTreeIndex, SceneTreeNode, TREE_MAX_DEPTH};
-pub use transform_edit::{apply_transform_edit, TransformEdit, TransformEditError, TransformEditQueue};
+pub use transform_edit::{
+    apply_transform_edit, TransformEdit, TransformEditError, TransformEditQueue,
+};
 pub(crate) use transform_edit::{apply_transform_edits, euler_deg_yxz};

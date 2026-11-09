@@ -16,22 +16,30 @@ use crate::remote::common::params::{invalid_params, parse_enabled, parse_params,
 /// "curve": "narkowicz"|"filament"?, "gain": f32?}`——缺省字段不动。
 #[system]
 pub(crate) fn bloom_set(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let p: serde_json::Map<String, Value> =
-        parse_params(params, "params 缺失：需要 enabled/strength/tonemap/curve/gain 之一")?;
+    let p: serde_json::Map<String, Value> = parse_params(
+        params,
+        "params 缺失：需要 enabled/strength/tonemap/curve/gain 之一",
+    )?;
     let mut settings = res_mut::<BloomSettings>(world)?;
     let mut echo = json!({});
     if let Some(v) = p.get("enabled") {
-        let enabled = v.as_bool().ok_or_else(|| invalid_params("enabled 非布尔"))?;
+        let enabled = v
+            .as_bool()
+            .ok_or_else(|| invalid_params("enabled 非布尔"))?;
         settings.enabled = enabled;
         echo["enabled"] = json!(enabled);
     }
     if let Some(v) = p.get("strength") {
-        let strength = v.as_f64().ok_or_else(|| invalid_params("strength 非数值"))?;
+        let strength = v
+            .as_f64()
+            .ok_or_else(|| invalid_params("strength 非数值"))?;
         settings.strength = strength as f32;
         echo["strength"] = json!(strength);
     }
     if let Some(v) = p.get("tonemap") {
-        let tonemap = v.as_bool().ok_or_else(|| invalid_params("tonemap 非布尔"))?;
+        let tonemap = v
+            .as_bool()
+            .ok_or_else(|| invalid_params("tonemap 非布尔"))?;
         settings.tonemap = tonemap;
         echo["tonemap"] = json!(tonemap);
     }
@@ -98,8 +106,7 @@ pub(crate) fn set_render_mode(
         mode: String,
     }
     let p: P = parse_params(params, "params 缺失：需要 mode")?;
-    *mode = RenderMode::from_name(&p.mode).ok_or_else(|| {
-        invalid_params(format!("未知模式 {}：{}", p.mode, RenderMode::NAME_HINT))
-    })?;
+    *mode = RenderMode::from_name(&p.mode)
+        .ok_or_else(|| invalid_params(format!("未知模式 {}：{}", p.mode, RenderMode::NAME_HINT)))?;
     Ok(json!({ "mode": p.mode }))
 }

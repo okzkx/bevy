@@ -56,8 +56,7 @@ impl CameraOrbit {
         Self {
             target,
             yaw: ops::atan2(offset.x, offset.z),
-            pitch: ops::atan2(offset.y, offset.xz().length())
-                .clamp(-PITCH_LIMIT, PITCH_LIMIT),
+            pitch: ops::atan2(offset.y, offset.xz().length()).clamp(-PITCH_LIMIT, PITCH_LIMIT),
             radius: offset.length().max(MIN_ORBIT_RADIUS),
         }
     }
@@ -318,9 +317,7 @@ fn camera_control(
     for (mut transform, orbit) in &mut cameras {
         orbit.write_transform(&mut transform);
     }
-    if !*engaged
-        && let Ok((_, orbit)) = cameras.single()
-    {
+    if !*engaged && let Ok((_, orbit)) = cameras.single() {
         *engaged = true;
         info!(
             "相机控制首次接管：yaw {:.3} rad / pitch {:.3} rad / radius {:.3}（左键环绕 + 滚轮推拉 + 右键环视 + WASDQE 漫游已生效）",
@@ -337,8 +334,12 @@ mod tests {
     /// 鼠标右拖 = 视线右转，且相机位置钉住不动（环视非环绕）。
     #[test]
     fn look_mouse_right_turns_view_and_keeps_position() {
-        let mut orbit =
-            CameraOrbit { target: Vec3::ZERO, yaw: 0.0, pitch: 0.0, radius: 4.0 };
+        let mut orbit = CameraOrbit {
+            target: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            radius: 4.0,
+        };
         let position = orbit.target + orbit.offset();
         look_rotate(&mut orbit, Vec2::new(150.0, 0.0), 0.01);
         assert!((orbit.target + orbit.offset() - position).length() < 1e-4);
@@ -349,8 +350,12 @@ mod tests {
     /// 下拖使视线向下俯。
     #[test]
     fn look_mouse_down_pitches_view_down() {
-        let mut orbit =
-            CameraOrbit { target: Vec3::ZERO, yaw: 0.0, pitch: 0.0, radius: 4.0 };
+        let mut orbit = CameraOrbit {
+            target: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            radius: 4.0,
+        };
         look_rotate(&mut orbit, Vec2::new(0.0, 50.0), 0.01);
         let position = orbit.target + orbit.offset();
         let forward = (orbit.target - position).normalize();

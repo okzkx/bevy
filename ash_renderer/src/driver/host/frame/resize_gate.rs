@@ -86,7 +86,8 @@ pub(super) fn rebuild_size_dependent(
         .rebuild(ctx, extent)
         .or_fatal("Bloom 链重建失败，渲染链无法继续")?;
     // 依赖上面已重建的深度视图（G-buffer 采样集 b3）
-    post.gbuffer.targets
+    post.gbuffer
+        .targets
         .rebuild(ctx, extent, &per_slot(|s| gpu.frames.depth_view(s)))
         .or_fatal("G-buffer 附件重建失败，渲染链无法继续")?;
     // 光源常驻表与尺寸无关不重建，只把它的 buffer 重新绑进新描述符集

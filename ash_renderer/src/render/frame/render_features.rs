@@ -1,17 +1,17 @@
 //! 一帧渲染功能的录制输入集合：一个字段一个功能束，字段按 `record_frame_steps` 的九段
 //! 消费时序排列。场景资源与规格不在这里，见 [`SceneResources`](super::scene_resources::SceneResources)。
 
-use crate::render::stats::perf::GpuTimer;
+use super::frame_pool::UploadWait;
 use crate::render::passes::lighting::cluster::ClusterFrameDraw;
+use crate::render::passes::overlay::overlay_pipeline::UiDraw;
+use crate::render::passes::post::post_chain::PostChainDraw;
 use crate::render::passes::shadow::shadow_frame::ShadowFrameDraw;
 use crate::render::passes::transparent::TransparentFrame;
 use crate::render::passes::visibility::cull::CullDraw;
 use crate::render::passes::visibility::hiz_frame::HizFrameDraw;
 use crate::render::passes::visibility::indirect::IndirectDraw;
 use crate::render::passes::visibility::lod::LodDraw;
-use crate::render::passes::post::post_chain::PostChainDraw;
-use crate::render::passes::overlay::overlay_pipeline::UiDraw;
-use super::frame_pool::UploadWait;
+use crate::render::stats::perf::GpuTimer;
 
 /// 一帧渲染功能的录制输入集合（draw_frame 组装，`record_frame` 消费）：一个字段一个功能束；
 /// 场景资源与规格走 [`SceneResources`] 参数，不混进功能清单。
@@ -45,4 +45,3 @@ pub struct RenderFeatures<'a> {
     /// 图形提交对上传队列的跨队列等待（备料时刻快照，见 [`UploadWait`]）。
     pub upload_wait: UploadWait,
 }
-

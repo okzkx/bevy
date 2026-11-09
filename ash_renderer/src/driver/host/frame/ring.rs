@@ -1,10 +1,7 @@
 //! GPU 环的 host 侧读写工具：标记/档位/缺口环共用的整段填充、读回解包与计数。
 //! 调用方都在 wait_for_slot 的 fence 保护内（culling/lod/gaps 各备料单元）。
 
-use crate::{
-    common::error::VulkanError,
-    render::GpuBuffer,
-};
+use crate::{common::error::VulkanError, render::GpuBuffer};
 
 /// host 侧整段填充 u32 环：`count` 个小端 `value`（开关关闭时的全可见/全最细档）。
 pub(super) fn fill_u32(ring: &mut GpuBuffer, count: usize, value: u32) -> Result<(), VulkanError> {
@@ -16,10 +13,17 @@ pub(super) fn fill_u32(ring: &mut GpuBuffer, count: usize, value: u32) -> Result
 pub(super) fn read_ring(ring: &mut GpuBuffer, len: usize) -> Result<Vec<u32>, VulkanError> {
     let mut bytes = vec![0u8; len];
     ring.read(0, &mut bytes)?;
-    Ok(bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect())
+    Ok(bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
+        .collect())
 }
 
 /// 在场行中标记 = 1 的行数（剔除/遮挡诊断读数）。
 pub(super) fn count_marked(marks: &[u32], live: &[u32]) -> u32 {
-    live.iter().filter(|&&slot| marks.get(slot as usize) == Some(&1)).count() as u32
+    live.iter()
+        .filter(|&&slot| marks.get(slot as usize) == Some(&1))
+        .count() as u32
 }

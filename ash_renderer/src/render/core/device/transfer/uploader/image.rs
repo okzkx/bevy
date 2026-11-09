@@ -92,7 +92,9 @@ pub(super) fn record_image_uploads(
                 .image_releases
                 .iter()
                 .find(|r| r.image == image)
-                .map_or((vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED), |r| (queue_family, r.to_family));
+                .map_or((vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED), |r| {
+                    (queue_family, r.to_family)
+                });
             let out_of_transfer = vk::ImageMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)

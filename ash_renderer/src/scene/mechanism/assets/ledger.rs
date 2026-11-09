@@ -254,7 +254,8 @@ impl InstanceLedger {
         floor_anchor: bool,
         lod_generation: u64,
     ) {
-        self.assembly.update(&self.rows, eval, floor_anchor, lod_generation);
+        self.assembly
+            .update(&self.rows, eval, floor_anchor, lod_generation);
     }
 
     /// 组装产物只读视图（draw_frame 组装段之后全程借用；与 `&mut` 消费点
@@ -299,10 +300,7 @@ impl Plugin for AshLedgerPlugin {
             // LOD 组登记处：flush_uploads 以 Res 读它（档位资产盘点
             // 与到货重挂），恒在账——随账本插件初始化
             .init_resource::<super::LodGroups>()
-            .add_systems(
-                PostUpdate,
-                update_ledger.after(TransformSystems::Propagate),
-            );
+            .add_systems(PostUpdate, update_ledger.after(TransformSystems::Propagate));
     }
 }
 
@@ -525,14 +523,17 @@ mod tests {
         ledger.assembly_update(&mut eval, false, 0);
         assert!(ledger.assembly_view().slots.is_empty(), "缺槽 = 不可绘");
         // 槽位到账 → 重估后进入可绘集（bound 的 mesh 身份本测试不消费，占位即可）
-        ledger
-            .set_instance_slot(e, 7, (mesh_id.unwrap_or_default(), 0, mat.id()));
+        ledger.set_instance_slot(e, 7, (mesh_id.unwrap_or_default(), 0, mat.id()));
         ledger.assembly_update(&mut eval, false, 0);
         assert_eq!(ledger.assembly_view().slots, &[7], "槽位到账进入可绘集");
         // 无变化帧：重估集为空 = 零重估，产物保持
         let reevals_before = ledger.assembly().reevals_total;
         ledger.assembly_update(&mut eval, false, 0);
-        assert_eq!(ledger.assembly().reevals_total, reevals_before, "稳定帧零重估");
+        assert_eq!(
+            ledger.assembly().reevals_total,
+            reevals_before,
+            "稳定帧零重估"
+        );
         assert_eq!(ledger.assembly_view().slots, &[7]);
     }
 
@@ -556,17 +557,37 @@ mod tests {
         ledger.rows.remove(&e1);
         ledger.mark_assembly_stale(e1);
         ledger.assembly_update(&mut eval, false, 0);
-        assert_eq!(ledger.assembly_view().materials.len(), 2, "共享材质随剩余行保留");
+        assert_eq!(
+            ledger.assembly_view().materials.len(),
+            2,
+            "共享材质随剩余行保留"
+        );
         let expected: Vec<u32> = ledger.rows().filter_map(|(_, r)| r.instance_slot).collect();
-        assert_eq!(ledger.assembly_view().slots, expected, "退场行撤出可绘集（序 = 账本行序）");
+        assert_eq!(
+            ledger.assembly_view().slots,
+            expected,
+            "退场行撤出可绘集（序 = 账本行序）"
+        );
         // 共享材质的最后一行退场：该材质出表，独占材质保留
         ledger.rows.remove(&e2);
         ledger.mark_assembly_stale(e2);
         ledger.assembly_update(&mut eval, false, 0);
-        assert_eq!(ledger.assembly_view().materials.len(), 1, "引用清零的材质出表");
+        assert_eq!(
+            ledger.assembly_view().materials.len(),
+            1,
+            "引用清零的材质出表"
+        );
         let expected: Vec<u32> = ledger.rows().filter_map(|(_, r)| r.instance_slot).collect();
-        assert_eq!(ledger.assembly_view().slots, expected, "剩余可绘行与账本行序一致");
-        assert_eq!(ledger.len() - ledger.assembly_view().slots.len(), 0, "可绘行零暂缓");
+        assert_eq!(
+            ledger.assembly_view().slots,
+            expected,
+            "剩余可绘行与账本行序一致"
+        );
+        assert_eq!(
+            ledger.len() - ledger.assembly_view().slots.len(),
+            0,
+            "可绘行零暂缓"
+        );
     }
 
     #[test]
@@ -580,7 +601,11 @@ mod tests {
         let rebuilds = ledger.assembly().rebuilds_total;
         // 锚开关翻转 = 换形重建
         ledger.assembly_update(&mut eval, true, 0);
-        assert_eq!(ledger.assembly().rebuilds_total, rebuilds + 1, "锚开关翻转触发全量重建");
+        assert_eq!(
+            ledger.assembly().rebuilds_total,
+            rebuilds + 1,
+            "锚开关翻转触发全量重建"
+        );
         // 同参数稳定帧不重建
         ledger.assembly_update(&mut eval, true, 0);
         assert_eq!(ledger.assembly().rebuilds_total, rebuilds + 1);
@@ -596,12 +621,17 @@ mod tests {
         let e = fx.entities(1).remove(0);
         let mut ledger = InstanceLedger::default();
         insert_row(&mut ledger, e, fx.row(mat, Some(3)));
-        let mut alpha_eval = |row: &InstanceRow| row.instance_slot.map(|s| (s, row.material.id(), true));
+        let mut alpha_eval =
+            |row: &InstanceRow| row.instance_slot.map(|s| (s, row.material.id(), true));
         ledger.assembly_update(&mut alpha_eval, false, 0);
         assert_eq!(ledger.assembly_view().alpha_override, 1);
         ledger.rows.remove(&e);
         ledger.mark_assembly_stale(e);
         ledger.assembly_update(&mut alpha_eval, false, 0);
-        assert_eq!(ledger.assembly_view().alpha_override, 0, "退场行的 alpha 覆盖计数应已扣除");
+        assert_eq!(
+            ledger.assembly_view().alpha_override,
+            0,
+            "退场行的 alpha 覆盖计数应已扣除"
+        );
     }
 }

@@ -16,16 +16,13 @@ use crate::{
     common::error::Result,
     common::syntax::ResultTierExt,
     render::{
-        AtlasGpu, BindlessTextureTable, ClusterBuildPass, CompositePipeline, Context, CullPass, FramePool,
-        FrameUniformTable,
-        GBufferTargets, GBufferPipeline, GpuTimer, HizPyramid, ImageCache, IndirectPass,
-        BloomPipelines, BloomTargets, InstanceTables, LodPass, MeshPool, OcclusionPass,
-        SmaaPipelines, SmaaTargets,
-        OverlayPipeline, PresentTonemapPipeline, SetLayouts,
-        ShadowBuildPass, ShadowPipeline, ShadowTargets, TransparentPasses, TransparentPipeline,
-        TransparentTargets, LightClusters,
-        Swapchain, UiVertexRing, Uploader,
-        LightTable, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
+        AtlasGpu, BindlessTextureTable, BloomPipelines, BloomTargets, ClusterBuildPass,
+        CompositePipeline, Context, CullPass, FramePool, FrameUniformTable, GBufferPipeline,
+        GBufferTargets, GpuTimer, HizPyramid, ImageCache, IndirectPass, InstanceTables,
+        LightClusters, LightTable, LodPass, MeshPool, OcclusionPass, OverlayPipeline,
+        PresentTonemapPipeline, SetLayouts, ShadowBuildPass, ShadowPipeline, ShadowTargets,
+        SmaaPipelines, SmaaTargets, Swapchain, TransparentPasses, TransparentPipeline,
+        TransparentTargets, UiVertexRing, Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
 
@@ -38,9 +35,9 @@ pub(super) fn init_vulkan(
     _main_thread: NonSendMarker,
     mut commands: Commands,
 ) -> Result<(), BevyError> {
-    let wrapper = wrapper
-        .single()
-        .or_fatal("PrimaryWindow 上取不到唯一的 RawHandleWrapper：窗口未在 Startup 前建好，时序假设被打破")?;
+    let wrapper = wrapper.single().or_fatal(
+        "PrimaryWindow 上取不到唯一的 RawHandleWrapper：窗口未在 Startup 前建好，时序假设被打破",
+    )?;
     let chain = try_init_vulkan(wrapper).or_fatal("Vulkan 初始化失败，资源束一个都不插入")?;
     let names = chain.insert_all(&mut commands);
     info!(
@@ -87,11 +84,8 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         ctx.queue_family_index,
         TABLE_CAPACITY,
     )?;
-    let instance_tables = InstanceTables::new(
-        &ctx.device,
-        ctx.memory_contract(),
-        &ctx.sharing_families(),
-    )?;
+    let instance_tables =
+        InstanceTables::new(&ctx.device, ctx.memory_contract(), &ctx.sharing_families())?;
     let light_table = LightTable::new(&ctx, ctx.memory_contract())?;
 
     // ---- 渲染目标：各渲染效果自己的资源族，向后续管线出借采样/数据布局 ----
@@ -99,16 +93,18 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         .map(|s| frames.depth_view(s))
         .collect();
     let gbuffer = GBufferTargets::new(&ctx, swapchain.extent, &depth_views)?;
-    let light_ring_buffers: Vec<vk::Buffer> =
-        (0..MAX_FRAMES_IN_FLIGHT).map(|s| light_table.ring_buffer(s)).collect();
+    let light_ring_buffers: Vec<vk::Buffer> = (0..MAX_FRAMES_IN_FLIGHT)
+        .map(|s| light_table.ring_buffer(s))
+        .collect();
     let light_clusters = LightClusters::new(&ctx, swapchain.extent, &light_ring_buffers)?;
     let transparent_targets = TransparentTargets::new(&ctx)?;
     let shadow_targets = ShadowTargets::new(&ctx)?;
     let bloom_targets = BloomTargets::new(&ctx, swapchain.extent)?;
     // 会提交上传（构造内当场等完）：两张查找表贴图
     let smaa_targets = SmaaTargets::new(&ctx, &mut uploader, swapchain.extent)?;
-    let depth_images: Vec<vk::Image> =
-        (0..MAX_FRAMES_IN_FLIGHT).map(|s| frames.depth_image(s)).collect();
+    let depth_images: Vec<vk::Image> = (0..MAX_FRAMES_IN_FLIGHT)
+        .map(|s| frames.depth_image(s))
+        .collect();
     let hiz = HizPyramid::new(&ctx, swapchain.extent, &depth_images)?;
 
     // ---- 管线：无状态，只借 GPU 表与渲染目标提供的描述符布局。各布局先登记进

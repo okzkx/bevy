@@ -18,7 +18,11 @@ pub(in crate::overlay) struct PipelinePage<'a> {
 
 impl PipelinePage<'_> {
     pub(in crate::overlay) fn show(self, ui: &mut egui::Ui) {
-        let Self { shadow, bloom, smaa } = self;
+        let Self {
+            shadow,
+            bloom,
+            smaa,
+        } = self;
         ui.strong("阴影");
         ui.checkbox(&mut shadow.enabled, "阴影（cascade CSM）");
         ui.monospace("BRP: ash_renderer/shadow_set");

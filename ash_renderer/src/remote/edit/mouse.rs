@@ -91,11 +91,10 @@ pub(crate) fn mouse_move(In(params): In<Option<Value>>, world: &mut World) -> Br
     }
     let (window, scale) = primary_window(world)?;
     let physical_position = DVec2::new(p.x as f64 * scale as f64, p.y as f64 * scale as f64);
-    res_mut::<Messages<WindowEvent>>(world)?
-        .write(WindowEvent::CursorMoved(RawCursorMoved {
-            window,
-            physical_position,
-        }));
+    res_mut::<Messages<WindowEvent>>(world)?.write(WindowEvent::CursorMoved(RawCursorMoved {
+        window,
+        physical_position,
+    }));
     Ok(json!({
         "window": window.to_string(),
         "position": [p.x, p.y],
@@ -157,19 +156,19 @@ pub(crate) fn mouse_button(In(params): In<Option<Value>>, world: &mut World) -> 
             "released": held.iter().map(|b| button_name(*b)).collect::<Vec<_>>(),
         }));
     }
-    let name = p
-        .button
-        .as_deref()
-        .ok_or_else(|| invalid_params("需要 button（left/right/middle/back/forward）或 all=true"))?;
+    let name = p.button.as_deref().ok_or_else(|| {
+        invalid_params("需要 button（left/right/middle/back/forward）或 all=true")
+    })?;
     let button = named_button(name)
         .ok_or_else(|| invalid_params("未知按钮名：left/right/middle/back/forward 五选一"))?;
     let (window, _) = primary_window(world)?;
-    res_mut::<Messages<WindowEvent>>(world)?
-        .write(WindowEvent::MouseButtonInput(MouseButtonInput {
+    res_mut::<Messages<WindowEvent>>(world)?.write(WindowEvent::MouseButtonInput(
+        MouseButtonInput {
             window,
             button,
             state,
-        }));
+        },
+    ));
     Ok(json!({
         "window": window.to_string(),
         "button": name,
@@ -198,14 +197,13 @@ pub(crate) fn mouse_wheel(In(params): In<Option<Value>>, world: &mut World) -> B
         _ => return Err(invalid_params("lines 与 pixels 恰好其一（有限数）")),
     };
     let (window, _) = primary_window(world)?;
-    res_mut::<Messages<WindowEvent>>(world)?
-        .write(WindowEvent::MouseWheel(MouseWheel {
-            unit,
-            x: 0.0,
-            y,
-            window,
-            phase: TouchPhase::Moved,
-        }));
+    res_mut::<Messages<WindowEvent>>(world)?.write(WindowEvent::MouseWheel(MouseWheel {
+        unit,
+        x: 0.0,
+        y,
+        window,
+        phase: TouchPhase::Moved,
+    }));
     Ok(json!({ "window": window.to_string(), "unit": unit_name, "y": y }))
 }
 

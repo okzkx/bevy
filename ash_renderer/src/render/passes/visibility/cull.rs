@@ -22,11 +22,11 @@ use bevy::prelude::Resource;
 use crate::common::bytes::{put_f32s, put_u32};
 use crate::common::error::Result;
 
-use crate::render::core::pipeline::compute::ComputePipeline;
-use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
+use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::passes::shadow::shadow_map::SHADOW_SET_DESC;
 use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
@@ -36,7 +36,10 @@ pub(crate) static CULL_PIPELINE: PipelineDesc = PipelineDesc {
     shader: &shader_abi::CULL,
     entries: &[c"cs_main"],
     sets: &[&INSTANCE_SET_DESC, &SHADOW_SET_DESC],
-    push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: CULL_PUSH_SIZE }),
+    push: Some(PushRange {
+        stages: vk::ShaderStageFlags::COMPUTE,
+        size: CULL_PUSH_SIZE,
+    }),
     color_formats: &[],
     depth_format: None,
 };
@@ -66,14 +69,19 @@ const _: () = {
 /// 法线不归一化（内外判定只看符号）。
 #[must_use]
 pub fn frustum_planes(view_proj: &Mat4) -> [Vec4; 6] {
-    let (r0, r1, r2, r3) = (view_proj.row(0), view_proj.row(1), view_proj.row(2), view_proj.row(3));
+    let (r0, r1, r2, r3) = (
+        view_proj.row(0),
+        view_proj.row(1),
+        view_proj.row(2),
+        view_proj.row(3),
+    );
     [
-        r0 + r3,        // x_c + w_c ≥ 0（左）
-        r3 - r0,        // w_c − x_c ≥ 0（右）
-        r1 + r3,        // y_c + w_c ≥ 0（下）
-        r3 - r1,        // w_c − y_c ≥ 0（上）
-        r2,             // z_c ≥ 0（近，D3D 型 clip volume）
-        r3 - r2,        // w_c − z_c ≥ 0（远）
+        r0 + r3, // x_c + w_c ≥ 0（左）
+        r3 - r0, // w_c − x_c ≥ 0（右）
+        r1 + r3, // y_c + w_c ≥ 0（下）
+        r3 - r1, // w_c − y_c ≥ 0（上）
+        r2,      // z_c ≥ 0（近，D3D 型 clip volume）
+        r3 - r2, // w_c − z_c ≥ 0（远）
     ]
 }
 
@@ -97,7 +105,11 @@ pub fn aabb_visible(planes: &[Vec4; 6], min: Vec3, max: Vec3) -> bool {
 /// 视锥平面 + dispatch 上界 + 主视图剔除启用位 → 112B compute push 字节（偏移按
 /// [`CullPushLayout`] 静态断言表排布）。
 #[must_use]
-fn pack_cull_push(planes: &[Vec4; 6], bound: u32, main_cull: bool) -> [u8; CULL_PUSH_SIZE as usize] {
+fn pack_cull_push(
+    planes: &[Vec4; 6],
+    bound: u32,
+    main_cull: bool,
+) -> [u8; CULL_PUSH_SIZE as usize] {
     let mut out = [0u8; CULL_PUSH_SIZE as usize];
     for (i, plane) in planes.iter().enumerate() {
         put_f32s(&mut out, i * 16, &plane.to_array());
@@ -159,7 +171,9 @@ impl CullPass {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        Ok(Self { pipeline: ComputePipeline::new(ctx, &CULL_PIPELINE, layouts)? })
+        Ok(Self {
+            pipeline: ComputePipeline::new(ctx, &CULL_PIPELINE, layouts)?,
+        })
     }
 
     /// 组一帧 dispatch 输入。draw_frame 消费，录制走 [`record`]。
@@ -178,7 +192,13 @@ impl CullDraw {
     /// compute 写标记 → 后续 compute 读写：indirect 组装读 marks、写 gap_marks，遮挡
     /// 回写 marks——同 buffer 的后续写要 WAW 依赖，dst access 含 SHADER_WRITE。dst stage
     /// 是超集（含 VS）。host 读不靠它（屏障排不了 host 访问，靠 fence）。
-    pub(crate) fn record(&self, device: &ash::Device, command_buffer: vk::CommandBuffer, instance_set: DescSet, shadow_set: DescSet) {
+    pub(crate) fn record(
+        &self,
+        device: &ash::Device,
+        command_buffer: vk::CommandBuffer,
+        instance_set: DescSet,
+        shadow_set: DescSet,
+    ) {
         self.pass.record(
             device,
             command_buffer,
@@ -199,7 +219,12 @@ mod tests {
     #[test]
     fn identity_planes_are_ndc_box() {
         let planes = frustum_planes(&Mat4::IDENTITY);
-        let close = |a: Vec4, b: [f32; 4]| a.to_array().iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+        let close = |a: Vec4, b: [f32; 4]| {
+            a.to_array()
+                .iter()
+                .zip(b)
+                .all(|(x, y)| (x - y).abs() < 1e-6)
+        };
         assert!(close(planes[0], [1.0, 0.0, 0.0, 1.0]), "左 = row0+row3");
         assert!(close(planes[1], [-1.0, 0.0, 0.0, 1.0]), "右 = row3−row0");
         assert!(close(planes[2], [0.0, 1.0, 0.0, 1.0]), "下 = row1+row3");
@@ -215,15 +240,35 @@ mod tests {
         // 盒内
         assert!(aabb_visible(&planes, Vec3::splat(-0.5), Vec3::splat(0.5)));
         // 跨左边界（保守 = 可见）
-        assert!(aabb_visible(&planes, Vec3::new(-1.5, -0.5, 0.5), Vec3::new(-0.5, 0.5, 0.5)));
+        assert!(aabb_visible(
+            &planes,
+            Vec3::new(-1.5, -0.5, 0.5),
+            Vec3::new(-0.5, 0.5, 0.5)
+        ));
         // 整盒在左侧外（x < -1）
-        assert!(!aabb_visible(&planes, Vec3::new(-3.0, -0.5, 0.5), Vec3::new(-2.0, 0.5, 0.5)));
+        assert!(!aabb_visible(
+            &planes,
+            Vec3::new(-3.0, -0.5, 0.5),
+            Vec3::new(-2.0, 0.5, 0.5)
+        ));
         // 整盒在近平面外（z < 0，D3D 型近半空间 z ≥ 0）
-        assert!(!aabb_visible(&planes, Vec3::new(-0.5, -0.5, -2.0), Vec3::new(0.5, 0.5, -0.1)));
+        assert!(!aabb_visible(
+            &planes,
+            Vec3::new(-0.5, -0.5, -2.0),
+            Vec3::new(0.5, 0.5, -0.1)
+        ));
         // 跨近平面（保守 = 可见）
-        assert!(aabb_visible(&planes, Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5)));
+        assert!(aabb_visible(
+            &planes,
+            Vec3::new(-0.5, -0.5, -0.5),
+            Vec3::new(0.5, 0.5, 0.5)
+        ));
         // 整盒在远处外（z > 1）
-        assert!(!aabb_visible(&planes, Vec3::new(-0.5, -0.5, 2.0), Vec3::new(0.5, 0.5, 3.0)));
+        assert!(!aabb_visible(
+            &planes,
+            Vec3::new(-0.5, -0.5, 2.0),
+            Vec3::new(0.5, 0.5, 3.0)
+        ));
     }
 
     /// 单平面 p 顶点选择的方向性：法线分量符号决定取 max/min 侧。
@@ -292,7 +337,11 @@ mod tests {
         assert_eq!(bound, 77);
         let main_cull = u32::from_le_bytes(bytes[100..104].try_into().expect("4B"));
         assert_eq!(main_cull, 1);
-        assert_eq!(pack_cull_push(&planes, 77, false)[100..104], [0u8; 4], "关 = 0");
+        assert_eq!(
+            pack_cull_push(&planes, 77, false)[100..104],
+            [0u8; 4],
+            "关 = 0"
+        );
         // 104..112 垫保持 0
         assert!(bytes[104..].iter().all(|&b| b == 0));
     }

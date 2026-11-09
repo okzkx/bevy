@@ -143,7 +143,9 @@ impl Swapchain {
         let mut format_list_info =
             vk::ImageFormatListCreateInfo::default().view_formats(&format_list);
         if caps.current_extent.width == u32::MAX {
-            return Err(VulkanError::Init("current_extent 未定义（窗口尚未定型），不做显式尺寸回退".into()));
+            return Err(VulkanError::Init(
+                "current_extent 未定义（窗口尚未定型），不做显式尺寸回退".into(),
+            ));
         }
         // MAILBOX 优先：新帧直接替换还没上屏的帧，acquire 不排队。
         // 坑：FIFO 的 acquire 在显示队列满时会阻塞，造成最小化死锁和拖拽窗口冻结；FIFO 只作必有的兜底
@@ -216,7 +218,8 @@ impl Swapchain {
         guard.semaphores.reserve(images.len());
         for _ in &images {
             guard.semaphores.push(unsafe {
-                ctx.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                ctx.device
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
             }?);
         }
 

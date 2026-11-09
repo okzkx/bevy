@@ -127,8 +127,9 @@ impl PerfLedger {
     /// draw_frame 开头调用：返回距上一帧起点的墙钟毫秒（首帧 0）并刷新起点。
     pub fn mark_frame_start(&mut self) -> f32 {
         let now = std::time::Instant::now();
-        let wall =
-            self.last_frame_start.map_or(0.0, |t| (now - t).as_secs_f32() * 1000.0);
+        let wall = self
+            .last_frame_start
+            .map_or(0.0, |t| (now - t).as_secs_f32() * 1000.0);
         self.last_frame_start = Some(now);
         wall
     }
@@ -160,11 +161,7 @@ impl PerfLedger {
     }
 
     /// 同一字段一次排序取多个分位数（调试窗每帧取多个，逐个调 [`Self::percentile`] 会重复排序）。
-    pub fn percentiles(
-        &self,
-        ps: &[f32],
-        field: impl Fn(&FrameSample) -> f32,
-    ) -> Vec<Option<f32>> {
+    pub fn percentiles(&self, ps: &[f32], field: impl Fn(&FrameSample) -> f32) -> Vec<Option<f32>> {
         let mut values: Vec<f32> = self.samples.iter().map(field).collect();
         if values.is_empty() {
             return vec![None; ps.len()];
@@ -172,8 +169,7 @@ impl PerfLedger {
         values.sort_by(f32::total_cmp);
         ps.iter()
             .map(|&p| {
-                let rank =
-                    ((p * values.len() as f32).ceil() as usize).clamp(1, values.len());
+                let rank = ((p * values.len() as f32).ceil() as usize).clamp(1, values.len());
                 Some(values[rank - 1])
             })
             .collect()
@@ -342,9 +338,8 @@ impl GpuTimer {
             wrapping_timestamp_delta(a, b, self.timestamp_mask) as f32 * self.period_ns / 1.0e6
         };
         use TimestampPoint::*;
-        let seg = |a: TimestampPoint, b: TimestampPoint| {
-            ticks_to_ms(raw[a as usize], raw[b as usize])
-        };
+        let seg =
+            |a: TimestampPoint, b: TimestampPoint| ticks_to_ms(raw[a as usize], raw[b as usize]);
         Ok(Some([
             seg(FrameStart, Compute),
             seg(Compute, Shadow),

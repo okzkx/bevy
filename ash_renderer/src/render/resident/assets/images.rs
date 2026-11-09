@@ -20,10 +20,10 @@ use bevy::image::Image as BevyImage;
 use bevy::log::info;
 
 use super::image_spec::ImageSpec;
-use crate::render::resident::tables::bindless_texture_table::{BindlessTextureTable, SlotBinding};
+use crate::common::error::{Result, VulkanError};
 use crate::render::core::device::memory::contract::MemoryContract;
 use crate::render::core::device::transfer::{Ticket, Uploader};
-use crate::common::error::{Result, VulkanError};
+use crate::render::resident::tables::bindless_texture_table::{BindlessTextureTable, SlotBinding};
 
 /// 一张 2D 贴图：VkImage（OPTIMAL，UNDEFINED 起步）+ dedicated memory + 全量 view。
 /// 布局迁移与上传在 [`crate::render::Uploader`] 的图像段，采样器归
@@ -68,10 +68,9 @@ impl GpuImage {
         let required_features = vk::FormatFeatureFlags::TRANSFER_DST
             | vk::FormatFeatureFlags::TRANSFER_SRC
             | vk::FormatFeatureFlags::SAMPLED_IMAGE;
-        let features = unsafe {
-            instance.get_physical_device_format_properties(physical_device, spec.format)
-        }
-        .optimal_tiling_features;
+        let features =
+            unsafe { instance.get_physical_device_format_properties(physical_device, spec.format) }
+                .optimal_tiling_features;
         if !features.contains(required_features) {
             return Err(VulkanError::Init(format!(
                 "格式 {0:?} 的 optimal tiling features {features:?} 不含所需 {required_features:?},贴图无法按该使用角色使用",
@@ -110,8 +109,9 @@ impl GpuImage {
                 None,
             )
         }?;
-        let result =
-            unsafe { Self::create_inner(device, contract, spec, usage, features, mip_levels, image) };
+        let result = unsafe {
+            Self::create_inner(device, contract, spec, usage, features, mip_levels, image)
+        };
         // image 统一在这里回收，内层只管 memory/view
         if result.is_err() {
             unsafe { device.destroy_image(image, None) };
@@ -259,7 +259,10 @@ impl ImageCache {
     /// 驻留贴图的分配字节合计（不含待销毁的旧图）。
     #[must_use]
     pub fn resident_bytes(&self) -> u64 {
-        self.resident.values().map(|(image, _, _)| image.alloc_bytes()).sum()
+        self.resident
+            .values()
+            .map(|(image, _, _)| image.alloc_bytes())
+            .sum()
     }
 
     /// 同身份内容替换：旧图进待销毁账，旧槽位交回表（不原地重写槽——在飞 draw 还在读，
@@ -295,7 +298,12 @@ impl ImageCache {
         }
         wait_draws()?;
         // 同一条时间线信号量按值单调，等最大票据即等全部
-        let max_ticket = self.graveyard.iter().map(|(_, ticket)| *ticket).max().unwrap_or(0);
+        let max_ticket = self
+            .graveyard
+            .iter()
+            .map(|(_, ticket)| *ticket)
+            .max()
+            .unwrap_or(0);
         uploader.wait_until(max_ticket)?;
         let count = self.graveyard.len();
         self.graveyard.clear();
@@ -315,7 +323,13 @@ impl ImageCache {
     }
 
     /// 登记驻留：仅在对应批次提交成功后调用。
-    pub fn commit(&mut self, id: AssetId<BevyImage>, image: GpuImage, ticket: Ticket, slots: SlotBinding) {
+    pub fn commit(
+        &mut self,
+        id: AssetId<BevyImage>,
+        image: GpuImage,
+        ticket: Ticket,
+        slots: SlotBinding,
+    ) {
         self.resident.insert(id, (image, ticket, slots));
     }
 

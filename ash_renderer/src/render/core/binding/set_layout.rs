@@ -57,11 +57,21 @@ pub struct BindingDesc {
 impl BindingDesc {
     /// 单个描述符、无 binding 旗标。
     pub(crate) const fn new(binding: u32, kind: DescKind, stages: vk::ShaderStageFlags) -> Self {
-        Self { binding, kind, count: 1, stages, flags: vk::DescriptorBindingFlags::empty() }
+        Self {
+            binding,
+            kind,
+            count: 1,
+            stages,
+            flags: vk::DescriptorBindingFlags::empty(),
+        }
     }
 
     pub(crate) const fn array(self, count: u32, flags: vk::DescriptorBindingFlags) -> Self {
-        Self { count, flags, ..self }
+        Self {
+            count,
+            flags,
+            ..self
+        }
     }
 }
 
@@ -75,7 +85,11 @@ pub struct SetLayoutDesc {
 
 impl SetLayoutDesc {
     pub(crate) const fn new(name: &'static str, bindings: &'static [BindingDesc]) -> Self {
-        Self { name, bindings, flags: vk::DescriptorSetLayoutCreateFlags::empty() }
+        Self {
+            name,
+            bindings,
+            flags: vk::DescriptorSetLayoutCreateFlags::empty(),
+        }
     }
 
     pub(crate) fn binding(&self, binding: u32) -> Option<&BindingDesc> {
@@ -90,7 +104,10 @@ impl SetLayoutDesc {
             out.push("没有任何 binding".to_owned());
         }
         for (i, b) in self.bindings.iter().enumerate() {
-            if self.bindings[..i].iter().any(|prev| prev.binding == b.binding) {
+            if self.bindings[..i]
+                .iter()
+                .any(|prev| prev.binding == b.binding)
+            {
                 out.push(format!("b{} 重复声明", b.binding));
             }
             if b.count == 0 {
@@ -99,14 +116,25 @@ impl SetLayoutDesc {
             if b.stages.is_empty() {
                 out.push(format!("b{} 没有可见阶段", b.binding));
             }
-            if b.flags.contains(vk::DescriptorBindingFlags::UPDATE_AFTER_BIND) {
+            if b.flags
+                .contains(vk::DescriptorBindingFlags::UPDATE_AFTER_BIND)
+            {
                 // VUID-VkDescriptorSetLayoutCreateInfo-flags-03000
-                if !self.flags.contains(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL) {
-                    out.push(format!("b{} 带 UPDATE_AFTER_BIND，布局缺 UPDATE_AFTER_BIND_POOL", b.binding));
+                if !self
+                    .flags
+                    .contains(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+                {
+                    out.push(format!(
+                        "b{} 带 UPDATE_AFTER_BIND，布局缺 UPDATE_AFTER_BIND_POOL",
+                        b.binding
+                    ));
                 }
                 // Context 只启用了 descriptorBindingSampledImageUpdateAfterBind（覆盖 sampled image 与 sampler）
                 if !matches!(b.kind, DescKind::SampledImage | DescKind::Sampler) {
-                    out.push(format!("b{} 是 {:?}，设备没启用这一类的 UPDATE_AFTER_BIND", b.binding, b.kind));
+                    out.push(format!(
+                        "b{} 是 {:?}，设备没启用这一类的 UPDATE_AFTER_BIND",
+                        b.binding, b.kind
+                    ));
                 }
             }
         }
@@ -116,7 +144,8 @@ impl SetLayoutDesc {
     /// 布局带 UPDATE_AFTER_BIND_POOL 时，配套的 pool 也必须带 UPDATE_AFTER_BIND 旗标
     ///（VUID-03000 三层配套的 pool 层，由声明推导）。
     pub(crate) const fn needs_uab_pool(&self) -> bool {
-        self.flags.contains(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+        self.flags
+            .contains(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
     }
 
     /// 把 `set_count` 份该布局的集对 pool 的消耗累加进 `out`（按描述符种类聚合）。
@@ -127,7 +156,11 @@ impl SetLayoutDesc {
             if let Some(slot) = out.iter_mut().find(|s| s.ty == b.kind.vk()) {
                 slot.descriptor_count += total;
             } else {
-                out.push(vk::DescriptorPoolSize::default().ty(b.kind.vk()).descriptor_count(total));
+                out.push(
+                    vk::DescriptorPoolSize::default()
+                        .ty(b.kind.vk())
+                        .descriptor_count(total),
+                );
             }
         }
     }
@@ -161,7 +194,11 @@ impl SetLayoutDesc {
     pub(crate) fn create(&self, device: &Device) -> Result<vk::DescriptorSetLayout> {
         let problems = self.problems();
         if !problems.is_empty() {
-            return Err(VulkanError::Init(format!("描述符集布局 {} 声明有误：{}", self.name, problems.join("；"))));
+            return Err(VulkanError::Init(format!(
+                "描述符集布局 {} 声明有误：{}",
+                self.name,
+                problems.join("；")
+            )));
         }
         let bindings: Vec<vk::DescriptorSetLayoutBinding> = self
             .bindings
@@ -174,9 +211,13 @@ impl SetLayoutDesc {
                     .stage_flags(b.stages)
             })
             .collect();
-        let binding_flags: Vec<vk::DescriptorBindingFlags> = self.bindings.iter().map(|b| b.flags).collect();
-        let mut flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
-        let mut info = vk::DescriptorSetLayoutCreateInfo::default().flags(self.flags).bindings(&bindings);
+        let binding_flags: Vec<vk::DescriptorBindingFlags> =
+            self.bindings.iter().map(|b| b.flags).collect();
+        let mut flags_info =
+            vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
+        let mut info = vk::DescriptorSetLayoutCreateInfo::default()
+            .flags(self.flags)
+            .bindings(&bindings);
         if binding_flags.iter().any(|f| !f.is_empty()) {
             info = info.push_next(&mut flags_info);
         }
@@ -185,7 +226,9 @@ impl SetLayoutDesc {
 }
 
 /// 多份布局一起挤一个 pool 时的合并消耗：`(声明, 集数)` 列表逐项累加。
-pub(crate) fn merged_pool_sizes(items: &[(&'static SetLayoutDesc, u32)]) -> Vec<vk::DescriptorPoolSize> {
+pub(crate) fn merged_pool_sizes(
+    items: &[(&'static SetLayoutDesc, u32)],
+) -> Vec<vk::DescriptorPoolSize> {
     let mut out = Vec::new();
     for (desc, set_count) in items {
         desc.add_pool_sizes(&mut out, *set_count);
@@ -270,10 +313,16 @@ impl SetLayouts {
         let mut entries: Vec<SetLayout> = Vec::new();
         for layout in layouts {
             if entries.iter().any(|e| e.desc.name == layout.desc.name) {
-                return Err(VulkanError::Init(format!("描述符集布局 {} 登记了两次", layout.desc.name)));
+                return Err(VulkanError::Init(format!(
+                    "描述符集布局 {} 登记了两次",
+                    layout.desc.name
+                )));
             }
             if layout.raw == vk::DescriptorSetLayout::null() {
-                return Err(VulkanError::Init(format!("描述符集布局 {} 登记时还没建", layout.desc.name)));
+                return Err(VulkanError::Init(format!(
+                    "描述符集布局 {} 登记时还没建",
+                    layout.desc.name
+                )));
             }
             entries.push(layout);
         }

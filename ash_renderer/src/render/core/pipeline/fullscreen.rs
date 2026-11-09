@@ -60,13 +60,13 @@ impl FullscreenPipeline {
         let blend_attachment = [vk::PipelineColorBlendAttachmentState::default()
             .blend_enable(false)
             .color_write_mask(vk::ColorComponentFlags::RGBA)];
-        let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
-            .attachments(&blend_attachment);
+        let color_blend =
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachment);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(desc.color_formats);
+        let mut rendering_info =
+            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(desc.color_formats);
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)
             .vertex_input_state(&vertex_input)
@@ -82,8 +82,7 @@ impl FullscreenPipeline {
         let pipeline = create_graphics_pipeline(device, &info)?;
         info!(
             "全屏管线 {} 就绪: color {:?}（无顶点输入全屏三角形 / 无深度 / 无混合，动态 viewport）",
-            desc.label,
-            desc.color_formats
+            desc.label, desc.color_formats
         );
         Ok(Self {
             handle: PipelineHandle::new(device, layout, pipeline, desc.sets),

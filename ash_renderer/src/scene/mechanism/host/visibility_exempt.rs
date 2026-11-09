@@ -34,7 +34,10 @@ fn visibility_exempt(
     }
     if count > 0 {
         stats.removed_total += count;
-        info!("可见性豁免：移除 {count} 个实体的 Visibility 三件套（累计 {}）", stats.removed_total);
+        info!(
+            "可见性豁免：移除 {count} 个实体的 Visibility 三件套（累计 {}）",
+            stats.removed_total
+        );
     }
 }
 
@@ -43,9 +46,7 @@ pub struct AshVisibilityExemptPlugin;
 
 impl Plugin for AshVisibilityExemptPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<VisibilityExemptStats>().add_systems(
-            PostUpdate,
-            visibility_exempt.after(update_ledger),
-        );
+        app.init_resource::<VisibilityExemptStats>()
+            .add_systems(PostUpdate, visibility_exempt.after(update_ledger));
     }
 }

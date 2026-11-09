@@ -45,10 +45,8 @@ impl FramePool {
         res: &SceneResources<'_>,
     ) -> Result<(), BevyError> {
         // # Safety:前提由帧循环在调用前建立（draw_frame 先 wait_for_slot 再 acquire_index）
-        unsafe {
-            self.record_frame_steps(target, feature, res)
-        }
-        .or_fatal("录制/提交失败，渲染链无法继续")
+        unsafe { self.record_frame_steps(target, feature, res) }
+            .or_fatal("录制/提交失败，渲染链无法继续")
     }
 
     /// 录制体九段，顺序固定：
@@ -63,7 +61,7 @@ impl FramePool {
     /// UI 接在 neighborhood 的同一次渲染里）
     /// ⑨ 出场 + 提交。段界 = image layout 迁移点，计时打点挂在段界；
     /// ②~⑧ 一段对应一个业务模块，段内输入全部来自 `feature`（功能门控）与 `res`（场景资源），
-/// 间衔接只靠布局屏障；
+    /// 间衔接只靠布局屏障；
     /// ①⑨ 是槽基建段（cb/fence/等待列表），消费槽私有物，不属于业务模块。
     /// 机制正本见笔记《整帧录制流程》。
     ///
@@ -83,7 +81,11 @@ impl FramePool {
         let slot = self.current;
         let cb = frame.command_buffer;
         let extent = target.extent;
-        let mark = FrameMark { cb, slot, timer: feature.timer };
+        let mark = FrameMark {
+            cb,
+            slot,
+            timer: feature.timer,
+        };
 
         // ---- ① 进场：cb 开始 → 帧计时 → 三组进场屏障 → 透明排序键预填 ----
         device.begin_command_buffer(
@@ -172,7 +174,13 @@ impl FramePool {
         // 透明层：collect → sort → gather
         if let Some(t) = feature.transparent.as_ref() {
             if let Some(collect) = &t.collect {
-                collect.record(device, cb, res.instance_set, feature.cluster.set, t.transparent_set);
+                collect.record(
+                    device,
+                    cb,
+                    res.instance_set,
+                    feature.cluster.set,
+                    t.transparent_set,
+                );
             }
 
             // 固定容量数组每个非空帧都重排，保证本帧新增的透明行不会以未排序状态进 gather
@@ -214,7 +222,12 @@ impl FramePool {
         // 实例槽号经 firstInstance 进 VS（按 instance_index 读 set2）；不可见行 instanceCount=0。
         if res.indirect_count > 0 {
             let (vertex_buffer, index_buffer) = res.pool_buffers()?;
-            bind_graphics(device, cb, &res.pipeline, &[res.bindless_set, res.frame_set, res.instance_set]);
+            bind_graphics(
+                device,
+                cb,
+                &res.pipeline,
+                &[res.bindless_set, res.frame_set, res.instance_set],
+            );
             // 坑：viewport 正高度，原因见 set_viewport
             set_viewport_scissor(device, cb, extent);
             // 整池绑一次，每条命令自带 vertexOffset/firstIndex
@@ -259,7 +272,12 @@ impl FramePool {
             // 清屏色按线性域给值——HDR 目标的 SRGB view 在 ROP 写出时才编码，别拿 sRGB 十六进制直接换算。
             clear: Some([0.02, 0.06, 0.14, 1.0]),
             pipeline: res.composite,
-            sets: &[res.frame_set, res.gbuffer.sampled_set(slot), feature.cluster.set, feature.shadow.set],
+            sets: &[
+                res.frame_set,
+                res.gbuffer.sampled_set(slot),
+                feature.cluster.set,
+                feature.shadow.set,
+            ],
         }
         .record(device, cb);
 
@@ -295,7 +313,12 @@ impl FramePool {
                 device,
                 cb,
                 &t.pipeline,
-                &[res.bindless_set, res.frame_set, res.instance_set, feature.cluster.set],
+                &[
+                    res.bindless_set,
+                    res.frame_set,
+                    res.instance_set,
+                    feature.cluster.set,
+                ],
             );
             set_viewport_scissor(device, cb, extent);
             bind_vertex_index(device, cb, vertex_buffer, index_buffer);

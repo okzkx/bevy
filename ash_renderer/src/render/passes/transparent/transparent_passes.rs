@@ -5,15 +5,15 @@ use bevy::log::info;
 
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
-use crate::render::core::pipeline::compute::ComputePipeline;
-use crate::render::core::record::compute::{ComputeHandles, Handoff};
-use crate::render::core::record::graphics::PipelineRef;
-use crate::render::Context;
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
+use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::record::compute::{ComputeHandles, Handoff};
+use crate::render::core::record::graphics::PipelineRef;
 use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET_DESC;
 use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
+use crate::render::Context;
 
 use super::transparent_targets::{TRANSPARENT_CAPACITY, TRANSPARENT_SET_DESC};
 
@@ -23,8 +23,15 @@ pub(crate) static TRANSPARENT_COLLECT_PIPELINE: PipelineDesc = PipelineDesc {
     label: "transparent_collect",
     shader: &shader_abi::TRANSPARENT_COLLECT,
     entries: &[c"cs_main"],
-    sets: &[&INSTANCE_SET_DESC, &LIGHT_CLUSTER_SET_DESC, &TRANSPARENT_SET_DESC],
-    push: Some(PushRange { stages: CS, size: TRANSPARENT_PUSH_SIZE }),
+    sets: &[
+        &INSTANCE_SET_DESC,
+        &LIGHT_CLUSTER_SET_DESC,
+        &TRANSPARENT_SET_DESC,
+    ],
+    push: Some(PushRange {
+        stages: CS,
+        size: TRANSPARENT_PUSH_SIZE,
+    }),
     color_formats: &[],
     depth_format: None,
 };
@@ -34,7 +41,10 @@ pub(crate) static TRANSPARENT_SORT_PIPELINE: PipelineDesc = PipelineDesc {
     shader: &shader_abi::TRANSPARENT_SORT,
     entries: &[c"cs_main"],
     sets: &[&TRANSPARENT_SET_DESC],
-    push: Some(PushRange { stages: CS, size: TRANSPARENT_SORT_PUSH }),
+    push: Some(PushRange {
+        stages: CS,
+        size: TRANSPARENT_SORT_PUSH,
+    }),
     color_formats: &[],
     depth_format: None,
 };
@@ -44,7 +54,10 @@ pub(crate) static TRANSPARENT_GATHER_PIPELINE: PipelineDesc = PipelineDesc {
     shader: &shader_abi::TRANSPARENT_GATHER,
     entries: &[c"cs_main"],
     sets: &[&INSTANCE_SET_DESC, &TRANSPARENT_SET_DESC],
-    push: Some(PushRange { stages: CS, size: TRANSPARENT_PUSH_SIZE }),
+    push: Some(PushRange {
+        stages: CS,
+        size: TRANSPARENT_PUSH_SIZE,
+    }),
     color_formats: &[],
     depth_format: None,
 };
@@ -124,7 +137,12 @@ impl TransparentPasses {
         info!(
             "透明层 compute 三件就绪: collect（[instance_set, cluster, transparent]）/ sort（[transparent]）/ gather（[instance_set, transparent]）"
         );
-        Ok(Self { sort, sort_passes, collect, gather })
+        Ok(Self {
+            sort,
+            sort_passes,
+            collect,
+            gather,
+        })
     }
 
     /// # Errors
@@ -217,10 +235,21 @@ impl TransparentCollectDraw {
 impl TransparentSortPlan {
     /// 录制排序：只绑一次，逐个 (k, j) dispatch；每次之间加屏障，下一轮才能读到
     /// 上一轮的交换结果。透明集不在本束，录制时传入。
-    pub(crate) fn record(&self, device: &Device, command_buffer: vk::CommandBuffer, transparent_set: DescSet) {
+    pub(crate) fn record(
+        &self,
+        device: &Device,
+        command_buffer: vk::CommandBuffer,
+        transparent_set: DescSet,
+    ) {
         self.pass.bind(device, command_buffer, &[transparent_set]);
         for pass in &self.passes {
-            self.pass.dispatch(device, command_buffer, pass, self.groups, Handoff::ComputeReadWrite);
+            self.pass.dispatch(
+                device,
+                command_buffer,
+                pass,
+                self.groups,
+                Handoff::ComputeReadWrite,
+            );
         }
     }
 }
@@ -285,7 +314,10 @@ mod tests {
         ];
         bitonic_sort(&mut entries);
         assert!(entries.windows(2).all(|pair| pair[0].0 <= pair[1].0));
-        assert_eq!(entries.iter().map(|entry| entry.1).collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(
+            entries.iter().map(|entry| entry.1).collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4, 5, 6, 7]
+        );
     }
 
     #[test]
@@ -301,7 +333,13 @@ mod tests {
             (2.0, 20),
         ];
         bitonic_sort(&mut entries);
-        assert_eq!(entries[6..].iter().map(|entry| entry.1).collect::<Vec<_>>(), [20, 90]);
-        assert_eq!(entries[6..].iter().map(|entry| entry.0).collect::<Vec<_>>(), [2.0, 9.0]);
+        assert_eq!(
+            entries[6..].iter().map(|entry| entry.1).collect::<Vec<_>>(),
+            [20, 90]
+        );
+        assert_eq!(
+            entries[6..].iter().map(|entry| entry.0).collect::<Vec<_>>(),
+            [2.0, 9.0]
+        );
     }
 }

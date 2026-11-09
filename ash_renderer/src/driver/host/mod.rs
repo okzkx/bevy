@@ -24,13 +24,13 @@ use bevy::{
     winit::{UpdateMode, WinitSettings},
 };
 
-use ash_macros::system;
 use crate::render::{
     BloomSettings, Context, CullDiagnostics, CullSettings, FrameSyncSettings, IndirectStats,
     LodDiagnostics, LodSettings, OcclusionDiagnostics, OcclusionSettings, PerfLedger, RenderMode,
     ShadowSettings, SmaaSettings,
 };
 use crate::scene::DrawListVerify;
+use ash_macros::system;
 
 mod drawlist;
 mod frame;

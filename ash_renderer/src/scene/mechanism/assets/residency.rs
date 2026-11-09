@@ -14,20 +14,20 @@
 
 use std::collections::{HashMap, HashSet};
 
+use ash_macros::system;
 use bevy::{
     camera::{Camera, Projection},
     ecs::system::SystemParam,
     pbr::StandardMaterial,
     prelude::*,
 };
-use ash_macros::system;
 
 use crate::{
-    scene::{InstanceLedger, LodGroups},
     render::{
         aabb_screen_rect, aabb_visible, conservative_world_aabb, frustum_planes, lod_raw_level,
-        ImageCache, LodSettings, MAX_LOD_LEVELS, MeshPool, Swapchain,
+        ImageCache, LodSettings, MeshPool, Swapchain, MAX_LOD_LEVELS,
     },
+    scene::{InstanceLedger, LodGroups},
 };
 
 use super::asset_events::{material_texture_slots, AssetRetirements};
@@ -327,7 +327,10 @@ fn residency_tick(
     // 保底锚切换会改变所有组的锚腿和需求位图，即使管理器关闭也要重挂全行。
     if *prev_floor != settings.floor_anchor && !ledger.is_empty() {
         let count = mark_all_dirty(&mut ledger, true);
-        info!("保底锚切换为 {}：全行 {count} 行置脏 + LOD 脏（锚腿/需求位图换形）", settings.floor_anchor);
+        info!(
+            "保底锚切换为 {}：全行 {count} 行置脏 + LOD 脏（锚腿/需求位图换形）",
+            settings.floor_anchor
+        );
     }
     *prev_floor = settings.floor_anchor;
     let recycle = pool.recycle_ledger();
@@ -366,7 +369,10 @@ fn residency_tick(
     // 逐位相同）。冷却表非空禁止早退（见模块文档坑点）；首个激活 tick
     //（was_active=false 或判定键无历史）不早退——需求位图必须先发布一次。
     let view = cameras.single().ok().map(|(projection, global)| {
-        (global.translation(), projection.get_clip_from_view() * global.affine().inverse())
+        (
+            global.translation(),
+            projection.get_clip_from_view() * global.affine().inverse(),
+        )
     });
     let cam_key = view.map(|(_, view_proj)| TickGateKey {
         view_proj,
@@ -380,8 +386,7 @@ fn residency_tick(
         floor_anchor: settings.floor_anchor,
         gap_mode: settings.gap_mode,
     });
-    let gap_quiet =
-        settings.gap_mode == GapMode::Off || snapshot.bits.iter().all(|&b| b == 0);
+    let gap_quiet = settings.gap_mode == GapMode::Off || snapshot.bits.iter().all(|&b| b == 0);
     if was_active
         && prev_cam_key.is_some()
         && *prev_cam_key == cam_key
@@ -405,7 +410,10 @@ fn residency_tick(
     };
     let groups = aggregate_groups(&ledger, pool, cam_pos, &frustum_planes(&view_proj));
     cooldown.tick();
-    let screen = [swapchain.extent.width as f32, swapchain.extent.height as f32];
+    let screen = [
+        swapchain.extent.width as f32,
+        swapchain.extent.height as f32,
+    ];
     let mut pass = FullPass {
         settings: &settings,
         pool,
@@ -419,10 +427,26 @@ fn residency_tick(
     let gap_rows = pass.gap_request_rows(&groups, &gap_by_base);
     let mut request_rows = pass.radius_request_rows(&groups);
     pass.eject_meshes_over_budget(&groups, used);
-    let lod_view = LodView { view_proj: &view_proj, screen, threshold_px: lod_settings.threshold_px };
-    pass.lod_pass(&groups, &gap_by_base, &lod_view, &mut lod_demand, &mut request_rows);
+    let lod_view = LodView {
+        view_proj: &view_proj,
+        screen,
+        threshold_px: lod_settings.threshold_px,
+    };
+    pass.lod_pass(
+        &groups,
+        &gap_by_base,
+        &lod_view,
+        &mut lod_demand,
+        &mut request_rows,
+    );
     let requested_rows = pass.commit_requests(request_rows, &gap_rows);
-    pass.image_pass(image_cache, &std_materials, cam_pos, &requested_rows, used_image);
+    pass.image_pass(
+        image_cache,
+        &std_materials,
+        cam_pos,
+        &requested_rows,
+        used_image,
+    );
 }
 
 /// 全行置脏（`with_lod` 时一并重挂 LOD 脏标），返回置脏行数。
@@ -535,8 +559,12 @@ impl FullPass<'_> {
     ) -> Vec<Entity> {
         let mut gap_rows: Vec<Entity> = Vec::new();
         for (base_id, bits) in gap_by_base {
-            let Some(g) = groups.get(base_id) else { continue };
-            let Some(levels) = self.lod_groups.levels_of(*base_id) else { continue };
+            let Some(g) = groups.get(base_id) else {
+                continue;
+            };
+            let Some(levels) = self.lod_groups.levels_of(*base_id) else {
+                continue;
+            };
             if self.cooldown.meshes.contains_key(base_id) {
                 continue;
             }
@@ -605,7 +633,9 @@ impl FullPass<'_> {
                 // 区间归还 free list；引用行此后不进 DrawList（mesh 未驻留），
                 // 先撤引用再回收区间
                 self.retirements.eject_mesh(id);
-                self.cooldown.meshes.insert(id, self.settings.eject_cooldown_frames);
+                self.cooldown
+                    .meshes
+                    .insert(id, self.settings.eject_cooldown_frames);
                 used = used.saturating_sub(bytes);
                 self.stats.ejected_total += 1;
                 self.stats.ejected_last += 1;
@@ -630,8 +660,10 @@ impl FullPass<'_> {
         let fine = settings.fine_grained || settings.floor_anchor;
         let mut lod_levels_resident = 0usize;
         for (base_id, g) in groups {
-            let Some(group_levels) = lod_groups.levels_of(*base_id) else { continue }; // 非阶梯 mesh 无档位账
-            // 保底锚启用时保底档为必需档；保底档未登记则退回基准档。
+            let Some(group_levels) = lod_groups.levels_of(*base_id) else {
+                continue;
+            }; // 非阶梯 mesh 无档位账
+               // 保底锚启用时保底档为必需档；保底档未登记则退回基准档。
             let mut needed = [false; LEVELS];
             needed[anchor_level(settings.floor_anchor, group_levels[FLOOR_LEVEL].is_some())
                 as usize] = true;
@@ -666,8 +698,12 @@ impl FullPass<'_> {
             // 检查含 level 0（基准可被淘汰，见模块文档坑点）；驻留计数只计变体档
             let mut any_needed_missing = false;
             for (level, needed_l) in needed.iter().enumerate() {
-                if !*needed_l { continue; }
-                let Some(handle) = &group_levels[level] else { continue };
+                if !*needed_l {
+                    continue;
+                }
+                let Some(handle) = &group_levels[level] else {
+                    continue;
+                };
                 if pool.resident(handle.id()).is_none() {
                     any_needed_missing = true;
                 } else if level != 0 {
@@ -702,10 +738,18 @@ impl FullPass<'_> {
         let pool = self.pool;
         for row in g.rows.iter().filter_map(|entity| self.ledger.row(*entity)) {
             let Some(slot) = pool.resident(row.mesh.id()).or_else(|| {
-                group_levels[FLOOR_LEVEL].as_ref().and_then(|h| pool.resident(h.id()))
-            }) else { continue };
+                group_levels[FLOOR_LEVEL]
+                    .as_ref()
+                    .and_then(|h| pool.resident(h.id()))
+            }) else {
+                continue;
+            };
             if let Some((px_min, px_max, _)) = aabb_screen_rect(
-                view.view_proj, &row.model, slot.local_aabb.0, slot.local_aabb.1, view.screen,
+                view.view_proj,
+                &row.model,
+                slot.local_aabb.0,
+                slot.local_aabb.1,
+                view.screen,
             ) {
                 let size = (px_max.x - px_min.x).max(px_max.y - px_min.y);
                 let raw = lod_raw_level(size, view.threshold_px, MAX_LOD_LEVELS);
@@ -723,13 +767,23 @@ impl FullPass<'_> {
     ) {
         let eject_start = usize::from(!self.settings.floor_anchor);
         for (level, needed_l) in merged.iter().enumerate().skip(eject_start) {
-            if *needed_l { continue; }
-            let Some(handle) = &group_levels[level] else { continue };
+            if *needed_l {
+                continue;
+            }
+            let Some(handle) = &group_levels[level] else {
+                continue;
+            };
             let level_id = handle.id();
-            if self.pool.resident(level_id).is_none() { continue; }
-            if self.cooldown.meshes.contains_key(&level_id) { continue; }
+            if self.pool.resident(level_id).is_none() {
+                continue;
+            }
+            if self.cooldown.meshes.contains_key(&level_id) {
+                continue;
+            }
             self.retirements.eject_mesh(level_id);
-            self.cooldown.meshes.insert(level_id, self.settings.eject_cooldown_frames);
+            self.cooldown
+                .meshes
+                .insert(level_id, self.settings.eject_cooldown_frames);
             self.stats.lod_levels_ejected_total += 1;
             for entity in &g.rows {
                 self.ledger.mark_lod_dirty(*entity);
@@ -782,14 +836,22 @@ impl FullPass<'_> {
                 if used_image <= budget {
                     break;
                 }
-                if self.cooldown.images.contains_key(&id) { continue; }
+                if self.cooldown.images.contains_key(&id) {
+                    continue;
+                }
                 // 本 tick 已置脏行的贴图跳过：材质腿同帧重传会让 eject 空转
                 //（拉锯），排除后下一 tick 行稳定再淘汰
-                if image_groups[&id].1.iter().any(|r| requested_rows.contains(r)) {
+                if image_groups[&id]
+                    .1
+                    .iter()
+                    .any(|r| requested_rows.contains(r))
+                {
                     continue;
                 }
                 self.retirements.eject_image(id);
-                self.cooldown.images.insert(id, settings.eject_cooldown_frames);
+                self.cooldown
+                    .images
+                    .insert(id, settings.eject_cooldown_frames);
                 used_image = used_image.saturating_sub(bytes);
                 // 重驻留通道 = 预算内分支（冷却过期 ∧ 半径内 → 引用行置脏重传）
                 //——eject 当帧不排队（同帧重传 = 自我拉锯，used 恒定全量）
@@ -825,18 +887,24 @@ fn image_groups(
     let mut mat_dist: HashMap<AssetId<StandardMaterial>, (f32, Vec<Entity>)> = HashMap::new();
     for (entity, row) in ledger.rows() {
         let dist = (row.model.w_axis.truncate() - cam_pos).length();
-        let e = mat_dist.entry(row.material.id()).or_insert((f32::INFINITY, Vec::new()));
+        let e = mat_dist
+            .entry(row.material.id())
+            .or_insert((f32::INFINITY, Vec::new()));
         e.0 = e.0.min(dist);
         e.1.push(entity);
     }
     let mut image_groups: HashMap<AssetId<Image>, (f32, Vec<Entity>)> = HashMap::new();
     for (mat_id, (dist, rows)) in &mat_dist {
-        let Some(material) = std_materials.get(*mat_id) else { continue };
+        let Some(material) = std_materials.get(*mat_id) else {
+            continue;
+        };
         for id in material_texture_slots(material) {
             if image_cache.resident(id).is_none() {
                 continue;
             }
-            let e = image_groups.entry(id).or_insert((f32::INFINITY, Vec::new()));
+            let e = image_groups
+                .entry(id)
+                .or_insert((f32::INFINITY, Vec::new()));
             e.0 = e.0.min(*dist);
             e.1.extend(rows.iter().copied());
         }
@@ -887,7 +955,11 @@ mod tests {
             MAX_LOD_LEVELS - 1,
             "锚开启 = 保底档（最粗变体）"
         );
-        assert_eq!(anchor_level(true, false), 0, "尾档缺席退回基准（登记不完整）");
+        assert_eq!(
+            anchor_level(true, false),
+            0,
+            "尾档缺席退回基准（登记不完整）"
+        );
     }
 
     /// 缺口位图 → 请求身份集（去重前）：逐置位档位映射资产身份（level 0 =
@@ -895,21 +967,24 @@ mod tests {
     #[test]
     fn gap_asset_ids_unpack() {
         let mut meshes = Assets::<Mesh>::default();
-        let sphere = || {
-            Sphere::new(0.5)
-                .mesh()
-                .ico(1)
-                .expect("细分上限内不失败")
-        };
-        let handles: Vec<Handle<Mesh>> = (0..MAX_LOD_LEVELS).map(|_| meshes.add(sphere())).collect();
+        let sphere = || Sphere::new(0.5).mesh().ico(1).expect("细分上限内不失败");
+        let handles: Vec<Handle<Mesh>> =
+            (0..MAX_LOD_LEVELS).map(|_| meshes.add(sphere())).collect();
         let mut levels: [Option<Handle<Mesh>>; MAX_LOD_LEVELS as usize] = Default::default();
         for (i, h) in handles.iter().enumerate() {
             levels[i] = Some(h.clone());
         }
         let base = handles[0].id();
-        assert!(gap_asset_ids(0, &levels, base).is_empty(), "零位图 = 无缺口");
+        assert!(
+            gap_asset_ids(0, &levels, base).is_empty(),
+            "零位图 = 无缺口"
+        );
         let ids = gap_asset_ids(0b1001, &levels, base);
-        assert_eq!(ids, vec![base, handles[3].id()], "bit0 与 bit3 → 基准与保底");
+        assert_eq!(
+            ids,
+            vec![base, handles[3].id()],
+            "bit0 与 bit3 → 基准与保底"
+        );
         // 越界位忽略（bit 4.. 不在 MAX 内）
         let only_inrange = gap_asset_ids(u32::MAX, &levels, base);
         assert_eq!(only_inrange.len(), MAX_LOD_LEVELS as usize);

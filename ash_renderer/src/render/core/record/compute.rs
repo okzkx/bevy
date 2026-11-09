@@ -50,9 +50,10 @@ impl Handoff {
     fn dst(self) -> (vk::PipelineStageFlags, vk::AccessFlags) {
         use vk::{AccessFlags as A, PipelineStageFlags as S};
         match self {
-            Self::VertexComputeReadWrite => {
-                (S::VERTEX_SHADER | S::COMPUTE_SHADER, A::SHADER_READ | A::SHADER_WRITE)
-            }
+            Self::VertexComputeReadWrite => (
+                S::VERTEX_SHADER | S::COMPUTE_SHADER,
+                A::SHADER_READ | A::SHADER_WRITE,
+            ),
             Self::VertexComputeRead => (S::VERTEX_SHADER | S::COMPUTE_SHADER, A::SHADER_READ),
             Self::ComputeReadWrite => (S::COMPUTE_SHADER, A::SHADER_READ | A::SHADER_WRITE),
             Self::ComputeRead => (S::COMPUTE_SHADER, A::SHADER_READ),
@@ -69,7 +70,14 @@ impl ComputeHandles {
         let raw: Vec<vk::DescriptorSet> = sets.iter().map(|s| s.raw()).collect();
         unsafe {
             device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, self.pipeline);
-            device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &raw, &[]);
+            device.cmd_bind_descriptor_sets(
+                cb,
+                vk::PipelineBindPoint::COMPUTE,
+                self.layout,
+                0,
+                &raw,
+                &[],
+            );
         }
     }
 

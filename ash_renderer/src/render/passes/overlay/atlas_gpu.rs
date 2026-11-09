@@ -53,7 +53,11 @@ impl AtlasGpu {
         slots: SlotBinding,
         generation: u64,
     ) {
-        if let Some(old) = self.current.replace(AtlasSlot { image, ticket, slots }) {
+        if let Some(old) = self.current.replace(AtlasSlot {
+            image,
+            ticket,
+            slots,
+        }) {
             tables.retire(old.slots);
             self.graveyard.push((old.image, old.ticket));
         }
@@ -74,7 +78,12 @@ impl AtlasGpu {
             return Ok(());
         }
         wait_draws()?;
-        let max_ticket = self.graveyard.iter().map(|(_, ticket)| *ticket).max().unwrap_or(0);
+        let max_ticket = self
+            .graveyard
+            .iter()
+            .map(|(_, ticket)| *ticket)
+            .max()
+            .unwrap_or(0);
         uploader.wait_until(max_ticket)?;
         let count = self.graveyard.len();
         self.graveyard.clear();

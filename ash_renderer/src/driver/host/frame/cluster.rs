@@ -8,7 +8,9 @@ use ash::vk;
 
 use crate::{
     common::syntax::ResultTierExt,
-    render::{pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, LightClusters, LightTable},
+    render::{
+        pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, LightClusters, LightTable,
+    },
 };
 
 use super::scene::FrameView;
@@ -48,6 +50,9 @@ impl ClusterInput<'_> {
 }
 
 /// cluster_build 录制输入：在场行 > 0 才建光源列表（合成与透明前向共用）。
-pub(super) fn create_cluster_build_draw(cluster: &ClusterInput, count: u32) -> Option<ClusterBuildDraw> {
+pub(super) fn create_cluster_build_draw(
+    cluster: &ClusterInput,
+    count: u32,
+) -> Option<ClusterBuildDraw> {
     (count > 0).then(|| cluster.build_pass.draw(cluster.clusters.grid()))
 }

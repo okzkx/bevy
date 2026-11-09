@@ -2,33 +2,27 @@
 //! 编排逻辑在 [`super::draw_frame`]；束上的方法只做本帧槽写入（`write_ubo`/`write_slot`
 //! 族，调用时该槽 fence 已等过）。
 
-use bevy::{
-    ecs::system::SystemParam,
-    prelude::*,
-    window::WindowResized,
-};
+use bevy::{ecs::system::SystemParam, prelude::*, window::WindowResized};
 
 use crate::{
-    scene::GapSnapshot,
     render::{
-        BindlessTextureTable, Context, FramePool, FrameUniformTable,
-        GpuTimer,
-        PerfLedger,
+        BindlessTextureTable, Context, FramePool, FrameUniformTable, GpuTimer, PerfLedger,
         Swapchain, Uploader,
     },
+    scene::GapSnapshot,
 };
 
 use super::cluster::ClusterInput;
 use super::culling::{FrustumCullInput, OcclusionGate, OcclusionInput};
+use super::frame_logs::FrameLogs;
 use super::indirect::IndirectInput;
 use super::lod::LodInput;
 use super::overlay::OverlayInput;
 use super::post::PostInput;
+use super::resize_gate::ResizeGate;
 use super::scene::SceneInput;
 use super::shadow::ShadowInput;
 use super::transparent::TransparentInput;
-use super::frame_logs::FrameLogs;
-use super::resize_gate::ResizeGate;
 
 /// draw_frame 的参数束：按特性分子束，系统签名只剩本束 + 主线程标记。
 #[derive(SystemParam)]

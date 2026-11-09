@@ -58,9 +58,7 @@ pub(super) fn report_lights_setup(
     };
     let light_count = lights.iter().count();
     let Ok(light_tf) = lights.single() else {
-        warn!(
-            "灯光就位核验未过：方向光 {light_count} 盏（期望 1）；{ambient_note}"
-        );
+        warn!("灯光就位核验未过：方向光 {light_count} 盏（期望 1）；{ambient_note}");
         return;
     };
     info!(

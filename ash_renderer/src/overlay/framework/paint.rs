@@ -21,8 +21,8 @@ use crate::{
         syntax::{OnceLog, ResultTierExt},
     },
     render::{
-        sampler_key, AtlasGpu, BindlessTextureTable, Context, GpuImage, ImageSpec, StagingImageCopy,
-        UiDrawCall, UiPaint, UiVertex, UiVertexRing, UploadBatch, Uploader,
+        sampler_key, AtlasGpu, BindlessTextureTable, Context, GpuImage, ImageSpec,
+        StagingImageCopy, UiDrawCall, UiPaint, UiVertex, UiVertexRing, UploadBatch, Uploader,
     },
 };
 
@@ -48,8 +48,9 @@ impl AtlasMirror {
     pub(crate) fn fold(&mut self, delta: &mut egui::TexturesDelta) {
         for (id, deltas) in &delta.set {
             if *id != egui::TextureId::Managed(0) {
-                self.warned_foreign
-                    .log(|| warn!("egui 纹理 {id:?} 非字体图集（用户贴图不实现，显式边界），增量跳过"));
+                self.warned_foreign.log(|| {
+                    warn!("egui 纹理 {id:?} 非字体图集（用户贴图不实现，显式边界），增量跳过")
+                });
                 continue;
             }
             for d in deltas {
@@ -149,8 +150,10 @@ pub(crate) fn paint_overlay(
     screen_px: vk::Extent2D,
     log: &mut OverlayLogState,
 ) -> Result<Option<UiPaint>, BevyError> {
-    paint_overlay_steps(ctx, egui, frame, mirror, gpu, ring, tables, uploader, slot, screen_px, log)
-        .or_fatal("overlay 绘制段失败，渲染链无法继续")
+    paint_overlay_steps(
+        ctx, egui, frame, mirror, gpu, ring, tables, uploader, slot, screen_px, log,
+    )
+    .or_fatal("overlay 绘制段失败，渲染链无法继续")
 }
 
 #[expect(
@@ -218,9 +221,9 @@ fn paint_overlay_steps(
             ..Default::default()
         };
         // staging 非空的批次必有提交（uploader 契约），None 是内部矛盾
-        let ticket = uploader
-            .submit_batch(batch)?
-            .ok_or_else(|| VulkanError::Init("图集批未产生提交（staging 非空，内部矛盾）".into()))?;
+        let ticket = uploader.submit_batch(batch)?.ok_or_else(|| {
+            VulkanError::Init("图集批未产生提交（staging 非空，内部矛盾）".into())
+        })?;
         // 槽位发布在提交成功后（失败不留指向未上传数据的槽）；只写新槽（不覆盖在飞消费的旧槽）
         let slots = tables.publish(gpu_image.view(), &sampler_key(&spec.sampler))?;
         gpu.install(tables, gpu_image, ticket, slots, mirror_generation);
@@ -253,7 +256,11 @@ fn paint_overlay_steps(
         return Ok(None);
     };
     // —— 4) 容量判定（超容量丢当帧 UI，帧循环照常）+ 顶点环写入 ——
-    let UiStream { vertices, indices, draws } = stream;
+    let UiStream {
+        vertices,
+        indices,
+        draws,
+    } = stream;
     if vertices.len() > ring.vertex_capacity() || indices.len() > ring.index_capacity() {
         log.warned_overflow.log(|| {
             warn!(
@@ -285,10 +292,7 @@ fn paint_overlay_steps(
         atlas_sampler: atlas.sampler,
         // 坑：screen_size 必须与顶点 pos 同域 = points（tessellate 不按 ppp 缩放顶点）；
         // 给物理像素会让 NDC 除偏大、UI 整体 ×ppp 缩小
-        screen_pt: [
-            screen_px.width as f32 / ppp,
-            screen_px.height as f32 / ppp,
-        ],
+        screen_pt: [screen_px.width as f32 / ppp, screen_px.height as f32 / ppp],
         draws,
     }))
 }
@@ -330,7 +334,8 @@ impl UiStream {
                 egui::epaint::Primitive::Mesh(mesh) => mesh,
                 // 回调图元（PaintCallback）不实现：调试窗口不用，显式边界
                 egui::epaint::Primitive::Callback(_) => {
-                    warned_callback.log(|| warn!("egui 回调图元（PaintCallback）不实现，该 clip 跳过"));
+                    warned_callback
+                        .log(|| warn!("egui 回调图元（PaintCallback）不实现，该 clip 跳过"));
                     continue;
                 }
             };

@@ -6,7 +6,10 @@ use crate::render::RenderMode;
 /// 单选钮分组：(组名, 组内模式)，按显示顺序。
 const GROUPS: &[(&str, &[RenderMode])] = &[
     ("光照", &[RenderMode::Lambert, RenderMode::Unlit]),
-    ("几何", &[RenderMode::Normal, RenderMode::Position, RenderMode::Depth]),
+    (
+        "几何",
+        &[RenderMode::Normal, RenderMode::Position, RenderMode::Depth],
+    ),
     (
         "G-buffer 材质通道",
         &[

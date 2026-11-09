@@ -42,14 +42,13 @@ mod common;
 mod edit;
 mod features;
 
-
 use bevy::{
     prelude::*,
-    render::RenderApp,
     remote::{
-        http::{DEFAULT_PORT, HostPort, RemoteHttpPlugin},
+        http::{HostPort, RemoteHttpPlugin, DEFAULT_PORT},
         RemotePlugin,
     },
+    render::RenderApp,
 };
 
 use self::{
@@ -60,7 +59,9 @@ use self::{
         ring_census::ring_census,
     },
     edit::{
-        assets::{load_image_cmd, load_mesh_cmd, load_world_cmd, mutate_asset_cmd, reload_asset_cmd},
+        assets::{
+            load_image_cmd, load_mesh_cmd, load_world_cmd, mutate_asset_cmd, reload_asset_cmd,
+        },
         generate::{chunk_census, chunk_despawn, generate_chunks_cmd, generate_scene},
         mouse::{mouse_button, mouse_move, mouse_status, mouse_wheel},
         objects::{increment_stats, replace_handles, spawn_primitive},
@@ -68,7 +69,10 @@ use self::{
         shapes::{spawn_lod, spawn_shape},
     },
     features::{
-        cluster::{cluster_census, light_remove, light_spawn, light_stats, light_update, transparent_sort_check},
+        cluster::{
+            cluster_census, light_remove, light_spawn, light_stats, light_update,
+            transparent_sort_check,
+        },
         cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
         draw::{draw_stats, drawlist_verify_set},
         gap::{gap_census, gap_set, gap_stats},
@@ -117,7 +121,10 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/sun_get", sun_get)
                 .with_method_main("ash_renderer/sun_set", sun_set)
                 .with_method_main("ash_renderer/cluster_census", cluster_census)
-                .with_method_main("ash_renderer/transparent_sort_check", transparent_sort_check)
+                .with_method_main(
+                    "ash_renderer/transparent_sort_check",
+                    transparent_sort_check,
+                )
                 .with_method_main("ash_renderer/hiz_census", hiz_census)
                 .with_method_main("ash_renderer/occlusion_probe", occlusion_probe)
                 .with_method_main("ash_renderer/occlusion_set_enabled", occlusion_set_enabled)
@@ -156,7 +163,11 @@ impl Plugin for AshRemotePlugin {
         }
         info!(
             "BRP（{}）: http://127.0.0.1:{port}（render subapp :{}）",
-            if is_dev_instance() { "开发实例" } else { "正式版" },
+            if is_dev_instance() {
+                "开发实例"
+            } else {
+                "正式版"
+            },
             port + 1
         );
     }
@@ -176,7 +187,11 @@ fn brp_port() -> u16 {
             _ => warn!("ASH_BRP_PORT='{v}' 不是合法端口，忽略"),
         }
     }
-    if is_dev_instance() { DEFAULT_PORT } else { PUBLISHED_PORT }
+    if is_dev_instance() {
+        DEFAULT_PORT
+    } else {
+        PUBLISHED_PORT
+    }
 }
 
 /// exe 是否从 cargo 的构建产物目录（`target/<profile>/` 及其子目录）启动。

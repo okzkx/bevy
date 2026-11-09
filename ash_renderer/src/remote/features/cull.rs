@@ -18,13 +18,13 @@ use serde_json::{json, Value};
 use ash_macros::system;
 
 use crate::{
-    scene::InstanceLedger,
     render::{
         aabb_screen_rect, aabb_visible, conservative_world_aabb, frustum_planes,
         occluded_reverse_z, occlusion_mip_level, Context, CullDiagnostics, CullSettings,
-        HizPyramid, InstanceTables, MARK_SIZE, MeshPool, OcclusionDiagnostics,
-        OcclusionFallback, OcclusionSettings, OBJECT_TABLE_CAPACITY,
+        HizPyramid, InstanceTables, MeshPool, OcclusionDiagnostics, OcclusionFallback,
+        OcclusionSettings, MARK_SIZE, OBJECT_TABLE_CAPACITY,
     },
+    scene::InstanceLedger,
 };
 
 use crate::remote::common::{
@@ -63,11 +63,8 @@ pub(crate) fn cull_stats(In(_params): In<Option<Value>>, world: &mut World) -> B
         let Some(mesh_slot) = pool.resident(row.mesh.id()) else {
             continue;
         };
-        let (wmin, wmax) = conservative_world_aabb(
-            &row.model,
-            mesh_slot.local_aabb.0,
-            mesh_slot.local_aabb.1,
-        );
+        let (wmin, wmax) =
+            conservative_world_aabb(&row.model, mesh_slot.local_aabb.0, mesh_slot.local_aabb.1);
         let visible = aabb_visible(&planes, wmin.into(), wmax.into());
         reference.push((entity, slot, visible));
     }
@@ -207,7 +204,9 @@ pub(crate) fn hiz_census(In(params): In<Option<Value>>, world: &mut World) -> Br
     let slot = p.slot.unwrap_or(0);
     let levels = hiz.levels();
     if let Some(level) = p.level.filter(|level| *level >= levels) {
-        return Err(invalid_params(format!("level {level} 越界（金字塔 {levels} 级）")));
+        return Err(invalid_params(format!(
+            "level {level} 越界（金字塔 {levels} 级）"
+        )));
     }
     let wanted: Vec<u32> = p
         .level
@@ -298,14 +297,26 @@ pub(crate) fn occlusion_probe(In(params): In<Option<Value>>, world: &mut World) 
         let scale = dims / Vec2::from_array(screen);
         let clamp_max = (dims - Vec2::splat(1.0)).max(Vec2::ZERO);
         let tile = (px_min * scale).clamp(Vec2::ZERO, clamp_max).as_uvec2();
-        let (x1, y1) = ((tile.x + 1).min(lw.saturating_sub(1)), (tile.y + 1).min(lh.saturating_sub(1)));
+        let (x1, y1) = (
+            (tile.x + 1).min(lw.saturating_sub(1)),
+            (tile.y + 1).min(lh.saturating_sub(1)),
+        );
         // 读回段越界（空级/尺寸不符）= 读数侧不变式破缺，回 internal
         let at = |x: u32, y: u32| {
             data.get((y as usize) * (lw as usize) + (x as usize))
                 .copied()
-                .ok_or_else(|| BrpError::internal(format!("Hi-Z 第 {level} 级读回越界：({x},{y}) 超出 {lw}×{lh}")))
+                .ok_or_else(|| {
+                    BrpError::internal(format!(
+                        "Hi-Z 第 {level} 级读回越界：({x},{y}) 超出 {lw}×{lh}"
+                    ))
+                })
         };
-        let taps = [at(tile.x, tile.y)?, at(x1, tile.y)?, at(tile.x, y1)?, at(x1, y1)?];
+        let taps = [
+            at(tile.x, tile.y)?,
+            at(x1, tile.y)?,
+            at(tile.x, y1)?,
+            at(x1, y1)?,
+        ];
         let occluder = taps.iter().copied().fold(f32::INFINITY, f32::min);
         rows.push(json!({
             "entity": format!("{entity:?}"),

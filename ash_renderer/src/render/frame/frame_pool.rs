@@ -23,7 +23,7 @@ use crate::common::error::Result;
 use crate::common::syntax::ResultTierExt;
 use crate::render::core::device::transfer::Uploader;
 use crate::render::core::target::depth::DepthTarget;
-use crate::render::{Context, MAX_FRAMES_IN_FLIGHT, Ticket};
+use crate::render::{Context, Ticket, MAX_FRAMES_IN_FLIGHT};
 
 /// 一项提交等待：等哪个信号量、从哪个阶段前卡、timeline 等到几号。
 /// binary 信号量 value 填 0 占位（TimelineSemaphoreSubmitInfo 要求与 wait 信号量同长，binary 忽略该值）。
@@ -145,7 +145,8 @@ impl FramePool {
             .collect::<Result<Vec<_>>>()?;
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             guard.image_available.push(unsafe {
-                ctx.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                ctx.device
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
             }?);
             guard.fences.push(unsafe {
                 ctx.device.create_fence(
@@ -159,12 +160,14 @@ impl FramePool {
             .into_iter()
             .zip(depths)
             .zip(guard.image_available.drain(..).zip(guard.fences.drain(..)))
-            .map(|((command_buffer, depth), (image_available, in_flight))| Frame {
-                command_buffer,
-                image_available,
-                in_flight,
-                depth,
-            })
+            .map(
+                |((command_buffer, depth), (image_available, in_flight))| Frame {
+                    command_buffer,
+                    image_available,
+                    in_flight,
+                    depth,
+                },
+            )
             .collect();
         let command_pool = std::mem::replace(&mut guard.command_pool, vk::CommandPool::null());
         info!(
@@ -264,10 +267,8 @@ impl FramePool {
         unsafe {
             self.device
                 .wait_for_fences(slice::from_ref(&frame.in_flight), true, u64::MAX)?;
-            self.device.reset_command_buffer(
-                frame.command_buffer,
-                vk::CommandBufferResetFlags::empty(),
-            )?;
+            self.device
+                .reset_command_buffer(frame.command_buffer, vk::CommandBufferResetFlags::empty())?;
         }
         Ok(())
     }

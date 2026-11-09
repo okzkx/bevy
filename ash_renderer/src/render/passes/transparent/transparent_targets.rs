@@ -5,11 +5,13 @@ use bevy::log::info;
 use bevy::prelude::Resource;
 
 use crate::common::error::Result;
+use crate::render::core::binding::set_layout::{
+    BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc,
+};
+use crate::render::core::binding::storage_sets;
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::role::BufferRole;
 use crate::render::Context;
-use crate::render::core::binding::set_layout::{BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
-use crate::render::core::binding::storage_sets;
 
 const CS: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
 
@@ -64,14 +66,22 @@ impl TransparentTargets {
         };
         let sharing = ctx.sharing_families();
         let mk = |role: BufferRole, size: u64| -> Result<GpuBuffer> {
-            GpuBuffer::create_with_families(&ctx.device, ctx.memory_contract(), size, role, &sharing)
+            GpuBuffer::create_with_families(
+                &ctx.device,
+                ctx.memory_contract(),
+                size,
+                role,
+                &sharing,
+            )
         };
         let capacity = u64::from(TRANSPARENT_CAPACITY);
         let mut slots = Vec::with_capacity(crate::render::MAX_FRAMES_IN_FLIGHT);
         for slot in 0..crate::render::MAX_FRAMES_IN_FLIGHT {
-            this.index_lists.push(mk(BufferRole::DeviceStorage, capacity * 4)?);
+            this.index_lists
+                .push(mk(BufferRole::DeviceStorage, capacity * 4)?);
             this.keys.push(mk(BufferRole::DeviceStorage, capacity * 4)?);
-            this.commands.push(mk(BufferRole::IndirectCommands, capacity * 20)?);
+            this.commands
+                .push(mk(BufferRole::IndirectCommands, capacity * 20)?);
             this.counts.push(mk(BufferRole::Storage, 4)?);
             slots.push([
                 this.index_lists[slot].buffer(),
@@ -81,7 +91,9 @@ impl TransparentTargets {
             ]);
         }
         this.set_layout = TRANSPARENT_SET_DESC.create(&ctx.device)?;
-        (this.pool, this.sets) = unsafe { storage_sets::create_sets(&ctx.device, &TRANSPARENT_SET_DESC, this.set_layout, &slots) }?;
+        (this.pool, this.sets) = unsafe {
+            storage_sets::create_sets(&ctx.device, &TRANSPARENT_SET_DESC, this.set_layout, &slots)
+        }?;
         info!(
             "透明命令链就绪: 透明行容量 {TRANSPARENT_CAPACITY}（索引/键列表 + 命令环 + 计数）× {} 帧槽",
             this.sets.len(),
@@ -150,7 +162,8 @@ impl Drop for TransparentTargets {
                 self.device.destroy_descriptor_pool(self.pool, None);
             }
             if self.set_layout != vk::DescriptorSetLayout::null() {
-                self.device.destroy_descriptor_set_layout(self.set_layout, None);
+                self.device
+                    .destroy_descriptor_set_layout(self.set_layout, None);
             }
         }
     }

@@ -38,19 +38,24 @@ use bevy::pbr::StandardMaterial;
 use crate::common::bytes::{put_f32s, put_mat4, put_u32, put_u32s, put_vec4};
 use crate::common::error::{Result, VulkanError};
 
-use crate::render::resident::slot_allocator::SlotAllocator;
+use crate::render::core::binding::descriptor_writer::DescriptorWriter;
+use crate::render::core::binding::set_layout::{
+    stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc,
+};
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::contract::{align_up, MemoryContract};
 use crate::render::core::device::memory::role::BufferRole;
-use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
+use crate::render::resident::slot_allocator::SlotAllocator;
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
 /// 对象表容量（实例槽数）：131072 ≥ 10 万实例压测档，用尽报错不截断。
 pub const OBJECT_TABLE_CAPACITY: u32 = 1 << 17;
 
-const SHARED: vk::ShaderStageFlags =
-    stages(&[vk::ShaderStageFlags::COMPUTE, vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT]);
+const SHARED: vk::ShaderStageFlags = stages(&[
+    vk::ShaderStageFlags::COMPUTE,
+    vk::ShaderStageFlags::VERTEX,
+    vk::ShaderStageFlags::FRAGMENT,
+]);
 const COMPUTE: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
 
 /// set2 实例表（binding 含义见模块注释）：b0/b1/b2 图形与 compute 共读，b3..b9 compute 专属
@@ -169,7 +174,11 @@ pub fn pack_object_record(
     aabb_max: [f32; 3],
 ) -> [u8; OBJECT_RECORD_SIZE as usize] {
     let mut out = [0u8; OBJECT_RECORD_SIZE as usize];
-    put_u32s(&mut out, 0, &[first_index, index_count, vertex_base, material_index]);
+    put_u32s(
+        &mut out,
+        0,
+        &[first_index, index_count, vertex_base, material_index],
+    );
     put_f32s(&mut out, 16, &aabb_min);
     put_f32s(&mut out, 32, &aabb_max);
     out
@@ -195,7 +204,11 @@ pub fn pack_material_record(
 
 /// LOD 变体条目 → 12B 字节（first_index/index_count/vertex_base，与 WGSL `LodEntry` 同序）。
 #[must_use]
-pub fn pack_lod_entry(first_index: u32, index_count: u32, vertex_base: u32) -> [u8; LOD_ENTRY_SIZE as usize] {
+pub fn pack_lod_entry(
+    first_index: u32,
+    index_count: u32,
+    vertex_base: u32,
+) -> [u8; LOD_ENTRY_SIZE as usize] {
     let mut out = [0u8; LOD_ENTRY_SIZE as usize];
     put_u32s(&mut out, 0, &[first_index, index_count, vertex_base]);
     out
@@ -278,7 +291,10 @@ impl InstanceTables {
         let per_object = |stride: u64| align_up(u64::from(OBJECT_TABLE_CAPACITY) * stride, MIB);
         let object_bytes = per_object(OBJECT_RECORD_SIZE);
         let model_bytes = per_object(MODEL_STRIDE);
-        let material_bytes = align_up(u64::from(MATERIAL_TABLE_CAPACITY) * MATERIAL_RECORD_SIZE, MIB);
+        let material_bytes = align_up(
+            u64::from(MATERIAL_TABLE_CAPACITY) * MATERIAL_RECORD_SIZE,
+            MIB,
+        );
         let mark_bytes = per_object(MARK_SIZE);
         let occ_mark_bytes = per_object(OCC_MARK_SIZE);
         let presence_bytes = per_object(PRESENCE_ENTRY_SIZE);
@@ -392,7 +408,11 @@ impl InstanceTables {
         lod_table_rings: &[GpuBuffer],
         lod_level_rings: &[GpuBuffer],
         gap_mark_rings: &[GpuBuffer],
-    ) -> Result<(vk::DescriptorSetLayout, Vec<vk::DescriptorSet>, vk::DescriptorPool)> {
+    ) -> Result<(
+        vk::DescriptorSetLayout,
+        Vec<vk::DescriptorSet>,
+        vk::DescriptorPool,
+    )> {
         unsafe {
             let set2_layout = INSTANCE_SET_DESC.create(device)?;
             let instance_pool_sizes = INSTANCE_SET_DESC.pool_sizes_vec(MAX_FRAMES_IN_FLIGHT as u32);
@@ -417,17 +437,58 @@ impl InstanceTables {
             // b0 对象表，b1..b9 各帧槽自己的环，全部整段绑定；写满才提交
             for (frame, set) in sets.iter().enumerate() {
                 let mut writer = DescriptorWriter::new(&INSTANCE_SET_DESC, *set);
-                writer.buffer(0, object_buffer.buffer(), 0, OBJECT_TABLE_CAPACITY as u64 * OBJECT_RECORD_SIZE);
+                writer.buffer(
+                    0,
+                    object_buffer.buffer(),
+                    0,
+                    OBJECT_TABLE_CAPACITY as u64 * OBJECT_RECORD_SIZE,
+                );
                 for (binding, buffer, range) in [
-                    (1u32, &model_rings[frame], OBJECT_TABLE_CAPACITY as u64 * MODEL_STRIDE),
-                    (2, &material_rings[frame], MATERIAL_TABLE_CAPACITY as u64 * MATERIAL_RECORD_SIZE),
-                    (3, &mark_rings[frame], OBJECT_TABLE_CAPACITY as u64 * MARK_SIZE),
-                    (4, &presence_rings[frame], OBJECT_TABLE_CAPACITY as u64 * PRESENCE_ENTRY_SIZE),
-                    (5, &command_rings[frame], OBJECT_TABLE_CAPACITY as u64 * INDIRECT_COMMAND_SIZE),
-                    (6, &occ_mark_rings[frame], OBJECT_TABLE_CAPACITY as u64 * OCC_MARK_SIZE),
-                    (7, &lod_table_rings[frame], OBJECT_TABLE_CAPACITY as u64 * LOD_TABLE_STRIDE),
-                    (8, &lod_level_rings[frame], OBJECT_TABLE_CAPACITY as u64 * LOD_LEVEL_SIZE),
-                    (9, &gap_mark_rings[frame], OBJECT_TABLE_CAPACITY as u64 * GAP_MARK_SIZE),
+                    (
+                        1u32,
+                        &model_rings[frame],
+                        OBJECT_TABLE_CAPACITY as u64 * MODEL_STRIDE,
+                    ),
+                    (
+                        2,
+                        &material_rings[frame],
+                        MATERIAL_TABLE_CAPACITY as u64 * MATERIAL_RECORD_SIZE,
+                    ),
+                    (
+                        3,
+                        &mark_rings[frame],
+                        OBJECT_TABLE_CAPACITY as u64 * MARK_SIZE,
+                    ),
+                    (
+                        4,
+                        &presence_rings[frame],
+                        OBJECT_TABLE_CAPACITY as u64 * PRESENCE_ENTRY_SIZE,
+                    ),
+                    (
+                        5,
+                        &command_rings[frame],
+                        OBJECT_TABLE_CAPACITY as u64 * INDIRECT_COMMAND_SIZE,
+                    ),
+                    (
+                        6,
+                        &occ_mark_rings[frame],
+                        OBJECT_TABLE_CAPACITY as u64 * OCC_MARK_SIZE,
+                    ),
+                    (
+                        7,
+                        &lod_table_rings[frame],
+                        OBJECT_TABLE_CAPACITY as u64 * LOD_TABLE_STRIDE,
+                    ),
+                    (
+                        8,
+                        &lod_level_rings[frame],
+                        OBJECT_TABLE_CAPACITY as u64 * LOD_LEVEL_SIZE,
+                    ),
+                    (
+                        9,
+                        &gap_mark_rings[frame],
+                        OBJECT_TABLE_CAPACITY as u64 * GAP_MARK_SIZE,
+                    ),
                 ] {
                     writer.buffer(binding, buffer.buffer(), 0, range);
                 }
@@ -611,7 +672,8 @@ impl Drop for InstanceTables {
         // buffer 随字段 Drop。
         unsafe {
             self.device.destroy_descriptor_pool(self.pool, None);
-            self.device.destroy_descriptor_set_layout(self.set2_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.set2_layout, None);
         }
     }
 }
@@ -662,7 +724,8 @@ mod tests {
     /// 恒等变换下保守盒 = 局部盒本身(不放大不偏移)。
     #[test]
     fn identity_transform_is_exact() {
-        let (wmin, wmax) = conservative_world_aabb(&Mat4::IDENTITY, [-1.0, 0.0, -2.0], [1.0, 3.0, 2.0]);
+        let (wmin, wmax) =
+            conservative_world_aabb(&Mat4::IDENTITY, [-1.0, 0.0, -2.0], [1.0, 3.0, 2.0]);
         assert_eq!(wmin, [-1.0, 0.0, -2.0]);
         assert_eq!(wmax, [1.0, 3.0, 2.0]);
     }
@@ -713,7 +776,11 @@ mod tests {
         assert_eq!(read_f32(4), 0.2);
         assert_eq!(read_f32(16), 0.75);
         assert_eq!(read_f32(20), 0.5);
-        assert_eq!(read_f32(24), 0.5, "reflectance 记录原值（clamp 换算在 shader 端）");
+        assert_eq!(
+            read_f32(24),
+            0.5,
+            "reflectance 记录原值（clamp 换算在 shader 端）"
+        );
         assert_eq!(read_u32(32), 7);
         assert_eq!(read_u32(36), u32::MAX, "normal 缺席哨兵");
         assert_eq!(read_u32(40), 9);
@@ -736,6 +803,9 @@ mod tests {
         assert_eq!(read_u32(8), 11);
         // 哨兵条目 = index_count 0（其余字段语义无关）
         let sentinel = pack_lod_entry(0, 0, 0);
-        assert_eq!(u32::from_le_bytes(sentinel[4..8].try_into().expect("4B")), 0);
+        assert_eq!(
+            u32::from_le_bytes(sentinel[4..8].try_into().expect("4B")),
+            0
+        );
     }
 }

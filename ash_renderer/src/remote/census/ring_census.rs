@@ -15,7 +15,7 @@ use ash_macros::system;
 
 use crate::render::{
     pack_material_record, pack_model, pack_object_record, readback_buffer, BindlessTextureTable,
-    ImageCache, InstanceTables, MeshPool, Context, INDIRECT_COMMAND_SIZE, MARK_SIZE,
+    Context, ImageCache, InstanceTables, MeshPool, INDIRECT_COMMAND_SIZE, MARK_SIZE,
     MATERIAL_RECORD_SIZE, MODEL_STRIDE, NO_TEXTURE_INDEX, OBJECT_RECORD_SIZE,
 };
 use crate::scene::InstanceLedger;
@@ -188,7 +188,11 @@ pub(crate) fn ring_census(In(params): In<Option<Value>>, world: &mut World) -> B
     {
         let mut tables = res_mut::<InstanceTables>(world)?;
         for (frame, list) in presence_lists.iter_mut().enumerate() {
-            let bytes = read_buffer(tables.presence_ring(frame), used_slots as usize * 4, "在场环读失败")?;
+            let bytes = read_buffer(
+                tables.presence_ring(frame),
+                used_slots as usize * 4,
+                "在场环读失败",
+            )?;
             // 环重写只覆盖在场列表长度，尾段是旧帧残留；过滤到合法槽域后即为本帧列表
             *list = words(&bytes)
                 .into_iter()
@@ -209,9 +213,16 @@ pub(crate) fn ring_census(In(params): In<Option<Value>>, world: &mut World) -> B
         {
             let mut tables = res_mut::<InstanceTables>(world)?;
             let mark_len = used_slots as usize * MARK_SIZE as usize;
-            combined_marks[frame] = words(&read_buffer(tables.mark_ring(frame), mark_len, "标记环读失败")?);
-            occ_only_marks[frame] =
-                words(&read_buffer(tables.occ_mark_ring(frame), mark_len, "遮挡标记环读失败")?);
+            combined_marks[frame] = words(&read_buffer(
+                tables.mark_ring(frame),
+                mark_len,
+                "标记环读失败",
+            )?);
+            occ_only_marks[frame] = words(&read_buffer(
+                tables.occ_mark_ring(frame),
+                mark_len,
+                "遮挡标记环读失败",
+            )?);
         }
         let count = presence_lists[frame].len();
         let mut bytes = vec![0u8; count * INDIRECT_COMMAND_SIZE as usize];
@@ -236,7 +247,10 @@ pub(crate) fn ring_census(In(params): In<Option<Value>>, world: &mut World) -> B
             model_match[frame] = model_buf == row.model_bytes;
             tables
                 .material_ring(frame)
-                .read(u64::from(row.mat_slot) * MATERIAL_RECORD_SIZE, &mut material_actual[frame])
+                .read(
+                    u64::from(row.mat_slot) * MATERIAL_RECORD_SIZE,
+                    &mut material_actual[frame],
+                )
                 .map_err(internal_err("材质环读失败"))?;
             material_match[frame] = material_actual[frame] == row.material_bytes;
         }

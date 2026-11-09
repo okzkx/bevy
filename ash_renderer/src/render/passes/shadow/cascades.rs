@@ -101,7 +101,11 @@ pub fn cascade_matrices(input: &ShadowCascadeInput) -> ShadowCascades {
         Vec3::Y
     };
     // 光空间右手基 (axis_x, axis_y, to_light)；光近铅直时换参考轴防退化
-    let up_ref = if to_light.y.abs() > 0.99 { Vec3::X } else { Vec3::Y };
+    let up_ref = if to_light.y.abs() > 0.99 {
+        Vec3::X
+    } else {
+        Vec3::Y
+    };
     let axis_x = up_ref.cross(to_light).normalize();
     let axis_y = to_light.cross(axis_x);
 
@@ -150,7 +154,10 @@ pub fn cascade_matrices(input: &ShadowCascadeInput) -> ShadowCascades {
         }
         let center = corners.iter().copied().sum::<Vec3>() / 8.0;
         // 包围球半径取整到 1/16 米：浮点噪声不让 texel 尺寸逐帧抖动
-        let radius = corners.iter().map(|p| p.distance(center)).fold(0.0_f32, f32::max);
+        let radius = corners
+            .iter()
+            .map(|p| p.distance(center))
+            .fold(0.0_f32, f32::max);
         let radius = ((radius * 16.0).ceil() / 16.0).max(0.0625);
         let texel = 2.0 * radius / SHADOW_MAP_SIZE as f32;
         // 盒中心取整到 texel 网格（世界原点锚定）
@@ -166,9 +173,24 @@ pub fn cascade_matrices(input: &ShadowCascadeInput) -> ShadowCascades {
         let span = (z_top - z_bottom).max(0.1);
         let inv_half = 1.0 / radius;
         out.view_proj[c] = Mat4::from_cols(
-            Vec4::new(axis_x.x * inv_half, axis_y.x * inv_half, to_light.x / span, 0.0),
-            Vec4::new(axis_x.y * inv_half, axis_y.y * inv_half, to_light.y / span, 0.0),
-            Vec4::new(axis_x.z * inv_half, axis_y.z * inv_half, to_light.z / span, 0.0),
+            Vec4::new(
+                axis_x.x * inv_half,
+                axis_y.x * inv_half,
+                to_light.x / span,
+                0.0,
+            ),
+            Vec4::new(
+                axis_x.y * inv_half,
+                axis_y.y * inv_half,
+                to_light.y / span,
+                0.0,
+            ),
+            Vec4::new(
+                axis_x.z * inv_half,
+                axis_y.z * inv_half,
+                to_light.z / span,
+                0.0,
+            ),
             Vec4::new(-cx * inv_half, -cy * inv_half, -z_bottom / span, 1.0),
         );
         out.texel_world[c] = texel;
@@ -272,8 +294,17 @@ mod tests {
     }
 
     /// 相机在 pos、按 rot 朝向的输入（fov 1 rad、方形视口）。
-    fn camera_input(pos: Vec3, rot: Quat, dir_to_light: Vec3, scene_aabb: Option<(Vec3, Vec3)>) -> ShadowCascadeInput {
-        let proj = PerspectiveProjection { fov: 1.0, aspect_ratio: 1.0, ..Default::default() };
+    fn camera_input(
+        pos: Vec3,
+        rot: Quat,
+        dir_to_light: Vec3,
+        scene_aabb: Option<(Vec3, Vec3)>,
+    ) -> ShadowCascadeInput {
+        let proj = PerspectiveProjection {
+            fov: 1.0,
+            aspect_ratio: 1.0,
+            ..Default::default()
+        };
         let view = Mat4::from_rotation_translation(rot, pos).inverse();
         ShadowCascadeInput {
             inv_view_proj: (proj.get_clip_from_view() * view).inverse(),
@@ -290,7 +321,12 @@ mod tests {
     #[test]
     fn slices_fit_inside_cascades() {
         let light = Vec3::new(0.3, 1.0, 0.2).normalize();
-        let input = camera_input(Vec3::new(1.0, 2.0, 3.0), Quat::from_rotation_y(0.7), light, None);
+        let input = camera_input(
+            Vec3::new(1.0, 2.0, 3.0),
+            Quat::from_rotation_y(0.7),
+            light,
+            None,
+        );
         let fit = cascade_matrices(&input);
         let bounds = cascade_slice_boundaries(SHADOW_NEAR_DISTANCE, SHADOW_FAR_MIN);
         assert!((fit.splits[SHADOW_CASCADES - 1] - SHADOW_FAR_MIN).abs() < 1e-4);
@@ -304,8 +340,14 @@ mod tests {
                     for &y in &[-1.0_f32, 1.0] {
                         let p = input.inv_view_proj * Vec4::new(x, y, z, 1.0);
                         let ndc = project(&fit.view_proj[c], p.truncate() / p.w);
-                        assert!(ndc.x.abs() <= 1.001 && ndc.y.abs() <= 1.001, "级联 {c} 角点出 XY 盒: {ndc}");
-                        assert!((-1e-4..=1.0001).contains(&ndc.z), "级联 {c} 角点出深度盒: {ndc}");
+                        assert!(
+                            ndc.x.abs() <= 1.001 && ndc.y.abs() <= 1.001,
+                            "级联 {c} 角点出 XY 盒: {ndc}"
+                        );
+                        assert!(
+                            (-1e-4..=1.0001).contains(&ndc.z),
+                            "级联 {c} 角点出深度盒: {ndc}"
+                        );
                     }
                 }
             }
@@ -319,14 +361,32 @@ mod tests {
     #[test]
     fn tall_caster_toward_sun_stays_in_box() {
         let aabb = (Vec3::new(-20.0, 0.0, -60.0), Vec3::new(20.0, 30.0, 5.0));
-        let input = camera_input(Vec3::new(0.0, 1.7, 0.0), Quat::IDENTITY, Vec3::Y, Some(aabb));
+        let input = camera_input(
+            Vec3::new(0.0, 1.7, 0.0),
+            Quat::IDENTITY,
+            Vec3::Y,
+            Some(aabb),
+        );
         let fit = cascade_matrices(&input);
         let receiver = Vec3::new(0.0, 0.0, -3.0);
         let caster = Vec3::new(0.0, 29.0, -3.0);
-        let c = fit.splits.iter().position(|&s| 3.0 <= s).expect("视深 3m 有级联");
-        let (r, k) = (project(&fit.view_proj[c], receiver), project(&fit.view_proj[c], caster));
-        assert!((r.x - k.x).abs() < 1e-4 && (r.y - k.y).abs() < 1e-4, "同一光线应同 XY: {r} {k}");
-        assert!(k.z > r.z, "投射体必须比接收点更近太阳: caster {k} receiver {r}");
+        let c = fit
+            .splits
+            .iter()
+            .position(|&s| 3.0 <= s)
+            .expect("视深 3m 有级联");
+        let (r, k) = (
+            project(&fit.view_proj[c], receiver),
+            project(&fit.view_proj[c], caster),
+        );
+        assert!(
+            (r.x - k.x).abs() < 1e-4 && (r.y - k.y).abs() < 1e-4,
+            "同一光线应同 XY: {r} {k}"
+        );
+        assert!(
+            k.z > r.z,
+            "投射体必须比接收点更近太阳: caster {k} receiver {r}"
+        );
         assert!((0.0..=1.0).contains(&k.z) && (0.0..=1.0).contains(&r.z));
     }
 
@@ -334,7 +394,12 @@ mod tests {
     #[test]
     fn far_follows_scene_extent() {
         let aabb = (Vec3::new(-100.0, 0.0, -150.0), Vec3::new(100.0, 10.0, 0.0));
-        let input = camera_input(Vec3::new(0.0, 60.0, 20.0), Quat::from_rotation_x(-0.6), Vec3::Y, Some(aabb));
+        let input = camera_input(
+            Vec3::new(0.0, 60.0, 20.0),
+            Quat::from_rotation_x(-0.6),
+            Vec3::Y,
+            Some(aabb),
+        );
         let far = cascade_matrices(&input).splits[SHADOW_CASCADES - 1];
         assert!(far > SHADOW_FAR_MIN && far <= SHADOW_FAR_MAX, "far = {far}");
     }
@@ -346,20 +411,46 @@ mod tests {
         let light = Vec3::new(0.4, 0.8, -0.3).normalize();
         let aabb = Some((Vec3::new(-30.0, 0.0, -30.0), Vec3::new(30.0, 15.0, 30.0)));
         let a = cascade_matrices(&camera_input(Vec3::ZERO, Quat::IDENTITY, light, aabb));
-        let b = cascade_matrices(&camera_input(Vec3::new(0.37, 0.11, -0.53), Quat::IDENTITY, light, aabb));
-        let rot = cascade_matrices(&camera_input(Vec3::ZERO, Quat::from_rotation_y(1.1), light, aabb));
+        let b = cascade_matrices(&camera_input(
+            Vec3::new(0.37, 0.11, -0.53),
+            Quat::IDENTITY,
+            light,
+            aabb,
+        ));
+        let rot = cascade_matrices(&camera_input(
+            Vec3::ZERO,
+            Quat::from_rotation_y(1.1),
+            light,
+            aabb,
+        ));
         let phase = |v: f32| {
             let t = (v + 1.0) * 0.5 * SHADOW_MAP_SIZE as f32;
             t - t.floor()
         };
         for c in 0..SHADOW_CASCADES {
-            assert_eq!(a.texel_world[c], b.texel_world[c], "级联 {c} 平移改了 texel 尺寸");
-            assert_eq!(a.texel_world[c], rot.texel_world[c], "级联 {c} 转动改了 texel 尺寸");
-            let world = Vec3::new(0.2, 0.0, -0.5 * (a.splits[c] + if c == 0 { 0.5 } else { a.splits[c - 1] }));
-            let (na, nb) = (project(&a.view_proj[c], world), project(&b.view_proj[c], world));
+            assert_eq!(
+                a.texel_world[c], b.texel_world[c],
+                "级联 {c} 平移改了 texel 尺寸"
+            );
+            assert_eq!(
+                a.texel_world[c], rot.texel_world[c],
+                "级联 {c} 转动改了 texel 尺寸"
+            );
+            let world = Vec3::new(
+                0.2,
+                0.0,
+                -0.5 * (a.splits[c] + if c == 0 { 0.5 } else { a.splits[c - 1] }),
+            );
+            let (na, nb) = (
+                project(&a.view_proj[c], world),
+                project(&b.view_proj[c], world),
+            );
             for (pa, pb) in [(phase(na.x), phase(nb.x)), (phase(na.y), phase(nb.y))] {
                 let diff = (pa - pb).abs();
-                assert!(diff.min(1.0 - diff) < 1e-2, "级联 {c} texel 相位漂移: {pa} {pb}");
+                assert!(
+                    diff.min(1.0 - diff) < 1e-2,
+                    "级联 {c} texel 相位漂移: {pa} {pb}"
+                );
             }
         }
     }

@@ -31,14 +31,18 @@ impl FrameLogs {
     /// indirect 组装还要用）。暂缓是可反复的状态，进入第一帧报一次、清零复位
     /// 重开（所以不用 [`OnceLog`]）；首个完整 DrawList 的材质覆盖说明只报一次
     /// ——流式加载中途计数残缺，等零暂缓再报。
-    pub(super) fn log_assembly_status(&mut self, pending_rows: usize, total_rows: usize, alpha_override: usize) {
+    pub(super) fn log_assembly_status(
+        &mut self,
+        pending_rows: usize,
+        total_rows: usize,
+        alpha_override: usize,
+    ) {
         if pending_rows > 0 {
             if !self.warned_pending {
                 self.warned_pending = true;
                 info!(
                     "DrawList 暂缓 {}/{} 行（实例槽/mesh/材质未就绪，上传链自愈后消失）",
-                    pending_rows,
-                    total_rows,
+                    pending_rows, total_rows,
                 );
             }
         } else {

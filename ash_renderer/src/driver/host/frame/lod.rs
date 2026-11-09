@@ -5,7 +5,10 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
     common::syntax::{OnceLog, ResultTierExt},
-    render::{InstanceTables, LodDiagnostics, LodDraw, LodPass, LodSettings, LOD_LEVEL_SIZE, MAX_LOD_LEVELS},
+    render::{
+        InstanceTables, LodDiagnostics, LodDraw, LodPass, LodSettings, LOD_LEVEL_SIZE,
+        MAX_LOD_LEVELS,
+    },
 };
 
 use super::ring::{fill_u32, read_ring};
@@ -30,12 +33,14 @@ pub(super) fn create_lod_draw(
 ) -> Result<Option<LodDraw>, BevyError> {
     let bound = pf.bound;
     let dispatch = if lod.settings.enabled && bound > 0 {
-        first.log(|| info!(
-            "GPU LOD 选档 dispatch 首跑（复用视锥 compute 链）：bound {bound}，\
+        first.log(|| {
+            info!(
+                "GPU LOD 选档 dispatch 首跑（复用视锥 compute 链）：bound {bound}，\
              组 {}，{MAX_LOD_LEVELS} 档（96B push：view_proj+screen+bound+threshold+hysteresis；\
              b7 变体表按档直址，b8 档位环 = 迟滞状态）",
-            bound.div_ceil(64),
-        ));
+                bound.div_ceil(64),
+            )
+        });
         Some(lod.pass.draw(
             &pf.view_proj,
             pf.screen,
@@ -51,11 +56,16 @@ pub(super) fn create_lod_draw(
         None
     };
     if bound > 0 {
-        let levels = read_ring(instances.lod_level_ring(pf.slot), bound as usize * LOD_LEVEL_SIZE as usize)
-            .or_fatal("LOD 档位环读数失败，渲染链无法继续")?;
+        let levels = read_ring(
+            instances.lod_level_ring(pf.slot),
+            bound as usize * LOD_LEVEL_SIZE as usize,
+        )
+        .or_fatal("LOD 档位环读数失败，渲染链无法继续")?;
         let mut counts = [0u32; MAX_LOD_LEVELS as usize];
         for slot in pf.live {
-            let Some(&level) = levels.get(*slot as usize) else { continue };
+            let Some(&level) = levels.get(*slot as usize) else {
+                continue;
+            };
             let index = (level as usize).min(counts.len() - 1);
             counts[index] += 1;
         }

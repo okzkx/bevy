@@ -16,8 +16,7 @@ use ash_renderer::{
     scene::{
         AshAssetEventPlugin, AshCameraAspectPlugin, AshCameraControlPlugin, AshCameraGuardPlugin,
         AshLedgerPlugin, AshLightControlPlugin, AshMaterialHookPlugin, AshReadinessPlugin,
-        AshResidencyPlugin, AshVisibilityExemptPlugin, AshWorkloadPlugin,
-        SceneEntryPlugin,
+        AshResidencyPlugin, AshVisibilityExemptPlugin, AshWorkloadPlugin, SceneEntryPlugin,
     },
 };
 use bevy::{

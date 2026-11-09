@@ -19,14 +19,16 @@ use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::role::BufferRole;
 use crate::render::{Context, HDR_FORMAT, MAX_FRAMES_IN_FLIGHT};
 
+use crate::render::core::binding::descriptor_writer::DescriptorWriter;
+use crate::render::core::binding::pipeline_layout::PipelineDesc;
+use crate::render::core::binding::set_layout::{
+    merged_pool_sizes, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts,
+};
+use crate::render::core::binding::shader_abi;
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::record::fullscreen::{record_fullscreen_sampled, FullscreenPass};
-use crate::render::core::target::color::ColorTarget;
-use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::record::graphics::PipelineRef;
-use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{merged_pool_sizes, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
-use crate::render::core::binding::shader_abi;
+use crate::render::core::target::color::ColorTarget;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
 
 /// 降/升采样级数（半分辨率逐级）。
@@ -164,7 +166,13 @@ pub struct BloomSettings {
 impl Default for BloomSettings {
     fn default() -> Self {
         // gain 1.667 对应 ACES_LEGACY 观感；1.0 是纯 ACES，实测画面偏暗（均值亮度约 17%）
-        Self { enabled: true, strength: 0.04, tonemap: true, curve: TonemapCurve::default(), gain: 1.667 }
+        Self {
+            enabled: true,
+            strength: 0.04,
+            tonemap: true,
+            curve: TonemapCurve::default(),
+            gain: 1.667,
+        }
     }
 }
 
@@ -241,10 +249,12 @@ impl BloomTargets {
     /// # Errors
     /// 附件/描述符重建失败。
     pub fn rebuild(&mut self, ctx: &Context, extent: vk::Extent2D) -> Result<()> {
-        if self.extents.first() == Some(&vk::Extent2D {
-            width: extent.width / 2,
-            height: extent.height / 2,
-        }) {
+        if self.extents.first()
+            == Some(&vk::Extent2D {
+                width: extent.width / 2,
+                height: extent.height / 2,
+            })
+        {
             return Ok(());
         }
         unsafe { ctx.device.device_wait_idle() }?;
@@ -274,13 +284,23 @@ impl BloomTargets {
         for k in 0..BLOOM_LEVELS {
             w = (w / 2).max(1);
             h = (h / 2).max(1);
-            let level = vk::Extent2D { width: w, height: h };
+            let level = vk::Extent2D {
+                width: w,
+                height: h,
+            };
             self.extents.push(level);
-            self.down.push(ColorTarget::new(ctx, level, HDR_FORMAT, false, "bloom down")?);
+            self.down.push(ColorTarget::new(
+                ctx,
+                level,
+                HDR_FORMAT,
+                false,
+                "bloom down",
+            )?);
             if k < BLOOM_LEVELS - 1 {
                 // up 链少一级（最小级 down[N-1] 直接作 up 源）；up[i] 与
                 // extents[i] 同尺寸（建在 extents[i+1] 上会 renderArea 越界 VUID）
-                self.up.push(ColorTarget::new(ctx, level, HDR_FORMAT, false, "bloom up")?);
+                self.up
+                    .push(ColorTarget::new(ctx, level, HDR_FORMAT, false, "bloom up")?);
             }
         }
         Ok(())
@@ -292,28 +312,30 @@ impl BloomTargets {
     /// 只在 new 调一次；每个对象建成即落字段，失败路径由 Drop 回收。
     unsafe fn build_static(&mut self) -> Result<()> {
         unsafe {
-        let device = &self.device;
-        self.set_layout_tex = BLOOM_TEX_SET_DESC.create(device)?;
-        self.set_layout_up = BLOOM_UP_SET_DESC.create(device)?;
-        // 自有线性采样器：随本资源 Drop 销毁，不占 bindless 表的采样器槽
-        self.sampler = crate::render::resident::sampler::sampler_key(
-            &bevy::image::ImageSamplerDescriptor::linear(),
-        )
-        .create_sampler(device)?;
-        // 池容量从布局声明推导（分配即按全 binding 扣，与是否写入无关）：
-        // down 集 (N-1)×slots 张 L_tex，up 集 (N-1)×slots + tonemap 集 slots 张 L_up
-        let n = BLOOM_LEVELS as u32;
-        let slots = MAX_FRAMES_IN_FLIGHT as u32;
-        let sets_total = 2 * (n - 1) * slots + slots;
-        let pool_sizes =
-            merged_pool_sizes(&[(&BLOOM_TEX_SET_DESC, (n - 1) * slots), (&BLOOM_UP_SET_DESC, (n - 1) * slots + slots)]);
-        self.pool = device.create_descriptor_pool(
-            &vk::DescriptorPoolCreateInfo::default()
-                .max_sets(sets_total)
-                .pool_sizes(&pool_sizes),
-            None,
-        )?;
-        Ok(())
+            let device = &self.device;
+            self.set_layout_tex = BLOOM_TEX_SET_DESC.create(device)?;
+            self.set_layout_up = BLOOM_UP_SET_DESC.create(device)?;
+            // 自有线性采样器：随本资源 Drop 销毁，不占 bindless 表的采样器槽
+            self.sampler = crate::render::resident::sampler::sampler_key(
+                &bevy::image::ImageSamplerDescriptor::linear(),
+            )
+            .create_sampler(device)?;
+            // 池容量从布局声明推导（分配即按全 binding 扣，与是否写入无关）：
+            // down 集 (N-1)×slots 张 L_tex，up 集 (N-1)×slots + tonemap 集 slots 张 L_up
+            let n = BLOOM_LEVELS as u32;
+            let slots = MAX_FRAMES_IN_FLIGHT as u32;
+            let sets_total = 2 * (n - 1) * slots + slots;
+            let pool_sizes = merged_pool_sizes(&[
+                (&BLOOM_TEX_SET_DESC, (n - 1) * slots),
+                (&BLOOM_UP_SET_DESC, (n - 1) * slots + slots),
+            ]);
+            self.pool = device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(sets_total)
+                    .pool_sizes(&pool_sizes),
+                None,
+            )?;
+            Ok(())
         }
     }
 
@@ -323,54 +345,70 @@ impl BloomTargets {
     /// 静态对象与目标已建成功；失败路径由调用方回收。
     unsafe fn build_descriptors(&mut self) -> Result<()> {
         unsafe {
-        let device = &self.device;
-        let sampler = self.sampler;
-        let n = self.down.len();
-        let slots = MAX_FRAMES_IN_FLIGHT;
-        let alloc = |layout: vk::DescriptorSetLayout, count: usize| -> Result<Vec<vk::DescriptorSet>> {
-            Ok(device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(self.pool)
-                    .set_layouts(&std::iter::repeat_n(layout, count).collect::<Vec<_>>()),
-            )?)
-        };
-        self.sets_down = alloc(self.set_layout_tex, (n - 1) * slots)?;
-        self.sets_up = alloc(self.set_layout_up, (n - 1) * slots)?;
-        self.sets_params = alloc(self.set_layout_up, slots)?;
-        // 写入按布局声明核对种类，写满才提交
-        let ro = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
-        for i in 1..n {
-            for slot in 0..slots {
-                let set_i = (i - 1) * slots + slot;
-                let mut writer = DescriptorWriter::new(&BLOOM_TEX_SET_DESC, self.sets_down[set_i]);
-                writer.image(BLOOM_BINDING_TEX0, self.down[i - 1].view(), ro);
-                writer.sampler(BLOOM_BINDING_SAMPLER, sampler);
-                writer.submit(device)?;
+            let device = &self.device;
+            let sampler = self.sampler;
+            let n = self.down.len();
+            let slots = MAX_FRAMES_IN_FLIGHT;
+            let alloc =
+                |layout: vk::DescriptorSetLayout, count: usize| -> Result<Vec<vk::DescriptorSet>> {
+                    Ok(device.allocate_descriptor_sets(
+                        &vk::DescriptorSetAllocateInfo::default()
+                            .descriptor_pool(self.pool)
+                            .set_layouts(&std::iter::repeat_n(layout, count).collect::<Vec<_>>()),
+                    )?)
+                };
+            self.sets_down = alloc(self.set_layout_tex, (n - 1) * slots)?;
+            self.sets_up = alloc(self.set_layout_up, (n - 1) * slots)?;
+            self.sets_params = alloc(self.set_layout_up, slots)?;
+            // 写入按布局声明核对种类，写满才提交
+            let ro = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+            for i in 1..n {
+                for slot in 0..slots {
+                    let set_i = (i - 1) * slots + slot;
+                    let mut writer =
+                        DescriptorWriter::new(&BLOOM_TEX_SET_DESC, self.sets_down[set_i]);
+                    writer.image(BLOOM_BINDING_TEX0, self.down[i - 1].view(), ro);
+                    writer.sampler(BLOOM_BINDING_SAMPLER, sampler);
+                    writer.submit(device)?;
+                }
             }
-        }
-        for i in 0..n - 1 {
+            for i in 0..n - 1 {
+                for slot in 0..slots {
+                    let set_i = i * slots + slot;
+                    let up_src = if i + 1 == n - 1 {
+                        self.down[n - 1].view()
+                    } else {
+                        self.up[i + 1].view()
+                    };
+                    let mut writer = DescriptorWriter::new(&BLOOM_UP_SET_DESC, self.sets_up[set_i]);
+                    writer
+                        .image(BLOOM_BINDING_TEX0, up_src, ro)
+                        .image(BLOOM_BINDING_TEX1, self.down[i].view(), ro)
+                        .sampler(BLOOM_BINDING_SAMPLER, sampler)
+                        .buffer(
+                            BLOOM_BINDING_PARAMS,
+                            self.ubos[slot].buffer(),
+                            0,
+                            vk::WHOLE_SIZE,
+                        );
+                    writer.submit(device)?;
+                }
+            }
             for slot in 0..slots {
-                let set_i = i * slots + slot;
-                let up_src = if i + 1 == n - 1 { self.down[n - 1].view() } else { self.up[i + 1].view() };
-                let mut writer = DescriptorWriter::new(&BLOOM_UP_SET_DESC, self.sets_up[set_i]);
+                let mut writer = DescriptorWriter::new(&BLOOM_UP_SET_DESC, self.sets_params[slot]);
                 writer
-                    .image(BLOOM_BINDING_TEX0, up_src, ro)
-                    .image(BLOOM_BINDING_TEX1, self.down[i].view(), ro)
+                    .image(BLOOM_BINDING_TEX0, self.up[0].view(), ro)
+                    .image(BLOOM_BINDING_TEX1, self.up[0].view(), ro)
                     .sampler(BLOOM_BINDING_SAMPLER, sampler)
-                    .buffer(BLOOM_BINDING_PARAMS, self.ubos[slot].buffer(), 0, vk::WHOLE_SIZE);
+                    .buffer(
+                        BLOOM_BINDING_PARAMS,
+                        self.ubos[slot].buffer(),
+                        0,
+                        vk::WHOLE_SIZE,
+                    );
                 writer.submit(device)?;
             }
-        }
-        for slot in 0..slots {
-            let mut writer = DescriptorWriter::new(&BLOOM_UP_SET_DESC, self.sets_params[slot]);
-            writer
-                .image(BLOOM_BINDING_TEX0, self.up[0].view(), ro)
-                .image(BLOOM_BINDING_TEX1, self.up[0].view(), ro)
-                .sampler(BLOOM_BINDING_SAMPLER, sampler)
-                .buffer(BLOOM_BINDING_PARAMS, self.ubos[slot].buffer(), 0, vk::WHOLE_SIZE);
-            writer.submit(device)?;
-        }
-        Ok(())
+            Ok(())
         }
     }
 
@@ -395,13 +433,19 @@ impl BloomTargets {
     /// 本帧槽 down 链源集（`level` = 1..N-1，读 down[level-1]）。
     #[must_use]
     pub fn set_down(&self, level: usize, slot: usize) -> DescSet {
-        DescSet::new(&BLOOM_TEX_SET_DESC, self.sets_down[(level - 1) * MAX_FRAMES_IN_FLIGHT + slot])
+        DescSet::new(
+            &BLOOM_TEX_SET_DESC,
+            self.sets_down[(level - 1) * MAX_FRAMES_IN_FLIGHT + slot],
+        )
     }
 
     /// 本帧槽 up 链源集（`level` = 0..N-2）。
     #[must_use]
     pub fn set_up(&self, level: usize, slot: usize) -> DescSet {
-        DescSet::new(&BLOOM_UP_SET_DESC, self.sets_up[level * MAX_FRAMES_IN_FLIGHT + slot])
+        DescSet::new(
+            &BLOOM_UP_SET_DESC,
+            self.sets_up[level * MAX_FRAMES_IN_FLIGHT + slot],
+        )
     }
 
     /// 参数 UBO（宿主写入口，fence 纪律内）。
@@ -440,10 +484,12 @@ impl Drop for BloomTargets {
                 self.device.destroy_descriptor_pool(self.pool, None);
             }
             if self.set_layout_tex != vk::DescriptorSetLayout::null() {
-                self.device.destroy_descriptor_set_layout(self.set_layout_tex, None);
+                self.device
+                    .destroy_descriptor_set_layout(self.set_layout_tex, None);
             }
             if self.set_layout_up != vk::DescriptorSetLayout::null() {
-                self.device.destroy_descriptor_set_layout(self.set_layout_up, None);
+                self.device
+                    .destroy_descriptor_set_layout(self.set_layout_up, None);
             }
             if self.sampler != vk::Sampler::null() {
                 self.device.destroy_sampler(self.sampler, None);
@@ -469,7 +515,11 @@ impl BloomPipelines {
         let prefilter = FullscreenPipeline::new(ctx, &BLOOM_PREFILTER_PIPELINE, layouts)?;
         let down = FullscreenPipeline::new(ctx, &BLOOM_DOWN_PIPELINE, layouts)?;
         let up = FullscreenPipeline::new(ctx, &BLOOM_UP_PIPELINE, layouts)?;
-        Ok(Self { prefilter, down, up })
+        Ok(Self {
+            prefilter,
+            down,
+            up,
+        })
     }
 
     #[must_use]

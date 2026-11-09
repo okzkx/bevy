@@ -18,11 +18,11 @@ use bevy::prelude::Resource;
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
 
-use crate::render::core::pipeline::compute::ComputePipeline;
-use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
+use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 
@@ -31,7 +31,10 @@ pub(crate) static BUILD_INDIRECT_PIPELINE: PipelineDesc = PipelineDesc {
     shader: &shader_abi::BUILD_INDIRECT,
     entries: &[c"cs_main"],
     sets: &[&INSTANCE_SET_DESC],
-    push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: INDIRECT_PUSH_SIZE }),
+    push: Some(PushRange {
+        stages: vk::ShaderStageFlags::COMPUTE,
+        size: INDIRECT_PUSH_SIZE,
+    }),
     color_formats: &[],
     depth_format: None,
 };
@@ -87,7 +90,10 @@ impl IndirectPass {
             "indirect 组装管线就绪: build_indirect compute（instance_set + 4B push count）,\
              maxDrawIndirectCount {max_draw_indirect_count}（drawCount 上界，超界显式报错）"
         );
-        Ok(Self { pipeline, max_draw_indirect_count })
+        Ok(Self {
+            pipeline,
+            max_draw_indirect_count,
+        })
     }
 
     /// 组一帧 dispatch 输入。draw_frame 消费，录制走 [`record`]。
@@ -115,7 +121,12 @@ impl IndirectDraw {
     /// 录制一帧命令组装 dispatch（`record_frame` 在剔除 dispatch 之后调用）。交接屏障
     /// 只收口命令环（compute 写 → DRAW_INDIRECT 读）；标记读依赖由 CullDraw::record 的屏障
     /// 承担。坑：标记屏障不盖 indirect 命令消费，这条必须单独立。
-    pub(crate) fn record(&self, device: &ash::Device, command_buffer: vk::CommandBuffer, instance_set: DescSet) {
+    pub(crate) fn record(
+        &self,
+        device: &ash::Device,
+        command_buffer: vk::CommandBuffer,
+        instance_set: DescSet,
+    ) {
         self.pass.record(
             device,
             command_buffer,

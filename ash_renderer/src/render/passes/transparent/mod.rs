@@ -22,5 +22,5 @@ pub(crate) use transparent_passes::{
 };
 pub use transparent_pipeline::TransparentPipeline;
 pub(crate) use transparent_pipeline::TRANSPARENT_FORWARD_PIPELINE;
-pub use transparent_targets::{TransparentTargets, TRANSPARENT_CAPACITY};
 pub(crate) use transparent_targets::TRANSPARENT_SET_DESC;
+pub use transparent_targets::{TransparentTargets, TRANSPARENT_CAPACITY};

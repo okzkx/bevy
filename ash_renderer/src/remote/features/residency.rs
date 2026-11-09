@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 use ash_macros::system;
 
 use crate::{
-    scene::{AssetInvalidations, InstanceLedger, ResidencySettings, ResidencyStats},
     render::MeshPool,
+    scene::{AssetInvalidations, InstanceLedger, ResidencySettings, ResidencyStats},
 };
 
 use crate::remote::common::{
@@ -46,8 +46,10 @@ pub(crate) fn residency_stats(In(_params): In<Option<Value>>, world: &mut World)
         e.0 = e.0.min(dist);
         e.1 += 1;
     }
-    let mut assets: Vec<(AssetId<Mesh>, f32, usize)> =
-        seen.into_iter().map(|(id, (dist, refs))| (id, dist, refs)).collect();
+    let mut assets: Vec<(AssetId<Mesh>, f32, usize)> = seen
+        .into_iter()
+        .map(|(id, (dist, refs))| (id, dist, refs))
+        .collect();
     assets.sort_by(|a, b| a.1.total_cmp(&b.1));
     let rows: Vec<Value> = assets
         .into_iter()
@@ -127,7 +129,9 @@ pub(crate) fn residency_set(In(params): In<Option<Value>>, world: &mut World) ->
     if let Some(radius) = p.request_radius
         && (!radius.is_finite() || radius <= 0.0)
     {
-        return Err(invalid_params(format!("request_radius {radius} 非法（须为有限正数）")));
+        return Err(invalid_params(format!(
+            "request_radius {radius} 非法（须为有限正数）"
+        )));
     }
     let mut settings = res_mut::<ResidencySettings>(world)?;
     if let Some(enabled) = p.enabled {

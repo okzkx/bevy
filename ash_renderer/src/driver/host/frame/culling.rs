@@ -11,8 +11,8 @@ use bevy::{
 use crate::{
     common::syntax::{OnceLog, ResultTierExt},
     render::{
-        frustum_planes, InstanceTables, CullDiagnostics, CullDraw, CullPass, CullSettings,
-        HizPyramid, OcclusionDiagnostics, OcclusionDraw, OcclusionFallback, OcclusionPass,
+        frustum_planes, CullDiagnostics, CullDraw, CullPass, CullSettings, HizPyramid,
+        InstanceTables, OcclusionDiagnostics, OcclusionDraw, OcclusionFallback, OcclusionPass,
         OcclusionSettings, MARK_SIZE,
     },
 };
@@ -44,18 +44,27 @@ pub(super) fn create_frustum_cull_draw(
     // shadow 开启时剔除 dispatch 也要产出 shadow 标记，两侧全关才可跳过。主视图开关随
     // push 进 shader：关 = marks 恒写 1，不覆盖下方 host 全可见填充的语义
     let draw = (frustum_cull.settings.enabled || shadow_enabled).then(|| {
-        first.log(|| info!(
-            "视锥剔除 dispatch 首跑：bound {bound}，组 {}，平面随 112B push 进 compute",
-            bound.div_ceil(64),
-        ));
-        frustum_cull.pass.draw(&frustum_planes(&pf.view_proj), bound, frustum_cull.settings.enabled)
+        first.log(|| {
+            info!(
+                "视锥剔除 dispatch 首跑：bound {bound}，组 {}，平面随 112B push 进 compute",
+                bound.div_ceil(64),
+            )
+        });
+        frustum_cull.pass.draw(
+            &frustum_planes(&pf.view_proj),
+            bound,
+            frustum_cull.settings.enabled,
+        )
     });
     if !frustum_cull.settings.enabled {
         fill_u32(instances.mark_ring(pf.slot), bound as usize, 1)
             .or_fatal("剔除标记环全可见填充失败，渲染链无法继续")?;
     }
-    let marks = read_ring(instances.mark_ring(pf.slot), bound as usize * MARK_SIZE as usize)
-        .or_fatal("剔除标记环读数失败，渲染链无法继续")?;
+    let marks = read_ring(
+        instances.mark_ring(pf.slot),
+        bound as usize * MARK_SIZE as usize,
+    )
+    .or_fatal("剔除标记环读数失败，渲染链无法继续")?;
     let visible = count_marked(&marks, pf.live);
     frustum_cull.diag.enabled = frustum_cull.settings.enabled;
     frustum_cull.diag.bound = bound;
@@ -157,7 +166,12 @@ pub(super) fn create_occlusion_draw(
                 bound.div_ceil(64),
                 occlusion.hiz.levels(),
             ));
-            let draw = occlusion.pass.draw(&pf.view_proj, pf.screen, bound, occlusion.hiz.occlusion_set(pf.slot));
+            let draw = occlusion.pass.draw(
+                &pf.view_proj,
+                pf.screen,
+                bound,
+                occlusion.hiz.occlusion_set(pf.slot),
+            );
             (Some(draw), None)
         }
         OcclusionVerdict::Skip(reason) => {
@@ -170,8 +184,11 @@ pub(super) fn create_occlusion_draw(
     };
     let mut visible = 0u32;
     if bound > 0 {
-        let marks = read_ring(instances.occ_mark_ring(pf.slot), bound as usize * MARK_SIZE as usize)
-            .or_fatal("遮挡标记环读数失败，渲染链无法继续")?;
+        let marks = read_ring(
+            instances.occ_mark_ring(pf.slot),
+            bound as usize * MARK_SIZE as usize,
+        )
+        .or_fatal("遮挡标记环读数失败，渲染链无法继续")?;
         visible = count_marked(&marks, pf.live);
     }
     let diag = &mut occlusion.diag;

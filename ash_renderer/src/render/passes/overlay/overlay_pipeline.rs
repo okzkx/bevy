@@ -24,13 +24,13 @@ use crate::common::error::Result;
 
 use crate::render::Context;
 
+use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::binding::set_layout::{stages, DescSet, SetLayouts};
+use crate::render::core::binding::shader_abi;
 use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
 use crate::render::core::record::graphics::{
     bind_graphics, bind_vertex_index, set_viewport, PipelineRef,
 };
-use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
-use crate::render::core::binding::set_layout::{stages, DescSet, SetLayouts};
-use crate::render::core::binding::shader_abi;
 use crate::render::resident::tables::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
 
 /// push 范围覆盖全 16B、双阶段：screen_size 在 vertex 用，槽位在 fragment 用。
@@ -268,15 +268,19 @@ impl OverlayPipeline {
             .dst_alpha_blend_factor(vk::BlendFactor::ONE)
             .alpha_blend_op(vk::BlendOp::ADD)
             .color_write_mask(vk::ColorComponentFlags::RGBA)];
-        let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
-            .attachments(&blend_attachment);
+        let color_blend =
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachment);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
         // 颜色 = swapchain 格式；深度格式必须等于实例深度附件（见模块注释）
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(OVERLAY_PIPELINE.color_formats)
-            .depth_attachment_format(OVERLAY_PIPELINE.depth_format.unwrap_or(vk::Format::UNDEFINED));
+            .depth_attachment_format(
+                OVERLAY_PIPELINE
+                    .depth_format
+                    .unwrap_or(vk::Format::UNDEFINED),
+            );
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)
             .vertex_input_state(&vertex_input)
@@ -295,8 +299,7 @@ impl OverlayPipeline {
              声明对齐读写关），顶点输入 20B（pos/uv/color @ 0/8/16），blend 开（color \
              ONE/ONE_MINUS_SRC_ALPHA，alpha ONE_MINUS_DST_ALPHA/ONE），剔除关，set0 \
              共享常驻表，push 16B（0/8/12）",
-            OVERLAY_PIPELINE.color_formats,
-            OVERLAY_PIPELINE.depth_format
+            OVERLAY_PIPELINE.color_formats, OVERLAY_PIPELINE.depth_format
         );
         Ok(Self {
             handle: PipelineHandle::new(device, layout, pipeline, OVERLAY_PIPELINE.sets),

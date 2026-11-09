@@ -58,7 +58,13 @@ const SPAN_SECS: f32 = 600.0;
 impl MonitorPage<'_> {
     /// 面板本体：fps 曲线 + 窗内统计 + 内存/显存读数行。
     pub(in crate::overlay) fn show(self, ui: &mut egui::Ui) {
-        let Self { history, fps, mesh_pool, image_cache, frame_sync } = self;
+        let Self {
+            history,
+            fps,
+            mesh_pool,
+            image_cache,
+            frame_sync,
+        } = self;
         let now = history.samples.last().map(|s| s.elapsed).unwrap_or(0.0);
         let span_start = (now - SPAN_SECS).max(0.0);
         let span: Vec<_> = history
@@ -67,7 +73,13 @@ impl MonitorPage<'_> {
             .filter(|s| s.elapsed >= span_start)
             .collect();
 
-        ui.monospace(format!("fps 当前 {:.0}（{:.1} ms）· 样本 {} · 已采 {:.0}s", fps.fps, fps.ms, history.samples.len(), now));
+        ui.monospace(format!(
+            "fps 当前 {:.0}（{:.1} ms）· 样本 {} · 已采 {:.0}s",
+            fps.fps,
+            fps.ms,
+            history.samples.len(),
+            now
+        ));
 
         // 帧率同步开关：帧循环节奏对齐显示器刷新率，非 present mode 切换
         match frame_sync.refresh_millihertz {
@@ -75,7 +87,9 @@ impl MonitorPage<'_> {
             None => ui.monospace("屏幕刷新率 不可用"),
         };
         ui.checkbox(&mut frame_sync.enabled, "同步 vsync")
-            .on_hover_text("帧循环节奏对齐显示器刷新率（winit wait），非 present mode 切换；关闭后聚焦时全速跑满");
+            .on_hover_text(
+            "帧循环节奏对齐显示器刷新率（winit wait），非 present mode 切换；关闭后聚焦时全速跑满",
+        );
 
         // fps 曲线（窗内）：y 轴 0 到窗内 max × 1.15 留头
         let (response, painter) =
@@ -88,10 +102,16 @@ impl MonitorPage<'_> {
                 .map(|s| {
                     let t = (s.elapsed - span_start).max(0.0) / SPAN_SECS;
                     let y = 1.0 - (s.fps / y_top).clamp(0.0, 1.0);
-                    egui::pos2(rect.left() + t * rect.width(), rect.top() + y * rect.height())
+                    egui::pos2(
+                        rect.left() + t * rect.width(),
+                        rect.top() + y * rect.height(),
+                    )
                 })
                 .collect();
-            painter.add(egui::Shape::line(points, egui::Stroke::new(1.0, egui::Color32::LIGHT_GREEN)));
+            painter.add(egui::Shape::line(
+                points,
+                egui::Stroke::new(1.0, egui::Color32::LIGHT_GREEN),
+            ));
         }
         if let Some(stats) = SpanStats::of(&mut span.iter().map(|s| s.fps).collect::<Vec<f32>>()) {
             ui.monospace(format!(

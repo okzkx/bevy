@@ -71,12 +71,18 @@ pub(crate) fn light_spawn(
     mut table: ResMut<'_, LightTable>,
 ) -> BrpResult {
     let p: LightParams = parse_params(params, "params 缺失：需要 pos 与 color")?;
-    let pos = p.pos.ok_or_else(|| invalid_params("params 缺失：需要 pos（光源世界位置）"))?;
-    let color = p.color.ok_or_else(|| invalid_params("params 缺失：需要 color（线性 RGB）"))?;
+    let pos = p
+        .pos
+        .ok_or_else(|| invalid_params("params 缺失：需要 pos（光源世界位置）"))?;
+    let color = p
+        .color
+        .ok_or_else(|| invalid_params("params 缺失：需要 color（线性 RGB）"))?;
     let radius = p.radius.unwrap_or(10.0); // 缺省作用半径（米）
     let intensity = p.intensity.unwrap_or(10.0);
     if radius <= 0.0 {
-        return Err(invalid_params(format!("radius {radius} 非正——作用半径必须大于 0")));
+        return Err(invalid_params(format!(
+            "radius {radius} 非正——作用半径必须大于 0"
+        )));
     }
     let mut record = LightRecord {
         pos_radius: [pos[0], pos[1], pos[2], radius],
@@ -85,7 +91,9 @@ pub(crate) fn light_spawn(
     };
     // 其余项已写入，这里只为合并 shadow 标志
     p.merge_onto(&mut record);
-    let slot = table.spawn(record).map_err(internal_err("光源 spawn 失败"))?;
+    let slot = table
+        .spawn(record)
+        .map_err(internal_err("光源 spawn 失败"))?;
     info!("BRP spawn 点光 → 常驻表槽 {slot}（radius {radius}）");
     Ok(json!({ "slot": slot, "count": table.light_count() }))
 }
@@ -113,7 +121,9 @@ pub(crate) fn light_update(
         .record(p.slot)
         .ok_or_else(|| invalid_params(format!("光源槽 {} 不在场", p.slot)))?;
     p.changes.merge_onto(&mut record);
-    table.update(p.slot, record).map_err(internal_err("光源 update 失败"))?;
+    table
+        .update(p.slot, record)
+        .map_err(internal_err("光源 update 失败"))?;
     Ok(json!({ "slot": p.slot }))
 }
 
@@ -132,7 +142,9 @@ pub(crate) fn light_remove(
         slot: u32,
     }
     let p: P = parse_params(params, "params 缺失：需要 slot")?;
-    table.remove(p.slot).map_err(internal_err("光源 remove 失败"))?;
+    table
+        .remove(p.slot)
+        .map_err(internal_err("光源 remove 失败"))?;
     Ok(json!({ "slot": p.slot, "count": table.light_count() }))
 }
 
@@ -187,10 +199,17 @@ pub(crate) fn cluster_census(In(_params): In<Option<Value>>, world: &mut World) 
         let mut clusters = res_mut::<LightClusters>(world)?;
         let grid = clusters.grid();
         let len = grid.cluster_count() as usize * 4;
-        (grid, words(&read_buffer(clusters.counts(0), len, "cluster 计数读失败")?))
+        (
+            grid,
+            words(&read_buffer(clusters.counts(0), len, "cluster 计数读失败")?),
+        )
     };
     let transparent_rows = u32_at(
-        &read_buffer(res_mut::<TransparentTargets>(world)?.count(0), 4, "透明行计数读失败")?,
+        &read_buffer(
+            res_mut::<TransparentTargets>(world)?.count(0),
+            4,
+            "透明行计数读失败",
+        )?,
         0,
     )?;
     // CPU 参照（与 cluster_build.wgsl 同公式）：按槽号铺满遍历域，空槽 = 死灯
@@ -235,7 +254,10 @@ pub(crate) fn cluster_census(In(_params): In<Option<Value>>, world: &mut World) 
 /// # Errors
 /// 相机缺席 / 回读失败。
 #[system]
-pub(crate) fn transparent_sort_check(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
+pub(crate) fn transparent_sort_check(
+    In(_params): In<Option<Value>>,
+    world: &mut World,
+) -> BrpResult {
     let view_proj = brp_view_proj(world, "CPU 参照无法提取视锥")?;
     // CPU 参照：可绘行判定与 drawlist 组装同口径，alpha<1 行取保守盒中心视图深度
     let pool = res::<MeshPool>(world)?;
@@ -254,11 +276,8 @@ pub(crate) fn transparent_sort_check(In(_params): In<Option<Value>>, world: &mut
         if material.base_color.to_linear().alpha >= 1.0 {
             continue;
         }
-        let (wmin, wmax) = conservative_world_aabb(
-            &row.model,
-            mesh_slot.local_aabb.0,
-            mesh_slot.local_aabb.1,
-        );
+        let (wmin, wmax) =
+            conservative_world_aabb(&row.model, mesh_slot.local_aabb.0, mesh_slot.local_aabb.1);
         let center: [f32; 3] = std::array::from_fn(|k| (wmin[k] + wmax[k]) * 0.5);
         let clip = view_proj * Vec4::new(center[0], center[1], center[2], 1.0);
         cpu_rows.push((slot, clip.w));
@@ -269,7 +288,12 @@ pub(crate) fn transparent_sort_check(In(_params): In<Option<Value>>, world: &mut
     let mut indices_bytes = vec![0u8; capacity * 4];
     let mut keys_bytes = vec![0u8; capacity * 4];
     res::<TransparentTargets>(world)?
-        .readback_sort(res::<Context>(world)?, 0, &mut indices_bytes, &mut keys_bytes)
+        .readback_sort(
+            res::<Context>(world)?,
+            0,
+            &mut indices_bytes,
+            &mut keys_bytes,
+        )
         .map_err(internal_err("透明排序回读失败"))?;
     let gpu_indices = words(&indices_bytes);
     let gpu_keys: Vec<f32> = words(&keys_bytes)
@@ -296,14 +320,15 @@ pub(crate) fn transparent_sort_check(In(_params): In<Option<Value>>, world: &mut
         let mut cpu_set: Vec<u32> = cpu_rows.iter().map(|(s, _)| *s).collect();
         cpu_set.sort_unstable();
         if gpu_set != cpu_set {
-            issues.push(format!(
-                "行集合不一致: gpu={gpu_set:?} cpu={cpu_set:?}"
-            ));
+            issues.push(format!("行集合不一致: gpu={gpu_set:?} cpu={cpu_set:?}"));
         }
         // 键值逐位对照（CPU 排序序 vs GPU 排序序，容差 1e-4）
         for (k, (gpu_key, (_, key))) in tail_keys.iter().zip(cpu_rows.iter()).enumerate() {
             if (gpu_key - key).abs() > 1e-4 {
-                issues.push(format!("键值偏差 @行{}: gpu={gpu_key} cpu={key}", tail_start + k));
+                issues.push(format!(
+                    "键值偏差 @行{}: gpu={gpu_key} cpu={key}",
+                    tail_start + k
+                ));
                 break;
             }
         }

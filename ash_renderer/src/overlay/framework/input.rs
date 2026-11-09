@@ -206,12 +206,13 @@ impl InputBridge<'_, '_> {
 }
 
 /// 失焦时补报全部已按下键的 Release（落点取最近已知位置；无位置则只清账不发事件）。
-fn release_all_pointer_buttons(input: &mut EguiInput, modifiers: egui::Modifiers) -> Vec<egui::Event> {
+fn release_all_pointer_buttons(
+    input: &mut EguiInput,
+    modifiers: egui::Modifiers,
+) -> Vec<egui::Event> {
     let mut events = Vec::new();
     for (idx, down) in input.buttons_down.iter_mut().enumerate() {
-        if *down
-            && let Some(pos) = input.last_pointer_pos
-        {
+        if *down && let Some(pos) = input.last_pointer_pos {
             events.push(egui::Event::PointerButton {
                 pos,
                 button: ALL_BUTTONS[idx],
@@ -333,14 +334,23 @@ mod tests {
         let events = release_all_pointer_buttons(&mut input, egui::Modifiers::default());
         assert_eq!(events.len(), 2);
         assert!(!input.any_button_down());
-        assert!(events.iter().all(|event| matches!(event, egui::Event::PointerButton { pressed: false, .. })));
-        assert!(matches!(events[0], egui::Event::PointerButton { button, .. } if button == ALL_BUTTONS[0]));
-        assert!(matches!(events[1], egui::Event::PointerButton { button, .. } if button == ALL_BUTTONS[2]));
+        assert!(events
+            .iter()
+            .all(|event| matches!(event, egui::Event::PointerButton { pressed: false, .. })));
+        assert!(
+            matches!(events[0], egui::Event::PointerButton { button, .. } if button == ALL_BUTTONS[0])
+        );
+        assert!(
+            matches!(events[1], egui::Event::PointerButton { button, .. } if button == ALL_BUTTONS[2])
+        );
     }
 
     #[test]
     fn focus_loss_clears_down_state_even_without_last_position() {
-        let mut input = EguiInput { buttons_down: [true, false, false, false, false], ..Default::default() };
+        let mut input = EguiInput {
+            buttons_down: [true, false, false, false, false],
+            ..Default::default()
+        };
         assert!(release_all_pointer_buttons(&mut input, egui::Modifiers::default()).is_empty());
         assert!(!input.any_button_down());
     }

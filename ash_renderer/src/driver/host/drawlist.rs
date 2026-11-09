@@ -20,14 +20,12 @@ use std::collections::BTreeSet;
 
 use crate::common::bytes::put_u32s;
 use crate::common::syntax::ResultTierExt;
-use crate::scene::{
-    anchor_level, DrawListVerify, InstanceLedger, InstanceRow, LodGroups,
-};
 use crate::render::{
-    pack_lod_entry, pack_material_record, pack_model, BindlessTextureTable, ImageCache, InstanceTables,
-    LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS,
-    MODEL_STRIDE, MeshPool, NO_TEXTURE_INDEX,
+    pack_lod_entry, pack_material_record, pack_model, BindlessTextureTable, ImageCache,
+    InstanceTables, MeshPool, LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE,
+    MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS, MODEL_STRIDE, NO_TEXTURE_INDEX,
 };
+use crate::scene::{anchor_level, DrawListVerify, InstanceLedger, InstanceRow, LodGroups};
 
 /// 可绘判定的输入来源：增量组装、全量参照与环写入共用的一束引用。
 #[derive(Clone, Copy)]
@@ -48,7 +46,12 @@ impl<'a> DrawabilitySources<'a> {
         lod_groups: &'a LodGroups,
         floor_anchor: bool,
     ) -> Self {
-        Self { pool, std_materials, lod_groups, floor_anchor }
+        Self {
+            pool,
+            std_materials,
+            lod_groups,
+            floor_anchor,
+        }
     }
 
     /// 可绘判定闭包：实例槽缺 / 锚未驻留 / 材质容器缺席 = None（暂缓）；
@@ -61,7 +64,10 @@ impl<'a> DrawabilitySources<'a> {
             let mesh_id = row.mesh.id();
             let anchor_id = match self.lod_groups.levels_of(mesh_id) {
                 Some(levels) => {
-                    let level = anchor_level(self.floor_anchor, levels[(MAX_LOD_LEVELS - 1) as usize].is_some());
+                    let level = anchor_level(
+                        self.floor_anchor,
+                        levels[(MAX_LOD_LEVELS - 1) as usize].is_some(),
+                    );
                     levels[level as usize].as_ref().map_or(mesh_id, Handle::id)
                 }
                 None => mesh_id,
@@ -93,7 +99,8 @@ impl DrawListVerify {
             return;
         }
         let pending_rows = ledger.assembly_pending();
-        let (ref_slots, ref_materials, ref_pending, ref_alpha) = assemble_reference(ledger, sources);
+        let (ref_slots, ref_materials, ref_pending, ref_alpha) =
+            assemble_reference(ledger, sources);
         let view = ledger.assembly_view();
         self.frames_compared_total += 1;
         let mut mismatch: Option<String> = None;
@@ -110,7 +117,9 @@ impl DrawListVerify {
                 ref_slots.len(),
             ));
         } else if pending_rows != ref_pending {
-            mismatch = Some(format!("暂缓行数不一致（增量 {pending_rows} vs 全量 {ref_pending}）"));
+            mismatch = Some(format!(
+                "暂缓行数不一致（增量 {pending_rows} vs 全量 {ref_pending}）"
+            ));
         } else {
             let mut inc_mats = view.materials.to_vec();
             inc_mats.sort_unstable();
@@ -197,7 +206,9 @@ impl InstanceTables {
         frame: usize,
     ) -> Result<(), BevyError> {
         for entity in model_dirty {
-            let Some((row, slot)) = row_with_slot(ledger, *entity) else { continue };
+            let Some((row, slot)) = row_with_slot(ledger, *entity) else {
+                continue;
+            };
             let bytes = pack_model(&row.model);
             self.model_ring(frame)
                 .write(u64::from(slot) * MODEL_STRIDE, &bytes)
@@ -286,12 +297,18 @@ impl InstanceTables {
         frame: usize,
     ) -> Result<(), BevyError> {
         for entity in lod_dirty {
-            let Some((row, slot)) = row_with_slot(ledger, *entity) else { continue };
+            let Some((row, slot)) = row_with_slot(ledger, *entity) else {
+                continue;
+            };
             let mut bytes = vec![0u8; LOD_TABLE_STRIDE as usize];
             let mut put_entry = |level: usize, id| {
                 if let Some(mesh_slot) = pool.resident(id) {
                     let o = level * LOD_ENTRY_SIZE as usize;
-                    let entry = pack_lod_entry(mesh_slot.first_index(), mesh_slot.index_count, mesh_slot.vertex_base());
+                    let entry = pack_lod_entry(
+                        mesh_slot.first_index(),
+                        mesh_slot.index_count,
+                        mesh_slot.vertex_base(),
+                    );
                     bytes[o..o + LOD_ENTRY_SIZE as usize].copy_from_slice(&entry);
                 }
             };

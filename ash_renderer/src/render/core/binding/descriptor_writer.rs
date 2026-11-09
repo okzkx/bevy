@@ -16,15 +16,28 @@ use super::set_layout::{DescKind, SetLayoutDesc};
 /// 一条待提交的写入（句柄值拷贝，不借用外部数据；提交时再组装 WriteDescriptorSet）。
 #[derive(Clone, Copy)]
 enum Write {
-    Buffer { binding: u32, element: u32, info: vk::DescriptorBufferInfo },
-    Image { binding: u32, element: u32, info: vk::DescriptorImageInfo },
+    Buffer {
+        binding: u32,
+        element: u32,
+        info: vk::DescriptorBufferInfo,
+    },
+    Image {
+        binding: u32,
+        element: u32,
+        info: vk::DescriptorImageInfo,
+    },
 }
 
 impl Write {
     /// `(binding, 数组元素)`。
     fn target(&self) -> (u32, u32) {
         match *self {
-            Self::Buffer { binding, element, .. } | Self::Image { binding, element, .. } => (binding, element),
+            Self::Buffer {
+                binding, element, ..
+            }
+            | Self::Image {
+                binding, element, ..
+            } => (binding, element),
         }
     }
 }
@@ -38,7 +51,11 @@ pub(crate) struct DescriptorWriter {
 
 impl DescriptorWriter {
     pub(crate) fn new(desc: &'static SetLayoutDesc, set: vk::DescriptorSet) -> Self {
-        Self { desc, set, writes: Vec::new() }
+        Self {
+            desc,
+            set,
+            writes: Vec::new(),
+        }
     }
 
     /// 写单个 buffer。种类须是 uniform/storage buffer。
@@ -53,25 +70,48 @@ impl DescriptorWriter {
     }
 
     /// 写 buffer 数组的单个元素（bindless 按槽发布）。
-    pub(crate) fn buffer_at(&mut self, binding: u32, element: u32, buffer: vk::Buffer, offset: u64, range: u64) -> &mut Self {
+    pub(crate) fn buffer_at(
+        &mut self,
+        binding: u32,
+        element: u32,
+        buffer: vk::Buffer,
+        offset: u64,
+        range: u64,
+    ) -> &mut Self {
         self.writes.push(Write::Buffer {
             binding,
             element,
-            info: vk::DescriptorBufferInfo::default().buffer(buffer).offset(offset).range(range),
+            info: vk::DescriptorBufferInfo::default()
+                .buffer(buffer)
+                .offset(offset)
+                .range(range),
         });
         self
     }
 
     /// 写一张图（sampled/storage image；种类按声明核对）。
-    pub(crate) fn image(&mut self, binding: u32, view: vk::ImageView, layout: vk::ImageLayout) -> &mut Self {
+    pub(crate) fn image(
+        &mut self,
+        binding: u32,
+        view: vk::ImageView,
+        layout: vk::ImageLayout,
+    ) -> &mut Self {
         self.image_at(binding, 0, view, layout)
     }
 
-    pub(crate) fn image_at(&mut self, binding: u32, element: u32, view: vk::ImageView, layout: vk::ImageLayout) -> &mut Self {
+    pub(crate) fn image_at(
+        &mut self,
+        binding: u32,
+        element: u32,
+        view: vk::ImageView,
+        layout: vk::ImageLayout,
+    ) -> &mut Self {
         self.writes.push(Write::Image {
             binding,
             element,
-            info: vk::DescriptorImageInfo::default().image_view(view).image_layout(layout),
+            info: vk::DescriptorImageInfo::default()
+                .image_view(view)
+                .image_layout(layout),
         });
         self
     }
@@ -81,7 +121,12 @@ impl DescriptorWriter {
         self.sampler_at(binding, 0, sampler)
     }
 
-    pub(crate) fn sampler_at(&mut self, binding: u32, element: u32, sampler: vk::Sampler) -> &mut Self {
+    pub(crate) fn sampler_at(
+        &mut self,
+        binding: u32,
+        element: u32,
+        sampler: vk::Sampler,
+    ) -> &mut Self {
         self.writes.push(Write::Image {
             binding,
             element,
@@ -114,10 +159,16 @@ impl DescriptorWriter {
                     | ("sampler", DescKind::Sampler)
             );
             if !kind_ok {
-                out.push(format!("b{binding}：声明是 {:?}，不能按 {shape} 写", b.kind));
+                out.push(format!(
+                    "b{binding}：声明是 {:?}，不能按 {shape} 写",
+                    b.kind
+                ));
             }
             if element >= b.count {
-                out.push(format!("b{binding}：元素 {element} 超出声明的 {} 个", b.count));
+                out.push(format!(
+                    "b{binding}：元素 {element} 超出声明的 {} 个",
+                    b.count
+                ));
             }
         }
         out
@@ -128,7 +179,9 @@ impl DescriptorWriter {
     fn coverage_problems(&self) -> Vec<String> {
         let mut out = Vec::new();
         for b in self.desc.bindings {
-            if b.flags.contains(vk::DescriptorBindingFlags::PARTIALLY_BOUND) {
+            if b.flags
+                .contains(vk::DescriptorBindingFlags::PARTIALLY_BOUND)
+            {
                 continue;
             }
             let mut covered = vec![false; b.count as usize];
@@ -139,7 +192,10 @@ impl DescriptorWriter {
             }
             let missing = (0..b.count as usize).filter(|&i| !covered[i]).count();
             if missing > 0 {
-                out.push(format!("b{}：声明要求写满 {} 个，还缺 {missing}", b.binding, b.count));
+                out.push(format!(
+                    "b{}：声明要求写满 {} 个，还缺 {missing}",
+                    b.binding, b.count
+                ));
             }
         }
         out
@@ -178,7 +234,12 @@ impl DescriptorWriter {
                 let ty = self
                     .desc
                     .binding(binding)
-                    .ok_or_else(|| VulkanError::Init(format!("b{binding}：{} 里没有这个 binding", self.desc.name)))?
+                    .ok_or_else(|| {
+                        VulkanError::Init(format!(
+                            "b{binding}：{} 里没有这个 binding",
+                            self.desc.name
+                        ))
+                    })?
                     .kind
                     .vk();
                 let write = vk::WriteDescriptorSet::default()

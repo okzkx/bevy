@@ -277,10 +277,9 @@ impl Uploader {
         let device = &self.device;
         let slot = &mut self.slots[index];
         // 先写入 staging，再录制读取该映射内存的拷贝。
-        let staging_buffer = slot
-            .staging
-            .as_mut()
-            .ok_or_else(|| VulkanError::Contract("内部矛盾:扩容判定后 staging 槽位仍缺席".into()))?;
+        let staging_buffer = slot.staging.as_mut().ok_or_else(|| {
+            VulkanError::Contract("内部矛盾:扩容判定后 staging 槽位仍缺席".into())
+        })?;
         staging_buffer.write(0, &batch.staging)?;
         unsafe {
             device
@@ -366,10 +365,17 @@ impl Uploader {
             device.end_command_buffer(slot.command_buffer)?;
 
             // signal/wait 票据数须与各自信号量数一致；无续批要等时 wait 两组都为空。
-            let waits: &[vk::Semaphore] = if chain_wait.is_some() { slice::from_ref(&semaphore) } else { &[] };
+            let waits: &[vk::Semaphore] = if chain_wait.is_some() {
+                slice::from_ref(&semaphore)
+            } else {
+                &[]
+            };
             let wait_values: Vec<Ticket> = chain_wait.into_iter().collect();
-            let wait_stages: &[vk::PipelineStageFlags] =
-                if chain_wait.is_some() { &[vk::PipelineStageFlags::TRANSFER] } else { &[] };
+            let wait_stages: &[vk::PipelineStageFlags] = if chain_wait.is_some() {
+                &[vk::PipelineStageFlags::TRANSFER]
+            } else {
+                &[]
+            };
             let mut timeline_submit = vk::TimelineSemaphoreSubmitInfo::default()
                 .wait_semaphore_values(&wait_values)
                 .signal_semaphore_values(slice::from_ref(&ticket));

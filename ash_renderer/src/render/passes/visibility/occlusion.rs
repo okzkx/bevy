@@ -20,11 +20,11 @@ use bevy::prelude::Resource;
 use crate::common::bytes::{put_f32s, put_mat4, put_u32};
 use crate::common::error::Result;
 
-use crate::render::core::pipeline::compute::ComputePipeline;
-use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
+use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::passes::visibility::hiz::HIZ_OCCLUSION_SET_DESC;
 use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
@@ -34,7 +34,10 @@ pub(crate) static OCCLUSION_PIPELINE: PipelineDesc = PipelineDesc {
     shader: &shader_abi::OCCLUSION,
     entries: &[c"cs_main"],
     sets: &[&INSTANCE_SET_DESC, &HIZ_OCCLUSION_SET_DESC],
-    push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: OCCLUSION_PUSH_SIZE }),
+    push: Some(PushRange {
+        stages: vk::ShaderStageFlags::COMPUTE,
+        size: OCCLUSION_PUSH_SIZE,
+    }),
     color_formats: &[],
     depth_format: None,
 };
@@ -62,7 +65,11 @@ const _: () = {
 /// view_proj + 屏幕尺寸 + dispatch 上界 → 80B compute push 字节（偏移按
 /// [`OcclusionPushLayout`] 静态断言表排布）。
 #[must_use]
-fn pack_occlusion_push(view_proj: &Mat4, screen: [f32; 2], bound: u32) -> [u8; OCCLUSION_PUSH_SIZE as usize] {
+fn pack_occlusion_push(
+    view_proj: &Mat4,
+    screen: [f32; 2],
+    bound: u32,
+) -> [u8; OCCLUSION_PUSH_SIZE as usize] {
     let mut out = [0u8; OCCLUSION_PUSH_SIZE as usize];
     put_mat4(&mut out, 0, view_proj);
     put_f32s(&mut out, 64, &screen);
@@ -179,7 +186,9 @@ impl OcclusionPass {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        Ok(Self { pipeline: ComputePipeline::new(ctx, &OCCLUSION_PIPELINE, layouts)? })
+        Ok(Self {
+            pipeline: ComputePipeline::new(ctx, &OCCLUSION_PIPELINE, layouts)?,
+        })
     }
 
     /// 组一帧 dispatch 输入。draw_frame 消费，录制走 [`OcclusionDraw::record`]。
@@ -203,7 +212,12 @@ impl OcclusionPass {
 impl OcclusionDraw {
     /// 录制一帧遮挡 dispatch（视锥剔除之后、build_indirect 之前）。交接屏障罩住合并标记
     /// 写 → build_indirect 读；CullDraw::record 的屏障只覆盖视锥段，本段的写要自己收口。
-    pub(crate) fn record(&self, device: &ash::Device, command_buffer: vk::CommandBuffer, instance_set: DescSet) {
+    pub(crate) fn record(
+        &self,
+        device: &ash::Device,
+        command_buffer: vk::CommandBuffer,
+        instance_set: DescSet,
+    ) {
         self.pass.record(
             device,
             command_buffer,
@@ -247,8 +261,8 @@ mod tests {
         ]);
         let vp = ortho * view;
         let screen = [1280.0, 720.0];
-        let (min, max, depth) =
-            aabb_screen_rect(&vp, &Mat4::IDENTITY, [-1.0; 3], [1.0; 3], screen).expect("正交全在相机前");
+        let (min, max, depth) = aabb_screen_rect(&vp, &Mat4::IDENTITY, [-1.0; 3], [1.0; 3], screen)
+            .expect("正交全在相机前");
         // 正交 x_c = 0.5x → NDC ±0.5 → 像素 x ∈ [320, 960]；y 同理翻转后 [180, 540]
         assert!((min.x - 320.0).abs() < 1.0 && (max.x - 960.0).abs() < 1.0);
         assert!((min.y - 180.0).abs() < 1.0 && (max.y - 540.0).abs() < 1.0);

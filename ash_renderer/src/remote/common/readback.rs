@@ -9,7 +9,11 @@ use crate::render::GpuBuffer;
 use super::params::internal_err;
 
 /// 从偏移 0 读回 `len` 字节；读失败报 internal（`what` 写明读的是哪段）。
-pub(crate) fn read_buffer(buffer: &mut GpuBuffer, len: usize, what: &str) -> Result<Vec<u8>, BrpError> {
+pub(crate) fn read_buffer(
+    buffer: &mut GpuBuffer,
+    len: usize,
+    what: &str,
+) -> Result<Vec<u8>, BrpError> {
     let mut bytes = vec![0u8; len];
     buffer.read(0, &mut bytes).map_err(internal_err(what))?;
     Ok(bytes)
@@ -18,7 +22,12 @@ pub(crate) fn read_buffer(buffer: &mut GpuBuffer, len: usize, what: &str) -> Res
 /// 整段按 4 字节小端字解析；尾部不足 4 字节的余量丢弃（读回段按字对齐分配，
 /// 余量只会来自调用方传错长度）。
 pub(crate) fn words(bytes: &[u8]) -> Vec<u32> {
-    bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect()
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
+        .collect()
 }
 
 /// `offset` 起 `len` 字节的子段；越界报 internal。

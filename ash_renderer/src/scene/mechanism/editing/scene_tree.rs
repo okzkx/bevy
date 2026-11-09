@@ -88,7 +88,11 @@ impl SceneTreeIndex {
             .map(|(entity, _)| *entity)
             .collect();
         roots.sort_by_key(|e| e.index());
-        Self { nodes, roots, total }
+        Self {
+            nodes,
+            roots,
+            total,
+        }
     }
 }
 

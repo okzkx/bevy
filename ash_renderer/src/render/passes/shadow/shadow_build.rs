@@ -6,11 +6,11 @@ use bevy::log::info;
 
 use crate::common::bytes::put_u32;
 use crate::common::error::Result;
-use crate::render::core::pipeline::compute::ComputePipeline;
-use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
+use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::passes::shadow::shadow_map::SHADOW_SET_DESC;
 use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
@@ -20,7 +20,10 @@ pub(crate) static SHADOW_BUILD_PIPELINE: PipelineDesc = PipelineDesc {
     shader: &shader_abi::SHADOW_BUILD,
     entries: &[c"cs_main"],
     sets: &[&INSTANCE_SET_DESC, &SHADOW_SET_DESC],
-    push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: SHADOW_BUILD_PUSH_SIZE }),
+    push: Some(PushRange {
+        stages: vk::ShaderStageFlags::COMPUTE,
+        size: SHADOW_BUILD_PUSH_SIZE,
+    }),
     color_formats: &[],
     depth_format: None,
 };

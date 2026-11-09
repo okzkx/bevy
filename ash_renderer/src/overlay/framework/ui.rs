@@ -25,16 +25,14 @@ use bevy::{
 use super::input::{EguiInput, InputBridge};
 use super::paint::AtlasMirror;
 use crate::common::syntax::{unwrap_or_return, OnceLog};
-use crate::render::{AtlasGpu, EguiPassTiming};
-use crate::scene::{
-    apply_transform_edits, PointerCapture, PointerCaptureSet, TransformEditQueue,
-};
-use crate::overlay::widgets::axis_gizmo::AxisGizmo;
-use crate::overlay::widgets::load_popup::{load_activity_tick, AssetLoadPopup, LoadActivity};
 use crate::overlay::tool_window::entity_tree::{
     add_tree_dirty_observers, collect_selected_details, maintain_entity_tree,
 };
 use crate::overlay::tool_window::{insert_tool_window_resources, ToolWindowParams};
+use crate::overlay::widgets::axis_gizmo::AxisGizmo;
+use crate::overlay::widgets::load_popup::{load_activity_tick, AssetLoadPopup, LoadActivity};
+use crate::render::{AtlasGpu, EguiPassTiming};
+use crate::scene::{apply_transform_edits, PointerCapture, PointerCaptureSet, TransformEditQueue};
 
 use ash_macros::system;
 
@@ -120,7 +118,8 @@ fn publish_pointer_capture(
     let cursor = window.single().ok().and_then(Window::cursor_position);
     *capture = match state {
         Some(state) => PointerCapture {
-            over_ui: cursor.is_some_and(|pos| pointer_over_ui(&state.ctx, egui::pos2(pos.x, pos.y))),
+            over_ui: cursor
+                .is_some_and(|pos| pointer_over_ui(&state.ctx, egui::pos2(pos.x, pos.y))),
             wants_keyboard: state.ctx.egui_wants_keyboard_input(),
         },
         None => PointerCapture::default(),
@@ -401,13 +400,17 @@ fn plugin_hooks_begin(state: &EguiState) -> egui::Ui {
             .layer_id(egui::LayerId::background())
             .max_rect(state.ctx.viewport_rect()),
     );
-    with_label_selection(state, |plugin| egui::Plugin::on_begin_pass(plugin, &mut plugin_host));
+    with_label_selection(state, |plugin| {
+        egui::Plugin::on_begin_pass(plugin, &mut plugin_host)
+    });
     plugin_host
 }
 
 /// 配对 [`plugin_hooks_begin`]：补跑 on_end_pass 后 `end_pass`。
 fn plugin_hooks_end(state: &EguiState, mut plugin_host: egui::Ui) -> egui::FullOutput {
-    with_label_selection(state, |plugin| egui::Plugin::on_end_pass(plugin, &mut plugin_host));
+    with_label_selection(state, |plugin| {
+        egui::Plugin::on_end_pass(plugin, &mut plugin_host)
+    });
     state.ctx.end_pass()
 }
 

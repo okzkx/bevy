@@ -12,11 +12,13 @@ use crate::render::passes::lighting::cluster::{CLUSTER_BUILD_PIPELINE, LIGHT_CLU
 use crate::render::passes::lighting::composite_pipeline::GBUFFER_COMPOSITE_PIPELINE;
 use crate::render::passes::overlay::overlay_pipeline::OVERLAY_PIPELINE;
 use crate::render::passes::post::bloom::{
-    BLOOM_DOWN_PIPELINE, BLOOM_PREFILTER_PIPELINE, BLOOM_TEX_SET_DESC, BLOOM_UP_PIPELINE, BLOOM_UP_SET_DESC,
+    BLOOM_DOWN_PIPELINE, BLOOM_PREFILTER_PIPELINE, BLOOM_TEX_SET_DESC, BLOOM_UP_PIPELINE,
+    BLOOM_UP_SET_DESC,
 };
 use crate::render::passes::post::present_tonemap_pipeline::PRESENT_TONEMAP_PIPELINE;
 use crate::render::passes::post::smaa::{
-    SMAA_A_SET_DESC, SMAA_BLEND_PIPELINE, SMAA_B_SET_DESC, SMAA_EDGE_PIPELINE, SMAA_NEIGHBORHOOD_PIPELINE,
+    SMAA_A_SET_DESC, SMAA_BLEND_PIPELINE, SMAA_B_SET_DESC, SMAA_EDGE_PIPELINE,
+    SMAA_NEIGHBORHOOD_PIPELINE,
 };
 use crate::render::passes::shadow::shadow_build::SHADOW_BUILD_PIPELINE;
 use crate::render::passes::shadow::shadow_map::{SHADOW_SET_DESC, SHADOW_WRITE_PIPELINE};
@@ -25,7 +27,9 @@ use crate::render::passes::transparent::{
     TRANSPARENT_SET_DESC, TRANSPARENT_SORT_PIPELINE,
 };
 use crate::render::passes::visibility::cull::CULL_PIPELINE;
-use crate::render::passes::visibility::hiz::{HIZ_DOWNSAMPLE_PIPELINE, HIZ_OCCLUSION_SET_DESC, HIZ_REDUCE_SET_DESC};
+use crate::render::passes::visibility::hiz::{
+    HIZ_DOWNSAMPLE_PIPELINE, HIZ_OCCLUSION_SET_DESC, HIZ_REDUCE_SET_DESC,
+};
 use crate::render::passes::visibility::indirect::BUILD_INDIRECT_PIPELINE;
 use crate::render::passes::visibility::lod::LOD_SELECT_PIPELINE;
 use crate::render::passes::visibility::occlusion::OCCLUSION_PIPELINE;

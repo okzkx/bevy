@@ -8,7 +8,10 @@
 //! 到货——路径失败经 `AssetLoadFailedEvent` 读侧收账，到货经上传链与 readiness
 //! 计量对账。
 
-use bevy::{prelude::*, remote::{BrpError, BrpResult}};
+use bevy::{
+    prelude::*,
+    remote::{BrpError, BrpResult},
+};
 use serde_json::{json, Value};
 
 use crate::scene::{
@@ -208,7 +211,9 @@ pub(crate) fn load_world_cmd(In(params): In<Option<Value>>, world: &mut World) -
     let handle = res::<AssetServer>(world)?
         // load 收 AssetPath<'static>（柄内保存），须传 owned 路径
         .load(bevy::gltf::GltfAssetLabel::Scene(0).from_asset(p.path.clone()));
-    let entity = world.spawn(bevy::world_serialization::WorldAssetRoot(handle)).id();
+    let entity = world
+        .spawn(bevy::world_serialization::WorldAssetRoot(handle))
+        .id();
     Ok(json!({
         "entity": entity.to_string(),
         "path": p.path,

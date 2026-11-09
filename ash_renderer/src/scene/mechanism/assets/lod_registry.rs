@@ -16,8 +16,8 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::scene::mechanism::{spawn_test_shape, ObjectOpError, TestShape};
 use crate::render::MAX_LOD_LEVELS;
+use crate::scene::mechanism::{spawn_test_shape, ObjectOpError, TestShape};
 
 /// LOD 组登记处：基准 mesh 身份 → 各档变体柄（level 0 = 基准自身），加
 /// level → base 反查（档位资产到货时重挂引用行 LOD 脏标用）与变体网格
@@ -62,7 +62,10 @@ impl LodGroups {
     /// 基准 mesh 的各档变体柄（查无 = 该 mesh 不在 LOD 组内——非阶梯实体，
     /// 消费端全部走哨兵回退）。
     #[must_use]
-    pub fn levels_of(&self, id: AssetId<Mesh>) -> Option<&[Option<Handle<Mesh>>; MAX_LOD_LEVELS as usize]> {
+    pub fn levels_of(
+        &self,
+        id: AssetId<Mesh>,
+    ) -> Option<&[Option<Handle<Mesh>>; MAX_LOD_LEVELS as usize]> {
         self.by_base.get(&id)
     }
 
@@ -96,12 +99,15 @@ fn build_lod_mesh(shape: TestShape, level: u32) -> Result<Mesh, ObjectOpError> {
                 1 => 3,
                 2 => 2,
                 3 => 1,
-                _ => return Err(ObjectOpError::InvalidParams(format!("LOD 档位 {level} 越界（0..{MAX_LOD_LEVELS}）"))),
+                _ => {
+                    return Err(ObjectOpError::InvalidParams(format!(
+                        "LOD 档位 {level} 越界（0..{MAX_LOD_LEVELS}）"
+                    )))
+                }
             };
-            Sphere::new(0.5)
-                .mesh()
-                .ico(subdivisions)
-                .map_err(|e| ObjectOpError::InvalidParams(format!("球体细分 {subdivisions} 失败：{e}")))
+            Sphere::new(0.5).mesh().ico(subdivisions).map_err(|e| {
+                ObjectOpError::InvalidParams(format!("球体细分 {subdivisions} 失败：{e}"))
+            })
         }
         _ => Err(ObjectOpError::InvalidParams(
             "LOD 阶梯仅支持 sphere（ico 细分参数面）；其余形状无细分参数，扩形状 = 加 builder 映射"
@@ -140,7 +146,16 @@ pub fn spawn_lod_ladder(
         ));
     }
     let readback = spawn_test_shape(
-        world, shape, color, None, None, translation, None, scale, name, unique,
+        world,
+        shape,
+        color,
+        None,
+        None,
+        translation,
+        None,
+        scale,
+        name,
+        unique,
     )?;
     let base_handle = world
         .get::<Mesh3d>(readback.entity)
@@ -191,9 +206,8 @@ mod tests {
                 .ico(subdiv)
                 .expect("细分上限内不失败")
         };
-        let handles: Vec<Handle<Mesh>> = (0..MAX_LOD_LEVELS)
-            .map(|_| meshes.add(sphere(4)))
-            .collect();
+        let handles: Vec<Handle<Mesh>> =
+            (0..MAX_LOD_LEVELS).map(|_| meshes.add(sphere(4))).collect();
         let base_id = handles[0].id();
         let mut groups = LodGroups::default();
         let mut arr: [Option<Handle<Mesh>>; MAX_LOD_LEVELS as usize] = Default::default();
@@ -202,7 +216,10 @@ mod tests {
         }
         groups.register(arr);
         let levels = groups.levels_of(base_id).expect("基准身份必命中");
-        assert_eq!(levels[0].as_ref().map(bevy::asset::Handle::id), Some(base_id));
+        assert_eq!(
+            levels[0].as_ref().map(bevy::asset::Handle::id),
+            Some(base_id)
+        );
         for handle in &handles {
             assert_eq!(groups.base_of(handle.id()), Some(base_id), "逐档反查归基准");
         }

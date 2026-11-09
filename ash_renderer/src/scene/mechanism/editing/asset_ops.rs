@@ -91,7 +91,8 @@ pub fn mutate_asset(
     }
     // PBR 标量域校验（[0,1]；shader 端也有 clamp，这里把误用挡在入口）
     if p.metallic.is_some_and(|m| !(0.0..=1.0).contains(&m))
-        || p.perceptual_roughness.is_some_and(|r| !(0.0..=1.0).contains(&r))
+        || p.perceptual_roughness
+            .is_some_and(|r| !(0.0..=1.0).contains(&r))
     {
         return Err(AssetOpError::InvalidParams(
             "metallic / perceptual_roughness 须在 [0,1]",
@@ -108,7 +109,11 @@ pub fn mutate_asset(
                 .0
                 .clone();
             // 源材质的 base_color 槽柄（None = 清目标槽——拷槽语义含"没有"）
-            Some(asset_ref(world, &source_material, MATERIAL)?.base_color_texture.clone())
+            Some(
+                asset_ref(world, &source_material, MATERIAL)?
+                    .base_color_texture
+                    .clone(),
+            )
         }
     };
     let tint_target: Option<Handle<Image>> = if p.image_tint.is_some() {
@@ -174,12 +179,16 @@ pub fn mutate_asset(
 
     if let Some(scale) = p.mesh_vertex_scale {
         write_asset(world, &mesh_handle, MESH, |mesh| {
-            let VertexAttributeValues::Float32x3(positions) =
-                mesh.attribute(Mesh::ATTRIBUTE_POSITION).ok_or(AssetOpError::MeshPositionsUnsupported)?
+            let VertexAttributeValues::Float32x3(positions) = mesh
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .ok_or(AssetOpError::MeshPositionsUnsupported)?
             else {
                 return Err(AssetOpError::MeshPositionsUnsupported);
             };
-            let scaled: Vec<[f32; 3]> = positions.iter().map(|p| [p[0] * scale, p[1] * scale, p[2] * scale]).collect();
+            let scaled: Vec<[f32; 3]> = positions
+                .iter()
+                .map(|p| [p[0] * scale, p[1] * scale, p[2] * scale])
+                .collect();
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, scaled);
             Ok(())
         })?;
@@ -191,7 +200,9 @@ pub fn mutate_asset(
         let texture_handle = tint_target.ok_or(AssetOpError::AssetMissing(
             "该实体材质没有 base_color_texture,无处 tint",
         ))?;
-        write_asset(world, &texture_handle, IMAGE, |image| tint_rgba8(image, tint))?;
+        write_asset(world, &texture_handle, IMAGE, |image| {
+            tint_rgba8(image, tint)
+        })?;
         readback.image = Some(texture_handle.id());
     }
 
@@ -236,7 +247,9 @@ fn write_asset<A: Asset>(
     let mut assets = world
         .get_resource_mut::<Assets<A>>()
         .ok_or(AssetOpError::AssetMissing(container))?;
-    let mut asset = assets.get_mut(handle).ok_or(AssetOpError::AssetMissing(name))?;
+    let mut asset = assets
+        .get_mut(handle)
+        .ok_or(AssetOpError::AssetMissing(name))?;
     write(&mut asset)
 }
 

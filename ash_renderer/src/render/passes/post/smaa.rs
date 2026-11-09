@@ -21,19 +21,22 @@ use crate::render::core::device::memory::role::BufferRole;
 use crate::render::resident::assets::images::GpuImage;
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
-use crate::render::core::target::color::ColorTarget;
-use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
+use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
-use crate::render::core::record::graphics::PipelineRef;
+use crate::render::core::binding::set_layout::{
+    merged_pool_sizes, stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts,
+};
+use crate::render::core::binding::shader_abi;
+use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::record::fullscreen::{
     record_fullscreen_open, record_fullscreen_sampled, FullscreenPass,
 };
-use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{merged_pool_sizes, stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
-use crate::render::core::binding::shader_abi;
+use crate::render::core::record::graphics::PipelineRef;
+use crate::render::core::target::color::ColorTarget;
 
 const SMAA_AREA_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/post/smaa/_smaa_area_lut.png");
-const SMAA_SEARCH_LUT_PNG: &[u8] = include_bytes!("../../../../shaders/post/smaa/_smaa_search_lut.png");
+const SMAA_SEARCH_LUT_PNG: &[u8] =
+    include_bytes!("../../../../shaders/post/smaa/_smaa_search_lut.png");
 
 const SMAA_BINDING_TEX0: u32 = 0;
 const SMAA_BINDING_INFO: u32 = 1;
@@ -151,10 +154,11 @@ fn decode_lut_png(bytes: &[u8], role: &str) -> Result<(Vec<u8>, u32, u32)> {
     )
     .map_err(|e| VulkanError::Init(format!("{role} LUT PNG 解码失败: {e}")))?;
     let (w, h) = (image.width(), image.height());
-    let data = image
-        .data
-        .take()
-        .ok_or_else(|| VulkanError::Init(format!("{role} LUT PNG 数据缺席（AssetUsages 全用 + 未压即有数据）")))?;
+    let data = image.data.take().ok_or_else(|| {
+        VulkanError::Init(format!(
+            "{role} LUT PNG 数据缺席（AssetUsages 全用 + 未压即有数据）"
+        ))
+    })?;
     Ok((data, w, h))
 }
 
@@ -206,7 +210,11 @@ impl SmaaTargets {
     ///
     /// # Errors
     /// 附件/LUT/描述符创建失败。
-    pub fn new(ctx: &Context, uploader: &mut crate::render::Uploader, extent: vk::Extent2D) -> Result<Self> {
+    pub fn new(
+        ctx: &Context,
+        uploader: &mut crate::render::Uploader,
+        extent: vk::Extent2D,
+    ) -> Result<Self> {
         // LUT 先于 this 建：半途失败时已建 GpuImage 随自身 Drop 回收
         let area_lut = upload_lut(ctx, uploader, SMAA_AREA_LUT_PNG, "area")?;
         let search_lut = upload_lut(ctx, uploader, SMAA_SEARCH_LUT_PNG, "search")?;
@@ -256,9 +264,27 @@ impl SmaaTargets {
         self.blends.clear();
         self.extent = extent;
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            self.ldrs.push(ColorTarget::new(ctx, extent, vk::Format::R8G8B8A8_UNORM, false, "smaa ldr")?);
-            self.edges.push(ColorTarget::new(ctx, extent, vk::Format::R8G8B8A8_UNORM, false, "smaa edges")?);
-            self.blends.push(ColorTarget::new(ctx, extent, vk::Format::R8G8B8A8_UNORM, false, "smaa blend")?);
+            self.ldrs.push(ColorTarget::new(
+                ctx,
+                extent,
+                vk::Format::R8G8B8A8_UNORM,
+                false,
+                "smaa ldr",
+            )?);
+            self.edges.push(ColorTarget::new(
+                ctx,
+                extent,
+                vk::Format::R8G8B8A8_UNORM,
+                false,
+                "smaa edges",
+            )?);
+            self.blends.push(ColorTarget::new(
+                ctx,
+                extent,
+                vk::Format::R8G8B8A8_UNORM,
+                false,
+                "smaa blend",
+            )?);
         }
         Ok(())
     }
@@ -269,24 +295,26 @@ impl SmaaTargets {
     /// 只在 new 调一次；每个对象建成即落字段，失败路径由 Drop 回收。
     unsafe fn build_static(&mut self) -> Result<()> {
         unsafe {
-        let device = &self.device;
-        self.set_layout_a = SMAA_A_SET_DESC.create(device)?;
-        self.set_layout_b = SMAA_B_SET_DESC.create(device)?;
-        let slots = MAX_FRAMES_IN_FLIGHT;
-        self.sampler = crate::render::resident::sampler::sampler_key(
-            &bevy::image::ImageSamplerDescriptor::linear(),
-        )
-        .create_sampler(device)?;
-        // 池容量从布局声明推导：每槽 edge/blend 两张 L_a + nb 一张 L_b
-        let pool_sizes =
-            merged_pool_sizes(&[(&SMAA_A_SET_DESC, 2 * slots as u32), (&SMAA_B_SET_DESC, slots as u32)]);
-        self.pool = device.create_descriptor_pool(
-            &vk::DescriptorPoolCreateInfo::default()
-                .max_sets((3 * slots) as u32)
-                .pool_sizes(&pool_sizes),
-            None,
-        )?;
-        Ok(())
+            let device = &self.device;
+            self.set_layout_a = SMAA_A_SET_DESC.create(device)?;
+            self.set_layout_b = SMAA_B_SET_DESC.create(device)?;
+            let slots = MAX_FRAMES_IN_FLIGHT;
+            self.sampler = crate::render::resident::sampler::sampler_key(
+                &bevy::image::ImageSamplerDescriptor::linear(),
+            )
+            .create_sampler(device)?;
+            // 池容量从布局声明推导：每槽 edge/blend 两张 L_a + nb 一张 L_b
+            let pool_sizes = merged_pool_sizes(&[
+                (&SMAA_A_SET_DESC, 2 * slots as u32),
+                (&SMAA_B_SET_DESC, slots as u32),
+            ]);
+            self.pool = device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets((3 * slots) as u32)
+                    .pool_sizes(&pool_sizes),
+                None,
+            )?;
+            Ok(())
         }
     }
 
@@ -296,47 +324,47 @@ impl SmaaTargets {
     /// 静态对象、目标与 UBO 已建成功；失败路径由调用方回收。
     unsafe fn build_descriptors(&mut self) -> Result<()> {
         unsafe {
-        let device = &self.device;
-        let slots = MAX_FRAMES_IN_FLIGHT;
-        let alloc = |layout: vk::DescriptorSetLayout| -> Result<Vec<vk::DescriptorSet>> {
-            Ok(device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(self.pool)
-                    .set_layouts(&std::iter::repeat_n(layout, slots).collect::<Vec<_>>()),
-            )?)
-        };
-        self.sets_edge = alloc(self.set_layout_a)?;
-        self.sets_blend = alloc(self.set_layout_a)?;
-        self.sets_nb = alloc(self.set_layout_b)?;
-        // 写入按布局声明核对种类，写满才提交
-        let ro = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
-        for slot in 0..slots {
-            let info = self.infos[slot].buffer();
-            // edge set：b0 ldr + b1 参数 + b2 采样器
-            let mut edge = DescriptorWriter::new(&SMAA_A_SET_DESC, self.sets_edge[slot]);
-            edge.image(SMAA_BINDING_TEX0, self.ldrs[slot].view(), ro)
-                .sampler(SMAA_BINDING_SAMPLER, self.sampler)
-                .buffer(SMAA_BINDING_INFO, info, 0, vk::WHOLE_SIZE);
-            edge.submit(device)?;
-            // blend set：b0 edges + b3 search + b4 area
-            let mut blend = DescriptorWriter::new(&SMAA_A_SET_DESC, self.sets_blend[slot]);
-            blend
-                .image(SMAA_BINDING_TEX0, self.edges[slot].view(), ro)
-                .sampler(SMAA_BINDING_SAMPLER, self.sampler)
-                .image(SMAA_BINDING_TEX1, self.search_lut.view(), ro)
-                .image(SMAA_BINDING_TEX2, self.area_lut.view(), ro)
-                .buffer(SMAA_BINDING_INFO, info, 0, vk::WHOLE_SIZE);
-            blend.submit(device)?;
-            // nb set：b0 ldr + b3 blend + b4 blend 采样器
-            let mut nb = DescriptorWriter::new(&SMAA_B_SET_DESC, self.sets_nb[slot]);
-            nb.image(SMAA_BINDING_TEX0, self.ldrs[slot].view(), ro)
-                .sampler(SMAA_BINDING_SAMPLER, self.sampler)
-                .image(SMAA_BINDING_TEX1, self.blends[slot].view(), ro)
-                .sampler(SMAA_BINDING_TEX2, self.sampler)
-                .buffer(SMAA_BINDING_INFO, info, 0, vk::WHOLE_SIZE);
-            nb.submit(device)?;
-        }
-        Ok(())
+            let device = &self.device;
+            let slots = MAX_FRAMES_IN_FLIGHT;
+            let alloc = |layout: vk::DescriptorSetLayout| -> Result<Vec<vk::DescriptorSet>> {
+                Ok(device.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(self.pool)
+                        .set_layouts(&std::iter::repeat_n(layout, slots).collect::<Vec<_>>()),
+                )?)
+            };
+            self.sets_edge = alloc(self.set_layout_a)?;
+            self.sets_blend = alloc(self.set_layout_a)?;
+            self.sets_nb = alloc(self.set_layout_b)?;
+            // 写入按布局声明核对种类，写满才提交
+            let ro = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+            for slot in 0..slots {
+                let info = self.infos[slot].buffer();
+                // edge set：b0 ldr + b1 参数 + b2 采样器
+                let mut edge = DescriptorWriter::new(&SMAA_A_SET_DESC, self.sets_edge[slot]);
+                edge.image(SMAA_BINDING_TEX0, self.ldrs[slot].view(), ro)
+                    .sampler(SMAA_BINDING_SAMPLER, self.sampler)
+                    .buffer(SMAA_BINDING_INFO, info, 0, vk::WHOLE_SIZE);
+                edge.submit(device)?;
+                // blend set：b0 edges + b3 search + b4 area
+                let mut blend = DescriptorWriter::new(&SMAA_A_SET_DESC, self.sets_blend[slot]);
+                blend
+                    .image(SMAA_BINDING_TEX0, self.edges[slot].view(), ro)
+                    .sampler(SMAA_BINDING_SAMPLER, self.sampler)
+                    .image(SMAA_BINDING_TEX1, self.search_lut.view(), ro)
+                    .image(SMAA_BINDING_TEX2, self.area_lut.view(), ro)
+                    .buffer(SMAA_BINDING_INFO, info, 0, vk::WHOLE_SIZE);
+                blend.submit(device)?;
+                // nb set：b0 ldr + b3 blend + b4 blend 采样器
+                let mut nb = DescriptorWriter::new(&SMAA_B_SET_DESC, self.sets_nb[slot]);
+                nb.image(SMAA_BINDING_TEX0, self.ldrs[slot].view(), ro)
+                    .sampler(SMAA_BINDING_SAMPLER, self.sampler)
+                    .image(SMAA_BINDING_TEX1, self.blends[slot].view(), ro)
+                    .sampler(SMAA_BINDING_TEX2, self.sampler)
+                    .buffer(SMAA_BINDING_INFO, info, 0, vk::WHOLE_SIZE);
+                nb.submit(device)?;
+            }
+            Ok(())
         }
     }
 
@@ -430,10 +458,12 @@ impl Drop for SmaaTargets {
                 self.device.destroy_descriptor_pool(self.pool, None);
             }
             if self.set_layout_a != vk::DescriptorSetLayout::null() {
-                self.device.destroy_descriptor_set_layout(self.set_layout_a, None);
+                self.device
+                    .destroy_descriptor_set_layout(self.set_layout_a, None);
             }
             if self.set_layout_b != vk::DescriptorSetLayout::null() {
-                self.device.destroy_descriptor_set_layout(self.set_layout_b, None);
+                self.device
+                    .destroy_descriptor_set_layout(self.set_layout_b, None);
             }
             if self.sampler != vk::Sampler::null() {
                 self.device.destroy_sampler(self.sampler, None);
@@ -454,10 +484,7 @@ pub struct SmaaPipelines {
 impl SmaaPipelines {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
-    pub fn new(
-        ctx: &Context,
-        layouts: &SetLayouts,
-    ) -> Result<Self> {
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
         Ok(Self {
             edge: FullscreenPipeline::new(ctx, &SMAA_EDGE_PIPELINE, layouts)?,
             blend: FullscreenPipeline::new(ctx, &SMAA_BLEND_PIPELINE, layouts)?,
@@ -502,7 +529,12 @@ impl SmaaEdgeBlendDraw {
         unsafe {
             for (target, target_view, pipeline, set) in [
                 (self.edges_image, self.edges_view, self.edge, self.edge_set),
-                (self.blend_image, self.blend_view, self.blend, self.blend_set),
+                (
+                    self.blend_image,
+                    self.blend_view,
+                    self.blend,
+                    self.blend_set,
+                ),
             ] {
                 record_fullscreen_sampled(
                     device,
@@ -543,13 +575,17 @@ impl SmaaNbDraw {
         extent: vk::Extent2D,
     ) {
         unsafe {
-            record_fullscreen_open(device, cb, &FullscreenPass {
-                view: swapchain_view,
-                extent,
-                clear: None,
-                pipeline: self.nb,
-                sets: &[self.nb_set],
-            });
+            record_fullscreen_open(
+                device,
+                cb,
+                &FullscreenPass {
+                    view: swapchain_view,
+                    extent,
+                    clear: None,
+                    pipeline: self.nb,
+                    sets: &[self.nb_set],
+                },
+            );
         }
     }
 }

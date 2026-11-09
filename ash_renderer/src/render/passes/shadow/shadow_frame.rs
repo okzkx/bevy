@@ -40,8 +40,11 @@ impl ShadowFrameDraw {
             // 进场：→ DEPTH_ATTACHMENT。深度图跨帧共享（不分帧槽）：等上一帧的片元
             // 采样读完再覆写（WAR）
             for &image in &self.images {
-                ImageBarrier::discard_to_depth_attachment(image, vk::PipelineStageFlags::FRAGMENT_SHADER)
-                    .record(device, cb);
+                ImageBarrier::discard_to_depth_attachment(
+                    image,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                )
+                .record(device, cb);
             }
             if let Some(passes) = &self.passes {
                 passes.write.record(device, cb, self.set);

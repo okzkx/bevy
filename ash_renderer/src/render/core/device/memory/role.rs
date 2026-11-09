@@ -80,6 +80,10 @@ impl BufferRole {
                 M::empty(),
             ),
         };
-        RoleSpec { usage, required, preferred }
+        RoleSpec {
+            usage,
+            required,
+            preferred,
+        }
     }
 }

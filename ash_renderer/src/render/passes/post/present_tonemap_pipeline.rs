@@ -4,11 +4,11 @@
 use ash::vk;
 
 use crate::common::error::Result;
-use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
-use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
+use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
+use crate::render::core::record::graphics::PipelineRef;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
 use crate::render::passes::post::bloom::BLOOM_UP_SET_DESC;
 use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
@@ -20,7 +20,11 @@ pub(crate) static PRESENT_TONEMAP_PIPELINE: PipelineDesc = PipelineDesc {
     label: "present_tonemap",
     shader: &shader_abi::PRESENT_TONEMAP,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&FRAME_UNIFORM_SET_DESC, &GBUFFER_SAMPLED_SET_DESC, &BLOOM_UP_SET_DESC],
+    sets: &[
+        &FRAME_UNIFORM_SET_DESC,
+        &GBUFFER_SAMPLED_SET_DESC,
+        &BLOOM_UP_SET_DESC,
+    ],
     push: None,
     color_formats: &[vk::Format::R8G8B8A8_UNORM],
     depth_format: None,
@@ -36,7 +40,9 @@ impl PresentTonemapPipeline {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        Ok(Self { inner: FullscreenPipeline::new(ctx, &PRESENT_TONEMAP_PIPELINE, layouts)? })
+        Ok(Self {
+            inner: FullscreenPipeline::new(ctx, &PRESENT_TONEMAP_PIPELINE, layouts)?,
+        })
     }
 
     #[must_use]

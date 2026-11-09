@@ -20,23 +20,24 @@
 //! 坑：acquire 成功之后的 Vulkan 真失败必须致命退出——同步状态已无法恢复，warn 后
 //! 继续会等一个永远无人 signal 的 fence，直接死锁。
 
-use bevy::{
-    ecs::system::NonSendMarker,
-    prelude::*,
-};
+use bevy::{ecs::system::NonSendMarker, prelude::*};
 
 use ash_macros::system;
 
 use crate::{
     common::syntax::fatal,
+    render::{
+        ClusterFrameDraw, HizFrameDraw, PostChainDraw, RenderFeatures, SceneResources, UiDraw,
+        UploadWait,
+    },
     scene::InstanceLedger,
-    render::{ClusterFrameDraw, RenderFeatures, HizFrameDraw, PostChainDraw, SceneResources, UiDraw, UploadWait},
 };
 
 use super::drawlist::{self, DrawabilitySources, ParityDirty};
 
 mod cluster;
 mod culling;
+mod frame_logs;
 mod gaps;
 mod indirect;
 mod input;
@@ -50,13 +51,12 @@ mod scene;
 mod shadow;
 mod stopwatch;
 mod transparent;
-mod frame_logs;
 
-use self::input::{FrameInput, PassFrame};
 use self::cluster::create_cluster_build_draw;
 use self::culling::{create_frustum_cull_draw, create_occlusion_draw};
 use self::gaps::sample_gaps;
 use self::indirect::create_indirect_draw;
+use self::input::{FrameInput, PassFrame};
 use self::lighting::FrameLight;
 use self::lod::create_lod_draw;
 use self::overlay::create_overlay_draw;
@@ -97,7 +97,9 @@ pub(crate) fn draw_frame(
     if gate.yield_minimized(&mut gpu.resized) {
         return Ok(());
     }
-    gate.rebuild_if_pending(gpu.swapchain.pending_rebuild(), || rebuild_size_dependent(gpu, &mut occlusion.hiz, post, cluster))?;
+    gate.rebuild_if_pending(gpu.swapchain.pending_rebuild(), || {
+        rebuild_size_dependent(gpu, &mut occlusion.hiz, post, cluster)
+    })?;
 
     // —— 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在提交前一刻）。
     let mut watch = FrameStopwatch::start(&mut timing.perf);
@@ -109,12 +111,19 @@ pub(crate) fn draw_frame(
     // 必须立即重建，等不得下一帧
     // —— acquire：OUT_OF_DATE/次优在 Swapchain::acquire_index 内消化（置位 + 让路），
     // 重建交给下个帧首（幂等）；次优照常画完本帧。
-    let index = gpu.swapchain.acquire_index(gpu.frames.current().image_available)?;
+    let index = gpu
+        .swapchain
+        .acquire_index(gpu.frames.current().image_available)?;
     watch.acquire_done();
     let extent = gpu.swapchain.extent;
 
     // —— 组装 DrawList（增量）：实例槽缺/mesh 未驻留/材质缺席的行暂缓，就绪后自愈。
-    let sources = DrawabilitySources::new(&scene.pool, &scene.std_materials, &scene.lod_groups, scene.residency_settings.floor_anchor);
+    let sources = DrawabilitySources::new(
+        &scene.pool,
+        &scene.std_materials,
+        &scene.lod_groups,
+        scene.residency_settings.floor_anchor,
+    );
     drawlist::assemble_update(&mut scene.ledger, sources);
     watch.assemble_done();
     scene.verify.verify_assembly(&scene.ledger, sources);
@@ -147,11 +156,18 @@ pub(crate) fn draw_frame(
 
     // 四环写入：模型增量 + 材质全量 + 在场全量 + LOD 表增量，都落本帧槽的环
     // （wait_for_slot 之后，fence 证据同本帧 UBO）。
-    scene.instance_tables.write_model_ring(ledger, &dirty.model, slot)?;
     scene
         .instance_tables
-        .write_material_ring(sources.std_materials, &scene.image_cache, assembly.materials, slot)?;
-    scene.instance_tables.write_presence_ring(assembly.slots, slot)?;
+        .write_model_ring(ledger, &dirty.model, slot)?;
+    scene.instance_tables.write_material_ring(
+        sources.std_materials,
+        &scene.image_cache,
+        assembly.materials,
+        slot,
+    )?;
+    scene
+        .instance_tables
+        .write_presence_ring(assembly.slots, slot)?;
     scene.instance_tables.write_lod_table_ring(
         ledger,
         sources.pool,
@@ -199,7 +215,12 @@ pub(crate) fn draw_frame(
     // LOD 选档：开关决定 dispatch 或 host 档位环填最细档（选档每帧现算，无 fallback）。
     let lod_dispatch = create_lod_draw(&pass_frame, lod, instances, &mut logs.lod_first_dispatch)?;
     // 缺口快照：读本槽缺口标记环（视锥剔除关闭帧 = host 全可见口径）。
-    sample_gaps(&pass_frame, gap_snapshot, instances, frustum_cull_draw.is_none())?;
+    sample_gaps(
+        &pass_frame,
+        gap_snapshot,
+        instances,
+        frustum_cull_draw.is_none(),
+    )?;
 
     // indirect 命令组装：在场行数 = GPU 命令条数；空场 = None（场景绘制整段跳过）。
     let indirect_count = assembly.slots.len() as u32;
@@ -215,7 +236,14 @@ pub(crate) fn draw_frame(
     // —— overlay 绘制：图集整传（可能多一张 transfer 票据，本帧 upload_wait 快照必须在此后取，
     // 见 UploadWait::snapshot）→ 镶嵌 → 顶点环写入。UI 数据缺席 = None（record_frame 的
     // UI 段整段跳过）。
-    let ui = create_overlay_draw(&gpu.ctx, &mut gpu.tables, &mut gpu.uploader, overlay, slot, extent)?;
+    let ui = create_overlay_draw(
+        &gpu.ctx,
+        &mut gpu.tables,
+        &mut gpu.uploader,
+        overlay,
+        slot,
+        extent,
+    )?;
 
     // —— 录制 + 提交。上传票据在 GPU 侧等待（ALL_COMMANDS），CPU 不阻塞。
     // 坑：image_available 已被置位、image 已到手，从这里起任何失败都只能致命退出，
@@ -223,8 +251,7 @@ pub(crate) fn draw_frame(
     // 本帧呈现目标与 render_finished 同号（按 image 分配），录制提交与 present 共用
     let target = gpu.swapchain.target(index);
     let instances = &scene.instance_tables;
-    let transparent_frame =
-        transparent_draw(transparent, slot, indirect_count)?;
+    let transparent_frame = transparent_draw(transparent, slot, indirect_count)?;
     // shadow：命令组装（读 shadow 标记 + LOD 档位环，逐在场行 × 每 cascade，无遮挡参与、
     // LOD 再粗一档）与 depth pass 同门；空场/关闭整段跳过，set 与深度图屏障恒录。
     let shadow_frame = shadow_frame_draw(shadow, instances, &scene.pool, slot, indirect_count)?;
@@ -250,7 +277,10 @@ pub(crate) fn draw_frame(
         timer: timing.timer.enabled.then_some(&*timing.timer),
         // —— ② compute 前置
         frustum_cull: frustum_cull_draw,
-        hiz: HizFrameDraw { occlusion: occl_dispatch, pyramid: &occlusion.hiz },
+        hiz: HizFrameDraw {
+            occlusion: occl_dispatch,
+            pyramid: &occlusion.hiz,
+        },
         lod: lod_dispatch,
         indirect: indirect_dispatch,
         shadow: shadow_frame,
@@ -276,17 +306,14 @@ pub(crate) fn draw_frame(
         // —— ⑨ 提交
         upload_wait: UploadWait::snapshot(&gpu.uploader),
     };
-    gpu.frames
-        .record_frame(
-            &target,
-            &feature,
-            &res,
-        )?;
+    gpu.frames.record_frame(&target, &feature, &res)?;
     watch.record_done();
 
     // —— present：OUT_OF_DATE 已在 present_digest 内标过时（下个帧首重建）；真失败
     // 先暂存——提交已发生，advance 必须照常推进保持帧槽账本一致，收尾后在系统末尾冒泡。
-    let present_failure = gpu.swapchain.present_digest(gpu.ctx.queue, target.render_finished, index);
+    let present_failure =
+        gpu.swapchain
+            .present_digest(gpu.ctx.queue, target.render_finished, index);
     watch.present_done();
 
     // —— 帧样本入账：只进计量。让路帧（最小化/acquire 过时）不经过此处。
@@ -299,4 +326,3 @@ pub(crate) fn draw_frame(
         None => Ok(()),
     }
 }
-

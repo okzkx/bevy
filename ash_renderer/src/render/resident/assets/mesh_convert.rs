@@ -80,7 +80,10 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
     let normals = match mesh.try_attribute(Mesh::ATTRIBUTE_NORMAL) {
         Ok(VertexAttributeValues::Float32x3(n)) if n.len() == vertex_count => Some(n),
         Ok(VertexAttributeValues::Float32x3(n)) => {
-            bevy::log::warn!("NORMAL 长度 {} 与顶点数 {vertex_count} 不符,按全 0 填充", n.len());
+            bevy::log::warn!(
+                "NORMAL 长度 {} 与顶点数 {vertex_count} 不符,按全 0 填充",
+                n.len()
+            );
             None
         }
         Ok(other) => {
@@ -92,7 +95,10 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
     let uvs = match mesh.try_attribute(Mesh::ATTRIBUTE_UV_0) {
         Ok(VertexAttributeValues::Float32x2(uv)) if uv.len() == vertex_count => Some(uv),
         Ok(VertexAttributeValues::Float32x2(uv)) => {
-            bevy::log::warn!("UV_0 长度 {} 与顶点数 {vertex_count} 不符,按全 0 填充", uv.len());
+            bevy::log::warn!(
+                "UV_0 长度 {} 与顶点数 {vertex_count} 不符,按全 0 填充",
+                uv.len()
+            );
             None
         }
         Ok(other) => {

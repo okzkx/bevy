@@ -11,7 +11,9 @@ use ash::{vk, Device};
 use crate::common::bytes::{put_mat4, put_u32, put_vec4};
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
+use crate::render::core::binding::set_layout::{
+    stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc,
+};
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::contract::MemoryContract;
 use crate::render::core::device::memory::role::BufferRole;
@@ -24,7 +26,11 @@ pub(crate) static FRAME_UNIFORM_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     &[BindingDesc::new(
         0,
         DescKind::UniformBuffer,
-        stages(&[vk::ShaderStageFlags::COMPUTE, vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT]),
+        stages(&[
+            vk::ShaderStageFlags::COMPUTE,
+            vk::ShaderStageFlags::VERTEX,
+            vk::ShaderStageFlags::FRAGMENT,
+        ]),
     )],
 );
 
@@ -149,7 +155,8 @@ impl FrameUniformTable {
         };
         let initial = pack_frame_uniforms(&identity_frame_uniforms());
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let mut ubo = GpuBuffer::create(device, contract, FRAME_UBO_SIZE, BufferRole::FrameUniform)?;
+            let mut ubo =
+                GpuBuffer::create(device, contract, FRAME_UBO_SIZE, BufferRole::FrameUniform)?;
             ubo.write(0, &initial)?;
             this.ubos.push(ubo);
         }
@@ -158,14 +165,18 @@ impl FrameUniformTable {
         let pool_sizes = FRAME_UNIFORM_SET_DESC.pool_sizes_vec(slots);
         this.pool = unsafe {
             device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default().max_sets(slots).pool_sizes(&pool_sizes),
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(slots)
+                    .pool_sizes(&pool_sizes),
                 None,
             )
         }?;
         let layouts = vec![this.layout; MAX_FRAMES_IN_FLIGHT];
         this.sets = unsafe {
             device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default().descriptor_pool(this.pool).set_layouts(&layouts),
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(this.pool)
+                    .set_layouts(&layouts),
             )
         }
         .map_err(VulkanError::from)?;

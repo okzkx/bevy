@@ -37,13 +37,16 @@ pub(crate) fn monitor_stats(
 ) -> BrpResult {
     let last = history.samples.last().copied();
     let frame_wall = perf.snapshot().pop().map(|s| s.frame_wall_ms);
-    let vram = ctx.as_deref().and_then(Context::memory_budget).map(|heaps| {
-        // 设备局部堆 usage/budget 求和（监控窗口同款口径）
-        heaps
-            .iter()
-            .filter(|h| h.device_local)
-            .fold((0u64, 0u64), |(u, b), h| (u + h.usage, b + h.budget))
-    });
+    let vram = ctx
+        .as_deref()
+        .and_then(Context::memory_budget)
+        .map(|heaps| {
+            // 设备局部堆 usage/budget 求和（监控窗口同款口径）
+            heaps
+                .iter()
+                .filter(|h| h.device_local)
+                .fold((0u64, 0u64), |(u, b), h| (u + h.usage, b + h.budget))
+        });
     let ((v_used, v_cap), (i_used, i_cap)) = mesh_pool.usage();
     Ok(json!({
         "fps": last.map(|s| s.fps),

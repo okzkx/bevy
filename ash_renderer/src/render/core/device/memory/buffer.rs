@@ -249,9 +249,10 @@ impl GpuBuffer {
                 self.property_flags
             )));
         }
-        if len > 0 && offset
-            .checked_add(len)
-            .is_none_or(|end| end > self.allocation_size)
+        if len > 0
+            && offset
+                .checked_add(len)
+                .is_none_or(|end| end > self.allocation_size)
         {
             return Err(VulkanError::Capacity(format!(
                 "host {what}越界:[{offset}, {}) 超出分配 {}B",

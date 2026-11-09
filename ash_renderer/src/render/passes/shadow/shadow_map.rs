@@ -14,28 +14,35 @@ use bevy::log::info;
 use crate::common::bytes::put_u32;
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::device::memory::buffer::GpuBuffer;
+use crate::render::core::device::memory::role::BufferRole;
 use crate::render::core::record::graphics::{
     bind_graphics, bind_vertex_index, full_rect, reverse_z_depth_attachment, set_viewport_scissor,
     PipelineRef,
 };
-use crate::render::core::device::memory::role::BufferRole;
 use crate::render::passes::shadow::cascades::{SHADOW_CASCADES, SHADOW_MAP_SIZE, SHADOW_UBO_SIZE};
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
-use crate::render::core::target::depth::{DepthTarget, DEPTH_FORMAT};
-use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
-use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::binding::set_layout::{
+    stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts,
+};
 use crate::render::core::binding::shader_abi;
-use crate::render::resident::tables::instance_table::{INDIRECT_COMMAND_SIZE, INSTANCE_SET_DESC, MARK_SIZE, OBJECT_TABLE_CAPACITY};
+use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::target::depth::{DepthTarget, DEPTH_FORMAT};
+use crate::render::resident::tables::instance_table::{
+    INDIRECT_COMMAND_SIZE, INSTANCE_SET_DESC, MARK_SIZE, OBJECT_TABLE_CAPACITY,
+};
 
 pub const SHADOW_BINDING_UNIFORM: u32 = 0;
 const SHADOW_BINDING_MAP0: u32 = 1;
 const SHADOW_BINDING_MARK0: u32 = 5;
 const SHADOW_BINDING_CMD0: u32 = 6;
 
-const _: () = assert!(SHADOW_CASCADES == 4, "SHADOW_SET_DESC 按 4 级 cascade 逐个列 binding");
+const _: () = assert!(
+    SHADOW_CASCADES == 4,
+    "SHADOW_SET_DESC 按 4 级 cascade 逐个列 binding"
+);
 const CS: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
 const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
 
@@ -96,7 +103,10 @@ impl ShadowTargets {
     /// # Errors
     /// 深度图/Vulkan 创建失败。
     pub fn new(ctx: &Context) -> Result<Self> {
-        let extent = vk::Extent2D { width: SHADOW_MAP_SIZE, height: SHADOW_MAP_SIZE };
+        let extent = vk::Extent2D {
+            width: SHADOW_MAP_SIZE,
+            height: SHADOW_MAP_SIZE,
+        };
         let maps = (0..SHADOW_CASCADES)
             .map(|c| {
                 DepthTarget::new(ctx, extent)
@@ -127,17 +137,25 @@ impl ShadowTargets {
         let slots = MAX_FRAMES_IN_FLIGHT;
         let sharing = ctx.sharing_families();
         let mk = |role: BufferRole, size: u64| -> Result<GpuBuffer> {
-            GpuBuffer::create_with_families(&ctx.device, ctx.memory_contract(), size, role, &sharing)
+            GpuBuffer::create_with_families(
+                &ctx.device,
+                ctx.memory_contract(),
+                size,
+                role,
+                &sharing,
+            )
         };
         let capacity = u64::from(OBJECT_TABLE_CAPACITY);
         let mark_size = capacity * SHADOW_CASCADES as u64 * MARK_SIZE;
         let cmd_size = capacity * INDIRECT_COMMAND_SIZE;
         for _ in 0..slots {
-            self.ubos.push(mk(BufferRole::FrameUniform, u64::from(SHADOW_UBO_SIZE))?);
+            self.ubos
+                .push(mk(BufferRole::FrameUniform, u64::from(SHADOW_UBO_SIZE))?);
             // 标记单份交错（[槽][cascade]）；命令环 ×cascade
             self.marks.push(mk(BufferRole::Storage, mark_size)?);
             for _ in 0..SHADOW_CASCADES {
-                self.commands.push(mk(BufferRole::IndirectCommands, cmd_size)?);
+                self.commands
+                    .push(mk(BufferRole::IndirectCommands, cmd_size)?);
             }
         }
         let device = &ctx.device;
@@ -160,11 +178,25 @@ impl ShadowTargets {
         // 深度图不随帧变，全槽写同一批 view；其余逐槽
         for slot in 0..slots {
             let mut writer = DescriptorWriter::new(&SHADOW_SET_DESC, self.sets[slot]);
-            writer.buffer(SHADOW_BINDING_UNIFORM, self.ubos[slot].buffer(), 0, vk::WHOLE_SIZE);
+            writer.buffer(
+                SHADOW_BINDING_UNIFORM,
+                self.ubos[slot].buffer(),
+                0,
+                vk::WHOLE_SIZE,
+            );
             for (c, map) in self.maps.iter().enumerate() {
-                writer.image(SHADOW_BINDING_MAP0 + c as u32, map.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                writer.image(
+                    SHADOW_BINDING_MAP0 + c as u32,
+                    map.view,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                );
             }
-            writer.buffer(SHADOW_BINDING_MARK0, self.marks[slot].buffer(), 0, vk::WHOLE_SIZE);
+            writer.buffer(
+                SHADOW_BINDING_MARK0,
+                self.marks[slot].buffer(),
+                0,
+                vk::WHOLE_SIZE,
+            );
             for c in 0..SHADOW_CASCADES {
                 writer.buffer(
                     SHADOW_BINDING_CMD0 + c as u32,
@@ -225,7 +257,8 @@ impl Drop for ShadowTargets {
         // 深度图/UBO/标记/命令环随字段 Drop，退出排空由 teardown 的 device_wait_idle 先行
         unsafe {
             self.device.destroy_descriptor_pool(self.pool, None);
-            self.device.destroy_descriptor_set_layout(self.set_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.set_layout, None);
         }
     }
 }
@@ -245,7 +278,10 @@ pub(crate) static SHADOW_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
     shader: &shader_abi::SHADOW_WRITE,
     entries: &[c"vs_main", c"fs_main"],
     sets: &[&INSTANCE_SET_DESC, &SHADOW_SET_DESC],
-    push: Some(PushRange { stages: vk::ShaderStageFlags::VERTEX, size: SHADOW_PUSH_SIZE }),
+    push: Some(PushRange {
+        stages: vk::ShaderStageFlags::VERTEX,
+        size: SHADOW_PUSH_SIZE,
+    }),
     color_formats: &[],
     depth_format: Some(DEPTH_FORMAT),
 };
@@ -272,13 +308,11 @@ impl ShadowPipeline {
             .binding(0)
             .stride(crate::render::VERTEX_STRIDE as u32)
             .input_rate(vk::VertexInputRate::VERTEX)];
-        let vertex_attributes = [
-            vk::VertexInputAttributeDescription::default()
-                .location(0)
-                .binding(0)
-                .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(0),
-        ];
+        let vertex_attributes = [vk::VertexInputAttributeDescription::default()
+            .location(0)
+            .binding(0)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(0)];
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&vertex_binding)
             .vertex_attribute_descriptions(&vertex_attributes);
@@ -304,7 +338,8 @@ impl ShadowPipeline {
         let dynamic_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
         // 附件格式须等于渲染时的实际附件全集（VUID-08914）：shadow 只有深度
-        let mut rendering_info = vk::PipelineRenderingCreateInfo::default().depth_attachment_format(DEPTH_FORMAT);
+        let mut rendering_info =
+            vk::PipelineRenderingCreateInfo::default().depth_attachment_format(DEPTH_FORMAT);
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)
             .vertex_input_state(&vertex_input)
@@ -321,7 +356,9 @@ impl ShadowPipeline {
             "shadow 管线就绪: depth-only dynamic rendering（D32 reverse-Z GREATER），\
              顶点输入 32B 交错 pos 位，4B push cascade 索引，[instance_set, shadow set]"
         );
-        Ok(Self { handle: PipelineHandle::new(device, layout, pipeline, SHADOW_WRITE_PIPELINE.sets) })
+        Ok(Self {
+            handle: PipelineHandle::new(device, layout, pipeline, SHADOW_WRITE_PIPELINE.sets),
+        })
     }
 
     /// 录制投影（帧输入束携带）。
@@ -336,7 +373,10 @@ impl ShadowWriteDraw {
     /// [`ShadowFrameDraw::record_depth`](super::shadow_frame::ShadowFrameDraw::record_depth) 恒录。
     pub(crate) fn record(&self, device: &Device, cb: vk::CommandBuffer, shadow_set: DescSet) {
         unsafe {
-            let map_extent = vk::Extent2D { width: SHADOW_MAP_SIZE, height: SHADOW_MAP_SIZE };
+            let map_extent = vk::Extent2D {
+                width: SHADOW_MAP_SIZE,
+                height: SHADOW_MAP_SIZE,
+            };
             for (c, map_view) in self.views.iter().enumerate() {
                 let shadow_depth_attachment = reverse_z_depth_attachment(*map_view);
                 device.cmd_begin_rendering(

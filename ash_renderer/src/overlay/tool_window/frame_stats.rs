@@ -43,7 +43,10 @@ impl FpsMeter {
         self.acc_frames += 1;
         if self.acc_secs >= Self::UPDATE_INTERVAL {
             let avg = self.acc_secs / self.acc_frames.max(1) as f32;
-            self.snapshot = FpsSnapshot { fps: 1.0 / avg.max(1e-6), ms: avg * 1000.0 };
+            self.snapshot = FpsSnapshot {
+                fps: 1.0 / avg.max(1e-6),
+                ms: avg * 1000.0,
+            };
             self.acc_secs = 0.0;
             self.acc_frames = 0;
             true
@@ -109,7 +112,17 @@ pub(in crate::overlay) struct FrameStatsPage<'a> {
 
 impl FrameStatsPage<'_> {
     pub(in crate::overlay) fn show(self, ui: &mut egui::Ui) {
-        let Self { fps, window, ppp, stats, pct, workload, image_cache, mesh_pool, chunks } = self;
+        let Self {
+            fps,
+            window,
+            ppp,
+            stats,
+            pct,
+            workload,
+            image_cache,
+            mesh_pool,
+            chunks,
+        } = self;
         ui.monospace(format!("fps {:.0}  ({:.1} ms)", fps.fps, fps.ms));
         ui.monospace(format!(
             "窗口 {:.0}×{:.0}pt（物理 {:.0}×{:.0}）ppp {ppp:.2}",
@@ -124,7 +137,10 @@ impl FrameStatsPage<'_> {
         let show_pct = |ui: &mut egui::Ui, label: &str, row: (f32, f32, f32, usize)| {
             ui.monospace(format!(
                 "{label} p50 {:.2} · p95 {:.2} · p99 {:.2} ms（{n} 样本）",
-                row.0, row.1, row.2, n = row.3,
+                row.0,
+                row.1,
+                row.2,
+                n = row.3,
             ));
         };
         show_pct(ui, "CPU", pct.cpu);
@@ -151,10 +167,13 @@ impl FrameStatsPage<'_> {
             mib(image_cache.resident_bytes()),
             image_cache.graveyard_len(),
         ));
-        let (chunk_count, chunk_members) = chunks
-            .iter()
-            .fold((0usize, 0usize), |(n, m), (_, c)| (n + 1, m + c.map_or(0, |c| c.len())));
-        ui.monospace(format!("chunk {chunk_count} 块 · 成员 {chunk_members}（生成期归属）"));
+        let (chunk_count, chunk_members) =
+            chunks.iter().fold((0usize, 0usize), |(n, m), (_, c)| {
+                (n + 1, m + c.map_or(0, |c| c.len()))
+            });
+        ui.monospace(format!(
+            "chunk {chunk_count} 块 · 成员 {chunk_members}（生成期归属）"
+        ));
         ui.monospace(format!(
             "常驻表 纹理 {}/{} · 采样器 {}",
             stats.tables.used_texture_slots(),

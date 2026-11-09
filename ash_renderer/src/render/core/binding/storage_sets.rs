@@ -39,7 +39,9 @@ pub(crate) unsafe fn create_sets<const N: usize>(
         let count = slots.len() as u32;
         let pool_sizes = desc.pool_sizes_vec(count);
         let pool = device.create_descriptor_pool(
-            &vk::DescriptorPoolCreateInfo::default().max_sets(count).pool_sizes(&pool_sizes),
+            &vk::DescriptorPoolCreateInfo::default()
+                .max_sets(count)
+                .pool_sizes(&pool_sizes),
             None,
         )?;
         let layouts = vec![layout; slots.len()];

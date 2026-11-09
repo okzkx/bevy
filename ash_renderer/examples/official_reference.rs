@@ -96,10 +96,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 /// unlit 覆盖（`OFFICIAL_REF_MODE=unlit` 时启用）：容器内全部 StandardMaterial
 /// 置 unlit（跳过光照直出 base color，与主程序 RenderMode::Unlit 同口径）。材质
 /// 异步到货——每帧幂等重扫，新到货的材质下一帧被覆盖；未启用时只报一次。
-fn apply_unlit_override(
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut settled: Local<bool>,
-) {
+fn apply_unlit_override(mut materials: ResMut<Assets<StandardMaterial>>, mut settled: Local<bool>) {
     if std::env::var("OFFICIAL_REF_MODE").ok().as_deref() != Some("unlit") {
         if !*settled {
             *settled = true;
@@ -115,7 +112,10 @@ fn apply_unlit_override(
         }
     }
     if flipped > 0 {
-        info!("官方对照 unlit 覆盖：+{flipped}（容器 {} 个材质）", materials.len());
+        info!(
+            "官方对照 unlit 覆盖：+{flipped}（容器 {} 个材质）",
+            materials.len()
+        );
     }
 }
 

@@ -46,13 +46,22 @@ impl PipelineHandle {
         pipeline: vk::Pipeline,
         sets: &'static [&'static SetLayoutDesc],
     ) -> Self {
-        Self { device: device.clone(), layout, pipeline, sets }
+        Self {
+            device: device.clone(),
+            layout,
+            pipeline,
+            sets,
+        }
     }
 
     /// 录制句柄（帧输入束携带；绑定序校验随行）。
     #[must_use]
     pub fn rec(&self) -> PipelineRef {
-        PipelineRef { pipeline: self.pipeline, layout: self.layout, sets: self.sets }
+        PipelineRef {
+            pipeline: self.pipeline,
+            layout: self.layout,
+            sets: self.sets,
+        }
     }
 }
 

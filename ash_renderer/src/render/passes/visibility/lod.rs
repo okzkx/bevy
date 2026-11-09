@@ -21,11 +21,11 @@ use bevy::prelude::Resource;
 use crate::common::bytes::{put_f32, put_f32s, put_mat4, put_u32};
 use crate::common::error::Result;
 
-use crate::render::core::pipeline::compute::ComputePipeline;
-use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
 use crate::render::core::binding::shader_abi;
+use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 use crate::render::MAX_LOD_LEVELS;
@@ -35,7 +35,10 @@ pub(crate) static LOD_SELECT_PIPELINE: PipelineDesc = PipelineDesc {
     shader: &shader_abi::LOD_SELECT,
     entries: &[c"cs_main"],
     sets: &[&INSTANCE_SET_DESC],
-    push: Some(PushRange { stages: vk::ShaderStageFlags::COMPUTE, size: LOD_PUSH_SIZE }),
+    push: Some(PushRange {
+        stages: vk::ShaderStageFlags::COMPUTE,
+        size: LOD_PUSH_SIZE,
+    }),
     color_formats: &[],
     depth_format: None,
 };
@@ -134,7 +137,11 @@ pub struct LodSettings {
 
 impl Default for LodSettings {
     fn default() -> Self {
-        Self { enabled: true, threshold_px: 256.0, hysteresis: 0.25 }
+        Self {
+            enabled: true,
+            threshold_px: 256.0,
+            hysteresis: 0.25,
+        }
     }
 }
 
@@ -178,7 +185,9 @@ impl LodPass {
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        Ok(Self { pipeline: ComputePipeline::new(ctx, &LOD_SELECT_PIPELINE, layouts)? })
+        Ok(Self {
+            pipeline: ComputePipeline::new(ctx, &LOD_SELECT_PIPELINE, layouts)?,
+        })
     }
 
     /// 组一帧 dispatch 输入。draw_frame 消费，录制走 [`record`]。
@@ -202,15 +211,27 @@ impl LodPass {
 impl LodDraw {
     /// 录制一帧选档 dispatch（遮挡测试之后、build_indirect 之前）。交接屏障罩住档位环
     /// 写 → build_indirect 读。
-    pub(crate) fn record(&self, device: &ash::Device, command_buffer: vk::CommandBuffer, instance_set: DescSet) {
-        self.pass.record(device, command_buffer, &[instance_set], &self.push, self.groups, Handoff::VertexComputeRead);
+    pub(crate) fn record(
+        &self,
+        device: &ash::Device,
+        command_buffer: vk::CommandBuffer,
+        instance_set: DescSet,
+    ) {
+        self.pass.record(
+            device,
+            command_buffer,
+            &[instance_set],
+            &self.push,
+            self.groups,
+            Handoff::VertexComputeRead,
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{lod_hysteresis_level, lod_raw_level, pack_lod_push, LOD_PUSH_SIZE};
     use super::MAX_LOD_LEVELS as MAX_LEVELS;
+    use super::{lod_hysteresis_level, lod_raw_level, pack_lod_push, LOD_PUSH_SIZE};
     use bevy::math::{Mat4, Vec3};
 
     /// 自然档位分带：floor 语义下 s 每减半升一档，边界值归更粗档（s = T/2 恰为档 1）。
@@ -220,7 +241,11 @@ mod tests {
         let max = MAX_LEVELS;
         assert_eq!(lod_raw_level(t, t, max), 0, "s = 阈值 → 最细档");
         assert_eq!(lod_raw_level(t * 2.0, t, max), 0, "s > 阈值 → 最细档");
-        assert_eq!(lod_raw_level(t * 0.99, t, max), 0, "s 略低于阈值仍在档 0（floor 不跳档）");
+        assert_eq!(
+            lod_raw_level(t * 0.99, t, max),
+            0,
+            "s 略低于阈值仍在档 0（floor 不跳档）"
+        );
         assert_eq!(lod_raw_level(t / 2.0, t, max), 1, "s = T/2 → 档 1");
         assert_eq!(lod_raw_level(t / 3.9, t, max), 1, "s ∈ (T/4, T/2] → 档 1");
         assert_eq!(lod_raw_level(t / 4.0, t, max), 2, "s = T/4 → 档 2");
@@ -242,7 +267,11 @@ mod tests {
         assert_eq!(lod_hysteresis_level(0, 2, t, t, h, max), 0);
         // 向粗（raw > prev）：s 在边界与 (1−h) 边界之间 → 留 prev（迟滞带）
         // s = 0.9·B(1) = 0.5T·0.8 = 0.4T：(1−h)·B(1) = 0.3T < s → 不降
-        assert_eq!(lod_hysteresis_level(1, 0, t * 0.4, t, h, max), 0, "迟滞带内保持细档");
+        assert_eq!(
+            lod_hysteresis_level(1, 0, t * 0.4, t, h, max),
+            0,
+            "迟滞带内保持细档"
+        );
         // s ≤ (1−h)·边界 → 降档（s = 0.3T ≤ 0.375T）
         assert_eq!(lod_hysteresis_level(1, 0, t * 0.3, t, h, max), 1);
         // 往返无抖动：降档后 s 回升到迟滞带内仍保持粗档（向细即时，但 raw

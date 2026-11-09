@@ -10,11 +10,11 @@
 //! `load_world` 时旧场景 primitive 仍在场、pending=0，不看"根已展开"会在解析期
 //! 误判完成。展开失败的根永无 `Children`，菊花如实长转（失败详情走 BRP readiness）。
 
-use bevy::prelude::*;
 use ash_macros::system;
+use bevy::prelude::*;
 
-use crate::scene::AssetReadiness;
 use crate::render::Uploader;
+use crate::scene::AssetReadiness;
 
 /// 完成判据的稳态确认窗（帧）：pending/票据清零后持续满足的帧数——加载末期
 /// 逐行到货的抖动不闪窗。
@@ -32,7 +32,10 @@ pub(in crate::overlay) struct LoadActivity {
 
 impl Default for LoadActivity {
     fn default() -> Self {
-        Self { active: true, settled_frames: 0 }
+        Self {
+            active: true,
+            settled_frames: 0,
+        }
     }
 }
 
@@ -58,9 +61,7 @@ pub(in crate::overlay) fn load_activity_tick(
             activity.settled_frames += 1;
             if activity.settled_frames >= SETTLE_FRAMES {
                 activity.active = false;
-                info!(
-                    "资产加载完成：进场根全展开 ∧ pending 清零 ∧ 票据在飞清零——弹窗冷却隐藏"
-                );
+                info!("资产加载完成：进场根全展开 ∧ pending 清零 ∧ 票据在飞清零——弹窗冷却隐藏");
             }
         } else {
             activity.settled_frames = 0;

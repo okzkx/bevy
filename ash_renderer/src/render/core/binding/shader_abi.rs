@@ -56,13 +56,27 @@ impl Shader {
     /// # Errors
     /// `vkCreateShaderModule` 失败。
     pub(crate) fn create_module(&self, device: &Device) -> Result<vk::ShaderModule> {
-        let words: Vec<u32> = self.spv.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
-        unsafe { device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None) }
-            .map_err(VulkanError::from)
+        let words: Vec<u32> = self
+            .spv
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
+            .collect();
+        unsafe {
+            device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
+        }
+        .map_err(VulkanError::from)
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "生成表覆盖全部 shader；`ALL` 和只给 examples 用的条目只有测试引用"))]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "生成表覆盖全部 shader；`ALL` 和只给 examples 用的条目只有测试引用"
+    )
+)]
 mod generated {
     use super::{vk, ArrayShape, DescKind, EntryAbi, ResourceUse, Shader};
 

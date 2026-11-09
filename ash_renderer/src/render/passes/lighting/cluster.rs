@@ -12,18 +12,23 @@ use bevy::prelude::Resource;
 
 use crate::common::bytes::{put_f32, put_mat4, put_u32};
 use crate::common::error::{Result, VulkanError};
-use crate::render::core::pipeline::compute::ComputePipeline;
-use crate::render::core::record::compute::{ComputeHandles, Handoff};
-use crate::render::core::device::memory::buffer::GpuBuffer;
-use crate::render::core::device::memory::role::BufferRole;
-use crate::render::LightRecord;
-use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
-use crate::render::core::binding::set_layout::{DescSet, stages, BindingDesc, DescKind, SetLayout, SetLayoutDesc, SetLayouts};
+use crate::render::core::binding::set_layout::{
+    stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts,
+};
 use crate::render::core::binding::shader_abi;
 use crate::render::core::binding::storage_sets;
+use crate::render::core::device::memory::buffer::GpuBuffer;
+use crate::render::core::device::memory::role::BufferRole;
+use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::record::compute::{ComputeHandles, Handoff};
+use crate::render::LightRecord;
+use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
-const CS_FS: vk::ShaderStageFlags = stages(&[vk::ShaderStageFlags::COMPUTE, vk::ShaderStageFlags::FRAGMENT]);
+const CS_FS: vk::ShaderStageFlags = stages(&[
+    vk::ShaderStageFlags::COMPUTE,
+    vk::ShaderStageFlags::FRAGMENT,
+]);
 
 /// 光源分簇集：b0 均匀数据 / b1 光源常驻表 / b2 每格列表 / b3 每格计数。
 pub(crate) static LIGHT_CLUSTER_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
@@ -141,8 +146,10 @@ pub fn cluster_reference(
         let tx = tile % grid.tiles_x;
         let ty = tile / grid.tiles_x;
         let (z0, z1) = slice_view_depth(slice, grid);
-        let (cz0, cz1) =
-            (slice_ndc_z(view_proj, inv_view_proj, z0), slice_ndc_z(view_proj, inv_view_proj, z1));
+        let (cz0, cz1) = (
+            slice_ndc_z(view_proj, inv_view_proj, z0),
+            slice_ndc_z(view_proj, inv_view_proj, z1),
+        );
         let (nx0, ny0) = pixel_ndc(
             (tx * CLUSTER_TILE_SIZE) as f32,
             (ty * CLUSTER_TILE_SIZE) as f32,
@@ -262,17 +269,27 @@ impl LightClusters {
     fn build(&mut self, ctx: &Context, light_buffers: &[vk::Buffer]) -> Result<()> {
         let sharing = ctx.sharing_families();
         let mk = |role: BufferRole, size: u64| -> Result<GpuBuffer> {
-            GpuBuffer::create_with_families(&ctx.device, ctx.memory_contract(), size, role, &sharing)
+            GpuBuffer::create_with_families(
+                &ctx.device,
+                ctx.memory_contract(),
+                size,
+                role,
+                &sharing,
+            )
         };
         let clusters = u64::from(self.grid.cluster_count());
         let mut slots = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for slot in 0..MAX_FRAMES_IN_FLIGHT {
             // b1 只引用 LightTable 的帧槽 buffer，不归这里销毁
-            let light = *light_buffers.get(slot).ok_or_else(|| {
-                VulkanError::Init("光源常驻表帧槽环数量少于 cluster 帧槽".into())
-            })?;
-            self.uniforms.push(mk(BufferRole::Storage, CLUSTER_UNIFORM_SIZE as u64)?);
-            self.lists.push(mk(BufferRole::DeviceStorage, clusters * CLUSTER_RECORD_SIZE as u64)?);
+            let light = *light_buffers
+                .get(slot)
+                .ok_or_else(|| VulkanError::Init("光源常驻表帧槽环数量少于 cluster 帧槽".into()))?;
+            self.uniforms
+                .push(mk(BufferRole::Storage, CLUSTER_UNIFORM_SIZE as u64)?);
+            self.lists.push(mk(
+                BufferRole::DeviceStorage,
+                clusters * CLUSTER_RECORD_SIZE as u64,
+            )?);
             self.counts.push(mk(BufferRole::Storage, clusters * 4)?);
             slots.push([
                 self.uniforms[slot].buffer(),
@@ -281,7 +298,14 @@ impl LightClusters {
                 self.counts[slot].buffer(),
             ]);
         }
-        (self.pool, self.sets) = unsafe { storage_sets::create_sets(&ctx.device, &LIGHT_CLUSTER_SET_DESC, self.set_layout, &slots) }?;
+        (self.pool, self.sets) = unsafe {
+            storage_sets::create_sets(
+                &ctx.device,
+                &LIGHT_CLUSTER_SET_DESC,
+                self.set_layout,
+                &slots,
+            )
+        }?;
         Ok(())
     }
 
@@ -365,7 +389,10 @@ impl Drop for LightClusters {
         // 不等 GPU：退出时 teardown 已先 device_wait_idle
         self.drop_resources();
         if self.set_layout != vk::DescriptorSetLayout::null() {
-            unsafe { self.device.destroy_descriptor_set_layout(self.set_layout, None) };
+            unsafe {
+                self.device
+                    .destroy_descriptor_set_layout(self.set_layout, None)
+            };
         }
     }
 }
@@ -404,8 +431,20 @@ impl ClusterBuildPass {
 
 impl ClusterBuildDraw {
     /// 录制 cluster_build；自带的屏障保证后面的合成与透明片元着色器读到新列表。
-    pub(crate) fn record(&self, device: &Device, command_buffer: vk::CommandBuffer, cluster_set: DescSet) {
-        self.pass.record(device, command_buffer, &[cluster_set], &[], self.groups, Handoff::ComputeFragmentRead);
+    pub(crate) fn record(
+        &self,
+        device: &Device,
+        command_buffer: vk::CommandBuffer,
+        cluster_set: DescSet,
+    ) {
+        self.pass.record(
+            device,
+            command_buffer,
+            &[cluster_set],
+            &[],
+            self.groups,
+            Handoff::ComputeFragmentRead,
+        );
     }
 }
 
@@ -433,7 +472,10 @@ mod tests {
 
     /// 相机不在原点时，算出的 NDC z 要等于视深 z 处真实点的 NDC z。
     #[test]
-    #[expect(deprecated, reason = "基准矩阵沿用退役构造器：bevy_math 只重导出 proj 族，view 族的 look_to_mat4 不在出口内，本测试不改写投影语义")]
+    #[expect(
+        deprecated,
+        reason = "基准矩阵沿用退役构造器：bevy_math 只重导出 proj 族，view 族的 look_to_mat4 不在出口内，本测试不改写投影语义"
+    )]
     fn slice_ndc_z_matches_off_origin_camera() {
         let eye = Vec3::new(5.0, 2.0, 1.0);
         let forward = Vec3::new(-1.0, -0.1, 0.0).normalize();
@@ -445,7 +487,10 @@ mod tests {
             let p = view_proj * (eye + forward * z).extend(1.0);
             let expected = p.z / p.w;
             let got = slice_ndc_z(view_proj, inv_view_proj, z);
-            assert!((got - expected).abs() < 1e-5, "z={z}: got {got}, expected {expected}");
+            assert!(
+                (got - expected).abs() < 1e-5,
+                "z={z}: got {got}, expected {expected}"
+            );
         }
     }
 }

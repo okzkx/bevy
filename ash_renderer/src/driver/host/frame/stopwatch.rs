@@ -44,7 +44,11 @@ impl FrameStopwatch {
     }
 
     /// 帧槽等待段收口 + GPU 帧计时取回（本槽 fence 已等完，timestamp 可读）。
-    pub(super) fn wait_slot_done(&mut self, timer: &mut GpuTimer, slot: usize) -> Result<(), BevyError> {
+    pub(super) fn wait_slot_done(
+        &mut self,
+        timer: &mut GpuTimer,
+        slot: usize,
+    ) -> Result<(), BevyError> {
         self.wait_slot_ms = self.lap();
         self.gpu_sections = timer
             .fetch(slot)
@@ -80,8 +84,12 @@ impl FrameStopwatch {
 
     /// 帧样本入账（只进计量，不驱动绘制）。
     pub(super) fn push(self, perf: &mut PerfLedger, instance_rows: u32, visible_rows: u32) {
-        let cpu_total_ms = self.wait_slot_ms + self.acquire_ms + self.assemble_ms + self.rings_ms
-            + self.record_submit_ms + self.present_ms;
+        let cpu_total_ms = self.wait_slot_ms
+            + self.acquire_ms
+            + self.assemble_ms
+            + self.rings_ms
+            + self.record_submit_ms
+            + self.present_ms;
         perf.push(FrameSample {
             frame_wall_ms: self.frame_wall_ms,
             wait_slot_ms: self.wait_slot_ms,

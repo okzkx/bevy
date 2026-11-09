@@ -25,7 +25,10 @@ use super::objects::object_op_error;
 use crate::remote::common::params::{invalid_params, parse_params};
 
 /// 生成源实体：显式给定直接用，缺省取场景里第一个可渲染 primitive。
-fn source_or_first_primitive(world: &mut World, source: Option<Entity>) -> Result<Entity, BrpError> {
+fn source_or_first_primitive(
+    world: &mut World,
+    source: Option<Entity>,
+) -> Result<Entity, BrpError> {
     if let Some(source) = source {
         return Ok(source);
     }
@@ -56,7 +59,8 @@ struct GenerateSceneParams {
 /// 首尾实体（入行对账锚点）。
 #[system]
 pub(crate) fn generate_scene(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let p: GenerateSceneParams = parse_params(params, "params 缺失：需要 count/columns/spacing/seed")?;
+    let p: GenerateSceneParams =
+        parse_params(params, "params 缺失：需要 count/columns/spacing/seed")?;
     let source = source_or_first_primitive(world, p.source)?;
     let readback = generate_instances(
         world,

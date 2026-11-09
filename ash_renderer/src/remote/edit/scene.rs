@@ -94,14 +94,18 @@ pub(crate) fn set_transform(In(params): In<Option<Value>>, world: &mut World) ->
     }
     apply_transform_edit(world, p.entity, edit).map_err(|e| match e {
         TransformEditError::EntityMissing => BrpError::entity_not_found(p.entity),
-        TransformEditError::TransformMissing => BrpError::component_not_present("Transform", p.entity),
+        TransformEditError::TransformMissing => {
+            BrpError::component_not_present("Transform", p.entity)
+        }
     })?;
     // 刚写入成功，组件必在；查无 = 内部矛盾，回协议错误不 panic
     let t = world
         .get_entity(p.entity)
         .ok()
         .and_then(|er| er.get::<Transform>())
-        .ok_or_else(|| BrpError::internal("apply_transform_edit 成功后 Transform 缺席——状态矛盾"))?;
+        .ok_or_else(|| {
+            BrpError::internal("apply_transform_edit 成功后 Transform 缺席——状态矛盾")
+        })?;
     let (yaw, pitch, roll) = t.rotation.to_euler(bevy::math::EulerRot::YXZ);
     Ok(json!({
         "entity": p.entity.to_string(),
@@ -208,7 +212,9 @@ struct SunSetParams {
 #[system]
 pub(crate) fn sun_set(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: SunSetParams = parse_params_or_default(params)?;
-    if p.azimuth_deg.is_some_and(|a| !a.is_finite()) || p.elevation_deg.is_some_and(|e| !e.is_finite()) {
+    if p.azimuth_deg.is_some_and(|a| !a.is_finite())
+        || p.elevation_deg.is_some_and(|e| !e.is_finite())
+    {
         return Err(invalid_params("azimuth_deg/elevation_deg 必须是有限数值"));
     }
     let mut q = world.query_filtered::<(&mut SunOrbit, &mut Transform), With<DirectionalLight>>();

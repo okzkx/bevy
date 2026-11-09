@@ -193,10 +193,9 @@ impl MeshPool {
         r.free_ranges = self.free_vertex.len() + self.free_index.len();
         r.free_vertex_bytes = self.free_vertex.iter().map(|x| x.size).sum();
         r.free_index_bytes = self.free_index.iter().map(|x| x.size).sum();
-        let (v, i) = self
-            .residency
-            .values()
-            .fold((0u64, 0u64), |(v, i), s| (v + s.vertex.size, i + s.index.size));
+        let (v, i) = self.residency.values().fold((0u64, 0u64), |(v, i), s| {
+            (v + s.vertex.size, i + s.index.size)
+        });
         r.resident_vertex_bytes = v;
         r.resident_index_bytes = i;
         r
@@ -330,10 +329,7 @@ impl MeshPool {
     /// first-fit 取一段区间：首个放得下的空洞整段用或切头、余量放回；没有才 bump 划新。
     /// `size` 须是对齐的倍数（顶点 32B、索引 4B，转换产物天然满足），余量偏移才保持对齐。
     fn take_range(free: &mut Vec<PoolRange>, used: &mut u64, size: u64) -> PoolRange {
-        debug_assert!(
-            size > 0,
-            "零长区间不进池(转换产物必有内容)"
-        );
+        debug_assert!(size > 0, "零长区间不进池(转换产物必有内容)");
         if let Some(pos) = free.iter().position(|r| r.size >= size) {
             let r = free.remove(pos);
             if r.size > size {
@@ -389,16 +385,19 @@ impl MeshPool {
         }
         wait_draws()?;
         // 同一条时间线信号量按值单调，等最大票据即等全部
-        let max_ticket = self.graveyard.iter().map(|(_, _, ticket)| *ticket).max().unwrap_or(0);
+        let max_ticket = self
+            .graveyard
+            .iter()
+            .map(|(_, _, ticket)| *ticket)
+            .max()
+            .unwrap_or(0);
         uploader.wait_until(max_ticket)?;
         let count = self.graveyard.len();
         for (vertex, index, _) in self.graveyard.drain(..) {
             self.free_vertex.push(vertex);
             self.free_index.push(index);
         }
-        info!(
-            "网格区间待回收队列排空:归还 {count} 组区间(双条件齐备:图形最后使用 + 上传票据)"
-        );
+        info!("网格区间待回收队列排空:归还 {count} 组区间(双条件齐备:图形最后使用 + 上传票据)");
         Ok(())
     }
 

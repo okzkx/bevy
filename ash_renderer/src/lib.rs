@@ -52,5 +52,5 @@ pub mod common;
 pub mod driver;
 pub mod overlay;
 pub mod remote;
-pub mod scene;
 pub mod render;
+pub mod scene;

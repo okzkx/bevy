@@ -15,11 +15,11 @@ use serde_json::{json, Value};
 use ash_macros::system;
 
 use crate::{
-    scene::{InstanceLedger, LodGroups},
     render::{
-        aabb_screen_rect, lod_hysteresis_level, lod_raw_level, InstanceTables, LOD_LEVEL_SIZE,
-        LodDiagnostics, LodSettings, MAX_LOD_LEVELS, MeshPool, Swapchain,
+        aabb_screen_rect, lod_hysteresis_level, lod_raw_level, InstanceTables, LodDiagnostics,
+        LodSettings, MeshPool, Swapchain, LOD_LEVEL_SIZE, MAX_LOD_LEVELS,
     },
+    scene::{InstanceLedger, LodGroups},
 };
 
 use crate::remote::common::{
@@ -38,10 +38,7 @@ use crate::remote::common::{
 pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let view_proj = brp_view_proj(world, "投屏参照无法计算")?;
     let (marks_frame, bound, enabled, threshold, hysteresis) = {
-        let (diag, settings) = (
-            res::<LodDiagnostics>(world)?,
-            res::<LodSettings>(world)?,
-        );
+        let (diag, settings) = (res::<LodDiagnostics>(world)?, res::<LodSettings>(world)?);
         (
             diag.marks_frame,
             diag.bound,
@@ -101,7 +98,8 @@ pub(crate) fn lod_census(In(_params): In<Option<Value>>, world: &mut World) -> B
     let mut counts = [0u32; MAX_LOD_LEVELS as usize];
     let mut rows = Vec::with_capacity(reference.len());
     for (entity, slot, raw, size, in_group) in reference {
-        let gpu = u32_at(&gpu_bytes, slot as usize * LOD_LEVEL_SIZE as usize)?.min(MAX_LOD_LEVELS - 1);
+        let gpu =
+            u32_at(&gpu_bytes, slot as usize * LOD_LEVEL_SIZE as usize)?.min(MAX_LOD_LEVELS - 1);
         counts[gpu as usize] += 1;
         // 迟滞裁决：prev = GPU 档位环本槽值，与 GPU 下一次 dispatch 读的迟滞输入同源
         let cpu = lod_hysteresis_level(raw, gpu, size, threshold, hysteresis, MAX_LOD_LEVELS);
@@ -159,8 +157,10 @@ struct SetParams {
 /// 参数缺失/类型错/数值非法（threshold ≤ 0 或 hysteresis 出 [0,1)）。
 #[system]
 pub(crate) fn lod_set_params(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let p: SetParams =
-        parse_params(params, "params 缺失：需要对象（threshold_px/hysteresis 可选）")?;
+    let p: SetParams = parse_params(
+        params,
+        "params 缺失：需要对象（threshold_px/hysteresis 可选）",
+    )?;
     if let Some(threshold) = p.threshold_px
         && (!threshold.is_finite() || threshold <= 0.0)
     {

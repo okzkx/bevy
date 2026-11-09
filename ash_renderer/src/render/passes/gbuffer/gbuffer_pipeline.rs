@@ -15,11 +15,11 @@ use crate::common::error::Result;
 
 use crate::render::Context;
 
-use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
-use crate::render::core::record::graphics::PipelineRef;
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
+use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
+use crate::render::core::record::graphics::PipelineRef;
 use crate::render::resident::tables::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
 use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
 use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
@@ -28,9 +28,17 @@ pub(crate) static GBUFFER_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
     label: "gbuffer_write",
     shader: &shader_abi::GBUFFER_WRITE,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&BINDLESS_TEXTURE_SET_DESC, &FRAME_UNIFORM_SET_DESC, &INSTANCE_SET_DESC],
+    sets: &[
+        &BINDLESS_TEXTURE_SET_DESC,
+        &FRAME_UNIFORM_SET_DESC,
+        &INSTANCE_SET_DESC,
+    ],
     push: None,
-    color_formats: &[crate::render::ALBEDO_FORMAT, crate::render::NORMAL_FORMAT, crate::render::MATPARAM_FORMAT],
+    color_formats: &[
+        crate::render::ALBEDO_FORMAT,
+        crate::render::NORMAL_FORMAT,
+        crate::render::MATPARAM_FORMAT,
+    ],
     depth_format: Some(crate::render::core::target::depth::DEPTH_FORMAT),
 };
 
@@ -45,10 +53,7 @@ impl GBufferPipeline {
     ///
     /// # Errors
     /// 配方对账不过，或 layout / shader module / pipeline 任一创建失败。
-    pub fn new(
-        ctx: &Context,
-        layouts: &SetLayouts,
-    ) -> Result<Self> {
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
         GBUFFER_WRITE_PIPELINE.build(ctx, layouts, |layout, stages| unsafe {
             Self::create_pipeline(&ctx.device, layout, stages)
         })
@@ -108,7 +113,8 @@ impl GBufferPipeline {
             .min_depth_bounds(0.0)
             .max_depth_bounds(1.0);
         // 每个颜色附件一条 blend 状态，条数须等于声明的颜色附件数
-        let blend_attachment: Vec<vk::PipelineColorBlendAttachmentState> = desc.color_formats
+        let blend_attachment: Vec<vk::PipelineColorBlendAttachmentState> = desc
+            .color_formats
             .iter()
             .map(|_| {
                 vk::PipelineColorBlendAttachmentState::default()
@@ -116,8 +122,8 @@ impl GBufferPipeline {
                     .color_write_mask(vk::ColorComponentFlags::RGBA)
             })
             .collect();
-        let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
-            .attachments(&blend_attachment);
+        let color_blend =
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachment);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);

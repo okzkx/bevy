@@ -61,7 +61,10 @@ impl ToolPage {
 
 /// 导航分组：(组名, 组内页面)，按显示顺序。
 const GROUPS: &[(&str, &[ToolPage])] = &[
-    ("渲染", &[ToolPage::Shading, ToolPage::Culling, ToolPage::Pipeline]),
+    (
+        "渲染",
+        &[ToolPage::Shading, ToolPage::Culling, ToolPage::Pipeline],
+    ),
     ("性能", &[ToolPage::FrameStats, ToolPage::Monitor]),
     ("场景", &[ToolPage::EntityTree]),
 ];
@@ -75,7 +78,10 @@ pub(in crate::overlay) struct ToolWindowState {
 
 impl Default for ToolWindowState {
     fn default() -> Self {
-        Self { page: ToolPage::FrameStats, group_open: [true; GROUPS.len()] }
+        Self {
+            page: ToolPage::FrameStats,
+            group_open: [true; GROUPS.len()],
+        }
     }
 }
 
@@ -131,7 +137,10 @@ fn show_nav(ui: &mut egui::Ui, state: &mut ToolWindowState) {
         let open = &mut state.group_open[i];
         let arrow = if *open { "▼" } else { "▶" };
         if ui
-            .selectable_label(false, egui::RichText::new(format!("{arrow} {group}")).strong())
+            .selectable_label(
+                false,
+                egui::RichText::new(format!("{arrow} {group}")).strong(),
+            )
             .clicked()
         {
             *open = !*open;
@@ -141,7 +150,10 @@ fn show_nav(ui: &mut egui::Ui, state: &mut ToolWindowState) {
         }
         ui.indent(group, |ui| {
             for &page in *pages {
-                if ui.selectable_label(state.page == page, page.title()).clicked() {
+                if ui
+                    .selectable_label(state.page == page, page.title())
+                    .clicked()
+                {
                     state.page = page;
                 }
             }
@@ -225,8 +237,11 @@ impl ToolWindowParams<'_, '_> {
     pub(in crate::overlay) fn tick_snapshot(&mut self, delta_secs: f32) -> bool {
         let ticked = self.fps.tick(delta_secs);
         if ticked {
-            self.history
-                .sample(self.fps.snapshot.fps, self.fps.snapshot.ms, self.vulkan.as_deref());
+            self.history.sample(
+                self.fps.snapshot.fps,
+                self.fps.snapshot.ms,
+                self.vulkan.as_deref(),
+            );
             self.pct_cache.refresh(&self.perf);
         }
         ticked
@@ -241,8 +256,15 @@ impl ToolWindowParams<'_, '_> {
     /// 的 Transform 拖改落进编辑队列。
     pub(in crate::overlay) fn show(&mut self, ctx: &egui::Context, window: &Window, ppp: f32) {
         let mut edit = None;
-        ToolWindow { ctx, state: &mut self.tool_state }.show(|body, page| match page {
-            ToolPage::Shading => ShadingPage { mode: &mut self.mode }.show(body),
+        ToolWindow {
+            ctx,
+            state: &mut self.tool_state,
+        }
+        .show(|body, page| match page {
+            ToolPage::Shading => ShadingPage {
+                mode: &mut self.mode,
+            }
+            .show(body),
             ToolPage::Culling => CullingPage {
                 cull_settings: &mut self.cull_settings,
                 cull_diag: &self.cull_diag,

@@ -23,10 +23,12 @@ use ash::{vk, Device};
 use bevy::log::info;
 
 use crate::common::error::{Result, VulkanError};
-use crate::render::Context;
-use crate::render::core::target::color::{ColorTarget, HDR_FORMAT};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::set_layout::{BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc};
+use crate::render::core::binding::set_layout::{
+    BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc,
+};
+use crate::render::core::target::color::{ColorTarget, HDR_FORMAT};
+use crate::render::Context;
 
 /// albedo 附件格式：存采样时已解码的线性反照率；sRGB 编码只在最终写 swapchain 时做一次。
 pub const ALBEDO_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
@@ -90,11 +92,7 @@ impl GBufferTargets {
     ///
     /// # Errors
     /// 格式 feature 不足、Vulkan 创建/分配失败、描述符集分配/写入失败。
-    pub fn new(
-        ctx: &Context,
-        extent: vk::Extent2D,
-        depth_views: &[vk::ImageView],
-    ) -> Result<Self> {
+    pub fn new(ctx: &Context, extent: vk::Extent2D, depth_views: &[vk::ImageView]) -> Result<Self> {
         let mut this = Self {
             device: ctx.device.clone(),
             extent: vk::Extent2D::default(),
@@ -239,7 +237,10 @@ impl GBufferTargets {
             self.pool = vk::DescriptorPool::null();
         }
         if self.set_layout != vk::DescriptorSetLayout::null() {
-            unsafe { self.device.destroy_descriptor_set_layout(self.set_layout, None) };
+            unsafe {
+                self.device
+                    .destroy_descriptor_set_layout(self.set_layout, None)
+            };
             self.set_layout = vk::DescriptorSetLayout::null();
         }
         if self.sampler != vk::Sampler::null() {
@@ -305,7 +306,9 @@ unsafe fn build_sampling_inner(
         let sets = device.allocate_descriptor_sets(
             &vk::DescriptorSetAllocateInfo::default()
                 .descriptor_pool(pool)
-                .set_layouts(&std::iter::repeat_n(set_layout, depth_views.len()).collect::<Vec<_>>()),
+                .set_layouts(
+                    &std::iter::repeat_n(set_layout, depth_views.len()).collect::<Vec<_>>(),
+                ),
         );
         let sets = match sets {
             Ok(s) => s,
@@ -336,13 +339,33 @@ unsafe fn build_sampling_inner(
         for ((set, slot), depth_view) in sets.iter().zip(slots).zip(depth_views) {
             let mut writer = DescriptorWriter::new(&GBUFFER_SAMPLED_SET_DESC, *set);
             writer
-                .image(SAMPLED_BINDING_ALBEDO, slot.albedo.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .image(SAMPLED_BINDING_NORMAL, slot.normal.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .image(SAMPLED_BINDING_HDR, slot.hdr.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image(
+                    SAMPLED_BINDING_ALBEDO,
+                    slot.albedo.view(),
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                )
+                .image(
+                    SAMPLED_BINDING_NORMAL,
+                    slot.normal.view(),
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                )
+                .image(
+                    SAMPLED_BINDING_HDR,
+                    slot.hdr.view(),
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                )
                 // 坑：深度布局须与帧编排转只读的目标布局一致（DEPTH_STENCIL_READ_ONLY，
                 // 不是 SHADER_READ_ONLY），否则 VUID-00344
-                .image(SAMPLED_BINDING_DEPTH, *depth_view, vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
-                .image(SAMPLED_BINDING_MATPARAM, slot.matparam.view(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image(
+                    SAMPLED_BINDING_DEPTH,
+                    *depth_view,
+                    vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                )
+                .image(
+                    SAMPLED_BINDING_MATPARAM,
+                    slot.matparam.view(),
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                )
                 .sampler(SAMPLED_BINDING_SAMPLER, sampler);
             writer.submit(device)?;
         }
