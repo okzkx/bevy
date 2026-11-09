@@ -13,7 +13,8 @@
 //! `wait_for_slot` 后取一次为 `slot`，本帧全部帧槽环/UBO/描述符集按它定位。
 //!
 //! 错误：错误点一行 `or_warn`/`or_fatal` 后 `?` 冒泡进统一错误通道，本系统只管控制流。
-//! 让路语义也走 `?`（Warn 级）：最小化整帧让路、swapchain 过时本帧作废。present 真失败
+//! swapchain 过时让路走 `?`（Warn 级）本帧作废；最小化让路是正常流程，用 if 早退不进
+//! 错误通道。present 真失败
 //! 保持显式分支：先暂存，`advance` 照常跑保持帧槽账本一致后再冒泡。
 //!
 //! 坑：acquire 成功之后的 Vulkan 真失败必须致命退出——同步状态已无法恢复，warn 后
@@ -93,7 +94,9 @@ pub(crate) fn draw_frame(
 
     // —— 帧首：最小化让路 + 挂起重建（尺寸相关资源随新 extent 重建，幂等；pending
     // 全部重建成功才清——失败帧让路或退出，下个帧首原样重试）。
-    gate.yield_minimized(&mut gpu.resized)?;
+    if gate.yield_minimized(&mut gpu.resized) {
+        return Ok(());
+    }
     gate.rebuild_if_pending(gpu.swapchain.pending_rebuild(), || rebuild_size_dependent(gpu, &mut occlusion.hiz, post, cluster))?;
 
     // —— 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在提交前一刻）。

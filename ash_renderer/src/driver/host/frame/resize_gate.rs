@@ -5,7 +5,7 @@
 use bevy::{prelude::*, window::WindowResized};
 
 use crate::{
-    common::syntax::{OptionTierExt, ResultTierExt},
+    common::syntax::ResultTierExt,
     render::{Context, HizPyramid, MAX_FRAMES_IN_FLIGHT},
 };
 
@@ -28,12 +28,12 @@ pub(super) struct ResizeGate {
 }
 
 impl ResizeGate {
-    /// 吸收本帧 resize 消息；`Err(Warning)` = 最小化中、本帧整帧让路——调用方一行
-    /// `?` 冒泡统一错误通道，tier_handler 打 warn 后丢弃，下帧继续。
+    /// 吸收本帧 resize 消息；返回 `true` = 窗口最小化中，调用方本帧整帧让路。
+    /// 让路是正常流程而非失败，不走错误通道、不打日志。
     ///
     /// 一次 update 可能积压多条消息（拖拽 125Hz 输入 vs 60fps 帧），逐条刷状态，
     /// 以最新一条为准。
-    pub(super) fn yield_minimized(&mut self, resized: &mut MessageReader<WindowResized>) -> Result<(), BevyError> {
+    pub(super) fn yield_minimized(&mut self, resized: &mut MessageReader<WindowResized>) -> bool {
         for msg in resized.read() {
             if msg.width == 0.0 || msg.height == 0.0 {
                 self.minimized = true;
@@ -42,9 +42,7 @@ impl ResizeGate {
                 self.pending = true;
             }
         }
-        (!self.minimized).then_some(()).ok_or_warn(
-            "窗口最小化中，帧循环整帧让路（不碰 swapchain），消息泵保持存活",
-        )
+        self.minimized
     }
 
     /// pending 帧首按需重建（宿主 resize 消息 / swapchain 次优或过时都算）：
