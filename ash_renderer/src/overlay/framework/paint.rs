@@ -266,6 +266,7 @@ fn paint_overlay_steps(
                 width: spec.width,
                 height: spec.height,
                 mip_levels: 1,
+                format: spec.format,
             }],
             ..Default::default()
         };
@@ -497,6 +498,7 @@ fn upload_user_texture(
             width: spec.width,
             height: spec.height,
             mip_levels: 1,
+            format: spec.format,
         }],
         ..Default::default()
     };

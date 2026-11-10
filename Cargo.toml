@@ -5899,3 +5899,9 @@ bevy_pbr = { path = "crates/bevy_pbr" }
 bevy_core_pipeline = { path = "crates/bevy_core_pipeline" }
 bevy_sprite_render = { path = "crates/bevy_sprite_render" }
 bevy_ui_render = { path = "crates/bevy_ui_render" }
+
+
+# ash_renderer BCn 烘焙编码器在 dev 构建下也开优化：ClusterFit 逐块拟合在 debug
+# 下慢三个量级（1024² 单张秒级 vs 十秒级），不做就烤不完场景
+[profile.dev.package.texpresso]
+opt-level = 3

@@ -194,6 +194,7 @@ fn upload_lut(
             width: w,
             height: h,
             mip_levels: 1,
+            format: spec.format,
         }],
         ..Default::default()
     })?;

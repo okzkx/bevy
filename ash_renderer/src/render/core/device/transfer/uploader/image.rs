@@ -6,7 +6,9 @@ use ash::{vk, Device};
 
 use crate::common::error::Result;
 
-use super::super::types::{StagingImageCopy, Ticket, UploadBatch};
+use super::super::types::{
+    is_block_compressed, level_bytes, StagingImageCopy, Ticket, UploadBatch,
+};
 use super::{distinct, Uploader};
 
 pub(super) fn record_image_uploads(
@@ -18,7 +20,19 @@ pub(super) fn record_image_uploads(
 ) {
     unsafe {
         // 首次使用的图像从 UNDEFINED 开始，没有旧访问需要等待。
+        // 块压缩图 mip 全链一次进写布局（各级都在本段拷入）；未压缩只动 mip0。
         for image in distinct_images(&batch.image_uploads) {
+            let mip_count = batch
+                .image_uploads
+                .iter()
+                .find(|r| r.image == image)
+                .map_or(1, |r| {
+                    if is_block_compressed(r.format) {
+                        r.mip_levels
+                    } else {
+                        1
+                    }
+                });
             let into_transfer = vk::ImageMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::empty())
                 .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -27,7 +41,7 @@ pub(super) fn record_image_uploads(
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .image(image)
-                .subresource_range(color_mips(0, 1));
+                .subresource_range(color_mips(0, mip_count));
             device.cmd_pipeline_barrier(
                 command_buffer,
                 vk::PipelineStageFlags::TOP_OF_PIPE,
@@ -38,8 +52,36 @@ pub(super) fn record_image_uploads(
                 &[into_transfer],
             );
         }
-        // 从紧密排列的 staging 数据拷贝 mip0。
         for region in &batch.image_uploads {
+            if is_block_compressed(region.format) {
+                // 块压缩：全链逐级拷入，块算术换算（块字节数倍数的 bufferOffset 红线
+                // 由排批侧对齐保证）。bufferRowLength/Height 写 0 表示紧排。
+                let mut offset = region.src_offset;
+                for level in 0..region.mip_levels {
+                    let (lw, lh) = level_extent(region, level);
+                    device.cmd_copy_buffer_to_image(
+                        command_buffer,
+                        staging_buffer,
+                        region.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[vk::BufferImageCopy {
+                            buffer_offset: offset,
+                            buffer_row_length: 0,
+                            buffer_image_height: 0,
+                            image_subresource: color_layer(level),
+                            image_offset: vk::Offset3D::default(),
+                            image_extent: vk::Extent3D {
+                                width: lw,
+                                height: lh,
+                                depth: 1,
+                            },
+                        }],
+                    );
+                    offset += level_bytes(region.format, lw, lh);
+                }
+                continue;
+            }
+            // 从紧密排列的 staging 数据拷贝 mip0。
             device.cmd_copy_buffer_to_image(
                 command_buffer,
                 staging_buffer,
@@ -59,7 +101,7 @@ pub(super) fn record_image_uploads(
                 }],
             );
         }
-        // 多级图像将 mip0 转为 TRANSFER_SRC，供 graphics 续批读取。
+        // 多级未压缩图像将 mip0 转为 TRANSFER_SRC，供 graphics 续批读取。
         let chained = chained_images(&batch.image_uploads);
         for region in &chained {
             // 转换写入对后续 blit 的 TRANSFER_READ 可见；跨提交依赖由票据衔接。
@@ -83,10 +125,22 @@ pub(super) fn record_image_uploads(
             );
         }
         // 该屏障覆盖拷贝写入；消费方以票据等待并建立 shader 读屏障。
+        // 块压缩图收尾覆盖全链（各级都在本段写入）。
         for image in distinct_images(&batch.image_uploads) {
             if chained.iter().any(|r| r.image == image) {
                 continue;
             }
+            let mip_count = batch
+                .image_uploads
+                .iter()
+                .find(|r| r.image == image)
+                .map_or(1, |r| {
+                    if is_block_compressed(r.format) {
+                        r.mip_levels
+                    } else {
+                        1
+                    }
+                });
             // 有 release 时顺带把所有权交给目标队列族
             let (src_family, dst_family) = batch
                 .image_releases
@@ -102,7 +156,7 @@ pub(super) fn record_image_uploads(
                 .src_queue_family_index(src_family)
                 .dst_queue_family_index(dst_family)
                 .image(image)
-                .subresource_range(color_mips(0, 1));
+                .subresource_range(color_mips(0, mip_count));
             device.cmd_pipeline_barrier(
                 command_buffer,
                 vk::PipelineStageFlags::TRANSFER,
@@ -116,10 +170,22 @@ pub(super) fn record_image_uploads(
     }
 }
 
+/// 某 mip 级的像素尺寸（最小 1，末级合法）。
+fn level_extent(region: &StagingImageCopy, level: u32) -> (u32, u32) {
+    (
+        (region.width >> level).max(1),
+        (region.height >> level).max(1),
+    )
+}
+
 pub(super) fn chained_images(regions: &[StagingImageCopy]) -> Vec<&StagingImageCopy> {
     let mut out: Vec<&StagingImageCopy> = Vec::new();
     for region in regions {
-        if region.mip_levels > 1 && !out.iter().any(|r| r.image == region.image) {
+        // 块压缩图不进 blit 续批（blit 不支持压缩格式，mip 链已预生成）
+        if region.mip_levels > 1
+            && !is_block_compressed(region.format)
+            && !out.iter().any(|r| r.image == region.image)
+        {
             out.push(region);
         }
     }

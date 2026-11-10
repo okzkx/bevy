@@ -453,8 +453,10 @@ impl Context {
             .descriptor_binding_sampled_image_update_after_bind(true)
             .descriptor_binding_partially_bound(true);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
-        // multi_draw_indirect 在 base features 里，不在 Vulkan12/13 结构中
-        let base_features = vk::PhysicalDeviceFeatures::default().multi_draw_indirect(true);
+        // multi_draw_indirect + texture_compression_bc(BCn 显存纹理采样的特性位) 在 base features 里
+        let base_features = vk::PhysicalDeviceFeatures::default()
+            .multi_draw_indirect(true)
+            .texture_compression_bc(true);
         let queue_priority = [1.0f32];
         let mut queue_infos = vec![vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)

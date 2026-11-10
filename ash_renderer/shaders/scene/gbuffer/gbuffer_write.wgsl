@@ -64,16 +64,18 @@ fn fs_main(in: VsOut) -> GBufferOut {
     let mat = materials[in.material];
     let surf = sample_surface(mat, in.uv);
 
-    // —— 法线：几何法线为底，normal map 经 TBN 扰动（切线空间 xyz，glTF +Y up：
-    // tex*2-1 后直接进 TBN）。
+    // —— 法线：几何法线为底，normal map 经 TBN 扰动。法线贴图只采 XY 重建 Z
+    // （BC5 块压缩只有双通道；RGBA8 归一化切线法线的 z≥0 时重建值相同）：
+    // xy*tex*2-1 展到 [-1,1]，z = sqrt(1-x²-y²)。
     // 坑：TBN 用 dpdx/dpdy，必须在一致控制流里算（所以放在 if 外）；放进分支会因
     // helper invocation 分歧得到未定义值（画面黑/白紊乱）。
     let tbn = cotangent_frame(normalize(in.world_normal), in.world_pos, in.uv);
     var n = normalize(in.world_normal);
     if (mat.tex_normal != NO_TEXTURE) {
         let nt = textureSampleLevel(
-            textures[mat.tex_normal], samplers[mat.sampler_index], in.uv, 0.0).xyz;
-        n = normalize(tbn * (nt * 2.0 - 1.0));
+            textures[mat.tex_normal], samplers[mat.sampler_index], in.uv, 0.0).xy * 2.0 - 1.0;
+        let nz = sqrt(max(0.0, 1.0 - dot(nt, nt)));
+        n = normalize(tbn * vec3(nt, nz));
     }
 
     return GBufferOut(
