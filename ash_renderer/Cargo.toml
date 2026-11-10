@@ -34,6 +34,8 @@ wgpu-types = { version = "30.0.1", default-features = false }
 egui = { version = "0.36.2", default-features = false, features = ["default_fonts"] }
 # #[system] 透明标注：具名系统函数的阅读路标 + 编译期校验（不能带 self），零运行时成本
 ash_macros = { path = "../ash_macros" }
+# BCn 块压缩编码（BC1~BC5，纯 Rust，libsquish 血统）：显存纹理烘焙用；rayon 并行整图压缩
+texpresso = { version = "2.0.2", features = ["rayon"] }
 
 # 进程/系统内存读数（Windows 专用）：GetProcessMemoryInfo + GlobalMemoryStatusEx，按
 # 最小 feature 面声明（Foundation = HANDLE、Threading = GetCurrentProcess）。版本对齐

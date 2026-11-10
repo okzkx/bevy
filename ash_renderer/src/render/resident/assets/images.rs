@@ -22,7 +22,7 @@ use bevy::log::info;
 use super::image_spec::ImageSpec;
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::device::memory::contract::MemoryContract;
-use crate::render::core::device::transfer::{Ticket, Uploader};
+use crate::render::core::device::transfer::{is_block_compressed, Ticket, Uploader};
 use crate::render::resident::tables::bindless_texture_table::{BindlessTextureTable, SlotBinding};
 
 /// 一张 2D 贴图：VkImage（OPTIMAL，UNDEFINED 起步）+ dedicated memory + 全量 view。
@@ -77,13 +77,19 @@ impl GpuImage {
                 spec.format
             )));
         }
-        // blit 逐级缩小要 BLIT_SRC/DST + 线性过滤，缺任一降为单级
+        // blit 逐级缩小要 BLIT_SRC/DST + 线性过滤，缺任一降为单级。
+        // mip 链级数：未压缩要 blit 能力（BLIT_SRC/DST + 线性过滤，缺任一降为单级）；
+        // 块压缩不支持 blit，链由烘焙预生成（全链级数照建，上传按级拷入）
         let blit_ok = features.contains(
             vk::FormatFeatureFlags::BLIT_SRC
                 | vk::FormatFeatureFlags::BLIT_DST
                 | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR,
         );
-        let mip_levels = if blit_ok { spec.mip_levels.max(1) } else { 1 };
+        let mip_levels = if is_block_compressed(spec.format) || blit_ok {
+            spec.mip_levels.max(1)
+        } else {
+            1
+        };
         let image = unsafe {
             device.create_image(
                 &vk::ImageCreateInfo::default()

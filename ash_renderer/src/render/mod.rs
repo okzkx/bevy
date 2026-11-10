@@ -42,7 +42,7 @@ pub use passes::visibility::hiz::{
 pub use passes::visibility::hiz_frame::HizFrameDraw;
 // 诊断回读助手：BRP 读数方法族（remote/）与 render 内部共用，crate 级重出口。
 pub(crate) use self::core::device::readback::readback_buffer;
-pub(crate) use core::device::transfer::Ticket;
+pub(crate) use core::device::transfer::{block_bytes, Ticket};
 pub use core::device::transfer::{
     CopyRegion, ImageRelease, Release, StagingCopy, StagingImageCopy, UploadBatch, Uploader,
 };
@@ -55,6 +55,8 @@ pub use passes::visibility::occlusion::{
     aabb_screen_rect, OcclusionDiagnostics, OcclusionDraw, OcclusionFallback, OcclusionPass,
     OcclusionSettings,
 };
+pub(crate) use resident::assets::bcn::{bake, has_alpha, BakeError, BakedBcn, TextureRole};
+pub(crate) use resident::assets::bcn_cache::{cache_key, BcnCache};
 pub use resident::assets::image_spec::{image_spec, ImageSpec, ImageSpecError};
 pub use resident::assets::images::{GpuImage, ImageCache};
 pub use resident::assets::mesh_convert::{

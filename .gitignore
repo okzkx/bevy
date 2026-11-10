@@ -58,3 +58,6 @@ ash_renderer/.smoke375
 
 # 临时文件统一目录（规则见 .agents/rules/临时文件与工具脚本存放.md）
 .temp/
+
+# BCn 烘焙缓存（运行时惰性烘焙的磁盘缓存，按内容哈希寻址）
+assets/bcn_cache/

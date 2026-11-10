@@ -79,9 +79,17 @@ pub fn full_mip_chain(width: u32, height: u32) -> u32 {
 
 impl ImageSpec {
     /// 是否按 sRGB 解码（base color/emissive 类；数据贴图为线性），按映射后的格式判断。
+    /// BCn 颜色类（BC1/BC3/BC7 的 SRGB 变体）同为颜色角色。
     #[must_use]
     pub fn srgb_role(&self) -> bool {
-        self.format == vk::Format::R8G8B8A8_SRGB
+        matches!(
+            self.format,
+            vk::Format::R8G8B8A8_SRGB
+                | vk::Format::BC1_RGB_SRGB_BLOCK
+                | vk::Format::BC1_RGBA_SRGB_BLOCK
+                | vk::Format::BC3_SRGB_BLOCK
+                | vk::Format::BC7_SRGB_BLOCK
+        )
     }
 }
 

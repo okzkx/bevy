@@ -19,7 +19,7 @@
 //! `ImageSampler::Default` 按 ImagePlugin 全局默认(linear)解析,格式角色以
 //! `texture_descriptor.format` 的 Srgb 后缀为准,不二次推断。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::{
     app::OnAppExitSystems, asset::AssetId, ecs::system::SystemParam, image::Image,
@@ -31,10 +31,11 @@ use ash_macros::system;
 use crate::{
     common::syntax::{OnceLog, OptionTierExt, ResultTierExt},
     render::{
-        convert_mesh, image_spec, pack_object_record, sampler_key, AtlasGpu, BindlessTextureTable,
-        Context, ConvertedMesh, FramePool, GpuImage, ImageCache, ImageSpec, InstanceTables,
-        MeshPool, PoolRange, StagingCopy, StagingImageCopy, UploadBatch, Uploader, MAX_LOD_LEVELS,
-        OBJECT_RECORD_SIZE,
+        bake, block_bytes, cache_key, convert_mesh, has_alpha, image_spec, pack_object_record,
+        sampler_key, AtlasGpu, BakeError, BakedBcn, BcnCache, BindlessTextureTable, Context,
+        ConvertedMesh, FramePool, GpuImage, ImageCache, ImageSpec, InstanceTables, MeshPool,
+        PoolRange, StagingCopy, StagingImageCopy, TextureRole, UploadBatch, Uploader,
+        MAX_LOD_LEVELS, OBJECT_RECORD_SIZE,
     },
     scene::{
         anchor_level, AssetInvalidations, AssetReadiness, AssetRetirements, InstanceLedger,
@@ -85,6 +86,8 @@ struct UploadState {
     warned_images: HashSet<AssetId<Image>>,
     /// "脏集首次清空且账本非空"报一次(稳态零盘点零上传的基准)。
     settled_logged: OnceLog,
+    /// BCn 烘焙缓存(首次有压缩角色贴图时懒建;缓存是优化不是正确性)。
+    bcn_cache: Option<BcnCache>,
 }
 
 /// mesh 腿三态:完成(驻留且无失效凭据)/失败(身份在 failed 集,不再重试)/待到货
@@ -145,6 +148,8 @@ struct RowScan {
     /// (身份, 柄, 是否换条目重传):第三位决定 commit 走登记还是替换。
     fresh_meshes: Vec<(AssetId<Mesh>, Handle<Mesh>, bool)>,
     fresh_images: Vec<(AssetId<Image>, Handle<Image>, bool)>,
+    /// 本次盘点登记的贴图角色（材质五槽点时顺带，同图多角色取优先者）。
+    image_roles: HashMap<AssetId<Image>, TextureRole>,
     /// 待写对象记录:(实例槽, 记录),排批时并入 staging。
     staged_records: Vec<(u32, [u8; OBJECT_RECORD_SIZE as usize])>,
     seen: HashSet<AssetId<Mesh>>,
@@ -157,12 +162,22 @@ struct RowScan {
     failed_settled_rows: usize,
 }
 
+/// 待上传贴图条目：(身份, 句柄, 规格, 是否换条目重传, 块压缩直通产物)。
+type ReadyImage = (
+    AssetId<Image>,
+    Handle<Image>,
+    ImageSpec,
+    bool,
+    Option<BakedBcn>,
+);
+
 /// 转换/规格映射的产物。
 #[derive(Default)]
 struct ReadyAssets {
     /// (身份, 转换结果, 是否换条目重传)
     converted: Vec<(AssetId<Mesh>, ConvertedMesh, bool)>,
-    image_specs: Vec<(AssetId<Image>, Handle<Image>, ImageSpec, bool)>,
+    /// 尾位 Some = 块压缩直通（BCn 块数据已就绪，排批全链连排）。
+    image_specs: Vec<ReadyImage>,
     pending_meshes: usize,
     pending_images: usize,
     marked_meshes: HashSet<AssetId<Mesh>>,
@@ -460,7 +475,20 @@ fn scan_texture_legs(data: &UploadData, row: &InstanceRow, legs: &mut RowLegs, s
     } = data;
     match std_materials.get(&row.material) {
         Some(material) => {
-            for handle in texture_slots(material).into_iter().flatten() {
+            // 槽位角色随腿盘点登记：同图多角色取优先者（枚举顺序即优先级）
+            const SLOT_ROLES: [TextureRole; 5] = [
+                TextureRole::BaseColor,
+                TextureRole::MetallicRoughness,
+                TextureRole::Occlusion,
+                TextureRole::Normal,
+                TextureRole::Emissive,
+            ];
+            for (role, handle) in SLOT_ROLES.into_iter().zip(texture_slots(material)) {
+                let Some(handle) = handle else { continue };
+                scan.image_roles
+                    .entry(handle.id())
+                    .and_modify(|r| *r = (*r).min(role))
+                    .or_insert(role);
                 let id = handle.id();
                 let had_old = image_cache.resident(id).is_some();
                 if had_old && !invalidations.image_pending(id) {
@@ -575,25 +603,72 @@ fn prepare_assets(
             },
         }
     }
-    for (id, handle, replace) in scan.fresh_images.drain(..) {
+    for (id, handle, replace) in std::mem::take(&mut scan.fresh_images) {
         match image_assets.get(&handle) {
             None => {
                 ready.pending_images += 1;
                 readiness.mark_pending_image(id);
                 ready.marked_images.insert(id);
             }
-            Some(image) => match image_spec(image) {
-                Ok(spec) => ready.image_specs.push((id, handle, spec, replace)),
+            Some(image) => match bcn_direct(state, scan, id, image) {
                 Err(e) => {
                     if state.warned_images.insert(id) {
-                        warn!("贴图 {id:?} 规格拒绝({e}),本步不采样该资产,帧循环照常");
+                        warn!("贴图 {id:?} BCn 烘焙拒绝({e}),本步不采样该资产,帧循环照常");
                     }
                     readiness.expel_image(id);
                 }
+                Ok(bcn) => match image_spec(image) {
+                    Ok(mut spec) => {
+                        if let Some(baked) = &bcn {
+                            // 规格换 BCn：格式/补后尺寸/预烘焙级数全部来自烘焙产物
+                            spec.format = baked.format;
+                            spec.width = baked.width;
+                            spec.height = baked.height;
+                            spec.mip_levels = baked.mip_levels;
+                        }
+                        ready.image_specs.push((id, handle, spec, replace, bcn));
+                    }
+                    Err(e) => {
+                        if state.warned_images.insert(id) {
+                            warn!("贴图 {id:?} 规格拒绝({e}),本步不采样该资产,帧循环照常");
+                        }
+                        readiness.expel_image(id);
+                    }
+                },
             },
         }
     }
     ready
+}
+
+/// BCn 直通判定与烘焙：贴图登记了压缩角色才进这条路径——查磁盘缓存，未命中
+/// 现烤并写回。`Ok(None)` = 无角色/角色不压缩（走 RGBA8 现行路径）；
+/// `Err` = 烘焙拒绝（数据形状矛盾，调用方按规格拒绝处理）。
+fn bcn_direct(
+    state: &mut UploadState,
+    scan: &RowScan,
+    id: AssetId<Image>,
+    image: &Image,
+) -> Result<Option<BakedBcn>, BakeError> {
+    let Some(&role) = scan.image_roles.get(&id) else {
+        return Ok(None);
+    };
+    let Some(data) = image.data.as_ref() else {
+        return Ok(None); // 无像素数据交给规格映射拒绝
+    };
+    if role.target_format(has_alpha(data)).is_none() {
+        return Ok(None); // 该角色不压缩（如 metallicRoughness 无 BC7 暂不压）
+    }
+    let cache = state.bcn_cache.get_or_insert_with(BcnCache::open);
+    let key = cache_key(role, data, image.width(), image.height());
+    if let Some(baked) = cache.load(key) {
+        return Ok(Some(baked));
+    }
+    let baked = bake(role, data, image.width(), image.height())?;
+    if let Err(e) = cache.store(key, &baked) {
+        warn!("贴图 {id:?} BCn 缓存写回失败({e}),本次现烤直用不落盘");
+    }
+    Ok(Some(baked))
 }
 
 /// 容量保证 → 建图 → 排批 → 一次 transfer 提交 → 驻留登记与槽位发布 → 销账与计量。
@@ -644,7 +719,7 @@ fn upload_batch(
     // 跨族设备走 CONCURRENT 双族(与池相同)
     let image_sharing = ctx.sharing_families();
     let mut gpu_images: Vec<(AssetId<Image>, GpuImage)> = Vec::with_capacity(image_specs.len());
-    for (id, _, spec, _) in &image_specs {
+    for (id, _, spec, _, _) in &image_specs {
         let g = GpuImage::create(
             &ctx.device,
             &ctx.instance,
@@ -661,7 +736,10 @@ fn upload_batch(
     // 其余层级由提交内 blit 生成
     let image_bytes: u64 = image_specs
         .iter()
-        .map(|(_, _, spec, _)| u64::from(spec.width) * u64::from(spec.height) * 4)
+        .map(|(_, _, spec, _, bcn)| match bcn {
+            Some(baked) => baked.total_bytes(),
+            None => u64::from(spec.width) * u64::from(spec.height) * 4,
+        })
         .sum();
     let mut staging = Vec::with_capacity(
         (vertex_bytes + index_bytes + image_bytes) as usize
@@ -691,11 +769,29 @@ fn upload_batch(
         });
         planned.push((id, replace, c, vertex, index));
     }
-    for ((id, handle, spec, _), (_, gpu)) in image_specs.iter().zip(&gpu_images) {
+    for ((id, handle, spec, _, bcn), (_, gpu)) in image_specs.iter().zip(&gpu_images) {
         // 上一阶段已验 Some,同一次系统调用内资产不变,取不到是状态矛盾
         let image = image_assets
             .get(handle)
             .ok_or_fatal(format!("贴图 {id:?} 在规格映射与排批之间消失,状态矛盾"))?;
+        if let Some(baked) = bcn {
+            // 块压缩直通：全链块数据连排，offset 对齐到块字节倍数(VUID 红线)
+            let bb = u64::from(block_bytes(baked.format));
+            while !(staging.len() as u64).is_multiple_of(bb) {
+                staging.push(0);
+            }
+            let src_offset = staging.len() as u64;
+            staging.extend_from_slice(&baked.data);
+            image_uploads.push(StagingImageCopy {
+                image: gpu.image(),
+                src_offset,
+                width: spec.width,
+                height: spec.height,
+                mip_levels: gpu.mip_levels(),
+                format: spec.format,
+            });
+            continue;
+        }
         let bytes = image
             .data
             .as_ref()
@@ -716,6 +812,7 @@ fn upload_batch(
             height: spec.height,
             // 实际建成级数(blit 能力降级后的值,与 view 层级同源)
             mip_levels: gpu.mip_levels(),
+            format: spec.format,
         });
     }
     // 对象记录按实例槽定址拷进对象表。读侧由图形提交在 ALL_COMMANDS 等本批票据保护;
@@ -781,13 +878,21 @@ fn upload_batch(
     // 耗尽,致命退出,不静默截断。
     // 坑:换内容必须"新槽发布 + 旧槽延迟回收",原槽重写对在飞 draw 不安全(UAB 不允许
     // 覆盖仍被未完成命令使用的描述符)
+    // mip 链计数只算 blit 生成的未压缩图；BCn 图的链是烘焙预生成,单独计量
+    let bcn_count = image_specs.iter().filter(|(.., bcn)| bcn.is_some()).count();
     let mip_chained = gpu_images
         .iter()
-        .filter(|(_, gpu)| gpu.mip_levels() > 1)
+        .filter(|(gid, gpu)| {
+            gpu.mip_levels() > 1
+                && image_specs
+                    .iter()
+                    .find(|(id, ..)| id == gid)
+                    .is_some_and(|(.., bcn)| bcn.is_none())
+        })
         .count();
     let mut sampler_slots_hit = HashSet::new();
     let mut replaced_images = 0usize;
-    for ((id, _, spec, replace), (gid, gpu)) in image_specs.iter().zip(gpu_images) {
+    for ((id, _, spec, replace, _), (gid, gpu)) in image_specs.iter().zip(gpu_images) {
         // 两表同序构建,错位会把视图挂到错误身份上
         (*id == gid)
             .then_some(())
@@ -823,7 +928,7 @@ fn upload_batch(
     readiness.reconcile(&marked_meshes, &marked_images);
     let srgb_count = image_specs
         .iter()
-        .filter(|(_, _, spec, _)| spec.srgb_role())
+        .filter(|(_, _, spec, ..)| spec.srgb_role())
         .count();
     // 计量:对象记录字节并入批次字节,槽位读数单独报
     let batch_bytes = vertex_bytes + index_bytes + image_bytes + record_bytes;
@@ -841,7 +946,7 @@ fn upload_batch(
     } = scan;
     info!(
         "上传批次 #{ticket}:mesh {} 个(其中换内容 {replaced_meshes},顶点 {vertex_bytes}B / 索引 {index_bytes}B)\
-         + 贴图 {} 张(其中换内容重传 {replaced_images},{image_bytes}B,sRGB 角色 {srgb_count} / 线性 {},mip 链 {mip_chained} 张)\
+         + 贴图 {} 张(其中换内容重传 {replaced_images},{image_bytes}B,sRGB 角色 {srgb_count} / 线性 {},mip 链 {mip_chained} 张,BCn 直通 {bcn_count} 张)\
          + 对象记录 {} 条(换槽重写,{record_bytes}B);\
          槽位发布:纹理槽 {}/{}(含 fallback 0 号)、采样器槽 {} 种(本批涉及 {new_sampler});\
          实例槽 {}/{}(待回收 {})、材质槽 {}/{};\

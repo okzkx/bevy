@@ -412,6 +412,7 @@ fn upload_fallback(
                 width: 1,
                 height: 1,
                 mip_levels: 1,
+                format: spec.format,
             }],
             // CONCURRENT 共享，不需要队列族所有权转移
             ..Default::default()
