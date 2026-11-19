@@ -41,7 +41,7 @@
 2. **可靠增量**：对象变更、资产内容事件、异步到货和删除取消共同驱动更新。`Changed<T>` 仍扫描匹配实体，不能把“只上传变化项”写成“只遍历变化项”；当前快照和句柄 clone 也不是零拷贝。
 3. **GPU 自建可见集**：步骤 5 以常驻实例表、包围体、GPU frustum 和 indirect 形成闭环，替换 M2 的逐 draw 参数装配；步骤 6 再加遮挡、LOD 和预算流送。
 
-这是一种适合本学习项目的取舍，不宣称所有现代引擎都无需 CPU 镜像（"为什么不是所有引擎都全上 GPU 驱动"的正面论证见[《为什么引擎没有都上 GPU 驱动：CPU 镜像、回读墙与收益边界》](笔记/引擎/为什么没有全上 GPU 驱动.md)）。GPU 常驻不自动解决主世界并行读写；本项目用同帧帧序消除竞争，以测量区分扫描、更新和提交成本。
+这是一种适合本学习项目的取舍，不宣称所有现代引擎都无需 CPU 镜像（"为什么不是所有引擎都全上 GPU 驱动"的正面论证见[《为什么引擎没有都上 GPU 驱动：CPU 镜像、回读墙与收益边界》](笔记/可见性与GPU驱动/为什么没有全上%20GPU%20驱动.md)）。GPU 常驻不自动解决主世界并行读写；本项目用同帧帧序消除竞争，以测量区分扫描、更新和提交成本。
 
 ## 三、用法边界：用什么、怎么用、不碰什么
 
@@ -133,7 +133,7 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 
 ## 九、文档分类归档规则（2026-09-22 定案）
 
-> 全目录文档盘点后的定案：**新文档动笔前先按生命周期对号入座**，写完在文末登记；混血文档（设计文档里嵌教程、结果文档里嵌图谱）按主用途归一类。落位（2026-09-22 三次修订）：**根目录 = 总览层，平铺不设分类文件夹**——入口篇 + 路线图少而重要，平铺一眼可见；跨步骤专题笔记（宪法/方法论/工具层/侦察）集中 `笔记/`，不占根目录（例外：错误处理三篇 2026-10-10 独立成专题文件夹 `错误处理/`；待修复清单、外置拓展需求两个登记处与显存纹理压缩追加项记录 2026-11-19 各自成文件夹，登记正本/施工记录与后续相关文档同处——成体系或需长期累积的专题可照此自立文件夹）；**分类的主战场在 步骤文件夹内部**——步骤文件夹根放 README（材料目录）与该步主产出/主计划，其余专题文档（侦察/设计/知识点/手册）全进 `材料/`；施工段文件夹（N.M-*）照旧平级。
+> 全目录文档盘点后的定案：**新文档动笔前先按生命周期对号入座**，写完在文末登记；混血文档（设计文档里嵌教程、结果文档里嵌图谱）按主用途归一类。落位（2026-09-22 三次修订）：**根目录 = 总览层，平铺不设分类文件夹**——入口篇 + 路线图少而重要，平铺一眼可见；跨步骤专题笔记（宪法/方法论/工具层/侦察）集中 `笔记/`，不占根目录（例外：错误处理三篇 2026-10-10 独立成专题文件夹 `错误处理/`；待修复清单、外置拓展需求两个登记处 2026-11-19 各自成文件夹，登记正本与后续相关文档同处——成体系或需长期累积的专题可照此自立文件夹）；**分类的主战场在 步骤文件夹内部**——步骤文件夹根放 README（材料目录）与该步主产出/主计划，其余专题文档（侦察/设计/知识点/手册）全进 `材料/`；施工段文件夹（N.M-*）照旧平级。
 >
 > ```text
 > .agents/docs/
@@ -145,8 +145,6 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 > │   ├── 外置拓展需求/            ← 编号外需求登记处（登记正本 + 相关文档）
 > │   │   └── 外置拓展需求.md
 > │   ├── 学习目标执行记录归档.md  ← 历史闸门归档
-> │   ├── 显存纹理压缩/            ← 追加项记录（BCn）
-> │   │   └── 显存纹理压缩施工记录.md
 > │   └── 1-熟悉Bevy结构/ … 8-完整延迟渲染管线/   ← 步骤文件夹（README + 主产出 + 材料/ + N.M-*）
 > ├── 错误处理/                    ← 跨步骤专题（成体系多篇，独立文件夹 + README 面板）
 > │   ├── README.md                ← 专题面板（篇目分工与读序）
@@ -162,7 +160,7 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 > └── N-*/ 已并入 开发步骤/
 > ```
 >
-> 本文管"归哪类、放哪里"；"怎么写"见《[写文档纪律：帧流程三轮返工的教训](笔记/写文档纪律.md)》。
+> 本文管"归哪类、放哪里"；"怎么写"见《[写文档纪律：帧流程三轮返工的教训](笔记/工程方法/写文档纪律.md)》。
 
 ### 事前——开工前立四件
 
@@ -225,18 +223,18 @@ cargo run -p bevy_city --release -- --no_cpu_culling --size 50   # 大世界参�
 - `1-熟悉Bevy结构/材料/事件系统全景：Message队列与Observer回调.md`（Messages 双缓冲+游标机制、Event/Observer 同步触发链路与防重入、一帧时序对比、ProjectStorm 实体事件对照与借鉴点）
 - `1-熟悉Bevy结构/材料/glTF加载链路：从磁盘到Mesh3d.md`（Q4 收尾：AssetServer→GltfLoader→WorldAsset→WorldAssetRoot 五站、RenderAssetUsages 声明式数据用途、0.19 材质解耦与 GltfExtensionHandler 接入缝、frenderer 同链路对照与资源管理层薄弱点）
 - `1-熟悉Bevy结构/材料/关系与层级：ChildOf、Children与变换传播.md`（待深入⑥收尾：与 Unity ECS 同构对照、Relationship 框架 hook 自动维护、变换传播三系统、静态子树跳过）
-- `笔记/开发工具与语法笔记.md`（**非引擎结构**的工具层知识：Rust 宏语法、cargo、调试工具等，随读源码沉淀）
+- `笔记/工程方法/开发工具与语法笔记.md`（**非引擎结构**的工具层知识：Rust 宏语法、cargo、调试工具等，随读源码沉淀）
 - `错误处理/错误处理语法糖：frenderer syntax与ash_renderer移植.md`（frenderer 自写错误处理宏语法糖全图谱：anyhow 单类型底座 + LogDebug 扩展 + 9 控制流宏（8 件原件 + ash_renderer 新增 unwrap_or_panic!；前缀定输入/后缀定出口）、"错误就地消化"哲学、ash_renderer 移植版四适配与未搬三件——**工具篇**；专题另有 README 面板）
 - `错误处理/错误处理体系：两Tier思想与优雅退出.md`（**宪法篇**：用户两 Tier 错误处理思想（非必要不 panic——①不影响运行 warn 丢弃继续 ②影响运行冒泡 main 优雅退出）、VulkanError 类型层、try_init `?` 串链 + AppExit 优雅退出全链、`?` 可用=统一错误通道（2026-10-10 修订，替代壳+body）、两 Tier 实测证据、后续纪律）
 - `错误处理/代码结构优化：统一错误通道定案.md`（**设计定案篇**（2026-10-10 定案同日开工：基建三件+`draw_frame` 拆壳已施工并冒烟（渲染零误报、WM_CLOSE 优雅退出 exit 0），`upload.rs` 九处样板待续）：统一错误通道替代壳+body——官方 API 基建三件（`set_error_handler` 自定义 tier_handler 按 Severity 分流 + `FATAL: AtomicBool` + `fatal_gate` 看门写 AppExit），业务 system 直接签名 `Result<(), BevyError>` + `?` 冒泡，`TierError`/frame_body 壳已退役（upload.rs 九处样板待迁）；**判定线=冒泡与否只看是否提前 return**（逐项降级/时序记录就地 log 不进通道，冒泡消息走 context、日志落点挪 handler 零双 log）；翻旧定案"错误值无负载"改带 context 负载；改 bevy_ecs handler 带 World 被否（多线程执行器 worker 线程无 world 是架构约束 + bevy_ecs 分层禁引 AppExit + error/executor 官方活跃区 merge 热点）；坑钉=全局静态进程级前提单 App、panic 的 resume_unwind 分支必须保留、半帧延迟与壳模式等价）
-- `笔记/写文档纪律.md`（**方法论篇**（2026-09-22）：帧流程篇同日三轮返工的沉淀——机制先于比喻、判定线加粗立 §0、对着读者的下一个问题写、精简=删重复不删信息；配图三层验证与箭头锚点钉死规则）
-- `笔记/Bevy/bevy_remote BRP协议.md`（**侦察篇**（2026-09-22）：bevy_remote=可选插件，把 App 经 JSON-RPC/HTTP 暴露成"ECS 服务端"（127.0.0.1:15702）——架构两层（协议/传输解耦、handler=system 帧节拍执行）、内置方法全景、反射边界（存在性全量/取值需 ReflectComponent）、自定义方法（构建期 with_method_main + 运行期 RemoteMethods::insert，handler 可独占 &mut World）、Web Console 落点（CORS Headers 已留口未验证、无鉴权仅限本地、渲染器内部状态应注册成自定义方法暴露）；0.20 方法名已整体改名 world.* 系列，旧资料照抄会 METHOD_NOT_FOUND）
-- `笔记/Vulkan/术语速查.md`（**速查篇**（2026-09-28）：读施工记录/知识篇/代码注释遇到缩写先查这里——核心三件（UBO=数据容器装什么 / UAB=绑定后更新的时序契约与三件套配套 / VUID=规范约束编号+本项目六枚钉号）、着色工具链、图像色彩、硬件单元、Unity 合批、工程内部编号（M/D/set0/b0/V1/Tier）五张分类表；钉子=UBO 管"装什么"、UAB 管"什么时候允许写"）
+- `笔记/工程方法/写文档纪律.md`（**方法论篇**（2026-09-22）：帧流程篇同日三轮返工的沉淀——机制先于比喻、判定线加粗立 §0、对着读者的下一个问题写、精简=删重复不删信息；配图三层验证与箭头锚点钉死规则）
+- `笔记/宿主与场景/bevy_remote BRP协议.md`（**侦察篇**（2026-09-22）：bevy_remote=可选插件，把 App 经 JSON-RPC/HTTP 暴露成"ECS 服务端"（127.0.0.1:15702）——架构两层（协议/传输解耦、handler=system 帧节拍执行）、内置方法全景、反射边界（存在性全量/取值需 ReflectComponent）、自定义方法（构建期 with_method_main + 运行期 RemoteMethods::insert，handler 可独占 &mut World）、Web Console 落点（CORS Headers 已留口未验证、无鉴权仅限本地、渲染器内部状态应注册成自定义方法暴露）；0.20 方法名已整体改名 world.* 系列，旧资料照抄会 METHOD_NOT_FOUND）
+- `笔记/参考索引/术语速查.md`（**速查篇**（2026-09-28）：读施工记录/知识篇/代码注释遇到缩写先查这里——核心三件（UBO=数据容器装什么 / UAB=绑定后更新的时序契约与三件套配套 / VUID=规范约束编号+本项目六枚钉号）、着色工具链、图像色彩、硬件单元、Unity 合批、工程内部编号（M/D/set0/b0/V1/Tier）五张分类表；钉子=UBO 管"装什么"、UAB 管"什么时候允许写"）
 - 实现规则：渲染器跨段施工的实现要求（**规则篇（宪法层）**（2026-09-29，承 3.4 施工记录定案提炼）——原定正本住用户级 `~/.zcode/rules/bevy-renderer-implementation-rules.md`，**该文件已不存在（2026-10-14 归档轮核实，内容未迁移）**；各条要求的判例与证据仍可查 3.4 段施工记录，失效订正记录见[验收复核 §8.2](开发步骤/4-可靠增量链路/4-验收复核.md)；内容：接口三方互证（offset_of! 编译期断言）与字节手工排布、法线 cofactor 与颜色空间恰一次、reverse-Z 三件套与 viewport 正高度直出定案、帧槽深度与同槽重用隔 fence、跨族一律 CONCURRENT 且屏障族号 IGNORED、可见性由票据信号量收口、探针形状须覆盖生产消费形态、验证层报错修结构不修验证、施工记录四问体例（要求/原理/过程含落点/反思））
-- `笔记/Bevy/Bevy GUI 实现研究.md`（**侦察篇**（2026-09-29，由 gradients 示例带出）：Bevy GUI=retained mode 实体树非即时模式，一套 UI 三层分家（0.20 拆 crate）——`bevy_ui`（Node 样式组件+taffy 0.14 布局+UiStack 排序，不依赖 bevy_render）/`bevy_ui_render`（独立 ui_pass 借主相机颜色附件、SDF 圆角边框走顶点参数、CPU Sutherland–Hodgman 裁剪、渐变参数走顶点属性）/`bevy_ui_widgets`（17 个无样式受控控件，全局 observer+Activate/ValueChange）；文字栈已换血 cosmic-text→parley 0.11+swash 位图图集（非 SDF）；交互=bevy_picking 统一管线一个后端（UiStack 逆序命中）→trigger 指针事件→观察者，旧 Interaction 已弃用；钉子=命中判定有一帧布局滞后（PreUpdate 读上一帧 ComputedNode）、裁剪在 CPU 圆角在 shader、文本 measure 回调是布局反推唯一通道；含调试 UI 问答（§8：Bevy 核心零 egui/imgui 依赖、dev_tools 全狗粮自绘、bevy_egui 接入三段式=Update build/输入桥/RenderApp 顶点化）与 Unity UI Toolkit 对照表；**本项目定案（2026-09-29 用户拍板）=调试 UI 走 egui 裸接 ash**（§11.2：禁 bevy_render 故 bevy_egui 挂不上，自己消费 epaint 顶点写 ash 管线，3.4 后验收题；BRP web console 另线互补；订正旧文"egui-wgpu"错误）
-- `笔记/Bevy/World与场景生命周期.md`（**知识篇**（2026-09-29，由"渲染器为什么住 World/静态变量之问"与"闯关全清怎么个做法"两轮问答沉淀）：World=引擎全量数据库非业务层（Time/Window/Assets/输入都住这，Resource 是引擎服务槽位）；静态变量输在别名控制/拆除序/失败语义/实例性四处，且 Resource 只是 marker trait 不绑 World（探针证明类型可在无 ECS 处完整使用）；渲染状态住 World 是"渲染器作为系统"的必然，完整解耦形态是 RenderApp SubApp，本项目 4.1 起用 `InstanceLedger`/`InstanceRow` 跨帧账本承接原快照角色（2026-11-19 订正）；**闯关全清五层配方**=States 状态机（帧边界切换）+`DespawnOnExit`/根实体 despawn（`bevy_state/src/state_scoped.rs:145`）+StateScoped 消息防漏关+强柄掉零+Local 复位；**场景结构是森林/图非单根树**——同根是编排约定，`ChildOf` 是单父关系、despawn 连带整棵子树（2026-11-19 订正）；**引用计数=强柄确定性掉零**（无 GC，Drop 即释放，glTF 资产家族传递退场，同路径 load 命中缓存去重），但只管 Assets 容器——GPU 驻留是第三层账，需 retire 按票据清（各表 `retire` 入口已立，运行期由上传链调用）；Unity 对照=DOTS 能删 World 是因渲染状态不在 World 里）
-- `笔记/引擎/为什么没有全上 GPU 驱动.md`（**知识篇**：GDR 只省掉 CPU 逐对象的剔除—装配—提交循环；一类内容值得搬上 GPU 须同时满足三条件——结论只被绘制消费（之后无 CPU 工作，否则 CPU 要晚一到两帧才拿到结论）、输入能便宜地常驻 GPU（权威状态留 CPU，GPU 只是增量投影，在场集合仍由 CPU 账本圈定）、规模大到逐对象成本超过常驻设施固定成本；GDR 不解决半透明排序（Nanite 只收 Opaque/Masked）与逐对象定制（Unity GPU Resident Drawer 的自动排除清单）；行业形态=按内容分层；文末附 ash_renderer 落点与自测四问）
-- `笔记/引擎/渲染管线模式与VisBuffer.md`（**知识篇**（2026-10-15，由"GPU-driven 用什么管线模式 / vis-buffer 是什么 / 与 G-buffer 什么关系"三轮问答沉淀，上条的姊妹篇——那边讲决策与提交层、这边讲着色层）：**GDR 与 forward/deferred 正交**（决策提交层关心对象数、着色数据组织层关心光源数/材质带宽，组合谱系 deferred（Nanite/Frostbite/Ubisoft）与 forward+（id Tech/COD）都有）；与 GDR 真正绑定的两件=不透明主通道（半透明独立 forward，与 deferred 同构）+ vis-buffer/deferred material；**vis-buffer=G-buffer 同一岗位的另一种格式**（存三角形 ID+重心坐标的"取货单"，~8B/px 对 40+B/px；resolve 回表现场插值=5.1"递索引不递数据"在像素层重放），二选一不并存、"G-buffer 由 vis-buffer 生成"只是 UE5 链式融合特例（纯派 id Tech/Frostbite 没有 G-buffer）；存在前提相反判据（能算属性→G-buffer 终态 / 微三角形或带宽压力→vis-buffer）；本项目落点=单 pass forward，两级升级路径（forward+ / vis-buffer）已登记外置拓展条目 5，信号判据="三角形 ID 表 + 全屏 resolve 消费"出现）
+- `笔记/宿主与场景/Bevy GUI 实现研究.md`（**侦察篇**（2026-09-29，由 gradients 示例带出）：Bevy GUI=retained mode 实体树非即时模式，一套 UI 三层分家（0.20 拆 crate）——`bevy_ui`（Node 样式组件+taffy 0.14 布局+UiStack 排序，不依赖 bevy_render）/`bevy_ui_render`（独立 ui_pass 借主相机颜色附件、SDF 圆角边框走顶点参数、CPU Sutherland–Hodgman 裁剪、渐变参数走顶点属性）/`bevy_ui_widgets`（17 个无样式受控控件，全局 observer+Activate/ValueChange）；文字栈已换血 cosmic-text→parley 0.11+swash 位图图集（非 SDF）；交互=bevy_picking 统一管线一个后端（UiStack 逆序命中）→trigger 指针事件→观察者，旧 Interaction 已弃用；钉子=命中判定有一帧布局滞后（PreUpdate 读上一帧 ComputedNode）、裁剪在 CPU 圆角在 shader、文本 measure 回调是布局反推唯一通道；含调试 UI 问答（§8：Bevy 核心零 egui/imgui 依赖、dev_tools 全狗粮自绘、bevy_egui 接入三段式=Update build/输入桥/RenderApp 顶点化）与 Unity UI Toolkit 对照表；**本项目定案（2026-09-29 用户拍板）=调试 UI 走 egui 裸接 ash**（§11.2：禁 bevy_render 故 bevy_egui 挂不上，自己消费 epaint 顶点写 ash 管线，3.4 后验收题；BRP web console 另线互补；订正旧文"egui-wgpu"错误）
+- `笔记/资源更新与流送/World与场景生命周期.md`（**知识篇**（2026-09-29，由"渲染器为什么住 World/静态变量之问"与"闯关全清怎么个做法"两轮问答沉淀）：World=引擎全量数据库非业务层（Time/Window/Assets/输入都住这，Resource 是引擎服务槽位）；静态变量输在别名控制/拆除序/失败语义/实例性四处，且 Resource 只是 marker trait 不绑 World（探针证明类型可在无 ECS 处完整使用）；渲染状态住 World 是"渲染器作为系统"的必然，完整解耦形态是 RenderApp SubApp，本项目 4.1 起用 `InstanceLedger`/`InstanceRow` 跨帧账本承接原快照角色（2026-11-19 订正）；**闯关全清五层配方**=States 状态机（帧边界切换）+`DespawnOnExit`/根实体 despawn（`bevy_state/src/state_scoped.rs:145`）+StateScoped 消息防漏关+强柄掉零+Local 复位；**场景结构是森林/图非单根树**——同根是编排约定，`ChildOf` 是单父关系、despawn 连带整棵子树（2026-11-19 订正）；**引用计数=强柄确定性掉零**（无 GC，Drop 即释放，glTF 资产家族传递退场，同路径 load 命中缓存去重），但只管 Assets 容器——GPU 驻留是第三层账，需 retire 按票据清（各表 `retire` 入口已立，运行期由上传链调用）；Unity 对照=DOTS 能删 World 是因渲染状态不在 World 里）
+- `笔记/可见性与GPU驱动/为什么没有全上 GPU 驱动.md`（**知识篇**：GDR 只省掉 CPU 逐对象的剔除—装配—提交循环；一类内容值得搬上 GPU 须同时满足三条件——结论只被绘制消费（之后无 CPU 工作，否则 CPU 要晚一到两帧才拿到结论）、输入能便宜地常驻 GPU（权威状态留 CPU，GPU 只是增量投影，在场集合仍由 CPU 账本圈定）、规模大到逐对象成本超过常驻设施固定成本；GDR 不解决半透明排序（Nanite 只收 Opaque/Masked）与逐对象定制（Unity GPU Resident Drawer 的自动排除清单）；行业形态=按内容分层；文末附 ash_renderer 落点与自测四问）
+- `笔记/管线与计算/渲染管线模式与VisBuffer.md`（**知识篇**（2026-10-15，由"GPU-driven 用什么管线模式 / vis-buffer 是什么 / 与 G-buffer 什么关系"三轮问答沉淀，上条的姊妹篇——那边讲决策与提交层、这边讲着色层）：**GDR 与 forward/deferred 正交**（决策提交层关心对象数、着色数据组织层关心光源数/材质带宽，组合谱系 deferred（Nanite/Frostbite/Ubisoft）与 forward+（id Tech/COD）都有）；与 GDR 真正绑定的两件=不透明主通道（半透明独立 forward，与 deferred 同构）+ vis-buffer/deferred material；**vis-buffer=G-buffer 同一岗位的另一种格式**（存三角形 ID+重心坐标的"取货单"，~8B/px 对 40+B/px；resolve 回表现场插值=5.1"递索引不递数据"在像素层重放），二选一不并存、"G-buffer 由 vis-buffer 生成"只是 UE5 链式融合特例（纯派 id Tech/Frostbite 没有 G-buffer）；存在前提相反判据（能算属性→G-buffer 终态 / 微三角形或带宽压力→vis-buffer）；本项目落点=单 pass forward，两级升级路径（forward+ / vis-buffer）已登记外置拓展条目 5，信号判据="三角形 ID 表 + 全屏 resolve 消费"出现）
 - [3-静态取数链路/](开发步骤/3-静态取数链路/README.md)（M2：**3.1～3.5 全段收官（2026-09-29）**——3.5 光照与同屏对照落地：每帧 UBO 128B 灯光/相机、材质三模式、官方 bevy_render 独立进程并排对照分项通过，全程零 VUID；步骤 4 解禁）
 - [阅读路线/](阅读路线/README.md)（**ash_renderer 代码阅读路线**（2026-11-19 重写为八篇深读）：README 定读法与篇目，概念篇先统一十四个反复出现的词，路线篇给六段读序/文件清单/检查点/代码地图，其后按地基、数据、绑定、可见性、绘制、编排六篇深读；代码引用写符号名不写行号，发现的结构候选与缺陷回填待修复清单）
 - [已实现缺陷与修复验收](开发步骤/3-静态取数链路/3.2-buffer侧上传/已实现缺陷与修复验收.md)（2026-09-23 代码复核：生产同步缺陷、timeline 探针有效性、证据等级与修复验收；仅文档，不宣称代码已修）
