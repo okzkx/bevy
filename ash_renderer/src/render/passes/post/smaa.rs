@@ -526,15 +526,26 @@ pub struct SmaaEdgeBlendDraw {
 impl SmaaEdgeBlendDraw {
     /// 录制 edge → blend 两 pass。中间目标按帧槽分配，同槽上一轮已被 fence 等完，
     /// UNDEFINED 进场即可。
+    ///
+    /// edge pass 必须清零：edge shader 对非边缘像素 `discard`，不会写满每个像素，
+    /// 用 `clear: None` 的话这些像素内容未定义，blend 采样会读到上一轮的旧边缘
+    /// （相机/物体运动时出现鬼影）。blend pass 写满全屏，可以不清。
     pub fn record(&self, device: &Device, cb: vk::CommandBuffer) {
         unsafe {
-            for (target, target_view, pipeline, set) in [
-                (self.edges_image, self.edges_view, self.edge, self.edge_set),
+            for (target, target_view, pipeline, set, clear) in [
+                (
+                    self.edges_image,
+                    self.edges_view,
+                    self.edge,
+                    self.edge_set,
+                    Some([0.0, 0.0, 0.0, 0.0]),
+                ),
                 (
                     self.blend_image,
                     self.blend_view,
                     self.blend,
                     self.blend_set,
+                    None,
                 ),
             ] {
                 record_fullscreen_sampled(
@@ -545,7 +556,7 @@ impl SmaaEdgeBlendDraw {
                     &FullscreenPass {
                         view: target_view,
                         extent: self.extent,
-                        clear: None,
+                        clear,
                         pipeline,
                         sets: &[set],
                     },
