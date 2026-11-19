@@ -29,7 +29,15 @@ const TRANSPARENT_CAPACITY: u32 = 16384u;  // transparent_targets.rs 同名常�
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     let count = min(t_count[0], TRANSPARENT_CAPACITY);
-    if i >= push.count || i >= count {
+    // 上界双重夹：push.count 是在场行数；命令环只按 TRANSPARENT_CAPACITY 分配。
+    if i >= push.count || i >= TRANSPARENT_CAPACITY {
+        return;
+    }
+    // 命令环按在场行数消费，但本帧只有 [0, count) 有条目。多出来的下标必须写成
+    // 零命令：否则它们保留上一轮（同帧槽两帧前）的命令，透明行数下降时会重放
+    // 旧对象（幽灵绘制）；首用还会执行未初始化显存里的任意命令。
+    if i >= count {
+        t_commands[i] = IndirectCommand(0u, 0u, 0u, 0i, 0u);
         return;
     }
     // 固定容量全排序后，-inf padding 位于前缀，真实键在尾部；从数组末端反向
