@@ -208,9 +208,14 @@ struct LoadWorldParams {
 #[system]
 pub(crate) fn load_world_cmd(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: LoadWorldParams = parse_params(params, "params 缺失：需要 path")?;
+    // 同 reload_asset_cmd：String → AssetPath 的 From 会在非法标签/空标签时 panic，
+    // 协议入参必须先 try_parse，非法路径回错误而不是把宿主打崩。
+    let path = bevy::asset::AssetPath::try_parse(&p.path)
+        .map_err(|e| invalid_params(format!("资产路径解析失败：{}: {e}", p.path)))?
+        .into_owned();
     let handle = res::<AssetServer>(world)?
         // load 收 AssetPath<'static>（柄内保存），须传 owned 路径
-        .load(bevy::gltf::GltfAssetLabel::Scene(0).from_asset(p.path.clone()));
+        .load(bevy::gltf::GltfAssetLabel::Scene(0).from_asset(path));
     let entity = world
         .spawn(bevy::world_serialization::WorldAssetRoot(handle))
         .id();

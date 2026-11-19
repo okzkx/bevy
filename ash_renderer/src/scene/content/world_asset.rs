@@ -5,6 +5,7 @@
 //! `.agents/docs/开发步骤/3-静态取数链路/3.1-ECS侧取数/3.1.2-场景进场：一个load请求与三个禁渲染补位.md`。
 
 use bevy::{
+    asset::AssetPath,
     gltf::GltfAssetLabel,
     image::Image,
     pbr::{MeshMaterial3d, StandardMaterial},
@@ -43,7 +44,15 @@ fn scene_override() -> Option<String> {
 #[system]
 pub(super) fn load_scene(mut commands: Commands, server: Res<AssetServer>) {
     let path = scene_override().unwrap_or_else(|| SPONZA.to_string());
-    let scene = server.load(GltfAssetLabel::Scene(0).from_asset(path.clone()));
+    // 坑：String → AssetPath 的 From 解析失败会 panic（`AssetPath::parse` 内部 unwrap），
+    // --scene 是用户输入，必须 try_parse；非法路径按"缺值回退"同一策略回默认 Sponza。
+    let scene = match AssetPath::try_parse(&path).map(|p| p.into_owned()) {
+        Ok(asset_path) => server.load(GltfAssetLabel::Scene(0).from_asset(asset_path)),
+        Err(e) => {
+            warn!("--scene 路径非法（{path}: {e}），回退默认 Sponza");
+            server.load(GltfAssetLabel::Scene(0).from_asset(SPONZA))
+        }
+    };
     commands.spawn(WorldAssetRoot(scene));
     info!("场景进场：已请求 {path}#Scene0，实体树待依赖就绪后异步展开");
 }
