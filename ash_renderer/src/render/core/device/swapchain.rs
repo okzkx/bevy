@@ -370,7 +370,13 @@ impl Swapchain {
         index: u32,
     ) -> Option<VulkanError> {
         match self.present(queue, wait_semaphore, index) {
-            Ok(_) => None,
+            // present 报次优（acquire 时还没次优）也要重建：只靠 acquire 的返回值
+            // 判断，某些平台会长期停在缩放/拉伸呈现而不自愈。
+            Ok(PresentOutcome::Suboptimal) => {
+                self.mark_out_of_date();
+                None
+            }
+            Ok(PresentOutcome::Done) => None,
             Err(VulkanError::SwapchainOutOfDate) => {
                 self.mark_out_of_date();
                 None
