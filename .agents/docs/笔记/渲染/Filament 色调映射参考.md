@@ -1,20 +1,13 @@
 # Filament 源码参考：色调映射与 Color Grading（8.6 对照基准）
 
-本篇是 8.6 追加段（还原 Filament 完整 ACES 色调映射）的开工前置源码参考篇：把 Filament 成像链"颜色质量"的机制与常量逐处钉明，供 8.6 段施工计划与施工记录按号引用；本篇只做源码事实与对照差距，不主张施工方案细节（归 8.6 段施工计划）与 grading 全链的立案拍板。
+在 Sponza 同机位做 BRP 三连取证：unlit 直出反照率的饱和度约 23%（暖沙色，贴图本身不灰）；点亮后受光面 (221,220,219) 近中性灰白，饱和度约 1%；BRP 关 ACES 直出后饱和度只回升到约 14%。发灰的主因是曝光落点与高光压缩，曲线选型是次因：`EXPOSURE = 0.00032` 把白墙的 ≈1.7 HDR 送进曲线肩部不截断，受光面整片落在去饱和最猛的一段。8.6.3 已按完整 ACES 的线性段口径重校为 `0.00016`——直射中灰 ≈0.25 HDR、白墙 ≈0.85 落线性段上沿。
 
-出处锚点：本地检出 `F:\okzkx\filament` @ `373190d49`（rc/1.78.1-cut 开发线，2026-10-22 登记，与 8.2 BRDF 参考篇同一检出）。本篇产出于 2026-10-23，起因 = Sponza 同机位 unlit（饱和）与 shaded（发灰）对照实测后，用户拍板"还原 Filament"。
+**Filament 保住颜色靠三层：完整版 ACES 拟合曲线、可选的 EVILS 亮度缩放（只滚降亮度、色度比例不动）、整条 color grading 预烘焙进 32³ 3D LUT（逐像素一次纹理采样）；本渲染器 8.6 施工前只有裸 Narkowicz 逐通道拟合，且曝光落在其去饱和最猛的肩部，8.6 已换成完整版十步管线。**
 
-**状态追记（2026-11-02）**：8.6 段已按本篇施工收官——`present_tonemap.wgsl` 已换完整版 aces::ACES 十步管线（Narkowicz 拟合降级为 curve=0 对照项保留），亮度增益位外露（1.667 = ACES_LEGACY 观感），曝光锚点重校为 `EXPOSURE = 0.00016`（现挂 `shaders/common/brdf.wgsl`）。下节"现状定位"保留的是 8.6 开工前的取证基线，不再描述现行链。
-
-## 一句话结论
-
-Filament 保住颜色靠三层：**①曲线本身**（完整版 ACES 拟合，AP0/AP1 色域内工作 + glow 模块 + 红色修正 + 受控两级去饱和——viewer 默认的 ACES_LEGACY 也走这套，只是加 1.667 亮度增益）、**②EVILS 亮度缩放**（可选开关：只对亮度做 tone map，色度比例原样保留）、**③整条 color grading 烘 32³ 3D LUT**（白平衡/CDL/对比度/vibrance/saturation/曲线全链，saturate 与 OETF 只在最后）。本渲染器在 8.6 施工前只有裸 Narkowicz 逐通道拟合 + 曝光钉在其去饱和最猛的肩部，是"发灰"观感的主源；该基线已由状态追记的完整 ACES 链取代。
-
-## 现状定位（ash_renderer 侧证据）
+## 现状定位（8.6 施工前的取证基线）
 
 - 现行曲线：`ash_renderer/shaders/present_tonemap.wgsl:50` 的 `(x(2.51x+0.03))/(x(2.43x+0.59)+0.14)`（Narkowicz 2015 拟合，Rec.709 逐通道）。这正是 Filament 注释里的 "legacy fit of ACES in Rec.709"（`filament/src/ToneMapper.cpp:173-174`）——Filament 自己只把它当亮度对照基准，不在正式链路裸用。
 - 曝光落点：`ash_renderer/shaders/gbuffer_composite.wgsl:121` `EXPOSURE = 0.00032`，锚点注释"白墙 ≈ 1.7 HDR 进肩部不截断"（8.4.1 重校准，治"全顶白"）——受光面大面积落在曲线肩部。
-- 发灰实测（2026-10-23，Sponza 同机位 BRP 三连取证）：unlit 直出反照率饱和度约 23%（暖沙色，贴图不灰）；点亮后受光面 (221,220,219) 近中性灰白，饱和度约 1%；BRP 关 ACES 直出后饱和度只回升到约 14%——说明曲线选型是次因，曝光落点与高光压缩才是主因。
 
 ## 二、Filament 色调映射算子家族
 
@@ -58,7 +51,7 @@ Filament 把整条 grading 预烘焙进 32³ 3D LUT（QualityLevel 控维度）�
 - viewer 默认 `exposure = 0.0`（EV 刻度，2^EV 乘在 grading 链最前，Settings.h:203）——Filament 不用曝光救曲线，场景标定靠光度单位（方向光 lux + IBL）。
 - 对比度锚 `MIDDLE_GRAY_ACEScct`（`ColorGrading.cpp:838` contrastOffset 基准）——ACEScct 域中灰，非我们线性域 0.18 直搬。
 - 我们侧对应物（8.6 施工前）：`EXPOSURE = 0.00032` 常量 + 20000 lx 满日照 + 800 lx ambient。8.6 已重校曝光锚点（典型受光面落线性段 ~0.5–0.8 而非肩部 1.7；结果见下一条），并把亮度增益位与 Hill 拟合的量纲分开。
-- **锚点与曲线选型是两个独立旋钮，锚点随曲线口径重标（8.6.3 实测钉）**：完整 ACES Hill 拟合线性段口径下 `EXPOSURE = 0.00016`——直射中灰 ≈0.25 HDR、白墙 ≈0.85 落线性段上沿，肩部压缩留给真高光；旧锚 0.00032 口径下白墙 ≈1.7 深入肩部（斜率 ~0.12），是受光面去饱和主源。曝光量纲牵动链：8.2.4 的 6.3e-4（预曝光口径）→ 8.4.1 的 0.00032（Narkowicz 肩部口径）→ 8.6.3 的 0.00016——每个锚点只对当时曲线口径成立，复跑双渲染器对照须按新锚点重标。
+- **锚点与曲线选型是两个独立旋钮，锚点随曲线口径重标（8.6.3 实测确认）**：完整 ACES Hill 拟合线性段口径下 `EXPOSURE = 0.00016`——直射中灰 ≈0.25 HDR、白墙 ≈0.85 落线性段上沿，肩部压缩留给真高光；旧锚 0.00032 口径下白墙 ≈1.7 深入肩部（斜率 ~0.12），是受光面去饱和主源。曝光量纲牵动链：8.2.4 的 6.3e-4（预曝光口径）→ 8.4.1 的 0.00032（Narkowicz 肩部口径）→ 8.6.3 的 0.00016——每个锚点只对当时曲线口径成立，复跑双渲染器对照须按新锚点重标。
 
 ## 六、PBR_NEUTRAL 形状与决策
 
@@ -71,19 +64,25 @@ Khronos PBR Neutral（`ToneMapper.cpp:446-464`，出处 modelviewer.dev tone-map
 | 层 | Filament | ash_renderer（8.6 施工前） | 8.6 主张（已施工） |
 |---|---|---|---|
 | 曲线 | 全拟合 ACES（AP0/AP1 + glow + 红修正 + Hill 拟合 + dim surround），LEGACY=同管线+1.667 增益 | 裸 Narkowicz 逐通道（Rec.709） | ✅ 替换为完整版，亮度增益位外露 |
-| 曝光 | EV 旋钮 + 光度单位标定，ACEScct 中灰锚 | EXPOSURE 常量，白墙钉在 1.7 HDR 肩部 | ✅ 锚点重校（受光面落线性段），随曲线替换重标 |
+| 曝光 | EV 旋钮 + 光度单位标定，ACEScct 中灰锚 | EXPOSURE 常量，白墙落在 1.7 HDR 肩部 | ✅ 锚点重校（受光面落线性段），随曲线替换重标 |
 | 亮度/色度分离 | EVILS luminanceScaling + gamutMapping（开关，默认关） | 无 | ⬜ 不进 8.6；若 8.6 后高光仍褪色再立案 |
 | grading 全链 | 白平衡/CDL/vibrance/saturation/曲线烘 32³ LUT | 无 | ⬜ 不进 8.6，留拍板（步骤 9 IBL 后按需） |
 | 间接光 | IBL 提供有色环境光 | 800 lx 灰 ambient（4%） | ⬜ 归步骤 9.1 间接光注入 |
 | 编码纪律 | grading LUT 末尾 OETF 一次 | swapchain SRGB view ROP 恰好一次（3.4 拍板） | 不变，8.6 置于同纪律下 |
 
-## 八、发灰问题归因（8.6 判定线的现象基线）
+## 八、发灰问题归因（现象基线）
 
-三因子按贡献排序：①曝光锚点把受光面送进曲线肩部（去饱和主源）；②ACES 家族曲线本身的高光压缩（换曲线可显著缓解但不归零）；③暗部只剩灰 ambient 无色相、中间调被 filmic 压缩（归步骤 9）。8.6 消①②，③留步骤 9——判定线须包含"同机位 unlit vs shading 饱和度差"与"高光段饱和色读图"两类对照，防只修曲线不修锚点。
+三因子按贡献排序：①曝光锚点把受光面送进曲线肩部（去饱和主源）；②ACES 家族曲线本身的高光压缩（换曲线可显著缓解但不归零）；③暗部只剩灰 ambient 无色相、中间调被 filmic 压缩（归步骤 9）。8.6 消①②，③留步骤 9——对照须包含"同机位 unlit vs shading 饱和度差"与"高光段饱和色读图"两类，防只修曲线不修锚点。
 
-## 九、gltf_viewer 对照配方钉子（复用必读，出处 8.2.4 §1.4 与 8.6.5）
+## 九、gltf_viewer 对照配方（复用必读，出处 8.2.4 §1.4 与 8.6.5）
 
 - `shutterSpeed` 单位是 **1/秒**（给 0.1935 = 实际曝光 5.17 s，过曝白屏）；`toneMapping` 在 `view.colorGrading` 下且取**字符串字面量**（`"LINEAR"` 非 0）；light `type` 大写（`"SUN"`）；默认 IBL `assets/ibl/lightroom_14b` 在 `--ibl` 空串时兜底加载，须给无效路径压掉。
 - **加载有效 IBL 时，viewer 用 IBL 球谐估计覆盖设置里的太阳**——均匀 IBL 下太阳近乎消失；要太阳须给无效 `--ibl` 路径。
 - `--screenshot` 须配 `--frames`：截图在 N 帧后落盘，glTF 异步加载未完会截到空场（40 帧不够，300 帧稳）。
 - 机位/曝光配方：`-s`（actual size，Sponza 节点自带 0.008 缩放即与宿主同米制）；`camera.enabled=true` + center/lookAt + focalLength 28.97（≈垂直 45°）；曝光 aperture 16 / ISO 100 / shutterSpeed 20.345 = 0.00016；`--window-size 1600x900 --frames 600 --screenshot` 出图不含 UI。
+
+## 来源与版本
+
+出处锚点：本地检出 `F:\okzkx\filament` @ `373190d49`（rc/1.78.1-cut 开发线，2026-10-22 登记，与 8.2 BRDF 参考篇同一检出）。这份参考产出于 2026-10-23，起因 = Sponza 同机位 unlit（饱和）与 shaded（发灰）对照实测后，用户拍板"还原 Filament"。
+
+**状态追记（2026-11-02）**：8.6 段已按这份参考施工收官——`present_tonemap.wgsl` 已换完整版 aces::ACES 十步管线（Narkowicz 拟合降级为 curve=0 对照项保留），亮度增益位外露（1.667 = ACES_LEGACY 观感），曝光锚点重校为 `EXPOSURE = 0.00016`（现挂 `shaders/common/brdf.wgsl`）。正文"现状定位"保留的是 8.6 开工前的取证基线，不再描述现行链。

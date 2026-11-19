@@ -1,16 +1,16 @@
 # Unity SCGI 调研：Surface Cache GI 与世界空间辐射缓存
 
-## 0. 判定线
+SCGI 的射线不从屏幕像素发出：表面被网格化成 patch，每个 patch 是射线的发射点，全局射线预算摊在 patch 上，不按像素数走。所以 DLSS/FSR 这类假设"每像素一个样本"的重建器帮不上它的噪声；它也只做 diffuse，镜面间接明确交给 Reflection Probes / 即将到来的 SSR。它的底子是"世界空间表面缓存 + 少量射线维护缓存 + 查询时收敛"——射线命中点从缓存取间接光，多弹射靠缓存自反馈，时域上靠累计收敛。
 
-- **SCGI = Surface Cache GI**，不是 Screen-space 也不是任何 shader 配置缩写。Unity 光照团队（rasmusn）2026-05-20 公开预览，目标随 6.7 LTS 发布，URP 先行。
-- **SCGI 是 diffuse-only 的动态 GI**：镜面间接明确交给 Reflection Probes / 即将到来的 SSR，不要指望它给反射。
-- **机制底座 = "世界空间表面缓存 + 少量射线维护缓存 + 查询时收敛"**，官方自认灵感来自 Frostbite GIBS（surfels）、Kajiya 的 irradiance cache、NVIDIA SHARC（hash grid radiance cache），且是三者的组合而非直接实现。
-- **射线预算花在缓存补丁上，不是每像素**：官方明确"每 Surface Cache patch 取 path tracing 样本（压低射线数）"，所以 DLSS/FSR 这类"屏幕空间逐像素路径样本"的重建器帮不上它的噪声。
-- 底层走 UnifiedRayTracing 库：有硬件 RT 就用，没有就 compute shader 软件求交 fallback；Unity 自己不支持 Metal/Vulkan 硬件光追，SCGI 在这两个 API 上也只能走软件路线。
+**SCGI = Surface Cache GI：射线花在缓存补丁上，不花在像素上；镜面间接不归它管。**
 
 ## 1. SCGI 是什么
 
 来源：[Surface Cache GI Preview - Unity Discussions](https://discussions.unity.com/t/surface-cache-gi-preview/1720494)（官方预览帖，下面所有官方说法出自此帖及其 Staff 回复，除非另注）。
+
+SCGI = Surface Cache GI，不是 Screen-space，也不是任何 shader 配置缩写。Unity 光照团队（rasmusn）2026-05-20 公开预览，目标随 6.7 LTS 发布，URP 先行。它是 **diffuse-only 的动态 GI**：镜面间接明确交给 Reflection Probes / 即将到来的 SSR，不要指望它给反射。
+
+机制底座是"世界空间表面缓存 + 少量射线维护缓存 + 查询时收敛"，官方自认灵感来自 Frostbite GIBS 的 surfel（带半径的表面小圆盘，缓存表面辐出度）、Kajiya 的 irradiance cache（按空间格子缓存入射辐照度，供别的射线查询）、NVIDIA SHARC（世界空间 hash grid 的辐射缓存），且是三者的组合而非直接实现。
 
 Unity 光照团队对 SCGI 的定位是"动态世界里的全局光照"，解决三件烘焙路线做不到的事：
 
@@ -27,12 +27,14 @@ Unity 光照团队对 SCGI 的定位是"动态世界里的全局光照"，解决
 - **覆盖范围靠 Surface Cache Volume 定义**："与 shadow map 类似，我们要求用户定义 SCGI 要覆盖的体块"。Volume 里配置球体半径/尺寸，无固定上限，但**半径越大越要配级联数**，避免远处堆太多精细 patch。
 - **级联 + patch**：表面被网格化为 patch，"Cell Index"调试模式能看到 patch 随配置实时移动。patch 走 **ring buffer，有硬编码的"温和"预算**，超预算（大范围×高分辨率）会报容量问题；官方说后续可能开放预算给不在乎弱设备的用户。
 - **每个 patch 是射线的发射点**：raygen 对 patch 发射线做直接光采样，多弹射靠缓存自反馈（见 SHARC/irradiance cache 的通用模式）。
+- **射线预算花在缓存补丁上，不是每像素**：官方明确"每 Surface Cache patch 取 path tracing 样本（压低射线数）"，所以 DLSS/FSR 这类"屏幕空间逐像素路径样本"的重建器帮不上它的噪声。
 - **半径外计划用"全局实时探针"兜底**（6.7 前加入）：探针随环境光实时变化但**不发射线、不产生遮挡**，官方建议用 SSAO 伪造遮挡。
 - **自发光三角形支持弱**（时间上不稳定），计划加自发光三角形重要性采样解决；短期建议用点光源直接光 + SCGI 间接光组合。
 - **依赖 Motion Vectors**：Scene View 没有 motion vectors 导致 Scene View 伪影多，说明系统按"表面随时间运动"建模，靠重投影稳定。
 - **天幕/背景几何会挡住环境光的射线**（已知问题），计划加对象排除功能。
 - 响应速度受 Temporal Smoothing 控制：置 0 反应最快但时域噪声大，加大样本数补偿。
 - 已知缺陷清单里有趣的一条：**与 x/y/z 轴完全平齐的平面会闪**（z-fighting 样的时域闪烁），根因是轴对齐几何在缓存结构里的退化。
+- **底层走 UnifiedRayTracing 库**：有硬件 RT 就用，没有就 compute shader 软件求交 fallback；Unity 自己不支持 Metal/Vulkan 硬件光追，SCGI 在这两个 API 上也只能走软件路线。
 
 这个拼图足够画出架构：**球体覆盖 → 级联表面 patch 池（ring buffer 预算）→ patch 采样射线 → 世界空间缓存 → 屏幕空间像素查询**——与三大灵感来源的范式一致。
 

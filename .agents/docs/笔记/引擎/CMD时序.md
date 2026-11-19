@@ -3,6 +3,24 @@
 > 行 = 录制调用单元（`record_frame_steps` 与各模块 record 的连续录制段），行内拆真命令：**动作**（dispatch/draw/fill，有执行事件）、**同步**（barrier，纯排序）、**状态**（bind 系，烤进动作参数，无执行事件）。真命令包 = 一行含多只同类动作命令，数量随场景/分辨率变化，公式标注。
 > 同步机制列回答"这一步靠什么保证顺序"：Handoff（compute.rs dispatch 后自动录）｜布局/内存屏障（手录或 helper 内录）｜framebuffer 语义｜提交级等待｜fence/跨帧。
 
+**九段**（表内"段"列，按录制顺序）：
+
+- **① 进场**：交换链、槽深度、G-buffer 的进场布局屏障，外加透明排序键预填；
+- **② compute 前置**：剔除 → 遮挡 → LOD → indirect/shadow 命令组装 → 光源分簇 → 透明 collect/sort/gather；
+- **③ shadow depth**：逐级联画阴影深度图；
+- **④ G-buffer**：不透明物体写三色附件 + 深度；
+- **⑤ 合成 + 透明前向**：G-buffer 光照合成进 HDR 目标，再叠透明层；
+- **⑥ Hi-Z 归约**：本帧深度逐级归约成金字塔；
+- **⑦ Bloom**：prefilter + down + up 全屏链；
+- **⑧ tonemap / SMAA / neighborhood + UI**：色调映射到 LDR，再叠 UI；
+- **⑨ 出场**：swapchain 转 PRESENT_SRC_KHR，随后提交。
+
+**三个反复出现的术语**：
+
+- **烤**：bind 类状态命令在录制时把参数写进后续动作命令，本身没有执行事件；表里 `[bind 烤]` 表示这一行含这类状态命令。
+- **Handoff**：compute dispatch 录完后自动追加的屏障（`Handoff::*`），把本 dispatch 的写交接给下一个消费者。
+- **环**：按帧槽轮转的缓冲——每个帧槽一份，CPU 写下一槽时不覆盖 GPU 正在读的那份（帧槽 = 每份在飞帧各用一组、按帧轮换的资源）。
+
 | # | 段 | 命令 / 操作 | 层级 | 写资源 @access | 读资源 @access | 同步机制 | src→dst stage | 执行形态 | 跨队列 / 跨帧 | 备注 |
 |---|----|-------------|------|----------------|----------------|----------|---------------|----------|---------------|------|
 | 1 | ① | **1×布局屏障** 交换链 UNDEFINED→COLOR_ATTACHMENT_OPTIMAL | 布局屏障 | swapchain image（进场写） | presentation engine 上一轮读（对面） | 布局屏障 + 提交级 image_available | COLOR_ATTACHMENT_OUTPUT→COLOR_ATTACHMENT_WRITE | 等 acquire 放手 | ✓ 对手是 presentation engine | 与进场屏障一配对：提交在 CAO 等 image_available |

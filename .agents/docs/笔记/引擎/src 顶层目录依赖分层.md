@@ -2,18 +2,25 @@
 
 #架构 #结构
 
-ash_renderer/src 六个顶层目录形成一棵单向无环的依赖树，箭头全部向下：
+ash_renderer/src 六个顶层目录之间的依赖关系单向无环，箭头全部向下：
 
 ```
                  driver（宿主桥/编排）
-                /   |    \      \
-         overlay  scene  render  remote
-              \    |    /  |
-               \   |   /   |
-                render ─────┘
-                   |
-                 common
+                /    |      \
+         overlay  scene    render
+              \      |       /
+               \     |      /
+                \    |     /
+                  render
+                    |
+                  common
+
+remote（BRP 调试读口，由 main 装配；driver 不引用）
+   ├── scene
+   └── render
 ```
+
+`remote` 不被任何目录引用，与 driver 各自成根；它依赖 scene、render，由 main 直接装配。
 
 实测口径：按各目录内 `crate::` 路径引用归类（量级随代码漂移，方向不漂移）。
 
@@ -22,10 +29,10 @@ ash_renderer/src 六个顶层目录形成一棵单向无环的依赖树，箭头
 | 目录 | 依赖 | 被依赖 | 职责一句话 |
 |---|---|---|---|
 | `common` | 无 | render、overlay、driver | 错误类型、`or_fatal`/`or_warn` 糖、字节打包等机械样板 |
-| `render` | common | scene、overlay、remote、driver | Vulkan 执行层：bindless 表、环、管线、录制提交 |
-| `scene` | render（仅 mechanism/assets 三文件） | overlay、remote、driver | 场景事实：账本、相机、灯光、资产登记 |
+| `render` | common | scene、overlay、remote、driver | Vulkan 执行层：bindless 表、环（按帧槽各一份、轮转使用的缓冲组）、管线、录制提交 |
+| `scene` | render（仅 mechanism/assets 三文件） | overlay、remote、driver | 场景事实：账本（按行记录对象状态、跨帧保留的表）、相机、灯光、资产登记 |
 | `overlay` | render、scene、common | driver | egui 立即模式 UI 与绘制半边 |
-| `remote` | scene、render | 无 | BRP 调试读口（GapSnapshot/账本取证） |
+| `remote` | scene、render | 无 | BRP（Bevy Remote Protocol，从外部查询运行中程序的接口）调试读口（GapSnapshot/账本取证） |
 | `driver` | common、render、scene、overlay | 无（remote 由 main 装配，driver 不引用） | 宿主桥：系统注册、帧编排、错误分流 |
 
 ## 三条撑结构的规则
@@ -48,7 +55,7 @@ overlay 读 scene 状态 + render 管线画界面；remote 读 GapSnapshot/账�
 取证——都不做帧决策。driver 把四层接进 Bevy 调度表（Startup/Update/PostUpdate/Last），
 自己不持有 Vulkan 状态；对 overlay 的唯一引用是 `draw_frame` 调 `paint_overlay`。
 
-## 判定线：新依赖该不该建
+## 新依赖该不该建
 
 - 箭头必须向下（driver→业务层→render→common），出现反向引用即结构缺陷。
 - 平级模块之间互不 import，需要共享就走共同的下层（如常量下沉 common）。

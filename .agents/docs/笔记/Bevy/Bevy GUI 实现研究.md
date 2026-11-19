@@ -1,27 +1,38 @@
 # Bevy GUI 实现研究：布局、渲染、交互三层链路
 
-> 行号说明：行号基于 Bevy 0.20.0-dev 本地快照（2026-10 时点），上游提交后可能漂移，以符号名为准。
+`examples/ui/styling/gradients.rs` 里的 GUI 很小：一个 flex 布局（像 CSS flexbox 那样按行或列自动排布子元素）的渐变画廊、一排按钮、几行文字，加上悬停和点击。示例自己没有处理鼠标，也没有排字，交互却照常工作——布局、绘制、命中三条链路一条都没少。
 
-> 侦察对象：本仓库 bevy 0.20.0-dev 源码（`crates/bevy_ui*`、`bevy_text`、`bevy_picking`、`bevy_input_focus`）。触发点：`examples/ui/styling/gradients.rs`——这个渐变示例里带着完整的 GUI（flex 布局画廊 + 按钮 + 文字标签 + 悬停/点击交互），虽小却把 GUI 三大件全走了一遍。本文按"数据怎么建 → 布局怎么算 → 像素怎么画 → 点击怎么来"展开，未加前缀的 `lib.rs`/`ui_node.rs` 等均指对应 crate 的 `src/` 下文件，断言均带 file:line。
+顺着这个示例往里查，看到的是 retained mode（保留模式）：UI 元素作为实体长期存在，样式是 `Node` 组件，布局结果和绘制序号是另一些组件，布局系统只重算变化的部分；egui 那种每帧重新声明所有控件的即时模式是另一条路线。**Bevy 原生 GUI 是 retained mode 的实体树：样式、布局、绘制、命中都是 ECS 数据与系统，不是即时模式。** 0.20 把这套 UI 拆成三个 crate——`bevy_ui`（样式 + taffy 布局 + 语义）、`bevy_ui_render`（RenderApp 侧全部 GPU 工作）、`bevy_ui_widgets`（无样式控件 + `Activate`/`ValueChange` 事件）；`bevy_text`、`bevy_picking`、`bevy_input_focus` 分别提供文字排版、命中管线与键盘焦点。
 
-## §0 判定线
+## 按主题查
 
-- **Bevy 的 GUI 是 retained mode（保留模式）实体树，不是即时模式。** 每个 UI 元素是一个实体，样式是 `Node` 组件、布局结果是另一些组件，布局系统增量重算；egui 那种"每帧重新声明所有控件"是另一条路线，Bevy 原生 UI 不走。
-- **一套 UI 三层分家（0.20 已拆成三个 crate）：** `bevy_ui`（样式组件 + taffy 布局 + 语义层，**不依赖 bevy_render**）、`bevy_ui_render`（RenderApp 侧全部 GPU 工作）、`bevy_ui_widgets`（无样式控件 + `Activate`/`ValueChange` 事件）；`bevy_text`（文字排版）、`bevy_picking`（统一命中管线）、`bevy_input_focus`（键盘焦点）横向供血。
-- **布局引擎是 taffy 0.14（纯 Rust flexbox/grid），且 UI 有自己专属的变换体系**：`UiTransform`/`UiGlobalTransform` 是 2D 仿射（原点左上、y 向下，CSS 约定），与 3D 场景图的 `bevy_transform` 是两套东西（ui_transform.rs:144/:227）。
-- **UI 渲染是独立 render pass，但借用主相机的颜色附件**：每个相机额外配一个 subview=1 的 UI 视图，`ui_pass` 挂在 Core2d/Core3d 的 PostProcess 之后、upscaling 之前，无深度模板附件（render_pass.rs:52-63）——UI 永远画在场景之上、不参与深度测试。
-- **文字栈 0.20 已换血：cosmic-text → parley 0.11（Linebender 文本栈）+ swash 0.2.6（光栅化）**（bevy_text/Cargo.toml:44-45）。字形光栅进动态图集，以 TEXTURED 四边形走普通 UiPipeline；是**位图图集不是 SDF**（对照 TextMeshPro 的 SDF）。
-- **交互是"统一 picking 管线的一个后端 + 观察者"，不是 GUI 回调**：winit 事件 → `PointerInput` → `ui_picking` 命中 → `PointerHits` → hover 差量 → trigger 指针事件 → 控件的全局 observer → `Activate`/`ValueChange` → 用户 observer。旧的 `Interaction` 在 0.20 已标弃用（focus.rs:61-66）；`ui_focus_system` 本身未标弃用，仍默认在 PreUpdate 运行。
-- **裁剪全在 CPU（Sutherland–Hodgman 多边形裁剪，发生在 prepare 生成顶点时），shader 零 clip 逻辑**；反过来，圆角/边框全在 shader（SDF 距离场），每个顶点随身携带 radius/border/size/point 参数。
-- **命中判定有一帧布局滞后**：`ui_picking` 跑在 PreUpdate，读的是上一帧 PostUpdate 算好的 `ComputedNode`/`UiStack`；同帧改布局当帧点击会有一次旧几何判定（通常无感，但机制上要知道）。
+| 想查什么 | 去哪节 |
+|---|---|
+| retained mode 与六个 crate 的分工 | §1.1 |
+| 一帧内 UI 系统的时间线 | §1.2 |
+| Node 样式组件与它的随从组件 | §2 |
+| taffy 布局同步与 measure 回调 | §3 |
+| UiStack 绘制顺序 | §3.4 |
+| UI subview、CPU 裁剪、SDF 圆角、渐变与阴影 | §4 |
+| parley/swash 文字栈与字形图集 | §5 |
+| picking 命中链与 Button 的 Activate | §6 |
+| 控件层与 bsn! 场景语法 | §7 |
+| 调试 UI 与 egui 接入 | §8 |
+| gradients.rs 全链路回看 | §9 |
+| Unity/UE 对照 | §10 |
+| 本项目的关系与定案 | §11 |
 
 ## §1 全景：六个 crate 与一帧的时间线
 
+侦察对象是本仓库 bevy 0.20.0-dev 源码的 `crates/bevy_ui*`、`bevy_text`、`bevy_picking`、`bevy_input_focus`。
+
 ### 1.1 crate 分工
+
+0.20 把这套 UI 拆成三个主 crate，另有三个分别提供文字、命中与焦点能力的 crate，依赖方向如下：
 
 | crate | 职责 | 关键依赖 |
 |---|---|---|
-| `bevy_ui` | `Node` 样式组件、taffy 布局桥、`ComputedNode`/`UiStack`/`CalculatedClip` 等计算组件、`Text`/`ImageNode` 等 widget、UI picking 后端、accesskit 同步 | taffy 0.14、bevy_text；**无 bevy_render** |
+| `bevy_ui` | `Node` 样式组件、taffy 布局桥、`ComputedNode`/`UiStack`/`CalculatedClip` 等计算组件、`Text`/`ImageNode` 等 widget、UI picking 后端、accesskit 同步 | taffy 0.14（纯 Rust 的 flexbox/grid 布局引擎）、bevy_text；**无 bevy_render** |
 | `bevy_ui_render` | RenderApp 侧 extract/queue/prepare/draw、五套渲染管线（Ui/Gradient/BoxShadow/TextureSlice/UiMaterial）、CPU 裁剪、批处理 | bevy_ui + bevy_text + bevy_sprite_render/bevy_render |
 | `bevy_ui_widgets` | 17 个**无样式**控件（Button/Slider/Checkbox/TextInput…），全局 observer + `Activate`/`ValueChange` | bevy_ui + bevy_picking + bevy_input_focus + bevy_a11y |
 | `bevy_text` | parley 排版、swash 光栅化、字形图集、`TextLayoutInfo` 输出 | parley 0.11、swash 0.2.6；**无 bevy_ui/bevy_render** |
@@ -52,7 +63,7 @@ RenderApp    Extract 链 15 个系统（变更驱动）→ queue_uinodes → sor
              → prepare_uinodes(裁剪+顶点+批次) → ui_pass(Core2d/3d)
 ```
 
-两处时间差值得钉死：**交互（PreUpdate）读上一帧布局**（见 §0）；**渲染（RenderApp extract）读本帧布局**——布局在 PostUpdate 刚算完，RenderApp 接着抽，所以画面不滞后。
+两处时间差值得注意：**交互（PreUpdate）读上一帧布局**——`ui_picking` 跑在 PreUpdate，读的是上一帧 PostUpdate 算好的 `ComputedNode`/`UiStack`，同帧改布局当帧点击会有一次旧几何判定（通常无感，但机制上要知道）；**渲染（RenderApp extract）读本帧布局**——布局在 PostUpdate 刚算完，RenderApp 接着抽，所以画面不滞后。
 
 ## §2 数据侧：Node 与它的十三件随从
 
@@ -75,6 +86,8 @@ RenderApp    Extract 链 15 个系统（变更驱动）→ queue_uinodes → sor
 | `ZIndex` | 兄弟间局部排序（`GlobalZIndex` 不是 require，需手动加） |
 | `EmSize` | 解析 Val::Em 用，文本节点由 `sync_font_size_to_em_size` 维护 |
 | `ComputedUiTargetCamera`/`ComputedUiRenderTargetInfo` | 归属相机 + 渲染目标的 scale_factor/物理尺寸（层级传播） |
+
+`UiTransform`/`UiGlobalTransform` 是原点左上、y 向下的 2D 仿射，与 3D 场景图的 `bevy_transform` 是两套东西（ui_transform.rs:144/:227）。
 
 还有几个重要的非 require 组件：`UiTargetCamera`（ui_node.rs:3408，根节点手动指定相机）、`FixedNode`（:3539，无视父级、直接相对视口定位——做 HUD 用）、`CalculatedClip`（:2776，继承的裁剪矩形链）、`OverrideClip`（:2846，丢弃继承裁剪）、`Pickable`（bevy_picking 提供，控制挡不挡下层）。
 
@@ -115,7 +128,7 @@ flexbox 里文字节点"由内容决定大小"是反向问题：taffy 算到该�
 
 ### 4.1 视图：每相机一个 UI subview
 
-`extract_ui_camera_view`（bevy_ui_render/lib.rs:1247-1382）给每个 Camera2d/3d 配第二个 `ExtractedView`：`RetainedViewEntity` 的 subview 固定为 `UI_CAMERA_SUBVIEW=1`（:1211-1216），投影是左上原点正交 `orthographic(0, w, h, 0, 0, 0, FAR)`（:1286-1294）——所以 UI 坐标系就是"像素坐标系"。主相机 render entity 挂 `UiCameraView(ui视图)`、UI 视图挂 `UiViewTarget(主相机)`，一对组件互链（:1313-1329）。
+`extract_ui_camera_view`（bevy_ui_render/lib.rs:1247-1382）给每个 Camera2d/3d 配第二个 `ExtractedView`：`RetainedViewEntity` 的 subview 固定为 `UI_CAMERA_SUBVIEW=1`（:1211-1216），投影是左上原点正交 `orthographic(0, w, h, 0, 0, 0, FAR)`（:1286-1294）——所以 UI 坐标系就是"像素坐标系"。主相机 render entity 挂 `UiCameraView(ui视图)`、UI 视图挂 `UiViewTarget(主相机)`，一对组件互链（:1313-1329）。`ui_pass` 挂在 Core2d/Core3d 的 PostProcess 之后、upscaling 之前，无深度模板附件（render_pass.rs:52-63）——UI 永远画在场景之上、不参与深度测试。
 
 ### 4.2 Extract：变更驱动，不是全量重抽
 
@@ -158,13 +171,15 @@ fragment 的核心是带椭圆角的 SDF：`sd_rounded_box`（ui.wesl:102-121）
 
 ## §5 文字：parley + swash + 动态图集
 
-0.20 的 bevy_text 已与早期版本（cosmic-text 时代）完全不同栈：
+0.20 的 bevy_text 已与早期版本（cosmic-text 时代）完全不同栈（bevy_text/Cargo.toml:44-45）：
 
 - **排版 = parley 0.11**（Linebender）：`TextPipeline::update_buffer`（pipeline.rs:72-295）把所有 span 文本喂给 parley ranged_builder，样式（FontFamily/字号/行高/字距/字重/特性）作为 StyleProperty 逐段压入，`break_all_lines` 断行 + align。字体数据库是 parley 的 fontique：`Font` 资产 = `fontique::Blob`（font.rs:29-45），加载时以"家族名 + `asset_id:{id}` 别名"双名字注册进全局 Collection（font.rs:81-99）。
 - **光栅化 = swash**：`update_text_layout_info`（pipeline.rs:343-476）遍历 parley 排版结果，按 run 组 `FontAtlasKey`（字体数据 id+字号+变体哈希+平滑模式），swash `Scaler` 出字形轮廓，`FontAtlas`（font_atlas.rs:32-41）用 `DynamicTextureAtlasBuilder` 光栅进 RGBA8 动态图集（2px padding，放不下开新 pow2≥512 图集）；alpha mask 转白色+alpha（可 tint），彩色 emoji 直通（font_atlas.rs:215-259）。
 - **组件结构**：`Text` 在 bevy_ui（widget/text.rs:114-128，require 9 件），子实体 `TextSpan`（bevy_text/text.rs:191-201）带自己的 TextFont/TextColor；`TextFont.font` 是 `FontSource`——句柄、家族名、CSS 风格家族列表都行（text.rs:283-304），`FontSize` 支持 Px/Vw/Rem 等（:782-796）。三个上下文资源 FontCx/LayoutCx/ScaleCx（parley_context.rs:36-171）由 TextPlugin 初始化。
 - **给布局的接口**：`create_text_measure`（pipeline.rs:298-340）→ `TextMeasureInfo::compute_size`（:600-613）——就是 §3.3 那个 measure 回调的后半截。`TextLayoutInfo`（:483-507）是最终产物：glyphs + run_geometry（下划线/删除线度量）+ 光标 + 选区矩形 + inline_boxes。
 - **给命中的接口**：`TextLayoutInfo.run_geometry.bounds` 让 `ui_picking` 能按字形 run 命中到具体 span 实体（bevy_ui/picking_backend.rs:278-297）。
+
+整条链的产物是一张位图字形图集，不是 SDF——字形以 TEXTURED 四边形走普通 UiPipeline（对照 TextMeshPro 的 SDF 图集）。
 
 ## §6 交互：从 winit 到 Activate
 
@@ -197,7 +212,7 @@ winit WindowEvent(CursorMoved/MouseInput)
 
 - `bevy_input_focus`：`InputFocus` 资源记录焦点实体，`dispatch_focused_input`（lib.rs:394-436）把原始键盘消息包成 `FocusedInput<M>` 沿 `ChildOf` 链**从焦点实体向上冒泡 trigger**；`PointerFocusPlugin` 的 `click_to_focus`（pointer_focus.rs:37-64）在点击时迁移焦点。控件用 `TabGroup`/`TabIndex` 参与 Tab 导航。
 - 无障碍三层：控件自带 `AccessibilityNode(Role::…)`（require）；bevy_ui 的 `AccessibilityPlugin` 把几何/标签/状态同步进 accesskit（accessibility.rs:53-190）；bevy_winit 的桥把树更新推给系统级 API（accesskit 0.25）。
-- **旧体系并存**：`ui_focus_system`（bevy_ui/focus.rs:172-365）仍注册在 PreUpdate 维护 `Interaction`/`RelativeCursorPosition`；`Interaction` 已弃用，函数本身未标弃用，0.20 注释明说待删——新代码一律走 picking + `Hovered`/`Pressed` 组件。
+- **旧体系并存**：`ui_focus_system`（bevy_ui/focus.rs:172-365）仍默认注册在 PreUpdate 维护 `Interaction`/`RelativeCursorPosition`；`Interaction` 已弃用（focus.rs:61-66），函数本身未标弃用，0.20 注释明说待删——新代码一律走 picking + `Hovered`/`Pressed` 组件。
 
 ## §7 控件层与 bsn! 场景语法
 
@@ -280,7 +295,7 @@ commands.spawn_scene(buttons_scene())                                 // §7.2�
 
 ## §11 与本项目的关系
 
-当前路线（3.4 管线绘制、3.5 光照）没有运行时 UI，本篇是纯机制侦察，不做运行时落地计划。两条线：
+当前路线（3.4 管线绘制、3.5 光照）没有运行时 UI，因此只做机制侦察，不做运行时落地计划。两条线：
 
 ### 11.1 三条可抄的渲染决策
 
@@ -302,8 +317,14 @@ commands.spawn_scene(buttons_scene())                                 // §7.2�
 ## 附：示例地图（examples/ui/）
 
 - 布局 `layout/`：flex_layout、grid、z_index、fixed_node、ghost_nodes
-- 样式 `styling/`：borders、box_shadow、**gradients**（本篇触发点）、stacked_gradients
+- 样式 `styling/`：borders、box_shadow、**gradients**（触发示例）、stacked_gradients
 - 滚动 `scroll_and_overflow/`：scroll、scrollbars、overflow 系列
 - 文本 `text/`：text_input、ime_support、font_*
 - 控件 `widgets/`：button、standard_widgets、feathers_*（主题层）、tab_navigation
 - 交互 `../picking/`：低层 picking 演示；`ui_drag_and_drop.rs`、`window_fallthrough.rs`
+
+## 附：行号与阅读约定
+
+行号基于 Bevy 0.20.0-dev 本地快照（2026-10 时点），上游提交后可能漂移，以符号名为准。
+
+文中未加前缀的 `lib.rs`/`ui_node.rs` 等均指对应 crate 的 `src/` 下文件；断言均带 file:line。

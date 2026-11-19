@@ -1,15 +1,12 @@
-# bevy_remote：BRP远程协议与自定义方法
+# bevy_remote：BRP（Bevy Remote Protocol）协议与自定义方法
 
-> 行号说明：行号基于 Bevy 0.20.0-dev 本地快照（2026-10 时点），上游提交后可能漂移，以符号名为准。
+Bevy 有没有工具能完全展现 World 里所有 Entity 和 Component？有，`bevy_remote`——它把引擎变成可选暴露的"ECS 服务端"：World 通过 JSON-RPC 2.0 暴露在本机 HTTP 端口 `127.0.0.1:15702` 上，远程可对实体、组件、资源增删改查，还能订阅变化（`+watch`）和内省引擎自身（schema、调度器图）。
 
-> 定位：**侦察篇**——2026-09-22 用户问"Bevy 有没有工具能完全展现 World 里所有 Entity 和 Component"，顺藤摸到 `bevy_remote` 并通读源码。**未来 Web Console 的候选底座**：本篇先存档结论，开工时在此基础上展开，不重复侦察。
-> ⚠ 时效警告：0.20 把方法名从旧版 `bevy.query` 风格**整体改名**为 `world.*` 系列，网上旧资料照抄会得到 METHOD_NOT_FOUND；本篇全部核对于本仓库 0.20.0-dev（`crates/bevy_remote/`）。
+**它不是 CLI 工具，是插件库；自定义方法的 handler 本身就是一个 Bevy system。**
 
-## 1. 一句话定性
+## 1. 不是 CLI 工具，是插件库
 
-**不是 CLI 工具，是插件库。** `RemotePlugin`（协议核心）+ `RemoteHttpPlugin`（HTTP 传输）两个插件装进 App，在**自己的进程内**起 HTTP 服务器，World 通过 JSON-RPC 2.0 暴露在 `127.0.0.1:15702`。客户端随便——curl、PowerShell、网页、第三方 GUI 都行。Bevy 仓库自带一个 158 行的 Rust 命令行客户端**示例**（`examples/remote/client.rs`），那是演示不是发布工具。名字相近的 `bevy_cli` 是社区另一个项目（脚手架/web 构建），与此无关。
-
-对 App 的意义：**引擎变成可选暴露的"ECS 服务端"**——远程可对实体、组件、资源增删改查，还能订阅变化（`+watch`）和内省引擎自身（schema、调度器图）。
+`RemotePlugin`（协议核心）+ `RemoteHttpPlugin`（HTTP 传输）两个插件装进 App，在**自己的进程内**起 HTTP 服务器。客户端随便——curl、PowerShell、网页、第三方 GUI 都行。Bevy 仓库自带一个 158 行的 Rust 命令行客户端**示例**（`examples/remote/client.rs`），那是演示不是发布工具。名字相近的 `bevy_cli` 是社区另一个项目（脚手架/web 构建），与此无关。
 
 ## 2. 架构两层：协议与传输解耦
 
@@ -24,6 +21,8 @@
 请求格式标准 JSON-RPC 2.0（`BrpRequest`，`lib.rs:1122`）；响应带 `result` 或 `error`，错误码 = 标准 JSON-RPC 段 + 自定义段（如 `-23401 ENTITY_NOT_FOUND`，`lib.rs:1469` 起）。
 
 ## 3. 内置方法全景（0.20 命名；主族常量见 `builtin_methods.rs:46-121`，stepping 见 `stepping_methods.rs`）
+
+> ⚠ 0.20 把方法名从旧版 `bevy.query` 风格**整体改名**为 `world.*` 系列，网上旧资料照抄会得到 METHOD_NOT_FOUND；以下方法名全部核对于本仓库 0.20.0-dev（`crates/bevy_remote/`）。
 
 | 分组 | 方法 | 说明 |
 |------|------|------|
@@ -44,7 +43,7 @@
 - 绕反射拿存在性：`query` 的 `has` 模式返回布尔。
 - 对照：`World::archetypes()` 遍历（`bevy_ecs/src/world/mod.rs:255`，组件名经 `ComponentInfo::name()`→`DebugName`）是唯一**反射无关**的全量口径；资源用 `world.iter_resources()`（`world/mod.rs:3652`）。BRP 管交互式查询，archetype 遍历管离线对账，互补。
 
-## 5. 自定义方法：handler 就是 system（本篇重点）
+## 5. 自定义方法：handler 就是 system
 
 **构建期**（`RemotePlugin::with_method_main`，`lib.rs:615`）：
 
@@ -74,15 +73,15 @@ handler 能力上限：**可独占 `&mut World`**——内置的 `process_remote
 
 细节：方法名任意字符串（内置点分风格，自定如 `ash_renderer/xxx`）；重名静默替换旧 handler；未知方法 `-32601`；`with_method_render` 注册进渲染子世界注册表——宿主无 RenderApp，用不上。
 
-**错误路径是两套机制，勿混（3.12 §4.1 实测收账）**："system 返回 Result 须 `Result<T, BevyError>` 否则 Err 走错误处理器静默吞"这条内存钉说的是**调度内系统**（Update 等走错误处理器那一层）；BRP handler 不是——它经 `world.run_system_with(id, params)`（lib.rs:1705）运行，返回的 `Ok(result)` 直接就是 handler 的 `BrpResult`，`Err(BrpError)` **原样 force_send 给客户端、原码穿透**（负例实抓 -23401 原码回传为证）。即：handler 的错误不进调度错误处理器，写 `BrpError` 直接当响应协议用。
+**错误路径是两套机制，勿混（3.12 §4.1 实测收账）**："system 返回 Result 须 `Result<T, BevyError>` 否则 Err 走错误处理器静默吞"这条关于错误处理的规则说的是**调度内系统**（Update 等走错误处理器那一层）；BRP handler 不是——它经 `world.run_system_with(id, params)`（lib.rs:1705）运行，返回的 `Ok(result)` 直接就是 handler 的 `BrpResult`，`Err(BrpError)` **原样 force_send 给客户端、原码穿透**（负例实抓 -23401 原码回传为证）。即：handler 的错误不进调度错误处理器，写 `BrpError` 直接当响应协议用。
 
-## 6. Web Console 落点（未开工，先记结论）
+## 6. Web Console 落点：BRP 是候选底座（未开工，先记结论）
 
 1. **BRP 就是现成后端**：网页 `fetch` POST JSON-RPC 即可读写 ECS，不用自建任何服务器。
 2. **跨域已留口**：`Headers`/`HostHeaders` 资源给 HTTP 响应加头，源码 doc 里就有 `cors_headers` 示例（`http.rs:184-194`）——`RemoteHttpPlugin::default().with_headers(Headers::new()...)`。⚠ CORS 预检（OPTIONS）是否完备**未验证**，开工先测。
 3. **安全边界**：默认只绑 loopback、**完全无鉴权**——console 只能开发期本地用，绝不 `with_address` 绑 `0.0.0.0` 对外。
 4. **自定义方法当"业务接口"**：内置方法是裸 ECS CRUD，让前端拼反射类型名很脆；渲染器内部状态（bindless 池占用、FlightHelmet 到货统计、collect_scene 采集范围）应注册成自定义方法暴露——前端只调语义接口。
-5. **Unity 类比**：相当于把 Unity Editor attach 到 Player 的通道（Hierarchy/Inspector 走网络读运行时状态）协议化、无头化。官方 Bevy Editor 将来大概率骑在 BRP 上——见《[Bevy编辑器路线与代码热重载](../../开发步骤/1-熟悉Bevy结构/材料/Bevy编辑器路线与代码热重载.md)》（该篇 §2/§6 是编辑器路线视角，协议细节以本篇为准；其"调试面板可用"的判断就是本篇 Web Console 落点的出处）。
+5. **Unity 类比**：相当于把 Unity Editor attach 到 Player 的通道（Hierarchy/Inspector 走网络读运行时状态）协议化、无头化。官方 Bevy Editor 将来大概率骑在 BRP 上——见《[Bevy编辑器路线与代码热重载](../../开发步骤/1-熟悉Bevy结构/材料/Bevy编辑器路线与代码热重载.md)》（该篇 §2/§6 是编辑器路线视角，协议细节以这里的核对为准；其"调试面板可用"的判断就是上面 Web Console 落点的出处）。
 
 ## 7. 启用成本与源码索引
 
@@ -97,7 +96,7 @@ handler 能力上限：**可独占 `&mut World`**——内置的 `process_remote
 
 **启用就两行**：`app.add_plugins((RemotePlugin::default(), RemoteHttpPlugin::default()));`
 
-## 8. 树内官方检视栈：bevy_inspector 三层结构（2026-10-09 3.10 收官后补查）
+## 8. 树内官方检视栈：bevy_inspector 三层结构
 
 3.10 自研实体树收官后用户问"bevy 源码里有没有现成的"——**有，且是 0.20-dev 树内新 crate**，与本项目 3.10/3.11/3.12 三段两两相关。三层 + 一个数据模型层：
 
@@ -129,3 +128,5 @@ cargo run --example remote_inspector --features="bevy_inspector,bevy_remote_clie
 - 示例场景用 0.20 新 `bsn!`/`bsn_list!` 场景 DSL（声明式实体树），另见本目录场景篇。
 
 **定案（2026-10-09 用户实测）**：`local_inspector` 的前端 UI 表现**不学**——实测又闪又卡（机制定性假设：bevy_ui retained 组件树每帧重建 + taffy 全量重排，规模一大就抖；未做源码级核实，勿当结论引用）。**可学的是后端数据收集与组织**：`bevy_dev_tools::inspection` 的数据模型（component 分组、label 解析、world_summary）、BRP inspection 读方法族、选中态语义（row↔source 映射）——3.11 开工深读 `entity_tree.rs` 时只取数据/语义层，不取 UI 表现层。
+
+> 行号说明：行号基于 Bevy 0.20.0-dev 本地快照（2026-10 时点），上游提交后可能漂移，以符号名为准。

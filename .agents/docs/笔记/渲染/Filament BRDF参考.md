@@ -1,22 +1,12 @@
 # Filament 源码参考：标准模型 BRDF 与多光源（8.2 对照基准）
 
-> 对应 [8.2 段 README 参考底座](../../开发步骤/8-完整延迟渲染管线/8.2-FilamentBRDF与多光源/README.md)、[Unity PBR 调研](Unity%20PBR%20调研.md)。版本钉：本地检出 `F:\okzkx\filament`，HEAD `373190d49`（`git describe` = rc/1.78.1-cut-31-g373190d49，移动开发线，函数行号会漂移，函数名不会）。全部引用逐行核对于 2026-10-22。
+8.2 照抄 Filament 的 F0 计算时漏了一行换算：`computeF0` 的第三参要的是换算后的介电体 F0（reflectance 默认 0.5 → 0.04），直接把材质 reflectance 原值传进去，F0 就成了 0.5。结果受光面整片叠白高光、发灰，8.6.5 修复。
 
-> **状态追记（2026-11-19）**：8.2 已按本篇施工收官。`shaders/common/brdf.wgsl` 实现 `D_GGX` / `V_SmithGGXCorrelated` / `F_Schlick` / `Fd_Lambert`；不透明光照累积 `gbuffer_composite.wgsl` 与透明 `transparent_forward.wgsl` 共用 `getStandardPixelParams` + `surfaceShading`；`energyCompensation` 取 1.0，IBL/DFG 仍归步骤 9。下文 §0/§3 保留施工前的判定与公式口径；§3.4 与 §6 已按施工结果改写。
-
-## 0. 判定线
-
-- **8.2 对照基准钉明（desktop 默认组合，实测核实）**：`D_GGX`（GGX 法向分布）＋ `V_SmithGGXCorrelated`（Heitz 2014 高度相关完整项）＋ `F_Schlick(f0, f90, VoH)`（f90 = saturate(16.5·Σf0)，介电体饱和到 1）＋ **diffuse = Lambert（1/π）**。**Burley 不是默认**——它是 `BRDF_DIFFUSE` 宏的另一个可选值，8.2 不取。
-- **照抄口径（2026-10-22 用户二次拍板）**：8.2 直接光 BRDF = Filament 标准模型**函数级移植**——本篇 §3/§4/§5.2 的全部函数与常量逐式照抄进 WGSL，函数命名保留 Filament 原名；"数学对照"升级为"照抄移植"，§7 边界的旧口径已随之订正。
-- desktop 质量档 = `FILAMENT_QUALITY_HIGH`（`ShaderModel::DESKTOP` → quality_high，libs/filamat/src/shaders/CodeGenerator.cpp），所以 V 项默认走**完整 Smith** 而非 FAST 近似；FAST（Hammon 2017）是 NORMAL 以下档的替代。
-- **glTF 的 roughnessFactor 就是 perceptualRoughness**（surface_shading_lit.fs `perceptualRoughness = material.roughness`），着色用 α = perceptual²，下限 clamp 0.045（desktop `MIN_PERCEPTUAL_ROUGHNESS`）。即：贴图/参数域记 perceptual，进 D/V 前平方——与 Unity 篇"两级换算"同构。
-- F0 = `baseColor·metallic + reflectance·(1−metallic)`，reflectance 默认 0.5 → 介电体 F0 = 0.16·0.5² = **0.04**；diffuseColor = `baseColor·(1−metallic)`。与 Unity 篇 `lerp(0.04, albedo, metallic)` 在 reflectance=0.5 时逐项等价。
-- **NoL 不进单个 lobe**：`surfaceShading` 返回 `(Fd + Fr)`，方向光/点光的 NoL 在尾部一次性乘（`colorIntensity.rgb × intensity × attenuation × NoL × occlusion`）。
-- 金属/非金属多光源循环提前退出：`NoL ≤ 0 || attenuation ≤ 0` 直接 continue，不积累颜色。
-- 强度单位有物理定义：方向光 **lux**（照度）、点光/聚光 **candela**（发光强度），`colorIntensity.w = intensity × exposure`（预曝光）。本项目 bevy `DirectionalLight.illuminance` 同为 lux，可直接对接。
-- 8.2 取 `energyCompensation = 1.0`：Filament 的该项来自 IBL 的预滤波 DFG LUT（`1.0 + f0·(1/dfg.y − 1)`），补偿多重散射能量损失；无 IBL 基建时只能取 1，误差方向 = 高粗糙金属高光略暗（与 Filament 源内 TODO "attenuate the diffuse lobe" 同状态）。
+**Filament 标准模型的直接光只有四个函数：`D_GGX`（法向分布）× `V_SmithGGXCorrelated`（可见性）× `F_Schlick`（菲涅尔）+ Lambert 漫反射；照抄时真正要小心的是喂进这些函数之前的参数换算。**
 
 ## 1. BRDF 宏默认组合
+
+8.2 对照基准取 desktop 默认组合（实测核实）：`D_GGX`（GGX 法向分布）＋ `V_SmithGGXCorrelated`（Heitz 2014 高度相关完整项）＋ `F_Schlick(f0, f90, VoH)`（f90 = saturate(16.5·Σf0)，介电体饱和到 1）＋ **diffuse = Lambert（1/π）**。**Burley 不是默认**——它是 `BRDF_DIFFUSE` 宏的另一个可选值，8.2 不取。
 
 `shaders/src/surface_brdf.fs` 头部：
 
@@ -32,7 +22,7 @@
 #define BRDF_SPECULAR_F             SPECULAR_F_SCHLICK   // 两档相同
 ```
 
-质量档由 matc/ShaderModel 决定：desktop 默认 HIGH，mobile 默认 LOW。LOW 档的菲涅尔还把 f90 固定为 1（省一次点积）。
+质量档由 matc/ShaderModel 决定：desktop 默认 HIGH，mobile 默认 LOW。desktop 质量档 = `FILAMENT_QUALITY_HIGH`（`ShaderModel::DESKTOP` → quality_high，libs/filamat/src/shaders/CodeGenerator.cpp），所以 V 项默认走**完整 Smith** 而非 FAST 近似；FAST（Hammon 2017）是 NORMAL 以下档的替代。LOW 档的菲涅尔还把 f90 固定为 1（省一次点积）。
 
 ## 2. 材质参数面（进入光照前的一次性换算）
 
@@ -53,13 +43,15 @@ pixel.f0                  = computeF0(baseColor, metallic, reflectance);
 
 - **换算不可省**（surface_shading_lit.fs:80）：`computeF0` 的第三参是已换算的介电体 F0，不是材质 reflectance 原值。8.2 照抄时漏了这一行，F0 成了 0.5，受光面整片叠白高光发灰，8.6.5 修复。
 
+- **glTF 的 roughnessFactor 就是 perceptualRoughness**（surface_shading_lit.fs `perceptualRoughness = material.roughness`），着色用 α = perceptual²，下限 clamp 0.045（desktop `MIN_PERCEPTUAL_ROUGHNESS`）。即：贴图/参数域记 perceptual，进 D/V 前平方——与 Unity 篇"两级换算"同构。
+- **F0 与 diffuseColor 的换算**：F0 = `baseColor·metallic + reflectance·(1−metallic)`，reflectance 默认 0.5 → 介电体 F0 = 0.16·0.5² = **0.04**；diffuseColor = `baseColor·(1−metallic)`。与 Unity 篇 `lerp(0.04, albedo, metallic)` 在 reflectance=0.5 时逐项等价。
 - roughness 纹理采样后同样进 perceptual 域（`material.roughness` ← roughnessFactor/roughness 贴图）。
-- **normal map 的 TBN 资产现实**：glTF 不保证带 TANGENT 顶点属性、bevy loader 也不自动生成——逐顶点切线不是全资产可用路线。8.2 取屏幕空间派生余切框架（Schüler 2015，`dpdx/dpdy` 现算，见 [8.2.1 施工记录](../../开发步骤/8-完整延迟渲染管线/8.2-FilamentBRDF与多光源/8.2.1-施工记录：材质参数面扩容.md)），配套两钉：导数内建要求 uniform 控制流（TBN 计算须在分支外）、uv 导数零区（平铺 UV 整数缝）退化守卫回落几何法线。
+- **normal map 的 TBN 资产现实**：glTF 不保证带 TANGENT 顶点属性、bevy loader 也不自动生成——逐顶点切线不是全资产可用路线。8.2 取屏幕空间派生余切框架（Schüler 2015，`dpdx/dpdy` 现算，见 [8.2.1 施工记录](../../开发步骤/8-完整延迟渲染管线/8.2-FilamentBRDF与多光源/8.2.1-施工记录：材质参数面扩容.md)），配套两条约束：导数内建要求 uniform 控制流（TBN 计算须在分支外）、uv 导数零区（平铺 UV 整数缝）退化守卫回落几何法线。
 - NoV 全程用 clamp 后的 `shading_NoV`（≥1e-4），防止掠射除零。
 
 ## 3. 直接光 BRDF 逐项（对照函数清单）
 
-来源：`shaders/src/surface_brdf.fs`，全部为 desktop 默认路径。**逐项公式即 8.2 判定线①的对照基准**。
+来源：`shaders/src/surface_brdf.fs`，全部为 desktop 默认路径。**逐项公式即 8.2 的对照基准。** 照抄口径（2026-10-22 用户二次拍板）：8.2 直接光 BRDF = Filament 标准模型**函数级移植**——本节与 §4、§5.2 的全部函数与常量逐式照抄进 WGSL，函数命名保留 Filament 原名；"数学对照"升级为"照抄移植"，§7 边界的旧口径已随之订正。
 
 ### 3.1 D_GGX（Walter et al. 2007）
 
@@ -131,8 +123,10 @@ vec3 surfaceShading(const PixelParams pixel, const Light light, float occlusion)
 要点：
 
 - **逐光源只做一次 h 归一化和四个点积**，D/V/F 全部吃这组余弦；参数换算（§2）在光照循环外做一次。
-- NoL 折在尾部，diffuse 与 specular 共享同一个 NoL 乘法。
+- **NoL 不进单个 lobe**：`surfaceShading` 返回 `(Fd + Fr)`，方向光/点光的 NoL 在尾部一次性乘（`colorIntensity.rgb × intensity × attenuation × NoL × occlusion`），diffuse 与 specular 共享同一个 NoL 乘法。
+- 金属/非金属多光源循环提前退出：`NoL ≤ 0 || attenuation ≤ 0` 直接 continue，不积累颜色。
 - occlusion（AO）是**乘在光源贡献上的标量**（8.2 的 AO 贴图槽对接点）；环境 AO 是另一条路（multiBounceAO，归间接光）。
+- **`energyCompensation = 1.0`（8.2 取值）**：Filament 的该项来自 IBL 的预滤波 DFG LUT（`1.0 + f0·(1/dfg.y − 1)`），补偿多重散射能量损失；无 IBL 基建时只能取 1，误差方向 = 高粗糙金属高光略暗（与 Filament 源内 TODO "attenuate the diffuse lobe" 同状态）。
 - 本项目 8.1 的 `gbuffer_composite.wgsl` 已经是"全屏 pass 读 G-buffer × 光源"的骨架，8.2 已把其中的 Lambert 行换成本函数同构，透明层（8.1.3 cluster forward）用同一份 lobe 函数。
 
 ## 5. 光源求值与驻留（旧头号待决的参考证据；现已落定为常驻灯表）
@@ -153,6 +147,8 @@ struct Light {
 ```
 
 Filament 用通道位（`light.channels & objectChannels == 0` 就跳过）做光照分层；8.2 若需要"这盏灯影响这层物体"，这是现成参照。
+
+强度单位有物理定义：方向光 **lux**（照度）、点光/聚光 **candela**（发光强度），`colorIntensity.w = intensity × exposure`（预曝光）。本项目 bevy `DirectionalLight.illuminance` 同为 lux，可直接对接。
 
 ### 5.2 衰减公式（punctual）
 
@@ -181,28 +177,32 @@ float getAngleAttenuation(const vec3 lightDir, const vec3 l, const vec2 scaleOff
 
 - **灯参数本体走每帧更新的 UBO**（`lightsUniforms`，每灯打包一个 mat4：position+radius / direction / color(half4×2)+角度 scaleOffset / intensity+type+shadow+channels），帧间由 CPU 侧 LightManager 组装上传——**没有"常驻灯表"**；远距衰减等帧级参数也在帧 UBO 里。
 - 空间加速是 **froxel**（视锥体素 3D 分簇）：froxel 纹理存 recordOffset+count，record 缓冲存灯索引，逐片元查 froxel → 遍历灯列表。这与 8.1 已建的 3D cluster 光源列表**同族不同实现**（Filament 靠 froxelizer 每帧 CPU 侧分簇，8.1 是 compute 侧组装）。
-- **对 8.2 当时头号待决（常驻表 vs 每帧环；现已落定为常驻灯表）**：Filament 的行业证据支持"灯参数每帧上传 + 空间索引加速"的形态；灯数在现代场景里是百量级、每灯 64B，每帧上传量 ≪ 贴图流送。常驻表（set2 式）省上传但要解决灯增删的槽位管理—— Filament 没走这条路本身就是一个参考信号。
+- **对 8.2 当时头号待决（常驻表 vs 每帧轮转上传；现已落定为常驻灯表）**：Filament 的行业证据支持"灯参数每帧上传 + 空间索引加速"的形态；灯数在现代场景里是百量级、每灯 64B，每帧上传量 ≪ 贴图流送。常驻表（set2 式）省上传但要解决灯增删的槽位管理—— Filament 没走这条路本身就是一个参考信号。
 
-## 6. ash_renderer 落地映射清单（8.2 施工钉）
+## 6. ash_renderer 落地映射清单（8.2 施工落点）
 
-1. **WGSL 对照函数清单（判定线①基准）**：`D_GGX`、`V_SmithGGXCorrelated`、`F_Schlick(f0, f90, VoH)`（f90 = saturate(16.5·Σf0)）、`Fd_Lambert()`。命名对照：Filament `shading_view`/`light.l`/`h` ↔ 本项目 `V`/`L`/`H`；`NoV/NoL/NoH/LoH` 同名。D 项可选教科书形式或 k²/π 形式（代数等价，单测对照收敛）。
-2. **材质环扩列换算链**：glTF roughness → perceptualRoughness（域内 clamp 0.045）→ α = p²；F0 = `baseColor·m + 0.04·(1−m)`；diffuseColor = `baseColor·(1−m)`；AO 贴图 → occlusion（乘光源贡献尾部）。
+1. **WGSL 对照函数清单（8.2 对照基准）**：`D_GGX`、`V_SmithGGXCorrelated`、`F_Schlick(f0, f90, VoH)`（f90 = saturate(16.5·Σf0)）、`Fd_Lambert()`。命名对照：Filament `shading_view`/`light.l`/`h` ↔ 本项目 `V`/`L`/`H`；`NoV/NoL/NoH/LoH` 同名。D 项可选教科书形式或 k²/π 形式（代数等价，单测对照收敛）。
+2. **材质参数扩列换算链**：glTF roughness → perceptualRoughness（域内 clamp 0.045）→ α = p²；F0 = `baseColor·m + 0.04·(1−m)`；diffuseColor = `baseColor·(1−m)`；AO 贴图 → occlusion（乘光源贡献尾部）。
 3. **energyCompensation = 1.0**，DFG LUT 与多重散射补偿随 IBL（步骤 9 附近）另立。
 4. **光照累积 pass**：8.1 composite 骨架上已把 Lambert 换成 §4 同构 `(Fd+Fr)·NoL`，光源数据从 set1 UBO 单方向光扩成列表（驻留形态已落定为常驻灯表 `resident/tables/light_table.rs`，cluster 通过 b1 引用；旧记的“头号待决”已结案）；ambient 项保持在光源循环外。
 5. **透明层复用**：8.1.3 透明 forward 与不透明光照累积共用同一份 lobe 函数（材质参数面一致是前提）。
 6. **单位与曝光**：方向光 lux / punctual candela；`intensity × exposure` 预曝光 vs 本项目尾部 `× EXPOSURE` 常量——标量位置等价；8.4/8.6 已落定 HDR 与 ACES 曝光锚点（`shaders/common/brdf.wgsl` 的 `EXPOSURE=0.00016`），预曝光口径统一留作后续 IBL/多光源标定项。
 
-## 7. 边界（本篇不主张）
+## 7. 边界（不主张的范围）
 
-- **照抄范围 = 标准模型直接光 BRDF 与光源定义**（§0 照抄口径钉明：函数级移植进 WGSL，命名保留原名）；pass 组织不照抄——Filament 是 forward（逐片元查 froxel 逐灯算），8.2 是 deferred 光照累积，只有"逐光源累加到 inout color"的循环形状同构。
-- standard 以外的 shading model（cloth/clearcoat/subsurface/refraction）不在 8.2 交付；本篇只记录了它们存在与入口（surface_shading_model_*.fs）。
-- 间接光全家（prefilteredDFG、irradiance SH、multiBounceAO、reflected lobe 拉伸）不在 8.2，接口位已留（§6.3）。
-- SUN_AS_AREA_LIGHT（HIGH 档把太阳做圆盘面光采样）不取——方向光按纯方向光对照，这是 8.2 判定线①的对照口径。
+- **照抄范围 = 标准模型直接光 BRDF 与光源定义**（§3 照抄口径：函数级移植进 WGSL，命名保留原名）；pass 组织不照抄——Filament 是 forward（逐片元查 froxel 逐灯算），8.2 是 deferred 光照累积，只有"逐光源累加到 inout color"的循环形状同构。
+- standard 以外的 shading model（cloth/clearcoat/subsurface/refraction）不在 8.2 交付；这里只记录了它们存在与入口（surface_shading_model_*.fs）。
+- 间接光全家（prefilteredDFG、irradiance SH、multiBounceAO、reflected lobe 拉伸）不在 8.2，接口位已留（§6 第 3 条）。
+- SUN_AS_AREA_LIGHT（HIGH 档把太阳做圆盘面光采样）不取——方向光按纯方向光对照，这是 8.2 对照基准的口径。
 
-## 来源清单
+## 来源
+
+本地检出 `F:\okzkx\filament`，HEAD `373190d49`（`git describe` = rc/1.78.1-cut-31-g373190d49，移动开发线，函数行号会漂移，函数名不会）。全部引用逐行核对于 2026-10-22。对应 [8.2 段 README 参考底座](../../开发步骤/8-完整延迟渲染管线/8.2-FilamentBRDF与多光源/README.md)、[Unity PBR 调研](Unity%20PBR%20调研.md)。
+
+**状态追记（2026-11-19）**：8.2 已按这份参考施工收官。`shaders/common/brdf.wgsl` 实现 `D_GGX` / `V_SmithGGXCorrelated` / `F_Schlick` / `Fd_Lambert`；不透明光照累积 `gbuffer_composite.wgsl` 与透明 `transparent_forward.wgsl` 共用 `getStandardPixelParams` + `surfaceShading`；`energyCompensation` 取 1.0，IBL/DFG 仍归步骤 9。正文保留施工前的判定与公式口径；§3.4 与 §6 已按施工结果改写。
 
 - `shaders/src/surface_brdf.fs`——宏默认组合、D/V/F/diffuse 全函数（逐行核对）
-- `shaders/src/surface_material.fs`——MIN_ROUGHNESS/clampNoF/computeDiffuseColor/computeF0/roughness 换算
+- `shaders/src/surface_material.fs`——MIN_ROUGHNESS/clampNoV/computeDiffuseColor/computeF0/roughness 换算
 - `shaders/src/surface_shading_lit.fs`——getStandardPixelParams（roughness 流入与 clamp 链）、energyCompensation
 - `shaders/src/surface_shading_model_standard.fs`——surfaceShading/isotropicLobe/diffuseLobe 组织
 - `shaders/src/surface_lighting.fs`——Light/PixelParams 结构定义
