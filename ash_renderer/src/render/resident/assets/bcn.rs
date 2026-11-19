@@ -77,9 +77,17 @@ pub struct BakedBcn {
 
 impl BakedBcn {
     /// 某级 mip 的压缩字节数。
+    ///
+    /// 宽/高按 `max(1)` 夹住：减半链在同一维降到 1 后不再降，末级仍写一个块。
+    /// 不夹会让非方形贴图的末级算成 0 字节，与 bake 实际写入不符（staging 少分配
+    /// 一级、磁盘缓存长度校验永不命中、每次加载重烤）。
     #[must_use]
     pub fn level_bytes(&self, level: u32) -> u64 {
-        level_bytes(self.format, self.width >> level, self.height >> level)
+        level_bytes(
+            self.format,
+            (self.width >> level).max(1),
+            (self.height >> level).max(1),
+        )
     }
 
     /// 全链字节合计（= staging 连排的源长度）。
@@ -271,6 +279,16 @@ mod tests {
             offset += baked.level_bytes(level);
         }
         assert_eq!(offset, baked.data.len() as u64);
+    }
+
+    /// 非方形贴图末级只有一个维度降到 1：level_bytes 必须按 max(1) 记一个块，
+    /// 否则 total_bytes 比 data 少一级（staging 少分配、缓存校验永不命中）。
+    #[test]
+    fn non_square_chain_total_matches_data() {
+        let baked = bake(TextureRole::BaseColor, &solid(16, 8, 10, 20, 30), 16, 8).unwrap();
+        assert_eq!(baked.total_bytes() as usize, baked.data.len());
+        let last = baked.level_bytes(baked.mip_levels - 1);
+        assert!(last > 0, "末级仍有块数据，{last}B");
     }
 
     #[test]

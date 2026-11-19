@@ -14,7 +14,8 @@ use ash::vk;
 use bevy::log::warn;
 
 use super::bcn::{BakedBcn, TextureRole, BAKE_VERSION};
-use crate::render::core::device::transfer::level_bytes;
+use crate::render::core::device::transfer::{block_bytes, level_bytes};
+use crate::render::resident::assets::image_spec::full_mip_chain;
 
 /// 缓存目录（相对运行目录；与资产根同侧，gitignore 挡住不入库）。
 const CACHE_DIR: &str = "assets/bcn_cache";
@@ -116,9 +117,20 @@ fn cache_from_bytes(bytes: &[u8]) -> Result<BakedBcn, String> {
     let width = u32::from_le_bytes(bytes[16..20].try_into().expect("4B"));
     let height = u32::from_le_bytes(bytes[20..24].try_into().expect("4B"));
     let mip_levels = u32::from_le_bytes(bytes[24..28].try_into().expect("4B"));
+    // 头部语义校验：格式必须是烘焙会产出的 BCn、尺寸与级数有界。损坏头若不拦，
+    // 后续会 shift 溢出（debug panic）或长出非法 GpuImage 走到致命退出。
+    if block_bytes(format) == 0 {
+        return Err(format!("非 BCn 格式 {format:?}"));
+    }
+    if width == 0 || height == 0 || mip_levels == 0 || mip_levels > full_mip_chain(width, height) {
+        return Err(format!(
+            "头部尺寸非法: {width}×{height}, {mip_levels} 级（全链 {}）",
+            full_mip_chain(width, height)
+        ));
+    }
     let data = &bytes[HEADER_LEN..];
     let expect: u64 = (0..mip_levels)
-        .map(|l| level_bytes(format, width >> l, height >> l))
+        .map(|l| level_bytes(format, (width >> l).max(1), (height >> l).max(1)))
         .sum();
     if data.len() as u64 != expect {
         return Err(format!("块数据 {}B ≠ 全链 {expect}B", data.len()));
