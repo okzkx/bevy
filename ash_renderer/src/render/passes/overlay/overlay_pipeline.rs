@@ -7,9 +7,10 @@
 //!   screen_size 用 points（与顶点 pos 同域，tessellate 不按 ppp 缩放顶点）。
 //!   `overlay_draw.wgsl` 的 PushParams、[`UiPushLayout`] 的 `offset_of!` 断言与本配方
 //!   三处要一起改。
-//! - **深度格式照声明、读写全关**：坑：渲染实例带 D32 深度附件，未启用
-//!   dynamicRenderingUnusedAttachments 时管线的 depthAttachmentFormat 必须与之相等，
-//!   不能填 UNDEFINED（VUID-08914，验证层逐 draw 报错）；"不用深度"靠关测试/写入表达。
+//! - **不声明深度**：本管线画在 SMAA neighborhood 开的渲染实例里，该实例只挂 color
+//!   附件。未启用 dynamicRenderingUnusedAttachments 时，实例深度附件为 NULL 要求
+//!   管线的 depthAttachmentFormat 必须是 UNDEFINED（VUID-08913）；深度测试/写入也
+//!   全关，声明 DEPTH_FORMAT 只会逐 draw 报错。
 //! - **混合**：color = (ONE, ONE_MINUS_SRC_ALPHA)，alpha = (ONE_MINUS_DST_ALPHA, ONE)——
 //!   egui 顶点色是预乘的，src 因子取 ONE（与 egui 官方 wgpu 后端一致）。
 //! - **不剔除**：epaint 不保证 UI 顶点绕向一致。
@@ -45,7 +46,7 @@ pub(crate) static OVERLAY_PIPELINE: PipelineDesc = PipelineDesc {
         size: UI_PUSH_CONSTANTS_SIZE,
     }),
     color_formats: &[crate::render::SWAPCHAIN_COLOR_FORMAT],
-    depth_format: Some(crate::render::core::target::depth::DEPTH_FORMAT),
+    depth_format: None,
 };
 
 /// push constant 布局（16B）的 Rust 镜像：运行时不用（字节由 [`pack_ui_push`] 按偏移
@@ -275,7 +276,7 @@ impl OverlayPipeline {
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        // 颜色 = swapchain 格式；深度格式必须等于实例深度附件（见模块注释）
+        // 颜色 = swapchain 格式；无深度声明（实例不挂深度，见模块注释）
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(OVERLAY_PIPELINE.color_formats)
             .depth_attachment_format(

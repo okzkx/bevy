@@ -65,8 +65,11 @@ impl FullscreenPipeline {
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let mut rendering_info =
-            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(desc.color_formats);
+        let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(desc.color_formats)
+            // 配方要么不声明深度（UNDEFINED），要么与实例深度附件同格式——
+            // 与图形管线同一条声明纪律（VUID-08913/08914）。
+            .depth_attachment_format(desc.depth_format.unwrap_or(vk::Format::UNDEFINED));
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(stages)
             .vertex_input_state(&vertex_input)
