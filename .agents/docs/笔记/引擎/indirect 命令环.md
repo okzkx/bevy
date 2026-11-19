@@ -138,4 +138,4 @@ Unity 的间接绘制 API 表面同形，语义不同——**buffer 内容和 Vu
 - `ash_renderer/src/driver/host/drawlist.rs:272/:307`——在场环发布、mesh 偏移打包（CPU 原料发布）
 - `ash_renderer/src/render/resident/tables/instance_table.rs:14`——命令环角色与写读权
 - Vulkan API 形状与 Unity 对照：Vulkan 1.3 规范 `VkDrawIndexedIndirectCommand` 定义；Unity 官方文档 `Graphics.DrawMeshInstancedIndirect`（bufferWithArgs 五整数、obsolete 指向 RenderMeshIndirect）与 `Graphics.RenderMeshIndirect`（IndirectDrawIndexedArgs 结构体、commandCount 多命令、同一 Mesh）——2026-11-04 核实
-- 姊妹篇：[GPU-Driven 本质](GPU-Driven%20本质.md)（决策点后移与控制面/数据面分家）、[为什么没有全上 GPU 驱动](为什么没有全上%20GPU%20驱动.md)（读数不投票与回读墙）、6.1 段《遮挡剔除的成本、覆盖与粒度》《Hi-Z 遮挡原理》（成本/粒度/滞后正本）
+- 姊妹篇：[GPU-Driven 本质](GPU-Driven%20本质.md)（逐对象决策移到执行时，提交侧与 GPU 负载的分工）、[为什么没有全上 GPU 驱动](为什么没有全上%20GPU%20驱动.md)（读数不投票与读回等待）、6.1 段《遮挡剔除的成本、覆盖与粒度》《Hi-Z 遮挡原理》（成本/粒度/滞后正本）
