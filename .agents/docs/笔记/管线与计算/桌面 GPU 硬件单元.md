@@ -69,7 +69,7 @@
 - **为什么做成专用电路**：搬数据只需地址生成和突发读写，用不着几千个着色线程；独立引擎让上传和渲染同时进行——这就是 transfer 专用队列族存在的意义。
 - **能力边界**：只做逐字节拷贝与 buffer ↔ image 布局重排，不做格式转换和过滤——blit 不能交给它、mip 续批必须回图形队列的硬件原因；有对齐要求，Vulkan 用队列族属性 `minImageTransferGranularity` 暴露，专用 transfer 族在部分硬件上比图形族更粗。
 - **Vulkan 对应**：“族 1：只有 TRANSFER”就是驱动把拷贝引擎暴露给应用。图形队列上提交的 copy，驱动可能交给拷贝引擎，也可能用 SM 跑拷贝 shader，选择不公开。
-- **本工程**：Q1 上传批把 staging（落在 CPU 可写的系统内存）经 PCIe 搬进只有 GPU 访问的显存。RTX 2060 是 PCIe 3.0 x16，理论单向约 16 GB/s，实际更低。[设备队列在飞快照](../Vulkan/_assets/queue-inflight-moments.svg) 时刻 ③ 的“大批没拷完、整条图形队列冻结”，瓶颈在 PCIe 通道和拷贝引擎，与 SM 忙不忙无关。
+- **本工程**：Q1 上传批把 staging（落在 CPU 可写的系统内存）经 PCIe 搬进只有 GPU 访问的显存。RTX 2060 是 PCIe 3.0 x16，理论单向约 16 GB/s，实际更低。[设备队列在飞快照](../_assets/queue-inflight-moments.svg) 时刻 ③ 的“大批没拷完、整条图形队列冻结”，瓶颈在 PCIe 通道和拷贝引擎，与 SM 忙不忙无关。
 
 ## 6. 另外两个与帧循环直接相关的单元
 
@@ -97,11 +97,11 @@
 | 光栅 / 几何前端 | 三角形多而小（每个只盖几个像素） | 大场景远处高模（所以有 LOD） |
 | 拷贝 / PCIe | 上传批大、图形队列在等上传完成 | 大批资产首次上传 |
 
-Nsight Graphics 的 GPU Trace 按单元列出吞吐占比（SM、L1TEX、ROP 类、几何前端类、L2、显存、PCIe 等，名称以工具显示为准），哪项接近 100%，瓶颈就在哪个单元。方法论见 [渲染性能归因方法](../开发方法/渲染性能归因方法.md)。
+Nsight Graphics 的 GPU Trace 按单元列出吞吐占比（SM、L1TEX、ROP 类、几何前端类、L2、显存、PCIe 等，名称以工具显示为准），哪项接近 100%，瓶颈就在哪个单元。方法论见 [渲染性能归因方法](../工程方法/渲染性能归因方法.md)。
 
 ## 来源
 
-- [同步模型](../Vulkan/同步模型.md)——执行依赖与内存依赖、阶段掩码的语义
-- [多帧在飞竞争](../Vulkan/多帧在飞竞争.md)——四主体与四道同步等待；配图 [设备队列在飞快照](../Vulkan/_assets/queue-inflight-moments.svg)：Q0/Q1 分工、mip 续批回图形队列、上传完成凭据未到
+- [同步模型](../同步与队列/同步模型.md)——执行依赖与内存依赖、阶段掩码的语义
+- [多帧在飞竞争](../同步与队列/多帧在飞竞争.md)——四主体与四道同步等待；配图 [设备队列在飞快照](../_assets/queue-inflight-moments.svg)：Q0/Q1 分工、mip 续批回图形队列、上传完成凭据未到
 - 工程代码：`render/core/device/context.rs`（队列族选择：专用 transfer 族、每族一条队列）、`render/core/device/transfer/uploader/image.rs`（mip blit 续批在图形队列提交）、`render/frame/record.rs` 第 ① 段（进场屏障的 srcStage）
 - 行号说明：行号基于 Bevy 0.20.0-dev 本地快照（2026-10 时点），上游提交后可能漂移，以符号名为准。

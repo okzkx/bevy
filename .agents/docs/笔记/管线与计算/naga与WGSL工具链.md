@@ -34,7 +34,7 @@ naga 的输出后端覆盖 SPIR-V/MSL（Metal 的着色器语言）/GLSL/HLSL/WG
 
 **为什么不选零补丁的定长数组**：`binding_array<T, N>`（N=容量）SPIR-V 原生合法、零后处理，但改容量=改 shader 常量重编；runtime 形态让描述符容量与 shader 解耦，容量演进不动源码。runtime + 补丁是编译期确定性变换，有 spirv-val 与验证层双重复验兜底，定长数组保留为补丁器失效时的降级出口。
 
-![WGSL 到 SPIR-V 的翻译链与 capability 补丁落点](_assets/wgsl-naga-spv-capability-patch.png)
+![WGSL 到 SPIR-V 的翻译链与 capability 补丁落点](../_assets/wgsl-naga-spv-capability-patch.png)
 
 ## 3. WGSL 语言事实
 
@@ -61,7 +61,7 @@ WGSL 没有 include 机制（把公共片段拼进源文件的语法），跨文
 
 inverse 的 cofactor 替换与 `// #import` 预展开都是零工具链改动。
 
-![#import 预展开方案：构建期递归展开与前后比对验证](_assets/wgsl-import-preexpand.png)
+![#import 预展开方案：构建期递归展开与前后比对验证](../_assets/wgsl-import-preexpand.png)
 
 ## 6. 跨端结构布局契约：三方互证
 
@@ -72,7 +72,7 @@ WGSL 结构体成员对齐遵循标量规则：`vec3<u32>` 对齐 16，作成员
 
 执法形态是三方互证、编译期报警：Rust 镜像 struct + `offset_of!`/`size_of` 静态断言（push 布局 0/64/72/76/80、size 96，且进单元测试与宿主打包同源看护）；WGSL 侧字段顺序与偏移逐字对齐（以 SPIR-V `OpMemberDecorate Offset` 实测互证）；pipeline layout（管线布局，声明 set/binding 与 push 范围的 Vulkan 对象）的 push/UBO range 声明与两侧同源。任何一侧改动，断言先于画面报警。判定条件宽松而充分：naga 算出的 span 相等、且各成员对齐不超过宿主步长，即可推出步长相等——不需要枚举全部对齐组合。build.rs 另设一道跨端布局检查：naga 校验产物里算出的具名结构体 span 必须等于宿主登记的字节数常量，不等即构建错误——新增记录结构时在检查表里登记。push 的尺寸本身也有一条链要对账：96B ≤ 规范最低保证 128B ≤ 本机查询上限 256B。
 
-![跨端结构布局三方互证](_assets/cross-side-layout-verification.png)
+![跨端结构布局三方互证](../_assets/cross-side-layout-verification.png)
 
 ## 7. build.rs 要点
 
@@ -111,5 +111,5 @@ set/binding/push 接口在探针四验收点通过后**冻结成表**：set0 b0/
 - [描述符索引特性族：能力位全景、三层配套与限额双轨](../../开发步骤/3-静态取数链路/3.3-贴图与bindless描述符/描述符索引特性族：能力位全景、三层配套与限额双轨.md)
 - [3.4.1~3.4.5 管线与绘制施工记录](../../开发步骤/3-静态取数链路/3.4-管线与绘制/3.4.1-3.4.5-管线与绘制施工记录：正式着色器、图形管线与DrawList同帧消费.md)
 - [8.2.3 光照累积 pass 施工记录](../../开发步骤/8-完整延迟渲染管线/8.2-FilamentBRDF与多光源/8.2.3-施工记录：光照累积pass照抄Filament.md)
-- [步骤7-8质量复盘](../步骤7-8质量复盘.md)
+- [步骤7-8质量复盘](../../审查与复盘/步骤7-8质量复盘.md)
 - [3.8.1 system 标注宏施工记录](../../开发步骤/3-静态取数链路/3.8-system标注宏/3.8.1-system标注宏施工记录：透明标注与编译期校验.md)

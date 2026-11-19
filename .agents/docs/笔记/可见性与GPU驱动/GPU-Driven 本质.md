@@ -86,8 +86,8 @@ CPU 驱动时，这些输入要么在系统内存里另算一份，要么从 GPU
 
 - 实现链：[5.3 施工记录](../../开发步骤/5-GPU驱动与常驻大场景/5.3-indirect闭环/5.3.1-5.3.5-indirect闭环施工记录：能力闸门、命令组装与图形消费.md)、[6.1 Hi-Z 原理](../../开发步骤/6-高级剔除LOD与流送/6.1-Hi-Z遮挡/Hi-Z遮挡原理：深度金字塔与保守遮挡判定.md)、[6.2 LOD 施工计划](../../开发步骤/6-高级剔除LOD与流送/6.2-GPULOD/施工计划：GPULOD拆解.md)、[6.3 流送施工计划](../../开发步骤/6-高级剔除LOD与流送/6.3-粗粒度流送/施工计划：粗粒度流送拆解.md)。
 - 读数：[5.5 分档性能记录](../../开发步骤/5-GPU驱动与常驻大场景/5.5-分档压测/分档性能记录：三档压测读数与瓶颈归因.md)。
-- 边界与反例：《[为什么没有全上 GPU 驱动](为什么没有全上%20GPU%20驱动.md)》；着色层另看《[渲染管线模式与VisBuffer](渲染管线模式与VisBuffer.md)》。
-- API 形状：《[indirect 命令环](indirect%20命令环.md)》；模拟类负载看《[GPU 模拟计算](GPU%20模拟计算.md)》。
+- 边界与反例：《[为什么没有全上 GPU 驱动](为什么没有全上%20GPU%20驱动.md)》；着色层另看《[渲染管线模式与VisBuffer](../管线与计算/渲染管线模式与VisBuffer.md)》。
+- API 形状：《[indirect 命令环](../命令与提交/indirect%20命令环.md)》；模拟类负载看《[GPU 模拟计算](../管线与计算/GPU%20模拟计算.md)》。
 
 ## 自测
 
@@ -99,4 +99,4 @@ CPU 驱动时，这些输入要么在系统内存里另算一份，要么从 GPU
 ## 来源
 
 - 本仓库代码：`ash_renderer/src/render/passes/visibility/{cull,occlusion,lod,indirect}.rs`、`ash_renderer/src/render/resident/tables/instance_table.rs`、`ash_renderer/src/render/frame/record.rs`、`ash_renderer/src/driver/host/frame/gaps.rs`。
-- 读数与边界：`.agents/docs/开发步骤/5-GPU驱动与常驻大场景/5.5-分档压测/分档性能记录：三档压测读数与瓶颈归因.md`、`.agents/docs/笔记/引擎/为什么没有全上 GPU 驱动.md`。
+- 读数与边界：`.agents/docs/开发步骤/5-GPU驱动与常驻大场景/5.5-分档压测/分档性能记录：三档压测读数与瓶颈归因.md`、`.agents/docs/笔记/可见性与GPU驱动/为什么没有全上 GPU 驱动.md`。

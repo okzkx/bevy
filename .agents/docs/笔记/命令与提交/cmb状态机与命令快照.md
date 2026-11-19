@@ -76,7 +76,7 @@ cmb 的"当前状态"是一组带槽位的寄存器，bind 系列各管各的：
 - 规范 §Synchronization "Submission Order"（隐式同步保证）——状态命令"在 host 记录时执行、不在设备上执行操作"原话
 - 规范 §Command Buffers（生命周期与提交节）——pending 状态语义、提交批次=命令缓冲组、ONE_TIME_SUBMIT 状态迁移
 - GPU 命令处理器模型——AMD ME/PFP、NVIDIA host front-end 按序消费命令流；WDDM GPFIFO = pushbuffer 引用的 FIFO（硬件资料侧知识，非规范条款）
-- [同步模型](同步模型.md)——draw/dispatch 这类命令之间的执行/内存依赖细则、屏障与信号量的分工
-- [多帧在飞竞争](多帧在飞竞争.md)——cmb 之上提交/队列层的竞争与等待关系
-- [整帧录制流程](../引擎/整帧录制流程.md)——本工程九段录制编排，以及命令流里 bind 与 barrier 的分工
+- [同步模型](../同步与队列/同步模型.md)——draw/dispatch 这类命令之间的执行/内存依赖细则、屏障与信号量的分工
+- [多帧在飞竞争](../同步与队列/多帧在飞竞争.md)——cmb 之上提交/队列层的竞争与等待关系
+- [整帧录制流程](整帧录制流程.md)——本工程九段录制编排，以及命令流里 bind 与 barrier 的分工
 - 工程代码：`core/record/compute.rs`（Handoff 交接屏障收拢）、`render/frame/record.rs`（整帧录制编排、overlay 切管线重绑 set0、bindless 整帧一绑；`UploadWait` 定义在 `render/frame/frame_pool.rs`）

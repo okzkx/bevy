@@ -12,7 +12,7 @@ egui 是立即模式 GUI：界面代码每帧从头重跑，每次只产出这�
 
 每帧的一轮对话是 `ctx.begin_pass(RawInput)` → UI 构建代码 → `ctx.end_pass() -> FullOutput`（一个 pass 就是一轮 begin/end）。pass 外不能查 widget；pass 产出的 `FullOutput` 里 `shapes` 是**未镶嵌**的 `ClippedShape` 列表（shapes：这一帧要画的图元；镶嵌即 `tessellate`，把形状拆成三角形顶点，是 GPU 后端的活），外加 `textures_delta`（图集增量）与 `pixels_per_point`。
 
-![立即模式：声明每帧重跑，记忆常驻 Context](_assets/egui-immediate-mode-model.png)
+![立即模式：声明每帧重跑，记忆常驻 Context](../_assets/egui-immediate-mode-model.png)
 
 “每帧重建”重建的只是声明。视觉连续性来自**重跑的声明 + 常驻的记忆**两层叠加。Context 里按 widget Id 记着：
 
@@ -43,7 +43,7 @@ egui 0.36 的行为在版本敏感处标注“版本相关”。
 
 三个尺寸域各喂各的，谁都不许替谁换算：**egui 布局/命中域**（`screen_rect`、命中测试，points；真实鼠标进 egui 恒 = 物理像素 ÷ ppp）、**镶嵌输出**（顶点，points）、**渲染目标域**（swapchain extent、viewport、scissor，物理像素——“points 换像素”落在 push 的分母与 `clip × ppp` 的 scissor 两处）。修复后的对账恒等式：`screen_pt = extent ÷ ppp`，顶点 ÷ screen_pt = NDC，恰好把 points 铺满物理屏幕一次。
 
-![points 域与物理像素的双域换算链](_assets/egui-points-physical-domain-chain.png)
+![points 域与物理像素的双域换算链](../_assets/egui-points-physical-domain-chain.png)
 
 ## 3. DPI 双域换算链与测量假阳性
 
@@ -75,7 +75,7 @@ egui 0.36 的 begin/end pass 每趟独立（`viewport_stack` 成对进出、`cum
 
 修复是纯登记：面板 pass 出口记下本 pass 画过的层（`visible_layer_ids`），子 pass begin 后用公开 API `Areas::move_to_top` 把这些层补记为“本 pass 可见”，换道后记录保留、淡入不再重置。**判据句式：任何不重画既有窗口的子 pass，都必须补记层可见性。**
 
-![多 pass 可见性簿记：子 pass 漏记导致淡入重置](_assets/egui-multi-pass-visibility.png)
+![多 pass 可见性簿记：子 pass 漏记导致淡入重置](../_assets/egui-multi-pass-visibility.png)
 
 ## 6. 输入仲裁与 Release 欠账
 

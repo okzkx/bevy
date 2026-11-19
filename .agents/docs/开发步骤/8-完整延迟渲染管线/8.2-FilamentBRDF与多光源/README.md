@@ -22,7 +22,7 @@
   - BRDF 数学在 `shaders/src/surface_brdf.fs`——`D_GGX` / `V_SmithGGXCorrelated` / `F_Schlick`，diffuse 走 `BRDF_DIFFUSE` 宏（Lambert 与 Burley 双变体并存，取舍随参考篇钉明）。
   - 标准模型 diffuse/specular 双 lobe 组成在 `shaders/src/surface_shading_model_standard.fs`；punctual 光距离/角度衰减在 `shaders/src/surface_light_punctual.fs`；光源循环骨架在 `shaders/src/surface_lighting.fs`。
   - PBR 理论白皮书源在 `docs_src/src_markdeep/Filament.md.html`，材质定义指南在 `docs_src/src_markdeep/Materials.md.html`。
-- **开工前置 ✅ 已产出（2026-10-22，`goal/8.2-filament-ref`）**：[Filament 源码参考：标准模型 BRDF 与多光源（8.2 对照基准）](../../../笔记/渲染/Filament%20BRDF参考.md)——钉明对照函数清单（D_GGX + V_SmithGGXCorrelated + F_Schlick + Lambert）、宏默认组合（desktop = FILAMENT_QUALITY_HIGH，Burley 非默认）、glTF roughness=perceptual 域换算链、punctual 衰减公式与驻留形态证据；判定线①"与 Filament 参考对照收敛"以该篇 §0/§3 钉明的函数与版本为基准。
+- **开工前置 ✅ 已产出（2026-10-22，`goal/8.2-filament-ref`）**：[Filament 源码参考：标准模型 BRDF 与多光源（8.2 对照基准）](../../../笔记/光照与材质/Filament%20BRDF参考.md)——钉明对照函数清单（D_GGX + V_SmithGGXCorrelated + F_Schlick + Lambert）、宏默认组合（desktop = FILAMENT_QUALITY_HIGH，Burley 非默认）、glTF roughness=perceptual 域换算链、punctual 衰减公式与驻留形态证据；判定线①"与 Filament 参考对照收敛"以该篇 §0/§3 钉明的函数与版本为基准。
 - **边界**：Filament 是 forward 全屏管线、没有独立光照累积 pass，本段 pass 组织方式不照抄——BRDF 侧按 2026-10-22 用户拍板为**完全照抄口径**（标准模型直接光函数级移植进 WGSL，命名保留原名，详见源码参考篇 §0），pass 编排自主。
 
 ## 任务面板（随段施工计划 §1 同步）
@@ -44,6 +44,6 @@
 - [施工计划：spawn增量链缺陷修复（8.2.6）](施工计划：spawn增量链缺陷修复（8.2.6）.md)——缺陷①②定责/修复/判定线（2026-10-22 立案，8.2.5 调试仪器验收轮受控复现为定责输入）。
 - [8.2.6-施工记录：spawn增量链缺陷修复](8.2.6-施工记录：spawn增量链缺陷修复.md)——定责方法链实录（环读回→gap 哨兵逐条件排除）、根因与修复、代码改动解析。
 - [施工计划：完整延迟渲染管线五段拆解](../施工计划：完整延迟渲染管线五段拆解.md)——§1 8.2 节（交付/落点/判定线草案）、§2 待决项汇总（光源驻留形态）。
-- [Unity PBR 调研：材质模型、BRDF 与 IBL](../../../笔记/渲染/Unity%20PBR%20调研.md)——Filament BRDF 参照底座。
-- [Filament 源码参考：标准模型 BRDF 与多光源（8.2 对照基准）](../../../笔记/渲染/Filament%20BRDF参考.md)——开工前置源码参考篇（2026-10-22 产出，对照基准已钉明）。
+- [Unity PBR 调研：材质模型、BRDF 与 IBL](../../../笔记/光照与材质/Unity%20PBR%20调研.md)——Filament BRDF 参照底座。
+- [Filament 源码参考：标准模型 BRDF 与多光源（8.2 对照基准）](../../../笔记/光照与材质/Filament%20BRDF参考.md)——开工前置源码参考篇（2026-10-22 产出，对照基准已钉明）。
 - Filament 本地源码检出（`F:\okzkx\filament`）——BRDF 对照参考底座，锚点与开工前置见上文[参考底座](#参考底座2026-10-22-登记)。

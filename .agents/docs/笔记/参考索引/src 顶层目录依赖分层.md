@@ -83,5 +83,5 @@ binding/pipeline/record/target）零上层引用 ← `resident` ← `passes` ←
 
 ## 姊妹篇
 
-- [常驻绘制数据组织](常驻绘制数据组织.md)——环与账本的数据流细节
-- [indirect 命令环](indirect%20命令环.md)——GPU 侧命令组装
+- [常驻绘制数据组织](../显存与资源/常驻绘制数据组织.md)——环与账本的数据流细节
+- [indirect 命令环](../命令与提交/indirect%20命令环.md)——GPU 侧命令组装

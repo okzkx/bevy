@@ -2,7 +2,7 @@
 
 画 100 个不同的物体，传统做法要换 100 次描述符集——每次都要重新布置一遍。bindless（正式名 descriptor indexing，描述符索引）把"选哪个资源"从 command buffer 的绑定状态搬进 shader 的输入数据——一张常驻大数组加动态下标：表启动时建一次，运行中按槽号（一个 u32）取资源。省下的是每 draw 的绑定切换，代价是把"这个槽此刻是否有效"的判断从绑定时刻挪到了 shader 执行时刻。
 
-这里有两个最常被误读的开关，先就地说明：**UAB**（`UPDATE_AFTER_BIND`，绑定之后仍可往描述符集里写新内容）和 **PARTIALLY_BOUND**（允许表里存在从未写入过的槽）。它们换的是契约，不是关掉校验；缩写全称见[术语速查](术语速查.md)。
+这里有两个最常被误读的开关，先就地说明：**UAB**（`UPDATE_AFTER_BIND`，绑定之后仍可往描述符集里写新内容）和 **PARTIALLY_BOUND**（允许表里存在从未写入过的槽）。它们换的是契约，不是关掉校验；缩写全称见[术语速查](../参考索引/术语速查.md)。
 
 **bindless 换掉的是绑定时刻的保证，不是校验本身：能力类开关只增加表达力，UAB 和 PARTIALLY_BOUND 把时序与完整性责任交给应用，验证层照旧执法旗标配套。**
 
@@ -30,7 +30,7 @@ PARTIALLY_BOUND 同构：feature 位 + binding 旗标 + 同一个 layout 创建�
 
 排查要点：**报错的 VUID 指向的可能是另一层的缺失。** 漏掉 device 层特性位，报错出现在 shader 模块创建（08740）；漏掉 layout 创建旗标，报错落在 layout 创建（03000）。某一层报错不等于病根在那一层——三层逐层核对，不按报错位置修。
 
-![UAB 三层配套：设备层、布局层、池层的旗标与两条 VUID 的执法位置](_assets/uab-three-layer-flags.png)
+![UAB 三层配套：设备层、布局层、池层的旗标与两条 VUID 的执法位置](../_assets/uab-three-layer-flags.png)
 
 ## 3. UAB 的真实消费窗口：提交 → 命令完成
 
@@ -47,7 +47,7 @@ UAB 解除的只有"记录绑定后内容冻结"；它**不**授权覆盖仍被�
 
 另有一条按场景的授权容易与 UAB 混淆：`descriptorBindingUpdateUnusedWhilePending` 允许改写"可证明未被在飞命令使用"的描述符——它作用于**没带** UAB 旗标的 binding，证明"未使用"的责任在应用；UAB 的区别在于授权面覆盖绑后分配与补槽，但同样不触及在飞消费窗口。
 
-![UAB 消费窗口与槽回收窗：在飞区间禁止改写，回收等最后使用完成](_assets/uab-consumption-window.png)
+![UAB 消费窗口与槽回收窗：在飞区间禁止改写，回收等最后使用完成](../_assets/uab-consumption-window.png)
 
 ## 4. PARTIALLY_BOUND：空槽是 UB
 
@@ -82,7 +82,7 @@ SAMPLER 类型的 UAB 不需要特性位：UAB 特性位按描述符类型逐位
 
 按此展开，一个槽位有三个可分辨的时刻：**进表**（描述符写入，槽位有效）→ **可采样**（拷贝完成，timeline 值到）→ **最后使用完成**（回收前提，§3 窗口的右端）。三个时刻各有各的等待物：第一个不需要等，第二个等 timeline 值，第三个等帧 fence + timeline 值。两个"完成"也是两个判据：拷贝完成管可采样，最后使用完成管回收——拿前者当后者的证据会把还在飞的内容销毁掉。
 
-![描述符写入与内容拷贝两个时刻：进表早于可采样，消费侧等 timeline 值](_assets/descriptor-write-vs-sampled-ready.png)
+![描述符写入与内容拷贝两个时刻：进表早于可采样，消费侧等 timeline 值](../_assets/descriptor-write-vs-sampled-ready.png)
 
 ## 7. pool 回收粒度：整体回收与按槽的代价
 
