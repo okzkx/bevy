@@ -38,11 +38,24 @@ pub enum VulkanError {
     Init(String),
 }
 
-/// 优雅退出请求位：唯一写者 [`tier_handler`]（致命分支置位），唯一消费者
-/// [`fatal_gate`]。
+/// 优雅退出请求位：唯一写者 [`tier_handler`]（致命分支置位），消费者
+/// [`fatal_gate`] 与帧循环入口（[`fatal_pending`]）。
 ///
 /// 坑：进程级全局静态，多 App 并存会串扰——本项目单进程单 App。
 static FATAL: AtomicBool = AtomicBool::new(false);
+
+/// `AppExit` 是否已写过（`fatal_gate` 去重；FATAL 本身不清，帧循环入口据此停手）。
+static EXIT_WRITTEN: AtomicBool = AtomicBool::new(false);
+
+/// 是否已有致命错误待退出。
+///
+/// 帧循环入口（`flush_uploads` / `draw_frame`）先查它：致命失败后同步状态已不可信，
+/// 再录一帧可能等一个永远没人 signal 的 fence（提交失败已 reset）而永久阻塞，
+/// 连 `fatal_gate` 写的 `AppExit` 都轮不到 runner 观察。
+#[must_use]
+pub fn fatal_pending() -> bool {
+    FATAL.load(Ordering::Acquire)
+}
 
 /// 统一错误处理器（`App::set_error_handler` 注册；system/observer/command 的 Err
 /// 全走这里）：按 `Severity` 分流。
@@ -75,11 +88,12 @@ pub fn tier_handler(mut err: BevyError, ctx: ErrorContext) {
 
 /// `FATAL` 置位 → 写 `AppExit::error()` 优雅退出（main.rs 挂在 `First`）。
 ///
-/// swap 清位：连续多个致命错误只退一次。写入后本帧剩余 system 照跑，runner 帧末
-/// 查到 `AppExit` 才停。
+/// FATAL 不清：帧循环入口靠 [`fatal_pending`] 停手，退出前不再录帧。`AppExit` 只写
+/// 一次（`EXIT_WRITTEN` 去重）。写入后本帧剩余 system 照跑，runner 帧末查到
+/// `AppExit` 才停。
 #[system]
 pub fn fatal_gate(mut exit: MessageWriter<AppExit>) {
-    if FATAL.swap(false, Ordering::AcqRel) {
+    if FATAL.load(Ordering::Acquire) && !EXIT_WRITTEN.swap(true, Ordering::AcqRel) {
         exit.write(AppExit::error());
     }
 }

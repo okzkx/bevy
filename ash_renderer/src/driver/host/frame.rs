@@ -73,6 +73,12 @@ pub(crate) fn draw_frame(
     mut input: FrameInput,
     _main_thread: NonSendMarker,
 ) -> Result<(), BevyError> {
+    // 已置位致命错误：上一帧可能停在"fence 已 reset 但未提交"之类的半状态，
+    // 再进一帧会在 wait_for_slot 上永久阻塞，连 fatal_gate 写的 AppExit 都轮不到
+    // runner 观察。退出链由 teardown_vulkan 负责。
+    if crate::common::error::fatal_pending() {
+        return Ok(());
+    }
     let FrameInput {
         gpu,
         timing,

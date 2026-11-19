@@ -221,6 +221,10 @@ struct UploadData<'w> {
 /// 提前 return 的失败一律 `or_fatal`/`ok_or_fatal` 冒泡,本系统只管控制流。
 #[system]
 fn flush_uploads(mut data: UploadData, mut state: Local<UploadState>) -> Result<(), BevyError> {
+    // 已置位致命错误：同步/账本状态不可信，再提交上传只会给没人等的票据加活。
+    if crate::common::error::fatal_pending() {
+        return Ok(());
+    }
     let drained_slots = drain_graveyards(&mut data)?;
     reclaim_retired(&mut data, drained_slots);
     // overlay 图集旧代:同样要等帧侧 + 上传票据。旧代的描述符槽已在整传帧交回表,由下一轮

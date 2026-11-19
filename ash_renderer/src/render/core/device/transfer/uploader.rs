@@ -401,7 +401,13 @@ impl Uploader {
             return Ok(Some(ticket));
         }
         let blit_cb = self.slots[index].blit_command_buffer;
-        image::record_blit_continuation(self, blit_cb, ticket, &chained)?;
+        // 坑：transfer 批已提交并在飞，这里的失败不能直接上报——调用方把 Err 当
+        // "本批未提交"，会立刻 Drop 本批目标图像/staging，在飞拷贝会写已销毁的
+        // 对象。先把票据等落地再报错（设备丢失时等失败，原样上报即可）。
+        if let Err(err) = image::record_blit_continuation(self, blit_cb, ticket, &chained) {
+            self.wait_until(ticket)?;
+            return Err(err);
+        }
         let published = ticket + 1;
         self.slots[index].in_flight = Some(published);
         self.next_ticket = published + 1;
