@@ -182,7 +182,9 @@ struct LightLedger {
     records: Vec<Option<LightRecord>>,
     /// 回收即复用（不走延迟回收，理由见模块注释）。
     slots: SlotAllocator,
-    /// 脏行账：(槽号, 剩余要写的帧槽数)。新脏 = 2，每写一个帧槽减一，归零出账。
+    /// 脏行账：(槽号, 剩余要写的帧槽数)。新脏 = 在飞帧数，每写一个帧槽减一，归零出账。
+    /// 坑：这里只记次数不记"写过哪些环"，靠调用节奏保证每次 flush 落不同帧槽；
+    /// 若将来出现同一槽连续 flush（换槽提前/跳帧），要改成按环位图记账。
     dirty: Vec<(u32, u8)>,
     dirty_writes_total: u64,
 }
@@ -237,9 +239,10 @@ impl LightLedger {
     }
 
     fn mark_dirty(&mut self, slot: u32) {
+        let ticks = MAX_FRAMES_IN_FLIGHT as u8;
         match self.dirty.iter_mut().find(|(s, _)| *s == slot) {
-            Some((_, remaining)) => *remaining = 2,
-            None => self.dirty.push((slot, 2)),
+            Some((_, remaining)) => *remaining = ticks,
+            None => self.dirty.push((slot, ticks)),
         }
     }
 
