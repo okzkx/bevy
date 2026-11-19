@@ -74,9 +74,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // 变细（靠近）与持平都即时生效
     var level = raw;
     if (raw > prev) {
-        // 变粗（远离）：需低于该档自然边界再留 (1−h) 余量才降档
-        let boundary = push.threshold * exp2(-f32(raw));
-        level = select(prev, raw, s <= boundary * (1.0 - push.hysteresis));
+        // 变粗（远离）：每次至多降一档，判据用**下一档**的边界再留 (1−h) 余量。
+        // 用 raw 的边界会在跳档时把阈值压到 1/2^(raw−prev)，物体一直画最细档，
+        // 然后一帧跳多档（可见突跳）。
+        let next = prev + 1u;
+        let boundary = push.threshold * exp2(-f32(next));
+        level = select(prev, next, s <= boundary * (1.0 - push.hysteresis));
     }
     lod_levels[slot] = level;
 }

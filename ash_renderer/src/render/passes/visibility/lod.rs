@@ -99,8 +99,12 @@ pub fn lod_raw_level(size_px: f32, threshold_px: f32, max_levels: u32) -> u32 {
     (raw as i64).clamp(0, i64::from(max_levels) - 1) as u32
 }
 
-/// 迟滞档位裁决：向粗（raw > prev）需 `s ≤ 该档自然边界 ×(1−h)`（越过阈值带才
-/// 降档），向细（raw < prev）即时升档，相等保持。prev = 档位环本槽值。
+/// 迟滞档位裁决：向粗（raw > prev）每次至多降一档，且要越过**下一档**的自然
+/// 边界 ×(1−h) 才动；向细（raw < prev）即时升档，相等保持。prev = 档位环本槽值。
+///
+/// 坑：判据必须用 `prev + 1` 的边界，不能直接用 `raw` 的边界——`raw = prev + 3`
+/// 时 `B(raw)` 比 `B(prev+1)` 小 8 倍，物体要缩到很细才肯动，此前一直画最细档
+/// （几何量成倍浪费），然后一帧跳三档（可见突跳）。
 #[must_use]
 pub fn lod_hysteresis_level(
     raw: u32,
@@ -112,9 +116,10 @@ pub fn lod_hysteresis_level(
 ) -> u32 {
     let prev = prev.min(max_levels - 1);
     if raw > prev {
-        let boundary = threshold_px * bevy::math::ops::exp2(-(raw as f32));
+        let next = prev + 1;
+        let boundary = threshold_px * bevy::math::ops::exp2(-(next as f32));
         if size_px <= boundary * (1.0 - hysteresis) {
-            raw
+            next
         } else {
             prev
         }
@@ -279,6 +284,22 @@ mod tests {
         assert_eq!(lod_hysteresis_level(1, 1, t * 0.4, t, h, max), 1);
         // prev 越界（环内容异常）clamp 进范围——不 panic 不放大
         assert_eq!(lod_hysteresis_level(0, 99, t, t, h, max), 0);
+    }
+
+    /// 跳档只逐帧向粗走一档：raw 比 prev 大 3 时仍按 prev+1 的边界判，
+    /// 不能一直卡在最细档（旧式用 B(raw) 会让 s=30px 永远停档 0）。
+    #[test]
+    fn hysteresis_steps_coarse_one_level_per_tick() {
+        let t = 256.0f32;
+        let h = 0.25f32;
+        let max = MAX_LEVELS;
+        let s = 30.0f32; // raw = 3
+        assert_eq!(lod_raw_level(s, t, max), 3);
+        assert_eq!(lod_hysteresis_level(3, 0, s, t, h, max), 1);
+        assert_eq!(lod_hysteresis_level(3, 1, s, t, h, max), 2);
+        // 档 3 的迟滞带是 (24, 32]：s=30 仍留档 2，缩到 ≤24 才进档 3
+        assert_eq!(lod_hysteresis_level(3, 2, s, t, h, max), 2);
+        assert_eq!(lod_hysteresis_level(3, 2, 24.0, t, h, max), 3);
     }
 
     /// push 打包与布局断言一致（96B：矩阵 @0..64、screen @64、bound @72、
