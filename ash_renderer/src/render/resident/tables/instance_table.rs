@@ -492,7 +492,12 @@ impl InstanceTables {
                 ] {
                     writer.buffer(binding, buffer.buffer(), 0, range);
                 }
-                writer.submit(device)?;
+                // 写入失败与前面两步失败同出口：已建的 pool/sets/layout 一并回收，
+                // 不留半套描述符对象（本函数文档承诺"任一步失败全部回收"）。
+                writer.submit(device).inspect_err(|_| {
+                    device.destroy_descriptor_pool(pool, None);
+                    device.destroy_descriptor_set_layout(set2_layout, None);
+                })?;
             }
             Ok((set2_layout, sets, pool))
         }
