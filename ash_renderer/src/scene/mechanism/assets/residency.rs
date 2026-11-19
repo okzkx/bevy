@@ -629,6 +629,14 @@ impl FullPass<'_> {
                 if used <= budget {
                     break;
                 }
+                // 与 LOD 档淘汰同一条不变式：表里保留指向已回收区间等于让 GPU 读
+                // 别人的 mesh。floor_anchor 下基准档被淘汰后行仍可绘（画锚档），
+                // 不重挂 LOD 脏标就永不自愈。
+                if let Some(g) = groups.get(&id) {
+                    for entity in &g.rows {
+                        self.ledger.mark_lod_dirty(*entity);
+                    }
+                }
                 // 出账进卸载回收账：flush 下帧开头出驻留条目 → 停尸房 → 排空后
                 // 区间归还 free list；引用行此后不进 DrawList（mesh 未驻留），
                 // 先撤引用再回收区间
@@ -820,7 +828,7 @@ impl FullPass<'_> {
     ) {
         let settings = self.settings;
         let budget = settings.budget_image_bytes;
-        let image_groups = image_groups(self.ledger, std_materials, image_cache, cam_pos);
+        let image_groups = image_groups(self.ledger, std_materials, cam_pos);
         let mut over_budget_image = false;
         let mut image_request: Vec<Entity> = Vec::new();
         if budget > 0 && used_image > budget {
@@ -877,11 +885,11 @@ impl FullPass<'_> {
 }
 
 /// 贴图聚合：材质 → (最近引用行距离, 引用行) → 贴图 → (最近距离, 引用行)。
-/// 未驻留贴图不参与（请求由行腿覆盖）。
+/// **包含未驻留贴图**：预算内分支靠这份聚合把"被淘汰且冷却已过"的贴图重新请求
+/// （请求行置脏 → 材质五槽盘点重传）；淘汰分支自行按驻留过滤。
 fn image_groups(
     ledger: &InstanceLedger,
     std_materials: &Assets<StandardMaterial>,
-    image_cache: &ImageCache,
     cam_pos: Vec3,
 ) -> HashMap<AssetId<Image>, (f32, Vec<Entity>)> {
     let mut mat_dist: HashMap<AssetId<StandardMaterial>, (f32, Vec<Entity>)> = HashMap::new();
@@ -899,9 +907,6 @@ fn image_groups(
             continue;
         };
         for id in material_texture_slots(material) {
-            if image_cache.resident(id).is_none() {
-                continue;
-            }
             let e = image_groups
                 .entry(id)
                 .or_insert((f32::INFINITY, Vec::new()));
