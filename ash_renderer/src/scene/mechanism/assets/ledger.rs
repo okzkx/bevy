@@ -372,7 +372,7 @@ pub(crate) fn update_ledger(
     // —— ② 新增/换绑：行不存在 = 入账，柄变化 = 换绑；两处都置脏等上传盘点。
     // 行的实例槽/记录身份由 flush_uploads 分配（None = 未驻留成表）。
     for (entity, mesh3d, material3d, global) in &assets {
-        let new_row = InstanceRow {
+        let mut new_row = InstanceRow {
             mesh: mesh3d.0.clone(),
             material: material3d.0.clone(),
             model: global.to_matrix(),
@@ -402,8 +402,13 @@ pub(crate) fn update_ledger(
                     ledger.freed_slots.push(slot);
                 }
             }
-            // 同值重复变更（重插同柄）：行重写、脏重置，不计处理数
-            Some(_) => {}
+            // 同值重复变更（重插同柄）：行重写、脏重置，不计处理数。
+            // 实例槽与记录身份必须原样保留——重置成 None 会让上传链另分一个新槽，
+            // 旧槽既没进 freed_slots 也不再被任何行引用，每重插一次泄漏一个对象表槽。
+            Some(old) => {
+                new_row.instance_slot = old.instance_slot;
+                new_row.bound = old.bound;
+            }
         }
         ledger.dirty.insert(entity);
         ledger.rows.insert(entity, new_row);
