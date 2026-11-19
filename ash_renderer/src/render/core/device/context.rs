@@ -21,6 +21,9 @@ use crate::common::error::{Result, VulkanError};
 use super::memory::contract::MemoryContract;
 
 const VALIDATION_LAYER: &std::ffi::CStr = c"VK_LAYER_KHRONOS_validation";
+/// 同步验证的载体扩展：`VkValidationFeaturesEXT` 进了 pNext 就必须同时启用它
+/// （VUID-VkInstanceCreateInfo-pNext-10243）。
+const VALIDATION_FEATURES_EXT: &std::ffi::CStr = c"VK_EXT_validation_features";
 
 #[cfg(windows)]
 unsafe extern "system" {
@@ -160,11 +163,24 @@ impl Context {
 
         // ---- Instance ----
         // debug_utils 常开（被动扩展）：对象命名供验证层报错与 RenderDoc 按名字显示
-        let ext_names: Vec<*const c_char> = vec![
+        // 同步验证依赖 VK_EXT_validation_features：有验证层且该扩展可用才启，否则
+        // 只启用核心检查（pNext 挂 VkValidationFeaturesEXT 而不启用扩展是 VUID-10243）。
+        // 坑：层提供的扩展必须带层名查（`None` 只返回全局扩展，会把
+        // VK_EXT_validation_features 误判为不可用）。
+        let has_validation_features = validation
+            && unsafe { entry.enumerate_instance_extension_properties(Some(VALIDATION_LAYER)) }
+                .unwrap_or_default()
+                .iter()
+                .any(|props| unsafe { std::ffi::CStr::from_ptr(props.extension_name.as_ptr()) }
+                    == VALIDATION_FEATURES_EXT);
+        let mut ext_names: Vec<*const c_char> = vec![
             surface::NAME.as_ptr(),
             win32_surface::NAME.as_ptr(),
             debug_utils::NAME.as_ptr(),
         ];
+        if has_validation_features {
+            ext_names.push(VALIDATION_FEATURES_EXT.as_ptr());
+        }
         let layer_names: Vec<*const c_char> = if validation {
             vec![VALIDATION_LAYER.as_ptr()]
         } else {
@@ -177,9 +193,14 @@ impl Context {
             .api_version(vk::API_VERSION_1_3);
         // 同步验证：额外检查信号量配对、present 复用、在飞销毁等跨对象时序，核心检查管不到这些。
         // 有帧时间开销；要关掉就把 enables 换成空数组。
-        let sync_enables = if validation {
+        let sync_enables = if has_validation_features {
             Some([vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION])
         } else {
+            if validation {
+                error!(
+                    "{VALIDATION_LAYER:?} 可用但缺少 {VALIDATION_FEATURES_EXT:?}，同步验证未启用"
+                );
+            }
             None
         };
         let mut sync_validation = vk::ValidationFeaturesEXT::default();
@@ -317,6 +338,8 @@ impl Context {
         unsafe { instance.get_physical_device_features2(physical_device, &mut features2) };
         // features2 还借着 vk12/vk13_query，先把要用的 base feature 读出来，之后才能直接读那两个结构
         let multi_draw_indirect_supported = features2.features.multi_draw_indirect != 0;
+        let draw_indirect_first_instance_supported =
+            features2.features.draw_indirect_first_instance != 0;
         // 要用的 feature 不支持就报错退出，不建缺能力的设备
         if vk12_query.timeline_semaphore == 0 || vk13_query.dynamic_rendering == 0 {
             return Err(VulkanError::Init(format!(
@@ -354,6 +377,14 @@ impl Context {
         if !multi_draw_indirect_supported {
             return Err(VulkanError::Init(
                 "物理设备 feature 不足：multi_draw_indirect 不支持（indirect 绘制无逐 draw 回退路径，该设备不可用）".into(),
+            ));
+        }
+        // 实例槽号经命令的 firstInstance 传给 VS（instance_index），不是可选优化：
+        // 未启用时 firstInstance 必须为 0（VUID-vkCmdDrawIndexedIndirect-None-02705），
+        // 而本工程的编号恰好恒非 0。Vulkan 1.4 才强制支持该位，1.3 设备必须显式查。
+        if !draw_indirect_first_instance_supported {
+            return Err(VulkanError::Init(
+                "物理设备 feature 不足：drawIndirectFirstInstance 不支持（实例槽号经 firstInstance 传入，无回退路径，该设备不可用）".into(),
             ));
         }
         // 20 个分位的支持情况全部记日志，以后要多启用哪一位先查这行
@@ -453,9 +484,11 @@ impl Context {
             .descriptor_binding_sampled_image_update_after_bind(true)
             .descriptor_binding_partially_bound(true);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
-        // multi_draw_indirect + texture_compression_bc(BCn 显存纹理采样的特性位) 在 base features 里
+        // multi_draw_indirect + draw_indirect_first_instance + texture_compression_bc
+        // (BCn 显存纹理采样的特性位) 在 base features 里
         let base_features = vk::PhysicalDeviceFeatures::default()
             .multi_draw_indirect(true)
+            .draw_indirect_first_instance(true)
             .texture_compression_bc(true);
         let queue_priority = [1.0f32];
         let mut queue_infos = vec![vk::DeviceQueueCreateInfo::default()
