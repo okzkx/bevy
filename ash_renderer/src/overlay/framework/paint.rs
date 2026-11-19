@@ -119,6 +119,11 @@ fn blit(
 ) {
     let [mw, mh] = mirror.size;
     let [pw, ph] = patch.size;
+    // 起点已在右/下边界外：整块不在界内，直接丢弃（copy_w 会裁成 0，但切片起点
+    // 仍会越界 panic）。
+    if x0 >= mw || y0 >= mh {
+        return;
+    }
     let copy_w = pw.min(mw.saturating_sub(x0));
     for y in 0..ph {
         let my = y0 + y;

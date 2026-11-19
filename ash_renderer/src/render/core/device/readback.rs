@@ -14,6 +14,11 @@ use super::context::Context;
 /// # Errors
 /// staging 创建/提交/等待失败（设备丢失等）。
 pub(crate) fn readback_buffer(ctx: &Context, src: vk::Buffer, out: &mut [u8]) -> Result<()> {
+    // 零长度是合法的诊断输入（对象槽高水位/在场列表为空）：0 字节 buffer 与 0 字节
+    // 拷贝都违反规范（VUID-VkBufferCreateInfo-size-00912 / VkBufferCopy-size-01988），直接当成功。
+    if out.is_empty() {
+        return Ok(());
+    }
     let byte_size = out.len() as u64;
     unsafe {
         let device = &ctx.device;
