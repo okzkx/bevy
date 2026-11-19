@@ -78,4 +78,4 @@ compute 环境/存储环/indirect 既有能力面全覆盖，本段无新 Vulkan
 - **bevy 参照**（当前 checkout 实存）：[meshlet/cull_shared.wesl](../../../../../crates/bevy_pbr/src/meshlet/cull_shared.wesl)——screen-size 判据思想参照（cluster 级路线本身不归本段，若将来立项另走流程）；bevy mesh 构造器（细分阶梯出处，随 §2 核实 1 钉明）。
 - **4.1 账本链路**：多档 mesh 经既有 [remote/objects.rs](../../../../../ash_renderer/src/remote/edit/objects.rs) 方法族与 4.1 账本进 GPU，渲染路径零触碰（6.1.1 同款边界）。
 - **环与状态纪律**：[环机制篇](../../5-GPU驱动与常驻大场景/5.1-常驻绘制数据/环机制：HostVisible数据的帧槽轮转与fence纪律.md)——LOD 状态若走宿主镜像须守 fence 纪律；时序契约同 6.1（选档/改写每帧全量重写，不新增等待闸门）。
-- **边界外挂**：cluster 级微几何（meshlet/vis-buffer 谱系）不归本段——bevy meshlet 为实验性参照本体，如立项另走立案流程；vis-buffer 相邻路线已登记[外置拓展条目 5](../../外置拓展需求.md)。流送（档位淘汰）归 6.3/6.4。
+- **边界外挂**：cluster 级微几何（meshlet/vis-buffer 谱系）不归本段——bevy meshlet 为实验性参照本体，如立项另走立案流程；vis-buffer 相邻路线已登记[外置拓展条目 5](../../外置拓展需求/外置拓展需求.md)。流送（档位淘汰）归 6.3/6.4。

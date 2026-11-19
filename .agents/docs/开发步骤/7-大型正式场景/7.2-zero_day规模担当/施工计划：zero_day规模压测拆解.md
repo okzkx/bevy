@@ -51,7 +51,7 @@ zero_day 是 Beeple 科幻走廊（NVIDIA ORCA），上游 `examples/large_scene
 - 不主张渲染画质特性（zero_day 的灯光/GI 表现归步骤 9 灵感源，本段只看"画得对、账得住"）。
 - 不做剔除/LOD/流送机制扩展；大资产暴露的机制缺陷走 7.4 缺陷轮单独立账。
 - 不换 Startup 默认场景（Sponza 保持基座位），多场景共存走 BRP load_world。
-- 材质多样性归 7.3 Poly Haven；页级 VT 仍挂[外置拓展条目 6](../../外置拓展需求.md)。
+- 材质多样性归 7.3 Poly Haven；页级 VT 仍挂[外置拓展条目 6](../../外置拓展需求/外置拓展需求.md)。
 
 ## 底座指向
 

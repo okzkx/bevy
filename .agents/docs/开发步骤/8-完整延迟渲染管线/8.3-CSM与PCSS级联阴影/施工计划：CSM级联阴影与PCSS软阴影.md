@@ -4,7 +4,7 @@
 >
 > **当前状态：⬜ 已立案（2026-10-22；2026-11-19 补：已收官，见[段 README](README.md)）**。
 
-**一句话说明**：本段给多光源里的方向光接 CSM 级联 shadow map + PCSS 软阴影——shadow depth pass 逐 cascade 复用 5.2 标记链与 5.3 命令组装（cascade 视锥代主相机视锥，CPU 只发矩阵），PCSS 采样进 8.2 光照累积 pass；本段不主张 VSM（[外置条目 7](../../外置拓展需求.md)）、不做时域滤波、不主张点光源阴影（LightRecord shadow bit0 保持记账，punctual shadow 归后继段）。
+**一句话说明**：本段给多光源里的方向光接 CSM 级联 shadow map + PCSS 软阴影——shadow depth pass 逐 cascade 复用 5.2 标记链与 5.3 命令组装（cascade 视锥代主相机视锥，CPU 只发矩阵），PCSS 采样进 8.2 光照累积 pass；本段不主张 VSM（[外置条目 7](../../外置拓展需求/外置拓展需求.md)）、不做时域滤波、不主张点光源阴影（LightRecord shadow bit0 保持记账，punctual shadow 归后继段）。
 
 ## 0. 立案期裁决（本计划钉明，施工可推翻但须记录）
 

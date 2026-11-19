@@ -20,6 +20,10 @@
 - `inject_mouse.py`——SendInput 注入鼠标输入（DPI 感知）：`drag` 左键拖拽、`move` 纯移动不按键、`wheel` 滚轮，坐标为屏幕物理像素。
 - `focus_window.py`——把目标窗口置前台（AttachThreadInput 套路），注入输入前必须先执行。
 
+## 本项目 Python 工具（资产修正）
+
+- `fix_gltf_alpha.py`——按 baseColor 贴图 alpha 直方图修正 glTF 材质 alpha 语义：MASK 但贴图全不透明 → OPAQUE、OPAQUE 但贴图有 ≥5% 全透明像素 → MASK（cutoff 0.5）、BLEND 但贴图与因子都没有 alpha → OPAQUE。只改 `alphaMode`/`alphaCutoff`；`--dry-run` 只打印，写盘前把原文件备份到 `.temp/gltf_alpha_backup/`，可重复执行（幂等）。
+
 ## 本项目 Python 工具（ash_renderer BRP 直控）
 
 - `brp.py`——BRP 薄客户端（3.12/3.13）：把宿主 HTTP JSON-RPC（127.0.0.1:15702）封装成子命令族——`tree`/`inspect`/`query`/`set-transform`/`camera`/`mouse-move`/`mouse-button`/`mouse-wheel`/`mouse-status`/`discover`/`raw`；组件短名自动展开，AI 免记协议。虚拟鼠标走应用层消息缓冲（与 bevy_winit 同层），不碰真实光标/焦点，不受无人模式纪律约束。逐命令用法与实战配方见 [BRP直控使用指南](../.agents/docs/开发步骤/3-静态取数链路/3.12-CLI直控/BRP直控使用指南：逐命令用法、与MCP的分界及Skill+CLI定位.md)。
