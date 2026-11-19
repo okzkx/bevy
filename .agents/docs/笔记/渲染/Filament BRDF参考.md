@@ -2,6 +2,8 @@
 
 > 对应 [8.2 段 README 参考底座](../../开发步骤/8-完整延迟渲染管线/8.2-FilamentBRDF与多光源/README.md)、[Unity PBR 调研](Unity%20PBR%20调研.md)。版本钉：本地检出 `F:\okzkx\filament`，HEAD `373190d49`（`git describe` = rc/1.78.1-cut-31-g373190d49，移动开发线，函数行号会漂移，函数名不会）。全部引用逐行核对于 2026-10-22。
 
+> **状态追记（2026-11-19）**：8.2 已按本篇施工收官。`shaders/common/brdf.wgsl` 实现 `D_GGX` / `V_SmithGGXCorrelated` / `F_Schlick` / `Fd_Lambert`；不透明光照累积 `gbuffer_composite.wgsl` 与透明 `transparent_forward.wgsl` 共用 `getStandardPixelParams` + `surfaceShading`；`energyCompensation` 取 1.0，IBL/DFG 仍归步骤 9。下文 §0/§3 保留施工前的判定与公式口径；§3.4 与 §6 已按施工结果改写。
+
 ## 0. 判定线
 
 - **8.2 对照基准钉明（desktop 默认组合，实测核实）**：`D_GGX`（GGX 法向分布）＋ `V_SmithGGXCorrelated`（Heitz 2014 高度相关完整项）＋ `F_Schlick(f0, f90, VoH)`（f90 = saturate(16.5·Σf0)，介电体饱和到 1）＋ **diffuse = Lambert（1/π）**。**Burley 不是默认**——它是 `BRDF_DIFFUSE` 宏的另一个可选值，8.2 不取。
@@ -104,7 +106,7 @@ float Fd_Lambert() { return 1.0 / PI; }
 // 可选 Burley（f90 = 0.5 + 2·α·LoH²，F_Schlick(1, f90, NoL)·F_Schlick(1, f90, NoV)/π）
 ```
 
-Filament 的 diffuse lobe = `diffuseColor × Fd_Lambert()`，无 roughness 依赖。本项目现行 Lambert（`gbuffer_composite.wgsl` 的 `lambert × INV_PI`）与之**数学上完全同款**——8.2 换 BRDF 时 diffuse 项零改动，只加 specular lobe。
+Filament 的 diffuse lobe = `diffuseColor × Fd_Lambert()`，无 roughness 依赖。本项目 PBR（8.2 已施工）由 `shaders/common/brdf.wgsl` 的 `getStandardPixelParams` + `surfaceShading` 实现（`gbuffer_composite.wgsl` 与 `transparent_forward.wgsl` 共用）：diffuse 项仍是 `diffuseColor × Fd_Lambert()`，specular 项为 `D_GGX × V_SmithGGXCorrelated × F_Schlick`。8.2 施工时 diffuse 项零改动，只加 specular lobe。
 
 ## 4. surfaceShading 组织（光照累积 pass 的同构形状）
 
@@ -131,9 +133,9 @@ vec3 surfaceShading(const PixelParams pixel, const Light light, float occlusion)
 - **逐光源只做一次 h 归一化和四个点积**，D/V/F 全部吃这组余弦；参数换算（§2）在光照循环外做一次。
 - NoL 折在尾部，diffuse 与 specular 共享同一个 NoL 乘法。
 - occlusion（AO）是**乘在光源贡献上的标量**（8.2 的 AO 贴图槽对接点）；环境 AO 是另一条路（multiBounceAO，归间接光）。
-- 本项目 8.1 的 `gbuffer_composite.wgsl` 已经是"全屏 pass 读 G-buffer × 光源"的骨架，8.2 把其中的 Lambert 行换成本函数同构即可，透明层（8.1.3 cluster forward）用同一份 lobe 函数。
+- 本项目 8.1 的 `gbuffer_composite.wgsl` 已经是"全屏 pass 读 G-buffer × 光源"的骨架，8.2 已把其中的 Lambert 行换成本函数同构，透明层（8.1.3 cluster forward）用同一份 lobe 函数。
 
-## 5. 光源求值与驻留（头号待决的参考证据）
+## 5. 光源求值与驻留（旧头号待决的参考证据；现已落定为常驻灯表）
 
 来源：`shaders/src/surface_lighting.fs`（Light/PixelParams 结构）、`surface_light_directional.fs`、`surface_light_punctual.fs`。
 
@@ -179,16 +181,16 @@ float getAngleAttenuation(const vec3 lightDir, const vec3 l, const vec2 scaleOff
 
 - **灯参数本体走每帧更新的 UBO**（`lightsUniforms`，每灯打包一个 mat4：position+radius / direction / color(half4×2)+角度 scaleOffset / intensity+type+shadow+channels），帧间由 CPU 侧 LightManager 组装上传——**没有"常驻灯表"**；远距衰减等帧级参数也在帧 UBO 里。
 - 空间加速是 **froxel**（视锥体素 3D 分簇）：froxel 纹理存 recordOffset+count，record 缓冲存灯索引，逐片元查 froxel → 遍历灯列表。这与 8.1 已建的 3D cluster 光源列表**同族不同实现**（Filament 靠 froxelizer 每帧 CPU 侧分簇，8.1 是 compute 侧组装）。
-- **对 8.2 头号待决（常驻表 vs 每帧环）**：Filament 的行业证据支持"灯参数每帧上传 + 空间索引加速"的形态；灯数在现代场景里是百量级、每灯 64B，每帧上传量 ≪ 贴图流送。常驻表（set2 式）省上传但要解决灯增删的槽位管理—— Filament 没走这条路本身就是一个参考信号。
+- **对 8.2 当时头号待决（常驻表 vs 每帧环；现已落定为常驻灯表）**：Filament 的行业证据支持"灯参数每帧上传 + 空间索引加速"的形态；灯数在现代场景里是百量级、每灯 64B，每帧上传量 ≪ 贴图流送。常驻表（set2 式）省上传但要解决灯增删的槽位管理—— Filament 没走这条路本身就是一个参考信号。
 
 ## 6. ash_renderer 落地映射清单（8.2 施工钉）
 
 1. **WGSL 对照函数清单（判定线①基准）**：`D_GGX`、`V_SmithGGXCorrelated`、`F_Schlick(f0, f90, VoH)`（f90 = saturate(16.5·Σf0)）、`Fd_Lambert()`。命名对照：Filament `shading_view`/`light.l`/`h` ↔ 本项目 `V`/`L`/`H`；`NoV/NoL/NoH/LoH` 同名。D 项可选教科书形式或 k²/π 形式（代数等价，单测对照收敛）。
 2. **材质环扩列换算链**：glTF roughness → perceptualRoughness（域内 clamp 0.045）→ α = p²；F0 = `baseColor·m + 0.04·(1−m)`；diffuseColor = `baseColor·(1−m)`；AO 贴图 → occlusion（乘光源贡献尾部）。
 3. **energyCompensation = 1.0**，DFG LUT 与多重散射补偿随 IBL（步骤 9 附近）另立。
-4. **光照累积 pass**：8.1 composite 骨架上把 Lambert 换成 §4 同构 `(Fd+Fr)·NoL`，光源数据从 set1 UBO 单方向光扩成列表（驻留形态=头号待决，§5.3 证据供拍板）；ambient 项保持在光源循环外。
+4. **光照累积 pass**：8.1 composite 骨架上已把 Lambert 换成 §4 同构 `(Fd+Fr)·NoL`，光源数据从 set1 UBO 单方向光扩成列表（驻留形态已落定为常驻灯表 `resident/tables/light_table.rs`，cluster 通过 b1 引用；旧记的“头号待决”已结案）；ambient 项保持在光源循环外。
 5. **透明层复用**：8.1.3 透明 forward 与不透明光照累积共用同一份 lobe 函数（材质参数面一致是前提）。
-6. **单位与曝光**：方向光 lux / punctual candela；`intensity × exposure` 预曝光 vs 本项目尾部 `× EXPOSURE` 常量——标量位置等价，8.4 正式 HDR 时再统一到预曝光口径。
+6. **单位与曝光**：方向光 lux / punctual candela；`intensity × exposure` 预曝光 vs 本项目尾部 `× EXPOSURE` 常量——标量位置等价；8.4/8.6 已落定 HDR 与 ACES 曝光锚点（`shaders/common/brdf.wgsl` 的 `EXPOSURE=0.00016`），预曝光口径统一留作后续 IBL/多光源标定项。
 
 ## 7. 边界（本篇不主张）
 

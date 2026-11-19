@@ -43,7 +43,7 @@ DCC（Blender 等）导出时，场景层级跟着资产走——glTF 的 scene 
 
 两个**改不掉也不必改**的 Scene 残留：`GltfAssetLabel::Scene(0)` 枚举名与标签串 `#Scene0`——它们是 glTF JSON 字段名 `scenes[]` 的直译、资产寻址键的一部分，Bevy 侧同样保留；写代码遇到按"标签串"理解即可。
 
-本项目的 `scene` 标识符家族（`scene/` 模块 / `SceneEntryPlugin` / `report_scene_arrival` / `collect_scene`）取**上表第四行义**——渲染器语境的"场景内容"（World 中会被渲染的子集），**不是 World 全量**：collect_scene 按 Query 只采 Mesh3d/MeshMaterial3d/GlobalTransform（及相机/灯光），不碰窗口与 Vulkan 资源，叫 world 反而名不副实；与被弃名的资产侧 Scene 也无关，不随 WorldAsset 改名。"场景"在这里是渲染器行话（scene = 一帧要画的内容集合），非 Bevy 术语。
+本项目的 `scene` 标识符家族（`scene/` 模块 / `SceneEntryPlugin` / `report_scene_arrival` / `update_ledger` / `report_scene_collected`）取**上表第四行义**——渲染器语境的"场景内容"（World 中会被渲染的子集），**不是 World 全量**：update_ledger 按 Query 维护 Mesh3d/MeshMaterial3d/GlobalTransform（及相机/灯光）的 `InstanceLedger` 账本，report_scene_collected 只做核验（3.1 时采集函数名为 `collect_scene`），不碰窗口与 Vulkan 资源，叫 world 反而名不副实；与被弃名的资产侧 Scene 也无关，不随 WorldAsset 改名。"场景"在这里是渲染器行话（scene = 一帧要画的内容集合），非 Bevy 术语。
 
 ## §6 复述锚点
 

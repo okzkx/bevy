@@ -2,7 +2,7 @@
 
 > 2026-10-22 立案（纯文档，随段开工立案钉明任务编号）。对应[步骤级施工计划 §1 8.3 节](../施工计划：完整延迟渲染管线五段拆解.md)与[段 README](README.md)：给方向光接 CSM 级联 shadow map + PCSS，shadow depth pass 走 GPU-driven。本文管 8.3 段做什么、按什么顺序、验收什么；"实际做了什么"开工后另立施工记录，不回写本文。
 >
-> **当前状态：⬜ 已立案（2026-10-22）**。
+> **当前状态：⬜ 已立案（2026-10-22；2026-11-19 补：已收官，见[段 README](README.md)）**。
 
 **一句话说明**：本段给多光源里的方向光接 CSM 级联 shadow map + PCSS 软阴影——shadow depth pass 逐 cascade 复用 5.2 标记链与 5.3 命令组装（cascade 视锥代主相机视锥，CPU 只发矩阵），PCSS 采样进 8.2 光照累积 pass；本段不主张 VSM（[外置条目 7](../../外置拓展需求.md)）、不做时域滤波、不主张点光源阴影（LightRecord shadow bit0 保持记账，punctual shadow 归后继段）。
 

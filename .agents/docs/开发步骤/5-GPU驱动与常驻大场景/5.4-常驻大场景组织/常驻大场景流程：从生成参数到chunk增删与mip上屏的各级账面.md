@@ -9,11 +9,11 @@
 | 文件 | 职责 |
 |---|---|
 | `scene/mechanism/generation/scene_gen.rs` | 生成器机制层：批量克隆铺实例（扁平/chunk 化两形态）、SceneChunk 组件、chunk 盘点与整块删除——BRP 与将来 egui 面板共用的可复用实现 |
-| `remote/generate.rs` | BRP 协议薄壳：generate_scene / generate_chunks / chunk_census / chunk_despawn 四方法的参数解析与 JSON 读回 |
-| `vulkan/images.rs` | ImageSpec 携带全链级数（full_mip_chain）、GpuImage 按格式 blit 能力建图（缺支持降级单级）、采样端 max_lod 放开 |
-| `vulkan/uploader.rs` | 上传编排扩形：transfer 批只拷 level 0；**mip 生成续批**（graphics 队列、等票据 → blit → signal 票据 +1） |
+| `remote/edit/generate.rs` | BRP 协议薄壳：generate_scene / generate_chunks / chunk_census / chunk_despawn 四方法的参数解析与 JSON 读回 |
+| `render/resident/assets/images.rs` | ImageSpec 携带全链级数（full_mip_chain）、GpuImage 按格式 blit 能力建图（缺支持降级单级）、采样端 max_lod 放开 |
+| `render/core/device/transfer/uploader.rs` | 上传编排扩形：transfer 批只拷 level 0；**mip 生成续批**（graphics 队列、等票据 → blit → signal 票据 +1） |
 | `driver/upload.rs` | flush_uploads 排批侧：staging 只排 level 0 字节、带链计量（mip 链 N 张）进批次日志 |
-| `overlay/windows/debug_window.rs` | 调试窗口 chunk 计量行（块数/成员总数） |
+| `overlay/tool_window/frame_stats.rs` | 调试窗口 chunk 计量行（块数/成员总数） |
 
 既有链路（账本/上传/DrawList/在场环/剔除/indirect）零改动——5.4 的全部内容叠在其上。
 
@@ -21,7 +21,7 @@
 
 以 `brp.py generate-chunks --chunk-grid 8 --instances-per-chunk 64 --spacing 4 --seed 42 --jitter 0.5`（4096 实例）为例：
 
-1. **BRP handler**（`remote/generate.rs`，RemoteLast 执行）：解析参数 → 机制层
+1. **BRP handler**（`remote/edit/generate.rs`，RemoteLast 执行）：解析参数 → 机制层
    `generate_chunks`（`scene_gen.rs`）。
 2. **机制层铺实体**：逐块（cz×8+cx 编号）spawn 根实体（SceneChunk + Transform@origin
    + Name `chunk{id}`），块内小网格铺 64 个实例（柄克隆 = 共享 6 mesh/6 材质，零新

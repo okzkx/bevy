@@ -11,11 +11,11 @@ BRP `spawn_lod` 造一个四档阶梯实体并登记 `LodGroups`；上传链把�
 | 文件 | 一层职责 |
 |---|---|
 | [scene/mechanism/assets/lod_registry.rs](../../../../../ash_renderer/src/scene/mechanism/assets/lod_registry.rs) | LOD 组登记处：基准身份→各档变体柄（flush 盘点/表写/census 共用）+ 阶梯 spawn 本体（形状 × 档位缓存） |
-| [vulkan/lod.rs](../../../../ash_renderer/src/vulkan/lod.rs) | 选档 compute 半边：LodPass 管线 + 96B push + 判据/迟滞纯函数（CPU 参照）+ 开关/诊断资源 |
-| [shaders/lod_select.wgsl](../../../../../ash_renderer/shaders/lod_select.wgsl) | 选档 shader：8 角点投屏 → floor 分带 + 迟滞 → 写 b8 |
-| [remote/lod.rs](../../../../../ash_renderer/src/remote/lod.rs) | BRP 方法族薄壳：lod_census（逐实例对照）/lod_set_enabled/lod_set_params |
+| [render/passes/visibility/lod.rs](../../../../../ash_renderer/src/render/passes/visibility/lod.rs) | 选档 compute 半边：LodPass 管线 + 96B push + 判据/迟滞纯函数（CPU 参照）+ 开关/诊断资源 |
+| [shaders/gpu_driven/lod_select.wgsl](../../../../../ash_renderer/shaders/gpu_driven/lod_select.wgsl) | 选档 shader：8 角点投屏 → floor 分带 + 迟滞 → 写 b8 |
+| [remote/features/lod.rs](../../../../../ash_renderer/src/remote/features/lod.rs) | BRP 方法族薄壳：lod_census（逐实例对照）/lod_set_enabled/lod_set_params |
 
-扩展件：instance_table.rs（两条新环 + set2 b7/b8）、ledger.rs（LOD 脏集两套奇偶）、upload.rs（档位盘点/换槽置脏/到货反查三挂点）、drawlist.rs（write_lod_table_ring）、build_indirect.wgsl（pick_lod_entry 按档取引脚）、frames.rs（FrameDraw.lod + 录制位）、frame.rs（LOD 半边：dispatch/关闭填充/诊断）、shapes.rs（spawn_lod 薄壳）、tools/scene_lod.py（场景脚本持久化）。
+扩展件：`render/resident/tables/instance_table.rs`（两条新环 + set2 b7/b8）、`ledger.rs`（LOD 脏集两套奇偶）、`upload.rs`（档位盘点/换槽置脏/到货反查三挂点）、`drawlist.rs`（`write_lod_table_ring`）、`shaders/gpu_driven/build_indirect.wgsl`（`pick_lod_entry` 按档取引脚）、`driver/host/frame.rs` + `render/frame/record.rs`（`RenderFeatures.lod` + 录制位）、`driver/host/frame.rs`（LOD 半边：dispatch/关闭填充/诊断）、`remote/edit/shapes.rs`（spawn_lod 薄壳）、`tools/scene_lod.py`（场景脚本持久化）。
 
 ## 2. 逐时刻走读
 
@@ -24,8 +24,8 @@ BRP `spawn_lod` 造一个四档阶梯实体并登记 `LodGroups`；上传链把�
 **上传链（flush_uploads，Last，先于帧循环）**：脏行盘点时，行 mesh 在登记组内 → **非基准档**未驻留的补进本批（去重 lod_seen；失败档跳过 = 哨兵降级）；mesh 腿完成 → 换槽写对象记录（staging 批）+ `mark_model_dirty` + **`mark_lod_dirty`**（两套奇偶集）。批提交成功 → 档位资产 commit → 反查 `base_of` 重挂引用行 LOD 脏标（档位晚到也刷新表）。
 
 **帧循环（draw_frame，wait_for_slot 之后）**：
-1. `write_rings` → `write_lod_table_ring`：消费本帧奇偶 LOD 脏集——level 0 = 本行基准 mesh 槽位引脚、level 1.. = 登记组变体引脚（未驻留 = 哨兵 0），48B 写进本帧槽 b7 环的槽直址处；同槽 b8 写 0（迟滞复位）。
-2. **LOD 半边**：开关开 ∧ bound>0 → `LodPass::draw`（96B push：view_proj/screen/bound/threshold/hysteresis）进 FrameDraw.lod；关 → host 把 b8 环 bound 段填 0（最细档，命令回 5.3 基准）。诊断：b8 直读逐在场行统计档位分布。
+1. **draw_frame 环写入段** → `write_lod_table_ring`：消费本帧奇偶 LOD 脏集——level 0 = 本行基准 mesh 槽位引脚、level 1.. = 登记组变体引脚（未驻留 = 哨兵 0），48B 写进本帧槽 b7 环的槽直址处；同槽 b8 写 0（迟滞复位）。
+2. **LOD 半边**：开关开 ∧ bound>0 → `LodPass::draw`（96B push：view_proj/screen/bound/threshold/hysteresis）进 `RenderFeatures.lod`；关 → host 把 b8 环 bound 段填 0（最细档，命令回 5.3 基准）。诊断：b8 直读逐在场行统计档位分布。
 
 **命令录制（record_frame，compute 三连）**：视锥剔除 → 遮挡测试 → **LOD 选档**（读 b0/b1 投屏 + b8 迟滞 prev，写 b8 本帧档位；屏障 compute 写→读）→ build_indirect（读在场环/标记/对象表 + **b7 按档取引脚** + b8 档位）→ 一次 `cmd_draw_indexed_indirect`。图形 VS/FS 零改动（引脚在命令里，VS 按 firstInstance 槽号读 set2 的 b1/b2 不变）。
 
@@ -41,15 +41,15 @@ BRP `spawn_lod` 造一个四档阶梯实体并登记 `LodGroups`；上传链把�
 
 ```
 已跟踪 18 文件 +564/−54（git diff --stat 3f615068d 实数），新文件五件：
- build_indirect.wgsl            | 59 +++++++--（按档取引脚 + 哨兵回退）
- instance_table.rs              | 147 +++++++---（两条新环 + set2 b7/b8）
- lod_select.wgsl                | 110 行（新）
- vulkan/lod.rs                  | 379 行（新：LodPass + 纯函数 + 开关/诊断）
- remote/lod.rs                  | 228 行（新：BRP 三方法）
+ shaders/gpu_driven/build_indirect.wgsl | 59 +++++++--（按档取引脚 + 哨兵回退）
+ render/resident/tables/instance_table.rs | 147 +++++++---（两条新环 + set2 b7/b8）
+ shaders/gpu_driven/lod_select.wgsl | 110 行（新）
+ render/passes/visibility/lod.rs    | 379 行（新：LodPass + 纯函数 + 开关/诊断）
+ remote/features/lod.rs         | 228 行（新：BRP 三方法）
  scene/mechanism/assets/lod_registry.rs| 203 行（新：登记处 + 阶梯 spawn）
  drawlist/frame/upload/init     | LOD 半边接线（64/77/52/19 行级）
  ledger/shapes/scene mods       | LOD 脏集 + 薄壳 + 导出
- overlay ui/debug_window        | LOD 面板行（8/19 行）
+ overlay/framework/ui + overlay/tool_window | LOD 面板行（8/19 行）
  tools/brp.py +52 / scene_lod.py 277 行（新）/ README 登记
 ```
 

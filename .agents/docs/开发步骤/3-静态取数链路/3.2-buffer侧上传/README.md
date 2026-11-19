@@ -38,23 +38,25 @@
 4. ✅ 真正使用 timeline 并覆盖同族、异族的依赖分支：signal（探针/App）、graphics 侧 wait（探针组 D）、CPU wait_semaphores（组 B/C）全链实测；异族 release/acquire 在本机专用 transfer 族（族 1）实跑,同族回退路径本机无硬件载体,注明未实测（形状由 memory_probe 同族闭环覆盖）。
 5. ✅ 验证层和同步验证实际启用（SDK 1.4.357.0 + VkValidationFeaturesEXT 常开）且目标路径零 WARNING/ERROR（探针四组 + App 上传/清屏/退出全程）；resize、最小化、异常返回和退出回归由帧循环既有闸门承担（V1 覆盖矩阵 + 缺陷文档 D1~D6）。
 
+> **探针状态（2026-11-19 补注）**：本段引用的 `examples/{timeline,memory,upload}_probe.rs` 已于 `5edb4275a` 删除；下文命令仅作历史记录，不再可运行。
+
 ## 材料清单
 
 - [Timeline信号量：用法、与阻塞的区别、现代引擎的做法.md](Timeline信号量：用法、与阻塞的区别、现代引擎的做法.md)：机制篇（2026-09-23）——用法与启用前提（支持/启用/使用三件事）、与阻塞收口的对照、D3D12/UE/Unity 同位置做法；3.2.4 设计依据。
 - [3.2.1-Context扩展：transfer队列族与timeline信号量开关.md](3.2.1-Context扩展：transfer队列族与timeline信号量开关.md)：队列选择、1.3 基线、支持与启用的勘误；保留历史实跑与新增探针的证据边界。
-- timeline 探针 v2：`ash_renderer/examples/timeline_probe.rs`，从仓库根可用 `cargo run -p ash_renderer --example timeline_probe` 运行。**已修正（2026-09-23）**：请求验证层 + 同步验证 + synchronization2/timeline 显式启用，组 A（合法观察组）零 VUID、组 B（负例诊断组）被 VUID-03252 精准收账——可作为验收工具；旧 A/B 运行记录仅作历史观察保留。
+- timeline 探针 v2（已退役，`5edb4275a`）：原文件 `ash_renderer/examples/timeline_probe.rs`，历史命令 `cargo run -p ash_renderer --example timeline_probe` 仅作记录，不再可运行。**已修正（2026-09-23）**：请求验证层 + 同步验证 + synchronization2/timeline 显式启用，组 A（合法观察组）零 VUID、组 B（负例诊断组）被 VUID-03252 精准收账——可作为验收工具；旧 A/B 运行记录仅作历史观察保留。
 - [验证层：CPU侧的规范执法者——它查什么、怎么查、保证到哪.md](验证层：CPU侧的规范执法者——它查什么、怎么查、保证到哪.md)：机制篇（2026-09-23）——驱动按契约假设你合法、layer 链与三个开关、四类执法面 + GPU-AV、保证的四条边界、"合同模拟执行者 vs GPU 监工"的复述校准。
 - [3.2.2.1-内存契约：memory type、usage、绑定与对齐.md](3.2.2.1-内存契约：memory type、usage、绑定与对齐.md)：施工记录（2026-09-24）——角色定案表、绑定四条款、coherent 分支与 atom 舍入三细则、探针证据与未实测边界；`vulkan/resources.rs` 与 memory_probe 的设计依据。
 - [GpuBuffer：契约、用法与frenderer三分法对照.md](GpuBuffer：契约、用法与frenderer三分法对照.md)：设计对照篇（2026-09-24）——GpuBuffer 定位与用法速查、与 frenderer RO/RW/MRW 的轴对照（角色表达用法 + 运行时同步语义 + 类型层留白）、Bindless 对 buffer 的"稳定与寿命"要求、宿主可见内存的两码头角色与 3.5 每帧 UBO 展望。
 - [Buffer与Staging上传：三跳路径与内存堆拓扑.md](Buffer与Staging上传：三跳路径与内存堆拓扑.md)：机制讲解篇（2026-09-29）——staging 是 VkBuffer 非"Rust 内存"、三跳路径与执行者换人、HOST_VISIBLE×DEVICE_LOCAL 两旗标正交而**堆决定物理位置**（本机 vulkaninfo 实测三堆表：staging 住系统内存、池/贴图住显存、BAR 窗口 214MiB 不当主力）、环形复用与时钟解耦；配图 `../_assets/staging-three-hop-path.png`。
 - [Uploader：搬运收口、完成票据与frenderers对照.md](Uploader：搬运收口、完成票据与frenderers对照.md)：机制讲解篇（2026-09-29）——三方分工（组货/搬运/记账）、submit_batch 七步每步守一条契约、能力边界闭集（mip0 冻结、无 blit/回读）、**卖点五张牌对着 frenderer 底牌打**（单队列+one-shot 等死消掉的复杂度 vs 票据可传递/等待只关税/失败结构化）；frenderers 源码锚点 command_manager.rs/rt_util.rs；配图 `../_assets/submit-batch-flow.png`。
-- 内存契约探针：`ash_renderer/examples/memory_probe.rs`，从仓库根可用 `cargo run -p ash_renderer --example memory_probe` 运行。组 A（合同正路）在验证层 + 同步验证下零 VUID，含 staging→池→回读的最小 copyBuffer 闭环；组 B（绑定负例）被 VUID-10739（即 v1.3.289 的 memoryOffset-01036）收账。
+- 内存契约探针（已退役，`5edb4275a`）：原文件 `ash_renderer/examples/memory_probe.rs`，历史命令 `cargo run -p ash_renderer --example memory_probe` 仅作记录，不再可运行。组 A（合同正路）在验证层 + 同步验证下零 VUID，含 staging→池→回读的最小 copyBuffer 闭环；组 B（绑定负例）被 VUID-10739（即 v1.3.289 的 memoryOffset-01036）收账。
 - [3.2.2.2-池与缓存：DEVICE_LOCAL大池、bump分配与资产身份去重.md](3.2.2.2-池与缓存：DEVICE_LOCAL大池、bump分配与资产身份去重.md)：施工记录（2026-09-24）——双池 bump、身份去重、账本行引脚与容量策略；`vulkan/pool.rs` 设计依据。
 - [3.2.2.3-容量与销毁：显式维护迁移与停顿分账.md](3.2.2.3-容量与销毁：显式维护迁移与停顿分账.md)：施工记录（2026-09-24）——维护五步时序、停顿分账、图形侧等待面冻结；组 C 证据。
 - [3.2.3-顶点与索引转换：32B交错布局、索引统一与拒绝策略.md](3.2.3-顶点与索引转换：32B交错布局、索引统一与拒绝策略.md)：施工记录（2026-09-24）——布局契约、索引统一 U32、拒绝策略；组 A 证据。
 - [3.2.4-flush_uploads：合批提交、timeline票据与跨族依赖.md](3.2.4-flush_uploads：合批提交、timeline票据与跨族依赖.md)：施工记录（2026-09-24）——四子项定案、合批形状、失败/退出结构保证、施工插曲（staging 漏写）。
 - [责任边界冻结：上传完成、图形消费与退出排空的时序契约.md](责任边界冻结：上传完成、图形消费与退出排空的时序契约.md)：前置闸门③（2026-09-24）——四等待面归主 + 分账表，3.4 接线契约。
-- 上传链探针：`ash_renderer/examples/upload_probe.rs`，从仓库根可用 `cargo run -p ash_renderer --example upload_probe` 运行。组 A（转换逐字节 + 拒绝精确）、组 B（上传闭环 + 票据 + 去重）、组 C（维护迁移内容保持 + 分账）、组 D（跨族 release/acquire + graphics 队列真实读）在验证层 + 同步验证下全程零 VUID（2026-09-24 实跑记录见 3.2.4 篇 §3）。
+- 上传链探针（已退役，`5edb4275a`）：原文件 `ash_renderer/examples/upload_probe.rs`，历史命令 `cargo run -p ash_renderer --example upload_probe` 仅作记录，不再可运行。组 A（转换逐字节 + 拒绝精确）、组 B（上传闭环 + 票据 + 去重）、组 C（维护迁移内容保持 + 分账）、组 D（跨族 release/acquire + graphics 队列真实读）在验证层 + 同步验证下全程零 VUID（2026-09-24 实跑记录见 3.2.4 篇 §3）。
 - [已实现缺陷与修复验收](已实现缺陷与修复验收.md)：本段前置的存量代码与探针问题（D1~D6 + V1），不与尚未开发的上传功能混记。
 
 ## 待决问题

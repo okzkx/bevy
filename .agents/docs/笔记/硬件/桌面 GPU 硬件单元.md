@@ -1,5 +1,7 @@
 # 桌面 GPU 硬件单元：四块专用电路与 Vulkan 逻辑阶段的对应
 
+> 行号说明：行号基于 Bevy 0.20.0-dev 本地快照（2026-10 时点），上游提交后可能漂移，以符号名为准。
+
 Vulkan 的管线阶段（`VERTEX_SHADER`、`FRAGMENT_SHADER`、`COMPUTE_SHADER`、`TRANSFER`……）是同步用的**逻辑划分**，规范不规定任何命令必须走哪个硬件单元。桌面 GPU 普遍有光栅器、纹理单元（TMU）、ROP、DMA 拷贝引擎四块专用电路，这是各家为效率做出的设计共识，不是规范要求。本篇硬件细节以 NVIDIA Turing（本机 RTX 2060）为主、注 AMD 对应名；厂商未完全公开的部分写的是公开资料的通行说法。
 
 ## 0. 判定线
@@ -101,4 +103,4 @@ Nsight Graphics 的 GPU Trace 按单元列出吞吐占比（SM、L1TEX、ROP 类
 
 - [同步模型](../Vulkan/同步模型.md)——执行依赖与内存依赖、阶段掩码的语义
 - [多帧在飞竞争](../Vulkan/多帧在飞竞争.md)——四主体四闸门；配图 [设备队列在飞快照](../Vulkan/_assets/queue-inflight-moments.svg)：Q0/Q1 分工、mip 续批回图形队列、票据冻结
-- 工程代码：`render/core/device/context.rs`（队列族选择：专用 transfer 族、每族一条队列）、`render/core/device/transfer/uploader/image.rs`（mip blit 续批在图形队列提交）、`render/frame/frame_draw.rs` 第 ① 段（进场屏障的 srcStage）
+- 工程代码：`render/core/device/context.rs`（队列族选择：专用 transfer 族、每族一条队列）、`render/core/device/transfer/uploader/image.rs`（mip blit 续批在图形队列提交）、`render/frame/record.rs` 第 ① 段（进场屏障的 srcStage）

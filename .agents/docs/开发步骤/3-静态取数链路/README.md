@@ -8,7 +8,31 @@
 
 **状态：✅ 3.1～3.8 全段收官（3.1~3.5 于 2026-09-29、追加段 3.6/3.7/3.8 于 2026-10-08）。**3.1 采集、3.2 上传、3.3 贴图+bindless 描述符、3.4 管线与绘制、3.5 光照对照均已验收（探针 + 宿主实跑证据，各段 README 逐项标注）；FlightHelmet 六 primitive 在自研管线中受 UBO 数据驱动光照画出，与官方 bevy_render 独立进程并排对照通过（几何/base color/光照方向分项），全程零 VUID。步骤 4（可靠增量链路）解禁；**收官后追加段 3.6（代码全量整理）、3.7（egui 调试 GUI——overlay 可见可交互、判定线五条全过）、3.8（system 标注宏）已收官 2026-10-08；追加段 3.9（鼠标摄像机控制——左键环绕/滚轮推拉/egui 层仲裁门判定线全过）已收官 2026-10-09**（2026-09-29 用户增补 3.6/3.7，2026-10-08/09 增补 3.8/3.9）。**2026-10-09 用户再增补追加段 3.10（egui 实体层级树）、3.11（egui 实体编辑）、3.12（CLI 直控/AI 通道）——3.10 已于同日收官**（独立窗口 struct + 调试窗口总控 + 相关实体过滤，判定线全过）；**3.11 同日立案修订（实例化/动态加载/删除出段并回步骤 4，拆 3.11.1 展示属性 / 3.11.2 修改属性）并于当日施工收官**（三段分离架构 + 覆盖面探针结论 + 写路径读回证据，[段 README](3.11-egui实体编辑/README.md)）；3.12 验收闭环联动修订（去实例化/删除环）；**3.12 已于 2026-10-10 施工收官**（BRP 连接闭环全过：官方读方法族 + 三个自定义方法 + 薄客户端 `tools/brp.py`，五张证据图读图验证通过 + 负例三连 + 零 VUID + exit 0，[段 README](3.12-CLI直控/README.md)）——3.10→3.11→3.12 追加段全链收官，交付范围与验收草案见[路线图](../学习目标实现步骤.md)步骤 3 节尾。**2026-10-10 用户增补追加段 3.13（Remote 虚拟鼠标——不基于窗口的输入源，BRP 注入 `Messages<WindowEvent>`），同日施工收官：四方法 + brp.py mouse 子命令族，不碰真实鼠标数字/像素双闭环（orbit 读回逐位吻合 + 六张证据图读图验证）、虚拟点选 egui 面板成立、3.12 遗留"属性面板数值联动"AI 自验轮随段收账，见[段 README](3.13-Remote虚拟鼠标/README.md)**。**next = 步骤 4（4.1 对象增量起步；实例化/despawn 的 BRP 方法随 4.1 落地后补）**。
 
-> **2026-09-23 前置闸门**：先关闭[已实现缺陷与修复验收](材料/已实现缺陷与修复验收.md)中的生产同步问题并建立验证环境，再继续上传。新增 A/B 探针保留为运行观察，不作“免启用 feature”的证明。本轮只修文档。
+> **2026-09-23 前置闸门**：先关闭[已实现缺陷与修复验收](3.2-buffer侧上传/已实现缺陷与修复验收.md)中的生产同步问题并建立验证环境，再继续上传。新增 A/B 探针保留为运行观察，不作“免启用 feature”的证明。本轮只修文档。
+
+> **代码落点说明（2026-11-19 补录）**：本目录是 2026-09~10 的历史施工记录，正文中的路径与符号保留当时口径；现行代码一律以当前 `ash_renderer/src` 为准。旧→新对照：
+>
+> | 旧路径/符号 | 当前落点 |
+> |---|---|
+> | `src/vulkan/context.rs` | `src/render/core/device/context.rs` |
+> | `src/vulkan/swapchain.rs` | `src/render/core/device/swapchain.rs` |
+> | `src/vulkan/frames.rs` | `src/render/frame/{frame_pool,record}.rs` |
+> | `src/vulkan/pool.rs` | `src/render/resident/assets/pool.rs` |
+> | `src/vulkan/resources.rs` | `src/render/core/device/memory/{contract,role,buffer}.rs` |
+> | `src/vulkan/uploader.rs` / `src/upload.rs` | `src/render/core/device/transfer/uploader.rs` / `src/driver/upload.rs` |
+> | `src/vulkan/{images,descriptors,pipeline}.rs` | `src/render/resident/assets/images.rs` / `src/render/core/{binding,pipeline}/` |
+> | `src/vulkan/mesh_convert.rs` | `src/render/resident/assets/mesh_convert.rs` |
+> | `src/host.rs` | `src/driver/host/{mod,init,frame}.rs` |
+> | `src/syntax.rs` | `src/common/syntax.rs` |
+> | `src/scene/collect.rs` / `CollectedScene` | `src/scene/mechanism/assets/ledger.rs`（`InstanceLedger`/`update_ledger`）+ `src/scene/content/collect_report.rs` |
+> | `src/scene/{world_asset,camera,lights}.rs` / `src/scene/material_hook.rs` | `src/scene/content/{world_asset,camera,lights}.rs` / `src/scene/mechanism/host/material_hook.rs` |
+> | `src/remote.rs` / `src/remote_mouse.rs` | `src/remote/mod.rs` / `src/remote/edit/mouse.rs` |
+> | `src/overlay/ui.rs` / `src/overlay/windows/*` | `src/overlay/framework/ui.rs` / `src/overlay/tool_window/` |
+> | `examples/*_probe.rs` | 已退役（`5edb4275a`），无替代 |
+>
+> **现行状态补注（2026-11-19）**：
+> - **探针体系退役**：`5edb4275a` 已删除 `examples/{timeline,memory,upload,image,descriptor,bindless}_probe.rs` 及其 WGSL；本目录各段仍提到这些探针处只作历史记录，命令不再可运行。
+> - **`CollectedScene` → `InstanceLedger`**：4.1（`f3a99104e`）把每帧重建的 `CollectedScene` 快照替换为跨帧 `InstanceLedger`/`InstanceRow` 账本；3.1 时期文档中的 `CollectedScene`/`collect_scene` 为当时符号。
 
 ## 施工顺序
 
@@ -34,12 +58,13 @@
 
 - [功能流程导读：静态取数链路全景](功能流程导读：静态取数链路全景.md)——3.1~3.5 主链收官后的链路全景走读（2026-10-23 产出；采集/上传/bindless/绘制/光照五环节契约，配机制图四张新图 + 两张复用图在 `_assets/`）。
 - [施工计划：Bindless起步五段拆解](施工计划：Bindless起步五段拆解.md)——主计划；2026-09-23 修订技术假设、资源生命周期、最小 shader 试验和验收边界。
-- [已实现缺陷与修复验收](材料/已实现缺陷与修复验收.md)——代码复核与修复验收；区分生产缺陷、验证工具问题、阶段限制和尚未开发功能。
+- [已实现缺陷与修复验收](3.2-buffer侧上传/已实现缺陷与修复验收.md)——代码复核与修复验收；区分生产缺陷、验证工具问题、阶段限制和尚未开发功能。
 - [3.1-ECS侧取数总结](3.1-ECS侧取数/3.1-ECS侧取数总结.md)——段级主产出，含拓扑快照、同帧调度和给 3.2 的接口。
 - [3.2.1-Context扩展：transfer队列族与timeline信号量开关](3.2-buffer侧上传/3.2.1-Context扩展：transfer队列族与timeline信号量开关.md)——已有实现记录与校验勘误，保留探针观察、不把驱动成功当规范裁决。
 - [代码结构整理：main只做统筹（宿主桥分家）](材料/代码结构整理：main只做统筹（宿主桥分家）.md)——结构整理记录；main 只组装，编排在 host。
 - [代码结构整理：scene拆组与src分层](材料/代码结构整理：scene拆组与src分层.md)——职责拆分记录；scene 自含插件，Vulkan 资源按模块落位。
 - [3.4.1-3.4.5-管线与绘制施工记录：正式着色器、图形管线与DrawList同帧消费](3.4-管线与绘制/3.4.1-3.4.5-管线与绘制施工记录：正式着色器、图形管线与DrawList同帧消费.md)——首次画出 FlightHelmet：三方布局冻结、朝向证据链（正高度 viewport 定案）、帧槽深度、CONCURRENT 跨族取舍与 Draw-09600 排障实录。
+- [pipeline-draw-abi](_assets/pipeline-draw-abi.png)——管线与绘制 ABI 示意图（2026-11-19 补登记：此前无正文引用，作为步骤 3 图示资产保留；原使用位置未确认）。
 - [3.5.1-3.5.4-光照与同屏对照施工记录：相机灯光UBO、材质三模式与官方对照收官](3.5-光照与同屏对照/3.5.1-3.5.4-光照与同屏对照施工记录：相机灯光UBO、材质三模式与官方对照收官.md)——段级收官主产出：UBO 128B 数值链（bevy prepare_lights 同源）、材质三模式、官方对照进程条件表与分项验收（几何/base color/光照方向）、D7 泄漏修复、窗口回归矩阵；配图七张入 [_assets](_assets/)。
 - [开放世界流送设计：滑动窗口驻留、淘汰与预算环](材料/开放世界流送设计：滑动窗口驻留、淘汰与预算环.md)——设计前瞻篇（2026-09-29，未施工）：开放世界改变的是"驻留"的定义（全集→滑动窗口）；三件套=决策/驻留（含淘汰三步与在飞世代保护）/流水线（预算环+多批多票）；改造点对到现有文件，五块底座全部复用不推倒；**落位步骤 4~6**（接走 3.2 README 待决的流送预算边界）；配图 [open-world-streaming-loop](_assets/open-world-streaming-loop.png)。
 - [3.6.3-注释失真订正：P0七项清零与复扫补漏](3.6-代码全量整理/3.6.3-注释失真订正：P0七项清零与复扫补漏.md)——3.6 目标①的清账记录（2026-10-08）：P0 落账表、复扫十二处、pool 迁移帧侧等待缺口立账（步骤 4 前须补）。

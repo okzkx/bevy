@@ -1,6 +1,7 @@
 # GPU驱动的第一课：从"CPU逐个喂参数"到"GPU自己查表"——5.1新旧两套写法对照讲解
 
 > 2026-10-15 收官配套讲解篇，面向第一次接触 GPU-driven 渲染的读者（即你）。全部代码摘自本仓库 5.1 前后的真实源码，旧代码标注"已退役"。读完你应该能回答四个问题：旧写法每帧在浪费什么、新写法把每一样数据搬到了哪、"写形状"和"环"为什么长那样、5.2/5.3 接下来吃什么。机制先行，比喻只做对照；Unity/UE 类比集中在 §8。
+> **2026-11 现状注**：本课停在 5.1；5.3 起逐 draw push 已完全退役（现值 0B，槽号经 `firstInstance`/`instance_index` 传入），材质记录已扩为 64B（5 条 = 320B）。下文凡"push 4B/材质 32B"均指 5.1 阶段，括号内已补现值。
 > 配套：[施工记录](5.1.1-5.1.6-常驻绘制数据施工记录：对象表、模型环与push退役.md)（判定线证据）、[流程导读](GPU常驻绘制数据流程：从账本行到实例索引的各级账面.md)（账面全景）。
 
 ## §0 先立三个核心判断（全文反复回来看）
@@ -93,7 +94,7 @@ for (_entity, row) in ledger.rows() {
 新写法在 DEVICE_LOCAL 显存里立一张表，一个物体一行（我们叫**实例槽**）：
 
 ```wgsl
-// debug_draw.wgsl——GPU 视角的对象表（set2 b0，只读 storage）
+// shaders/common/instance.wgsl——GPU 视角的对象表（set2 b0，只读 storage）
 struct ObjectRecord {
     first_index: u32,      // 索引池里这个 mesh 从哪开始（画的范围）
     index_count: u32,
@@ -108,7 +109,7 @@ struct ObjectRecord {
 shader 拿到编号就自己查：
 
 ```wgsl
-// push 从 96B 缩到 4B：只剩一个编号
+// 5.1：push 从 96B 缩到 4B；5.3 起逐 draw push 退役为 0（槽号走 firstInstance）
 struct PushParams { instance: u32 }
 var<immediate> push: PushParams;
 
@@ -125,9 +126,9 @@ fn vs_main(@location(0) position: vec3f, ...) -> VsOut {
 CPU 侧从"组装 96B"变成"递一个编号"：
 
 ```rust
-// 新 frames.rs——每物体 push 4B
+// 5.1 的 frames.rs（现拆为 driver/host/frame.rs + render/frame/）——当时每物体 push 4B；5.3 后为 0
 for call in draw.draws {
-    let push_bytes = call.instance.to_le_bytes();   // 4B，就一个槽号
+    let push_bytes = call.instance.to_le_bytes();   // 5.1 时 4B，就一个槽号
     device.cmd_push_constants(..., &push_bytes);
     device.cmd_draw_indexed(...);                    // 其余照旧
 }
@@ -173,7 +174,7 @@ for call in draw.draws {
 
 - **对象表不是"每帧更新的表"，是"几乎不更新的表"**——所以它敢放 DEVICE_LOCAL（GPU 独享显存，最快），也敢承诺"这个槽的内容永远不用改"（要改就换槽）。shader 读它零竞态。
 - **model 单独拆出来**，不是因为矩阵特殊，是因为它属于"移动 = 改内容"的一类。易变数据的家不是常驻表，是**环**（§四）。
-- **材质环选"全量重写"是个杠杆**：材质内容本身会变（mutate、贴图热重载），如果材质记录也走"写一次 + 换槽"，那么 10 万个实例共享 5 个材质时，改一张贴图 = 5 个材质换槽 = **10 万个对象记录跟着换槽**（它们记着材质槽号）——链式 churn。全量重写把这条链砍断：贴图变了，下一帧材质环里那 5 条记录自然就是新值，10 万个对象记录**一个都不用动**（它们记的槽号没变）。代价是每帧重写"材质数 × 32B"——几百字节，忽略不计。
+- **材质环选"全量重写"是个杠杆**：材质内容本身会变（mutate、贴图热重载），如果材质记录也走"写一次 + 换槽"，那么 10 万个实例共享 5 个材质时，改一张贴图 = 5 个材质换槽 = **10 万个对象记录跟着换槽**（它们记着材质槽号）——链式 churn。全量重写把这条链砍断：贴图变了，下一帧材质环里那 5 条记录自然就是新值，10 万个对象记录**一个都不用动**（它们记的槽号没变）。代价是每帧重写"材质数 × 64B"——几百字节，忽略不计。
 
 一句话总结写形状：**"写一次"的数据最贵也最安全，"增量写"的数据要自带两份轮转，"全量写"的数据必须足够小。**三类数据放错位置，要么撞 hazard，要么白搬。
 
@@ -202,7 +203,7 @@ for call in draw.draws {
 // draw_frame 里三兄弟排在一起——同一套 fence 纪律
 tables.frame_ubo(frames.current_index())          // 帧 UBO：相机/灯光（3.4 就有）
     .write(0, &pack_frame_uniforms(...))?;
-drawlist::write_rings(instance_tables, ledger, ...) // 模型环 + 材质环（5.1 新增）
+drawlist::write_model_ring / write_material_ring(instance_tables, ledger, ...) // 模型环 + 材质环（5.1 新增；原 write_rings 已拆分）
     .or_fatal("模型/材质环写失败，渲染链无法继续")?;
 ```
 
@@ -226,7 +227,7 @@ pub(crate) fn mark_model_dirty(&mut self, entity: Entity) {
 
 ### 4.3 材质环为什么敢全量重写
 
-材质记录的量级是**唯一材质数**（不是实例数！）——FlightHelmet 六个 primitive 共享 5 个材质，重写 5 条 × 32B = 160B。而且每帧从资产容器现读意味着：材质参数 mutate、贴图槽换指，**下一帧自动生效，不需要任何失效通道**。4.2 立的"材质没有 GPU 驻留内容"这句话在新世界里依然成立——材质环本质上是"每帧把材质参数当全局量重报一遍"。
+材质记录的量级是**唯一材质数**（不是实例数！）——FlightHelmet 六个 primitive 共享 5 个材质，重写 5 条 × 64B = 320B（5.1 时为 32B/条 = 160B，后扩为 64B）。而且每帧从资产容器现读意味着：材质参数 mutate、贴图槽换指，**下一帧自动生效，不需要任何失效通道**。4.2 立的"材质没有 GPU 驻留内容"这句话在新世界里依然成立——材质环本质上是"每帧把材质参数当全局量重报一遍"。
 
 ---
 
@@ -271,7 +272,7 @@ despawn → update_ledger 清行，旧槽进 ledger.freed_slots（纯整数账�
   5. acquire
   6. DrawList 槽位枚举：行 → {instance: slot, 池引脚}   ← CPU 只递编号
   7. 帧 UBO 写 + 模型环增量写 + 材质环全量写（同一条 fence 纪律之下）
-  8. 录制：绑 set0/1/2 → 每 draw push 4B → cmd_draw_indexed
+  8. 录制：绑 set0/1/2 → 5.1 时每 draw push 4B；5.3 起一次 cmd_draw_indexed_indirect（0B push）
      （图形提交在 GPU 侧等票据 T——"对象表写完了才可画"）
 [present]
 ```
@@ -307,10 +308,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
 | 事项 | 旧写法（≤4.x） | 新写法（5.1 起） | 差在哪 |
 |---|---|---|---|
 | model 矩阵 | 每 draw push 64B | 模型环 64B/槽，动了才写 | 静态物体矩阵永远不过 CPU |
-| 材质参数/贴图槽 | 每 draw push 12B，每帧从容器现读 | 材质环 32B/材质，每帧全量重写 | 参数与物体数解耦（×材质数） |
+| 材质参数/贴图槽 | 每 draw push 12B，每帧从容器现读 | 材质环 64B/材质（5.1 时 32B），每帧全量重写 | 参数与物体数解耦（×材质数） |
 | mesh 范围 | CPU 侧 DrawCall 字段 | 对象表记录（副本）+ CPU 引脚并存 | GPU 可自查（5.3 indirect 的前提） |
-| draw 命令 | N 条 cmd_draw_indexed + N 次 push 96B | N 条 + N 次 push 4B | **命令数没变**（5.3 indirect 才动它） |
-| DrawList 组装 | O(N) 组装 96B 参数 | O(N) 查槽号（组装参数职责已死） | CPU 每物体工作量：96B 打包 → 4B 查号 |
+| draw 命令 | N 条 cmd_draw_indexed + N 次 push 96B | 1 条 cmd_draw_indexed_indirect + 0B push（5.1 时 N 条 + 4B） | **命令数解耦**（5.3 indirect 收口） |
+| DrawList 组装 | O(N) 组装 96B 参数 | O(N) 查槽号（组装参数职责已死） | CPU 每物体工作量：96B 打包 → 槽号查表（5.3 后 0B push） |
 | 场景全景表 | 无 | 对象表（GPU 可查） | **5.2 剔除的存在前提** |
 | 移动物体成本 | 96B push（每帧每个 draw） | 64B 环写（只写改动的） | 静态场景趋零 |
 | 删除/复用 | 无槽概念 | 停尸房 + free list | 第三层账（资产/实体/实例槽） |
@@ -327,7 +328,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
 | 对象表（范围+材质槽+包围盒，GPU 可查） | GPU Resident Drawer 的 GPU instance data（Unity 6 内部，用户 API 不可见） | mesh pass 的 GPU scene 数据 + primitive fuzzy mapping |
 | 模型环（每帧增量写易变矩阵） | 传统路径 per-object `unity_ObjectToWorld` cbuffer（SRP Batcher 合批的那份）——本质也是环式 cbuffer | FPrimitiveSceneProxy 每帧 upload 的 primitive uniform |
 | 材质环（每帧重写小表） | SRP Batcher 的 per-material cbuffer 思想（材质数据与物体数据分列） | material uniform buffer 集 |
-| push 4B 实例槽号 | SRP Batcher 的 `unity_InstanceID`/instance offset——同一刀：CPU 递索引不递数据 | indirect draw 的 DrawIndexedArgs，参数在 GPU |
+| 槽号索引（5.1 push 4B；5.3 后 firstInstance/instance_index） | SRP Batcher 的 `unity_InstanceID`/instance offset——同一刀：CPU 递索引不递数据 | indirect draw 的 DrawIndexedArgs，参数在 GPU |
 | 停尸房 | 未必暴露（引擎内部 JobSystem 时序管理） | RHI 的 deferred delete 队列（等 fence 再真删） |
 
 你之前问过的 Unity bindless 三层拆解里有一条"标准路径无 bindless"——5.1 之后可以再加一句：**Unity 6 的 GPU Resident Drawer 就是我们 5.1+5.2+5.3 三段合起来的官方版**：instance 数据常驻（5.1）+ GPU 剔除（5.2）+ indirect（5.3），Unity 只是把三刀一起卖给想省 CPU 的用户。

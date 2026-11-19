@@ -21,7 +21,7 @@
 
 5.5 收官后的链路：视锥剔除（5.2）→ 在场环/命令环（5.3）→ 一次 indirect 绘制；三档压测结论 = GPU 图形段主导（36/137/254 ms，预算不可达），提交侧平坦解耦——**剩下能省的就是"在视锥内但被挡住"的那部分绘制**。6.1 补遮挡剔除：
 
-- **深度链现状**（[vulkan/depth.rs](../../../../ash_renderer/src/vulkan/depth.rs)）：D32_SFLOAT reverse-Z（`depth.rs:18`），帧槽每槽一张、随 swapchain 重建；loadOp CLEAR 清 0 + GREATER 比较成套（`pipeline.rs:182`、`frames.rs:368`）。**立案期核实：深度附件 usage 仅 `DEPTH_STENCIL_ATTACHMENT`（`depth.rs:64`）——不可采样、不可 blit/copy 出去，Hi-Z 的取数通道必须新建或扩 usage（§5 待决 2）**。
+- **深度链现状**（[vulkan/depth.rs](../../../../../crates/bevy_core_pipeline/src/mip_generation/experimental/depth.rs)）：D32_SFLOAT reverse-Z（`depth.rs:18`），帧槽每槽一张、随 swapchain 重建；loadOp CLEAR 清 0 + GREATER 比较成套（`pipeline.rs:182`、`frames.rs:368`）。**立案期核实：深度附件 usage 仅 `DEPTH_STENCIL_ATTACHMENT`（`depth.rs:64`）——不可采样、不可 blit/copy 出去，Hi-Z 的取数通道必须新建或扩 usage（§5 待决 2）**。
 - **剔除链现状**：`cull.wgsl`（112B push 六平面 + bump bound，8 角点世界推导，与 CPU 参照逐位同语义）；标记环 set2 b3（HOST_VISIBLE ×2 帧槽）；build_indirect 消费标记写 `instanceCount=0`。遮挡测试的天然落点 = cull pass 内扩展或其后第二 compute pass（都必须在 build_indirect 之前，§5 待决 3）。
 - **归约形状参照**（当前 checkout 实存）：bevy [occlusion_culling.wesl](../../../../../crates/bevy_pbr/src/render/occlusion_culling.wesl)——AABB 投屏四角、按包围盒像素尺寸选 mip 层、4 tap textureLoad 取极值做保守判定；[mip_generation/downsample.wesl](../../../../../crates/bevy_core_pipeline/src/mip_generation/downsample.wesl)——金字塔逐级下采样。学机制与保守化形状，不搬整套架构。
 - **计量底座现成**：5.5 交付的 GPU timestamp 帧区间 + PerfLedger 分位数 + BRP perf 读数族 + egui perf 行——判定线 4 的 A/B 对照零新建计量。
@@ -78,6 +78,6 @@
 - **5.3 消费链**：[施工记录](../../5-GPU驱动与常驻大场景/5.3-indirect闭环/5.3.1-5.3.5-indirect闭环施工记录：能力闸门、命令组装与图形消费.md)（命令环屏障形状——6.1 的标记写入点在 build_indirect 上游，不新增 indirect 侧依赖形状）。
 - **5.5 计量底座**：[段 README](../../5-GPU驱动与常驻大场景/5.5-分档压测/README.md)——GPU timestamp 帧区间/分位数账本/BRP perf 读数族，判定线 4 直接复用。
 - **环与格式能力先例**：[环机制篇](../../5-GPU驱动与常驻大场景/5.1-常驻绘制数据/环机制：HostVisible数据的帧槽轮转与fence纪律.md)（帧槽 + fence 纪律——金字塔 ×2 槽照此链）；depth.rs/images.rs（格式支持查询先例）；5.4 mip blit 的 graphics 队列续批先例（[施工记录](../../5-GPU驱动与常驻大场景/5.4-常驻大场景组织/5.4.1-5.4.5-常驻大场景组织施工记录：生成器、chunk组织与mip链.md)，若走 blit 备选）。
-- **4.1 对象方法族（6.1.1 实现底座）**：[remote/objects.rs](../../../../../ash_renderer/src/remote/objects.rs)——协议薄壳与操作本体（`scene::mechanism::spawn_primitive_clone`）分离的分层先例，`spawn_shape` 照此形状长；测试实体经 4.1 账本链路进 GPU，渲染路径零触碰。
+- **4.1 对象方法族（6.1.1 实现底座）**：[remote/objects.rs](../../../../../ash_renderer/src/remote/edit/objects.rs)——协议薄壳与操作本体（`scene::mechanism::spawn_primitive_clone`）分离的分层先例，`spawn_shape` 照此形状长；测试实体经 4.1 账本链路进 GPU，渲染路径零触碰。
 - **时序契约**：金字塔生命周期遵守[责任边界契约](../../3-静态取数链路/3.2-buffer侧上传/责任边界冻结：上传完成、图形消费与退出排空的时序契约.md)——每帧由 compute/图形链全量重写（非上传链产物），×2 帧槽 + 既有 fence 同链即可，不新增等待闸门。
 - **边界外挂**：细粒度流送（VT 页表/feedback）不归本段——已登记[外置拓展条目 6](../../外置拓展需求.md)（替代 6.4，调研笔记见[虚拟纹理调研](../../../笔记/渲染/虚拟纹理调研.md)）。

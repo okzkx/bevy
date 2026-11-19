@@ -27,7 +27,7 @@
   - 记录双面、透明、metallic/roughness、normal map、曝光/后处理的简化或未实现项；完整材质不强塞步骤 4。（施工记录 §6 诚实边界）
 - [x] **3.5.3 对照载体与条件**：优先独立官方 Bevy 进程配合并排截图，避免让自研进程初始化 wgpu。（`examples/official_reference.rs` 独立进程，6s 自动退出）
   - 固定资产版本、六个 primitive、相机、分辨率、viewport、材质覆盖与灯光方向。（条件表见施工记录 §3）
-  - 几何、base color/UV、法线/方向光分别验收；不直接拿官方完整 PBR 默认画面要求像素相同。（[unlit 并排](../../_assets/helmet-compare-unlit.png) / [lambert 并排](../../_assets/helmet-compare-lambert.png)：轮廓/色相/亮侧方向一致）
+  - 几何、base color/UV、法线/方向光分别验收；不直接拿官方完整 PBR 默认画面要求像素相同。（[unlit 并排](../_assets/helmet-compare-unlit.png) / [lambert 并排](../_assets/helmet-compare-lambert.png)：轮廓/色相/亮侧方向一致）
 - [x] **3.5.4 收官文档**：记录终态、同步/生命周期契约、坑和证据；更新路线图、入口与五段 README；未关闭缺陷不得隐藏在”全部通过”之下。（回归轮实抓 3.4 遗留 D7=VkShaderModule 泄漏，已修，退出路径零 VUID）
 
 ## 验证
@@ -37,12 +37,12 @@
 3. 法线和光照方向正确，非均匀缩放案例成立；未对齐的 PBR/曝光差异明确列出。
 4. 静态 mesh/贴图不每帧重复上传；合批、descriptor indexing 与同帧提交落点正确。
 5. 验证层及同步验证确实开启，目标路径无告警；resize、最小化、失败分支、退出均有复测证据。
-6. 两 Tier 纪律成立，可恢复错误才跳帧；源码修复状态与[缺陷文档](../材料/已实现缺陷与修复验收.md)一致。
+6. 两 Tier 纪律成立，可恢复错误才跳帧；源码修复状态与[缺陷文档](../3.2-buffer侧上传/已实现缺陷与修复验收.md)一致。
 
 ## 材料清单
 
 - 施工记录（2026-09-29）：[3.5.1-3.5.4-光照与同屏对照施工记录：相机灯光UBO、材质三模式与官方对照收官](3.5.1-3.5.4-光照与同屏对照施工记录：相机灯光UBO、材质三模式与官方对照收官.md)——§0 判定线逐条对账、UBO 128B 数值链（bevy prepare_lights 同源逐字段）、材质三模式、官方对照条件表与分项结论、D7 发现与修复、回归矩阵、诚实边界与给后续段的接口。
-- 配图（2026-09-29 入[步骤 _assets](../../_assets/)）：[helmet-compare-unlit](_assets/../_assets/helmet-compare-unlit.png)（unlit 并排：base color/UV/几何）、[helmet-compare-lambert](../../_assets/helmet-compare-lambert.png)（lambert vs 官方 PBR：光照方向）、[helmet-normal-debug](../../_assets/helmet-normal-debug.png)（法线可视化）、[helmet-nonuniform-normal](../../_assets/helmet-nonuniform-normal.png) / [helmet-nonuniform-lambert](../../_assets/helmet-nonuniform-lambert.png)（非均匀缩放探针，验证后已删）、[helmet-regression-resize-900x620](../../_assets/helmet-regression-resize-900x620.png) / [helmet-regression-restore](../../_assets/helmet-regression-restore.png)（窗口回归）。
+- 配图（2026-09-29 入[步骤 _assets](../_assets/)）：[helmet-compare-unlit](../_assets/helmet-compare-unlit.png)（unlit 并排：base color/UV/几何）、[helmet-compare-lambert](../_assets/helmet-compare-lambert.png)（lambert vs 官方 PBR：光照方向）、[helmet-normal-debug](../_assets/helmet-normal-debug.png)（法线可视化）、[helmet-nonuniform-normal](../_assets/helmet-nonuniform-normal.png) / [helmet-nonuniform-lambert](../_assets/helmet-nonuniform-lambert.png)（非均匀缩放探针，验证后已删）、[helmet-regression-resize-900x620](../_assets/helmet-regression-resize-900x620.png) / [helmet-regression-restore](../_assets/helmet-regression-restore.png)（窗口回归）。
 
 ## 待决问题
 

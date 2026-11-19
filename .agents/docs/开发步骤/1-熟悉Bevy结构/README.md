@@ -2,24 +2,44 @@
 
 对应 [学习目标实现步骤.md](../学习目标实现步骤.md) 步骤 1，本文件夹存放该步的全部产出。本步主产出（`Bevy结构笔记.md`）留在根，其余专题文档在 [材料/](材料/)。
 
+> **代码落点说明（2026-11-19 补录）**：本步骤笔记基于 Bevy 0.19.1/0.20.0-dev 时点，正文中的代码路径与符号保留当时口径；涉及 `ash_renderer` 的落点一律以当前 `ash_renderer/src` 为准。旧→新对照：
+>
+> | 旧路径/符号 | 当前落点 |
+> |---|---|
+> | `src/vulkan/context.rs` | `src/render/core/device/context.rs` |
+> | `src/vulkan/swapchain.rs` | `src/render/core/device/swapchain.rs` |
+> | `src/vulkan/frames.rs` | `src/render/frame/{frame_pool,record}.rs` |
+> | `src/vulkan/pool.rs` | `src/render/resident/assets/pool.rs` |
+> | `src/vulkan/resources.rs` | `src/render/core/device/memory/{contract,role,buffer}.rs` |
+> | `src/vulkan/uploader.rs` / `src/upload.rs` | `src/render/core/device/transfer/uploader.rs` / `src/driver/upload.rs` |
+> | `src/vulkan/{images,descriptors,pipeline}.rs` | `src/render/resident/assets/images.rs` / `src/render/core/{binding,pipeline}/` |
+> | `src/vulkan/mesh_convert.rs` | `src/render/resident/assets/mesh_convert.rs` |
+> | `src/host.rs` | `src/driver/host/{mod,init,frame}.rs` |
+> | `src/syntax.rs` | `src/common/syntax.rs` |
+> | `src/scene/collect.rs` / `CollectedScene` | `src/scene/mechanism/assets/ledger.rs`（`InstanceLedger`/`update_ledger`）+ `src/scene/content/collect_report.rs` |
+> | `src/scene/{world_asset,camera,lights}.rs` / `src/scene/material_hook.rs` | `src/scene/content/{world_asset,camera,lights}.rs` / `src/scene/mechanism/host/material_hook.rs` |
+> | `src/remote.rs` / `src/remote_mouse.rs` | `src/remote/mod.rs` / `src/remote/edit/mouse.rs` |
+> | `src/overlay/ui.rs` / `src/overlay/windows/*` | `src/overlay/framework/ui.rs` / `src/overlay/tool_window/` |
+> | `examples/*_probe.rs` | 已退役（`5edb4275a`），无替代 |
+
 ## 材料清单
 
-- `Bevy结构笔记.md`——**主产出**：App/SubApp/Schedule/World 概念 + 帧循环时序图 + Unity 映射表（四问中 **Q1、Q3 已答**）
+- [`Bevy结构笔记.md`](Bevy结构笔记.md)——**主产出**：App/SubApp/Schedule/World 概念 + 帧循环时序图 + Unity 映射表（四问中 **Q1、Q3 已答**）
 
 材料（按需翻查）：
 
-- `材料/SubApp机制与取舍.md`——SubApp 专题（定位/并行真相/开销风险账）
-- `材料/Plugin与PluginGroup机制.md`——Plugin 专题（添加=build/生命周期/宏展开/disable 语义）
-- `材料/数据层全景：World、Entity、Resource与Asset.md`——数据层专题（2026-09-16 合并原《World与Resource》《Entity与Asset》去重：World 字段解剖/Resource=隐形实体+唯一性原理/Entity 位布局/Assets 双存储/tick/数据放哪判定/同构表+bindless 落点）
-- `材料/DefaultPlugins分类.md`——四问之 **Q2 已答**：渲染族禁 8 个、数据/渲染 crate 已解耦、PbrPlugin 优雅降级
-- `材料/BSN场景语法与Unity场景对比.md`——Q4 消费端半篇：BSN 语法/Template 机制/功能盘点 + Unity scene YAML 对比（glTF 加载链路另算）；§4.4 含 BSN 场景 vs Commands.spawn 直接构造的对比与选型（2026-09-18）
-- `材料/System与调度DSL.md`——调度体系专题：add_systems 四跳链、ScheduleLabel/Interned、System 运行时对象、IntoScheduleConfigs 配置树、建图→编译→执行、Schedule 心智模型 + Unity DOTS 对照、并行规则
-- `材料/System参数与数据访问.md`——参数全家桶专题（2026-09-16，收编待深入①②）：0.19.1 参数全量目录、Query D/F 模板与 Single/Populated 验证跳过、Commands 同步点三时机与手动控制、Local 详解、多 Query 共存规则、高频问答
-- `材料/实体写路径：Bundle、Commands与Query改值.md`——写路径专题（2026-09-17）：Bundle=出生组件清单与一步落位 archetype、Commands API 分组与错误处理、独占系统立即写、Query `&mut` 值路径与变更检测、结构/值两路径对比与选型口诀
-- `材料/事件系统全景：Message队列与Observer回调.md`——事件专题（2026-09-18）：Messages 双缓冲+游标机制、Event/Observer 同步触发链路（EventKey/CachedObservers/Trigger 策略/防重入）、一帧时序对比 + ProjectStorm（Unity DOTS ECB 实体事件）对照与借鉴点
-- `材料/glTF加载链路：从磁盘到Mesh3d.md`——Q4 收尾篇（2026-09-20）：AssetServer→GltfLoader→WorldAsset→WorldAssetRoot 五站链路、RenderAssetUsages 声明式数据用途、0.19 材质解耦（GltfMaterial→GltfExtensionHandler）、frenderer 同链路逐维度对照（最薄弱环=资源管理层）
-- `材料/关系与层级：ChildOf、Children与变换传播.md`——待深入最后一项（2026-09-21）：与 Unity ECS 同构对照（ChildOf↔Parent、Children↔Child buffer）、Relationship 框架 hook 自动维护链路、写路径 API 全家、despawn 递归语义、变换传播三系统（脏标记/set_if_neq/静态子树跳过）+ 项目四落点
-- `材料/Bevy编辑器路线与代码热重载.md`——Bevy editor-last 立场与 BRP/.bsn 基建；Rust 热重载三堵墙与原生热重载光谱
+- [`材料/SubApp机制与取舍.md`](材料/SubApp机制与取舍.md)——SubApp 专题（定位/并行真相/开销风险账）
+- [`材料/Plugin与PluginGroup机制.md`](材料/Plugin与PluginGroup机制.md)——Plugin 专题（添加=build/生命周期/宏展开/disable 语义）
+- [`材料/数据层全景：World、Entity、Resource与Asset.md`](材料/数据层全景：World、Entity、Resource与Asset.md)——数据层专题（2026-09-16 合并原《World与Resource》《Entity与Asset》去重：World 字段解剖/Resource=隐形实体+唯一性原理/Entity 位布局/Assets 双存储/tick/数据放哪判定/同构表+bindless 落点）
+- [`材料/DefaultPlugins分类.md`](材料/DefaultPlugins分类.md)——四问之 **Q2 已答**：渲染族禁 8 个、数据/渲染 crate 已解耦、PbrPlugin 优雅降级
+- [`材料/BSN场景语法与Unity场景对比.md`](材料/BSN场景语法与Unity场景对比.md)——Q4 消费端半篇：BSN 语法/Template 机制/功能盘点 + Unity scene YAML 对比（glTF 加载链路另算）；§4.4 含 BSN 场景 vs Commands.spawn 直接构造的对比与选型（2026-09-18）
+- [`材料/System与调度DSL.md`](材料/System与调度DSL.md)——调度体系专题：add_systems 四跳链、ScheduleLabel/Interned、System 运行时对象、IntoScheduleConfigs 配置树、建图→编译→执行、Schedule 心智模型 + Unity DOTS 对照、并行规则
+- [`材料/System参数与数据访问.md`](材料/System参数与数据访问.md)——参数全家桶专题（2026-09-16，收编待深入①②）：0.19.1 参数全量目录、Query D/F 模板与 Single/Populated 验证跳过、Commands 同步点三时机与手动控制、Local 详解、多 Query 共存规则、高频问答
+- [`材料/实体写路径：Bundle、Commands与Query改值.md`](材料/实体写路径：Bundle、Commands与Query改值.md)——写路径专题（2026-09-17）：Bundle=出生组件清单与一步落位 archetype、Commands API 分组与错误处理、独占系统立即写、Query `&mut` 值路径与变更检测、结构/值两路径对比与选型口诀
+- [`材料/事件系统全景：Message队列与Observer回调.md`](材料/事件系统全景：Message队列与Observer回调.md)——事件专题（2026-09-18）：Messages 双缓冲+游标机制、Event/Observer 同步触发链路（EventKey/CachedObservers/Trigger 策略/防重入）、一帧时序对比 + ProjectStorm（Unity DOTS ECB 实体事件）对照与借鉴点
+- [`材料/glTF加载链路：从磁盘到Mesh3d.md`](材料/glTF加载链路：从磁盘到Mesh3d.md)——Q4 收尾篇（2026-09-20）：AssetServer→GltfLoader→WorldAsset→WorldAssetRoot 五站链路、RenderAssetUsages 声明式数据用途、0.19 材质解耦（GltfMaterial→GltfExtensionHandler）、frenderer 同链路逐维度对照（最薄弱环=资源管理层）
+- [`材料/关系与层级：ChildOf、Children与变换传播.md`](材料/关系与层级：ChildOf、Children与变换传播.md)——待深入最后一项（2026-09-21）：与 Unity ECS 同构对照（ChildOf↔Parent、Children↔Child buffer）、Relationship 框架 hook 自动维护链路、写路径 API 全家、despawn 递归语义、变换传播三系统（脏标记/set_if_neq/静态子树跳过）+ 项目四落点
+- [`材料/Bevy编辑器路线与代码热重载.md`](材料/Bevy编辑器路线与代码热重载.md)——Bevy editor-last 立场与 BRP/.bsn 基建；Rust 热重载三堵墙与原生热重载光谱
 - 另：《Bevy结构笔记》已增补 runner 真身表 + update() 内部三层；《SubApp机制与取舍》已增补 §7 三创建者与渲染线程交接；《开发工具与语法笔记》（笔记/）已增补 repr 内存布局条目（2026-09-14）、add_systems 泛型套路条目（2026-09-16）
 - 运行记录与截图（按需，尚未产生）
 

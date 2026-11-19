@@ -12,7 +12,7 @@
 |---|---|---|---|---|
 | `InstanceLedger` 行表 | scene/mechanism/assets/ledger.rs | 每实体一行（柄/矩阵/实例槽/记录身份） | `update_ledger`（发现）、`flush_uploads`（槽位） | 全链 |
 | `AssemblyCache`（7.9 新增） | 账本字段 | 可绘行集合（Entity→槽号/材质/alpha）+ 材质引用计数 + 待重估集 + 产物 Vec | `assembly_update`（帧循环触发，判定闭包由 drawlist 注入） | draw_frame 组装段→帧尾 |
-| `lod_dirty`/`model_dirty` | 账本字段 | 模型环/LOD 表环的奇偶待写集 | 换槽/矩阵变化/档位到货/淘汰 | `write_rings` |
+| `lod_dirty`/`model_dirty` | 账本字段 | 模型环/LOD 表环的奇偶待写集 | 换槽/矩阵变化/档位到货/淘汰 | `write_model_ring` / `write_lod_table_ring` |
 | GPU 在场环 | InstanceTables | 本帧命令宇宙（槽号列表，**每帧照写**——环按帧槽双缓冲，快照语义不可省） | `write_presence_ring` | build_indirect |
 
 关键分工：**账本持有"行的世界侧事实"，组装缓存持有"这些事实的可绘投影"**。投影的全部输入变化都必须经过账本的行状态变化——这是增量合法性（"行宇宙不变 → 投影不变"）的物理保证，也是不做第二套变更发现的原因。
@@ -51,11 +51,11 @@ AssemblyCache（账本字段，7.9）
 ## 4. 帧循环里的借用纪律（draw_frame 步骤 3/4a）
 
 ```
-drawlist::assemble_update(&mut ledger, pool, ...)   ← 排空重估集（&mut 收口）
+drawlist::assemble_update(&mut ledger, sources)       ← 排空重估集（&mut 收口）
 verify.enabled → verify_assembly(&ledger, ...)      ← 对照模式：全量参照 vs 缓存
 ledger.take_model_dirty / take_lod_dirty            ← 奇偶集先行取走（&mut 收口）
 let assembly = ledger.assembly_view()               ← 此后全程共享借用
-drawlist::write_rings(tables, &ledger, ..., &assembly, ...)
+InstanceTables::write_model_ring / write_material_ring / write_presence_ring / write_lod_table_ring
   ├─ write_model_ring(model_dirty 切片 + &ledger.row 查行)
   ├─ write_material_ring(assembly.materials)        ← 全量重写（7.9 裁决留全量）
   ├─ write_presence_ring(assembly.slots)            ← 每帧照写（环双缓冲）
@@ -81,8 +81,8 @@ drawlist::write_rings(tables, &ledger, ..., &assembly, ...)
 
 | 文件 | 改动要点 |
 |---|---|
-| scene/mechanism/assets/ledger.rs（+362） | AssemblyCache 结构 + `assembly_update`（重建/重估/产物重建）+ `AssemblyView` + 变更点钩子（行增删/换绑/mark_dirty/set_instance_slot）+ `rows_with_material` + 单测 5 条 |
-| driver/host/drawlist.rs（+236 改） | `assemble` 全量走访退役 → `drawability_eval` 闭包 + `assemble_update` 包装 + `assemble_reference`（对照真值面）+ `verify_assembly` + `DrawListVerify` 账面 + `write_rings` 共享借用签名 |
+| scene/mechanism/assets/assembly_cache.rs + ledger.rs（+362） | AssemblyCache 结构 + `assembly_update`（重建/重估/产物重建）+ `AssemblyView` + 变更点钩子（行增删/换绑/mark_dirty/set_instance_slot）+ `rows_with_material` + 单测 5 条 |
+| driver/host/drawlist.rs（+236 改） | `assemble` 全量走访退役 → `drawability_eval` 闭包 + `assemble_update` 包装 + `assemble_reference`（对照真值面）+ `verify_assembly` + `DrawListVerify` 账面 + `write_*_ring` 四函数共享借用签名 |
 | driver/host/frame.rs（+47） | 步骤 3 改增量维护 + verify 钩子 + 奇偶集先取 + `FrameInput.verify` 束 |
 | scene/mechanism/assets/residency.rs（+109） | 全静闸门（TickGateKey 键 + 五条件 + 冷却表空放行规则）+ `TickResources` 参数束（16 上限对策）|
 | driver/upload.rs（+20） | 脏行循环逐行标记 + 驻留出账反查标记（基准 + 保底档两候选集）|
@@ -90,4 +90,4 @@ drawlist::write_rings(tables, &ledger, ..., &assembly, ...)
 | scene/mechanism/editing/asset_ops.rs（+16） | mutate 写入点直标（RemoteLast 内容写入不绕隔帧事件链）|
 | scene/mechanism/assets/lod_registry.rs（+12） | register 换代号（组装缓存换形触发键）|
 | scene/mechanism/mod.rs、driver/host/mod.rs（+8） | AssemblyView 再导出 + DrawListVerify 资源注册 |
-| remote/draw.rs、remote/mod.rs（+60） | draw_stats 组装/verify 块 + `drawlist_verify_set` 方法注册 |
+| remote/features/draw.rs、remote/mod.rs（+60） | draw_stats 组装/verify 块 + `drawlist_verify_set` 方法注册 |

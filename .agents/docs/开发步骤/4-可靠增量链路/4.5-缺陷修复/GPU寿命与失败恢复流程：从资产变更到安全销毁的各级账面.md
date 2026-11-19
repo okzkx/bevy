@@ -7,14 +7,14 @@
 | 账面 | 位置 | 4.5 改动 |
 |---|---|---|
 | `InstanceLedger`（实体行账） | `scene/mechanism/assets/ledger.rs` | 统计口径订正：帧字段每帧刷新、`asset_invalidations_total` 累计只增、`asset_invalidations_current` 存量另列 |
-| `AssetReadiness`（pending/failed 身份账） | `asset_readiness.rs` | **失败记账写入点统一**：note_failure/revive/clear 全部并入事件读侧单系统，本模块只剩结构定义 |
-| `AssetInvalidations` / `AssetRetirements` | `asset_events.rs` | 事件纪律扩容：`Unused` 出清失败账（F8）、`Added` 无条件复活重挂（F9）、失败记账同系统先入（F4） |
-| `BindlessTables.sampler_bodies`（**新账**） | `vulkan/descriptors.rs` | 采样器本体归表：槽号 → 表自建自持的 `VkSampler`（F2） |
-| `BindlessTables.retired_*`（槽待回收账） | `vulkan/descriptors.rs` | 语义升级：retire_texture 成为内容重传的常规路径（F1），采样器本体随槽进待销毁账 |
-| `ImageCache.resident / graveyard` | `vulkan/images.rs` | 停尸房条目 `(GpuImage, Ticket)`——票据随行（F3）；`swap_commit` 取代 `take`+rebind（F1） |
-| `MeshPool.graveyard` | `vulkan/pool.rs` | 条目三元组化 `(+ticket)`，排空双条件（F3） |
-| `AtlasGpu.current / graveyard` | `overlay/framework/paint.rs` | 旧代接 retire 账 + 票据随行，排空挂 flush 统一排空点（F15） |
-| `InitDrainGuard`（**新护栏**） | `driver/host/init.rs` | 初始化失败路径的 device_wait_idle 先于一切 Drop（F12） |
+| `AssetReadiness`（pending/failed 身份账） | `scene/mechanism/assets/asset_readiness.rs` | **失败记账写入点统一**：note_failure/revive/clear 全部并入事件读侧单系统，本模块只剩结构定义 |
+| `AssetInvalidations` / `AssetRetirements` | `scene/mechanism/assets/asset_events.rs` | 事件纪律扩容：`Unused` 出清失败账（F8）、`Added` 无条件复活重挂（F9）、失败记账同系统先入（F4） |
+| `BindlessTextureTable.samplers`（**新账**） | `render/resident/tables/bindless_texture_table.rs` | 采样器本体归表：槽号 → 表自建自持的 `VkSampler`（F2） |
+| `BindlessTextureTable.retired_*`（槽待回收账） | `render/resident/tables/bindless_texture_table.rs` | 语义升级：`retire` 成为内容重传的常规路径（F1），采样器本体随槽进待销毁账 |
+| `ImageCache.resident / graveyard` | `render/resident/assets/images.rs` | 停尸房条目 `(GpuImage, Ticket)`——票据随行（F3）；`swap_commit` 取代 `take`+rebind（F1） |
+| `MeshPool.graveyard` | `render/resident/assets/pool.rs` | 条目三元组化 `(+ticket)`，排空双条件（F3） |
+| `AtlasGpu.current / graveyard` | `render/passes/overlay/atlas_gpu.rs` | 旧代接 retire 账 + 票据随行，排空挂 flush 统一排空点（F15） |
+| `teardown_vulkan` / `device_wait_idle`（原 `InitDrainGuard` 已退役） | `driver/host/init.rs` | 退出路径 device_wait_idle 先于一切 Drop（F12）；`Context::new` 半建回滚由 `ContextInitGuard` 承担 |
 
 ## 二、逐时刻走读
 
@@ -23,7 +23,7 @@
 1. `Assets::get_mut` 发 `Modified` → 次帧事件读侧收：身份进失效集 + `revive_*`（F6 复活前提）。
 2. `flush_uploads` 盘点：失效凭据放行"已驻留要换内容"的行 → fresh 表 `(id, handle, replace=true)`。
 3. 转换成功进批、`submit_batch` 拿新票据。
-4. **槽位发布（改写点）**：`publish(view, key)` 分配**全新纹理槽**——不再 `rebind` 原槽重写（F1：在飞 draw 可能仍消费旧描述符）。新键首次出现时表自建 `VkSampler` 进 `sampler_bodies`（F2）。
+4. **槽位发布（改写点）**：`publish(view, key)` 分配**全新纹理槽**——不再 `rebind` 原槽重写（F1：在飞 draw 可能仍消费旧描述符）。新键首次出现时表自建 `VkSampler` 进 `samplers`（F2）。
 5. `image_cache.swap_commit`：旧 GpuImage+旧票据 → 停尸房；旧纹理槽 → `retired_textures`；旧采样器槽仅当"新条目不同槽且无其余共享方"退场（本体随之进待销毁账）。新条目（新图、新票据、新槽）入 resident。
 6. 过渡帧语义不变：在飞 draw 经旧槽读停尸房保活的旧图，新 draw 经新槽读新图——**旧图多活一帧的代价换覆盖安全**。
 
@@ -60,7 +60,7 @@ AtlasGpu.graveyard  ──┘   + 票据时间线信号量（上传完成，F3�
 
 ### 时刻 D：初始化失败（F12/F13——失败路径也守 D4）
 
-`try_init_vulkan` 串链，任一 `?` 短路：逆序 Drop 中 `InitDrainGuard`（声明于 Uploader 之后）最先析构 → `device_wait_idle` → 其后 Uploader/表/GpuImage 析构时 transfer 已完成。`Swapchain::new` 内部 views/semaphores 半建失败：已建 view 逐个销毁 + swapchain 本体就地销毁——泄漏者占 hwnd → 重建恒报 `NATIVE_WINDOW_IN_USE` 的路径不存在。
+`try_init_vulkan` 串链，任一 `?` 短路。`InitDrainGuard` 已退役：退出路径由 `teardown_vulkan` 先 `device_wait_idle` 再反序拆除；`Context::new` 的半建由 `ContextInitGuard` 回滚；`Swapchain::new` 内部 views/semaphores 半建失败：已建 view 逐个销毁 + swapchain 本体就地销毁——泄漏者占 hwnd → 重建恒报 `NATIVE_WINDOW_IN_USE` 的路径不存在。
 
 ## 三、失败与稳态路径对照
 
@@ -81,6 +81,6 @@ AtlasGpu.graveyard  ──┘   + 票据时间线信号量（上传完成，F3�
 
 | 分组 | 文件 | 要点 |
 |---|---|---|
-| F4/F6~F10（第一批） | `asset_events.rs`（单系统合并+事件纪律扩容）、`asset_readiness.rs`（系统退役、结构保留）、`upload.rs`（expel 出去重条件、dirty_rows 定案点）、`ledger.rs`（统计字段）、`remote_objects.rs`（stats 出口） | 失败记账单入口是本批结构性改动 |
-| F1/F2/F3/F12~F15（第二批） | `descriptors.rs`（sampler_bodies 新账、publish 改签名、rebind 删除）、`images.rs`（swap_commit、票据停尸房、SamplerKey::create_sampler）、`pool.rs`（票据三元组）、`init.rs`（护栏）、`swapchain.rs`（全有或全无）、`frame.rs`（pending 置位）、`paint.rs`（图集接账） | 销毁凭据与所有权两条主线 |
+| F4/F6~F10（第一批） | `asset_events.rs`（单系统合并+事件纪律扩容）、`asset_readiness.rs`（系统退役、结构保留）、`upload.rs`（expel 出去重条件、dirty_rows 定案点）、`ledger.rs`（统计字段）、`remote/edit/objects.rs`（stats 出口） | 失败记账单入口是本批结构性改动 |
+| F1/F2/F3/F12~F15（第二批） | `render/resident/tables/bindless_texture_table.rs`（samplers 新账、publish 改签名、rebind 删除）、`render/resident/assets/images.rs`（swap_commit、票据停尸房、SamplerKey::create_sampler）、`render/resident/assets/pool.rs`（票据三元组）、`init.rs`（退出排空）、`swapchain.rs`（全有或全无）、`frame.rs`（pending 置位）、`paint.rs`（图集接账） | 销毁凭据与所有权两条主线 |
 | F16~F21+P3（第三批） | `remote.rs`/`mesh_convert.rs`/`material_hook.rs`/`camera.rs`/`http.rs`（bevy fork）/`swapchain.rs`/注释九处/小账七项 | 防御与同真，多为单点 |

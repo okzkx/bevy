@@ -110,6 +110,6 @@ D3D12 的 `ID3D12Fence` 就是 timeline 语义的原生形态：`Signal(value)` 
 
 ## §4 证据与边界
 
-- 探针 `ash_renderer/examples/timeline_probe.rs` 的 A/B PASS 是**驱动行为观察**，保留为记录；它无验证层、两组均未启用 `synchronization2`，不能作为规范合规证据，待按[缺陷文档](../材料/已实现缺陷与修复验收.md)修正（隔离变量、启用验证层、正确声明能力）后作为验收工具复跑。
+- 探针 `ash_renderer/examples/timeline_probe.rs` 的 A/B PASS 是**驱动行为观察**，保留为记录；该探针已于 `5edb4275a` 退役，不再作为验收工具。其原始观察（无验证层、两组均未启用 `synchronization2`）不能作为规范合规证据，合规证据以现行验证层路径为准（见[缺陷文档](已实现缺陷与修复验收.md)）。
 - 验收口径（3.2 README §验证）：验证层实际开启且目标路径零 WARNING/ERROR；timeline 覆盖同族/异族依赖分支；本机跑不到的回退路径注明未实测。
 - 本机验证层尚未安装（启动日志既有 ERROR：未找到 `VK_LAYER_KHRONOS_validation`），3.3 前"装 SDK 补验证层"待兑现；缺环境不得用"无告警"通过。

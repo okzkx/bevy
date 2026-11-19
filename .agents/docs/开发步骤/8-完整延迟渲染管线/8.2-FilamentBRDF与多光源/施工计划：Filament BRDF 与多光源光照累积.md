@@ -8,7 +8,7 @@
 
 ## 0. 立案期裁决（2026-10-22 用户拍板）
 
-- **光源驻留形态=常驻表**：灯数据走 set2 式常驻 storage 表（对象表/材质表同族），增量账本驱动更新（4.1 对象增量先例），不逐帧全量上传。光源记录**预留 shadow 标志位**（8.3 接管采样选择权）；Filament 的 froxel 灯列表与本段无冲突——8.1 已建的 3D cluster 逐 tile 光源列表（存灯索引）改从常驻表取数，索引域统一到表槽号。参考证据：[Filament 源码参考 §5.3](../../笔记/渲染/Filament%20源码参考：标准模型%20BRDF%20与%20多光源（8.2%20对照基准）.md)（Filament 本体走每帧 UBO+froxel，无常驻表；常驻表是本项目按 4.1/5.1 账本路线的自选形态，收益=稳态零上传）。
+- **光源驻留形态=常驻表**：灯数据走 set2 式常驻 storage 表（对象表/材质表同族），增量账本驱动更新（4.1 对象增量先例），不逐帧全量上传。光源记录**预留 shadow 标志位**（8.3 接管采样选择权）；Filament 的 froxel 灯列表与本段无冲突——8.1 已建的 3D cluster 逐 tile 光源列表（存灯索引）改从常驻表取数，索引域统一到表槽号。参考证据：[Filament 源码参考 §5.3](../../../笔记/渲染/Filament%20BRDF参考.md)（Filament 本体走每帧 UBO+froxel，无常驻表；常驻表是本项目按 4.1/5.1 账本路线的自选形态，收益=稳态零上传）。
 - **BRDF 对照基准已钉明（2026-10-22 用户二次拍板：完全照抄口径）**（开工前置参考篇已产出 2026-10-22，`goal/8.2-filament-ref`）：**8.2 直接光 BRDF = Filament 标准模型函数级移植**——D_GGX + V_SmithGGXCorrelated（Heitz 完整）+ F_Schlick（f90=saturate(16.5·Σf0)）+ diffuse=Lambert，连同参数换算链（glTF roughness=perceptualRoughness、clamp 0.045→α=p²、computeDiffuseColor/computeF0、clampNoV 1e-4）与 punctual 衰减公式（getSquareFalloffAttenuation/getAngleAttenuation）逐式照抄，公式、常量、组织顺序全同，只做 GLSL→WGSL 语法转换，**函数命名保留 Filament 原名**（对照时逐名可查）；desktop=QUALITY_HIGH 档，Burley 不取；energyCompensation=1.0（无 IBL，Filament 源内该值即走 1.0 分支的形状）。照抄范围=标准模型直接光；froxel/IBL/其他 shading model 不在范围（§5 边界）。
 - **对照资产与参照渲染解锁（2026-10-22 用户增补拍板）**：①对照资产可直接用 filament 仓库自带（属实 2026-10-22 现场清点：`third_party/models/` 八件 glTF 含 DamagedHelmet.glb 3.8MB、`assets/models/` 十二件含 material_sphere、`assets/environments/white_furnace` 白炉环境）——Khronos MetalRoughSpheres 若仍需要走 Sponza 同源重下通道；②参照渲染可编译 filament 本体（`build.sh` windows 分支 + `gltf_viewer` 载入同一 glb 同参数截图对照）——**编译是否顺待实测**（本仓库 checkout 尚未编译过，`build/` 只有构建模板；顺带得到判定线①从"读图对照"升级为"与 filament 实渲染对照"的口径，8.2.4 施工时钉实）。
 
@@ -54,4 +54,4 @@
 - **不主张 IBL 与 GI**：环境光项维持现役 ambient 常量（灯表外），间接光注入项只立接口；DFG LUT/多重散射补偿归步骤 9 附近。
 - **不主张 HDR 合成契约变化**（归 8.4）与精确 OIT（外置条目）。
 - **GPU-driven 闭环不回退是红线**：光照累积是新增全屏 pass，不动 5.3 draw 决策链。
-- 依赖顺序：8.1 收官（已收官待并回）→ 8.2 → 8.3；开工前置参考篇已产出（[源码参考篇](../../笔记/渲染/Filament%20源码参考：标准模型%20BRDF%20与%20多光源（8.2%20对照基准）.md)）。
+- 依赖顺序：8.1 收官（已收官待并回）→ 8.2 → 8.3；开工前置参考篇已产出（[源码参考篇](../../../笔记/渲染/Filament%20BRDF参考.md)）。

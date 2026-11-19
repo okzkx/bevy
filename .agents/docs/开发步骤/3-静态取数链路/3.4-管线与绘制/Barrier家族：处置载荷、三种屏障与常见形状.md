@@ -41,14 +41,14 @@
 | 上传首用（免单进场） | 管道顶→搬运 | 空→TRANSFER_WRITE | UNDEFINED→TRANSFER_DST | uploader.rs:381 |
 | 上传收尾（转可采样） | 搬运→管道底 | TRANSFER_WRITE→空 | TRANSFER_DST→SHADER_READ_ONLY | uploader.rs:447 |
 | 同提交写后读（buffer） | 搬运→搬运 | TRANSFER_WRITE→TRANSFER_READ | —（buffer 无布局） | uploader.rs:470 |
-| 池写→图形消费（同族回退形状） | 搬运→顶点输入/片段 | TRANSFER_WRITE→顶点属性读/SHADER_READ | — | memory_probe 闭环 |
+| 池写→图形消费（同族回退形状） | 搬运→顶点输入/片段 | TRANSFER_WRITE→顶点属性读/SHADER_READ | — | 原 memory_probe 闭环，探针已退役 |
 | 离屏渲染→回采样（**将来必遇**） | 写颜色→片段 | COLOR_ATTACHMENT_WRITE→SHADER_READ | 可写→SHADER_READ_ONLY | 后处理/egui 接入标准形 |
 | mipmap 逐层生成 | 搬运→搬运 | TRANSFER_WRITE→TRANSFER_READ | TRANSFER_DST→TRANSFER_READ（逐层） | 本项目 mip0 冻结未用 |
-| 所有权让渡（EXCLUSIVE） | 各自按资源 | 写→空（dst 掩码被规范忽略） | buffer 无 / image 顺路携带 | uploader.rs:504、image_probe 组 C |
+| 所有权让渡（EXCLUSIVE） | 各自按资源 | 写→空（dst 掩码被规范忽略） | buffer 无 / image 顺路携带 | uploader.rs:504（原 image_probe 组 C 已退役） |
 
-## 4. 项目屏障总账：19 道插入点
+## 4. 项目屏障总账：现行 7 道 + 已退役探针 12 道
 
-**生产 7 道 + 探针 12 道；按载荷分三类：布局转换 11 道（全在 image 屏障）、所有权让渡 3 道、纯依赖 5 道（全在 buffer 屏障）。** 图像屏障全带布局转换不是巧合——它们全部插在**使用点交接**现场，而每个使用点有布局契约（拷贝要 TRANSFER_DST、采样要 SHADER_READ_ONLY、ROP 要附件布局），使用点一变，布局状态机就必须走一步，转换必然顺路。buffer 没有布局概念，屏障于是"变纯"，只剩依赖与所有权两件事——"屏障即状态转移"的 D3D12 直觉（那边连 buffer 都有 ResourceState）在它身上落空。同一布局的 image 屏障（纯依赖，mipmap 逐层是标准现场）合法且常见，本项目尚未遇到。
+**现行生产 7 道；另有 12 道来自已退役探针（`5edb4275a`），下表与分类保留为历史总账。历史 19 道按载荷分三类：布局转换 11 道（全在 image 屏障）、所有权让渡 3 道、纯依赖 5 道（全在 buffer 屏障）。** 图像屏障全带布局转换不是巧合——它们全部插在**使用点交接**现场，而每个使用点有布局契约（拷贝要 TRANSFER_DST、采样要 SHADER_READ_ONLY、ROP 要附件布局），使用点一变，布局状态机就必须走一步，转换必然顺路。buffer 没有布局概念，屏障于是"变纯"，只剩依赖与所有权两件事——"屏障即状态转移"的 D3D12 直觉（那边连 buffer 都有 ResourceState）在它身上落空。同一布局的 image 屏障（纯依赖，mipmap 逐层是标准现场）合法且常见，本项目尚未遇到。
 
 > 数法："道" = 一处 `cmd_pipeline_barrier` 插入点；uploader 逐图循环里一道代表 N 张图，按图展开后更多。探针屏障为验证机制而插，生产对其零依赖。
 
@@ -62,16 +62,11 @@
 | uploader.rs:381（逐图） | 图像 | 管道顶→搬运 | 空→TRANSFER_WRITE | UNDEFINED→TRANSFER_DST | 免单进场：新图无旧内容；买 cmdCopyBufferToImage 的布局契约 |
 | uploader.rs:447（逐图） | 图像 | 搬运→管道底 | TRANSFER_WRITE→空 | TRANSFER_DST→SHADER_READ_ONLY | 全单：拷贝干完+写冲缓存+换可采样布局；dst 空，真读依赖由消费方票据建立；CONCURRENT 双族族号 IGNORED |
 | uploader.rs:470（逐源池） | buffer | 搬运→搬运 | TRANSFER_WRITE→TRANSFER_READ | — | 纯放行：同提交池→池拷贝写完才准读；无布局可换 |
-| uploader.rs:504（逐 release 条目） | buffer | 搬运→管道底 | TRANSFER_WRITE→空（dst 侧被规范忽略） | — | 载荷=所有权让渡（family→to_family），配对 acquire 在接收族侧；生产正常路径恒空（uploader.rs:29 定案），形状保留+探针实证 |
+| uploader.rs:504（逐 release 条目） | buffer | 搬运→管道底 | TRANSFER_WRITE→空（dst 侧被规范忽略） | — | 载荷=所有权让渡（family→to_family），配对 acquire 在接收族侧；生产正常路径恒空（uploader.rs:29 定案），形状保留（原探针实证已随 `5edb4275a` 退役） |
 
-### 探针（examples/，12 道）
+### 探针（examples/，12 道；已退役）
 
-| 探针 | 道位锚点 | 在验什么 |
-|---|---|---|
-| memory_probe | :437、:452（helper :499） | 生产写后读同款（TRANSFER_WRITE→TRANSFER_READ）；设备写→宿主读（TRANSFER→HOST，非 coherent 靠屏障+读侧 invalidate 兜底） |
-| upload_probe | :770、:799 | 跨族 buffer acquire（src 阶段 ALL_COMMANDS 等 release、srcAccess 规范忽略置空、族号与 release 成对）；设备写→宿主读 |
-| image_probe | :397、:431（组B，各一拖二）；:548、:568、:594、:612（组C） | 组B 回读往返 SHADER_READ_ONLY→TRANSFER_SRC→回（VUID-01397 读回不收 SHADER_READ_ONLY 的现场）；组C 跨族图像 acquire（old/new 与 release 同一对=所有权按对生效的实证钉）、自族迁入 TRANSFER_SRC、读毕迁回、宿主收口 |
-| bindless_probe | :973、:1008（helper :1111） | 上传前后两道与生产同形状；access 按 layout 配对定案写死在 helper |
+`memory_probe`/`upload_probe`/`image_probe`/`bindless_probe` 四份探针共 12 道插入点，已于 `5edb4275a` 随探针体系整体退役；此处不再保留文件行号锚点。历史分类见上：生产与探针合计 19 道。
 
 ## 5. 现场实拆：纹理上传的两道屏障
 
@@ -96,4 +91,4 @@ D3D12 的 `ResourceBarrier` 把载荷暴露得更直白——参数**只有**状
 1. 屏障执行四步是什么？"转换是载荷、作用域是安全壳"怎么对应到这四步？
 2. 免单（access 全空）的合法性来源是什么？上传的两道屏障里哪道是免单、哪道是全单？
 3. 图像屏障独有而缓冲屏障没有的字段是什么？为什么 buffer 不需要它？
-4. 项目 19 道屏障按载荷分三类各几道？为什么图像屏障全带布局转换、buffer 屏障却"空手"？
+4. 历史 19 道屏障（现行 7 道 + 已退役探针 12 道）按载荷分三类各几道？为什么图像屏障全带布局转换、buffer 屏障却"空手"？

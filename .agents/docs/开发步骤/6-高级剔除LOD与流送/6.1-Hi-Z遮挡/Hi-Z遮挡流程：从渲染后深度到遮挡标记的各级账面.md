@@ -6,14 +6,14 @@
 
 | 文件 | 一句话 |
 |---|---|
-| `shaders/hiz_downsample.wgsl` | 归约单入口：2×2 取 MIN 写下一级（reverse-Z 方向钉在注释里） |
-| `shaders/occlusion.wgsl` | 遮挡判定：8 角点投屏 → 选 mip → 4 tap MIN → `obj_max < occluder` 判剔除，合并写 b3、独立写 b6 |
-| `src/vulkan/hiz.rs` | HizPyramid：×2 帧槽 R32F mip 链本体 + 归约管线 + 遮挡测试描述符 + 读回通道 + reverse-Z 纯函数三件（单测） |
-| `src/vulkan/occlusion.rs` | OcclusionPass：遮挡 compute 管线 + 80B push 打包 + 投屏参照 + OcclusionSettings/Diagnostics |
+| `shaders/gpu_driven/hiz_downsample.wgsl` | 归约单入口：2×2 取 MIN 写下一级（reverse-Z 方向钉在注释里） |
+| `shaders/gpu_driven/occlusion.wgsl` | 遮挡判定：8 角点投屏 → 选 mip → 4 tap MIN → `obj_max < occluder` 判剔除，合并写 b3、独立写 b6 |
+| `src/render/passes/visibility/hiz.rs` | HizPyramid：×2 帧槽 R32F mip 链本体 + 归约管线 + 遮挡测试描述符 + 读回通道 + reverse-Z 纯函数三件（单测） |
+| `src/render/passes/visibility/occlusion.rs` | OcclusionPass：遮挡 compute 管线 + 80B push 打包 + 投屏参照 + OcclusionSettings/Diagnostics |
 | `src/scene/mechanism/generation/test_entities.rs` | 测试实体本体：五形状 + 颜色 → 按形状/颜色缓存的 mesh/材质（遮挡样本载具） |
-| `src/remote/shapes.rs` | `ash_renderer/spawn_shape` 协议薄壳（本体在 mechanism 层） |
+| `src/remote/edit/shapes.rs` | `ash_renderer/spawn_shape` 协议薄壳（本体在 mechanism 层） |
 
-改动沉淀的既有文件（要点）：`depth.rs`（usage 扩 SAMPLED + 能力查询）、`frames.rs`（storeOp STORE + 深度屏障 + 遮挡/归约录制位 + depth_image 访问器）、`instance_table.rs`（遮挡标记环第六族 b6）、`perf.rs`（4→5 位 timestamp、`gpu_hiz_ms`）、`driver/host/frame.rs`（遮挡半边编排 + OcclusionGate + resize 同批重建 + warmup 走账）、`driver/host/init.rs`（hiz/occlusion_pass 进创建链与拆除链——**拆除序：OcclusionPass → HizPyramid → FramePool**，视图先于深度 image 销毁）、`remote/cull.rs`（occlusion_set_enabled/hiz_census/occlusion_probe 三方法 + cull_stats 遮挡分列）、`overlay/windows/debug_window.rs` + `overlay/framework/ui.rs`（遮挡开关与状态行）。
+改动沉淀的既有文件（要点）：`render/core/target/depth.rs`（usage 扩 SAMPLED + 能力查询）、`driver/host/frame.rs` + `render/frame/record.rs`（storeOp STORE + 深度屏障 + 遮挡/归约录制位 + depth_image 访问器）、`render/resident/tables/instance_table.rs`（遮挡标记环第六族 b6）、`render/stats/perf.rs`（6.1 时 4→5 位 timestamp，现 8 位 + `gpu_hiz_ms`）、`driver/host/frame.rs`（遮挡半边编排 + OcclusionGate + resize 同批重建 + warmup 走账）、`driver/host/init.rs`（hiz/occlusion_pass 进创建链与拆除链——**拆除序：OcclusionPass → HizPyramid → FramePool**，视图先于深度 image 销毁）、`remote/features/cull.rs`（occlusion_set_enabled/hiz_census/occlusion_probe 三方法 + cull_stats 遮挡分列）、`overlay/tool_window/culling.rs` + `overlay/framework/ui.rs`（遮挡开关与状态行）。
 
 ## 二、一帧里 Hi-Z 数据的生与死（逐时刻走读）
 
@@ -66,4 +66,4 @@
 
 ## 六、代码改动实数（`git diff --stat a62fdaa16..1c1fd66d2`）
 
-26 文件 +2752/−64，提交四笔：`5b482560c`（立案 docs）→ `4a759b5a2`（6.1.1 测试实体，+283）→ `f5afa0a90`（6.1.2~6.1.5 主体，+2303/−59，含 hiz.rs/occlusion.rs 两个新 vulkan 模块与两个新 shader）→ `1c1fd66d2`（OcclusionGate 单测，+38）。新增文件 6：两个 shader、hiz.rs、occlusion.rs、shapes.rs、test_entities.rs；扩展文件按家族归组：vulkan 侧（depth/frames/instance_table/perf/mod）、宿主编排（init/frame/mod）、读数与面板（remote/cull、remote/mod、remote/perf、overlay/ui、overlay/debug_window）、工具（tools/brp.py）。取舍要点：Hi-Z binding 走独立小布局不进 set2（冻结纪律优先）；遮挡标记独立 b6 + b3 合并（build_indirect 零触碰）；GpuTimer 4→5 位扩区间而非新建计时器。
+26 文件 +2752/−64，提交四笔：`5b482560c`（立案 docs）→ `4a759b5a2`（6.1.1 测试实体，+283）→ `f5afa0a90`（6.1.2~6.1.5 主体，+2303/−59，含 hiz.rs/occlusion.rs 两个新渲染模块与两个新 shader）→ `1c1fd66d2`（OcclusionGate 单测，+38）。新增文件 6：两个 shader、hiz.rs、occlusion.rs、shapes.rs、test_entities.rs；扩展文件按家族归组：渲染侧（depth/frames/instance_table/perf/mod）、宿主编排（init/frame/mod）、读数与面板（remote/features/cull、remote/mod、remote/census/perf、overlay/framework/ui、overlay/tool_window/culling）、工具（tools/brp.py）。取舍要点：Hi-Z binding 走独立小布局不进 set2（冻结纪律优先）；遮挡标记独立 b6 + b3 合并（build_indirect 零触碰）；GpuTimer 4→5 位扩区间而非新建计时器（后续段已扩到 8 位）。

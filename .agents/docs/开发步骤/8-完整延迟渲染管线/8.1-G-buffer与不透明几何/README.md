@@ -6,11 +6,11 @@
 
 **一句话说明**：本段把不透明几何从"直出颜色"改成"写 G-buffer"、透明拆成开工即 3D cluster 的 Clustered Forward 层并配 GPU bitonic 透明排序、为 motion vectors 附件留位——为 8.2 光照累积与步骤 9 SCGI 备好原料；本段不主张光照模型变化（仍单方向光对照）与任何画质提升，motion vectors 只留位不写内容（本体归步骤 9.x 前置施工件）。
 
-**当前状态：✅ 收官（2026-10-22 五任务全链施工：迁移 → G-buffer 多 pass → 深度重建 → 透明 Clustered Forward → bitonic 排序 → 总验收；判定线四条全过，详见[8.1.5 施工记录](8.1.5-施工记录：判定线总验收与计量.md)；待并回拍板）**。详见[施工计划：G-buffer与透明层拆解](施工计划：G-buffer与透明层拆解.md)。
+**当前状态：✅ 收官（2026-10-22 五任务全链施工：迁移 → G-buffer 多 pass → 深度重建 → 透明 Clustered Forward → bitonic 排序 → 总验收；判定线四条全过，详见[8.1.5 施工记录](8.1.5-施工记录：判定线总验收与计量.md)；已并回）**。详见[施工计划：G-buffer与透明层拆解](施工计划：G-buffer与透明层拆解.md)。
 
 ## 代码落点
 
-- **`render/pipeline/`**（2026-10-22 用户钉明，已落地）：`vulkan/` 20 文件已全量迁移入 `render/{assets,gpu,pipeline}`（git mv 保历史，c80b87c56），`vulkan/` 退役；8.1 新增 gbuffer.rs / fullscreen_pipeline.rs / cluster.rs 与五个 shader（gbuffer_write/composite、present_blit、cluster_build、transparent_collect/gather/sort/forward）。
+- **`render/` 五目录布局**（2026-10-22 用户钉明，已落地）：`vulkan/` 20 文件已全量迁移入 `render/{core,resident,passes,frame,stats}`（git mv 保历史，c80b87c56），`vulkan/` 退役；8.1 主体落 `render/passes/gbuffer/gbuffer_targets.rs`、`render/passes/lighting/cluster.rs`、`render/core/pipeline/fullscreen.rs` 与 `render/frame/record.rs`；新增七个 shader（gbuffer_write / gbuffer_composite / cluster_build / transparent_collect / transparent_gather / transparent_sort / transparent_forward）。present_blit 已删除，present 链由 8.4/8.6 的 `shaders/post/present_tonemap.wgsl` 接替。
 - 迁移逐文件去向与 shader 子目录钉明见[8.1.1 施工记录](8.1.1-施工记录：render迁移与G-buffer多pass首跑.md)。
 
 ## 任务面板

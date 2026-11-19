@@ -8,7 +8,7 @@
 
 ## 一句话结论
 
-Filament 保住颜色靠三层：**①曲线本身**（完整版 ACES 拟合，AP0/AP1 色域内工作 + glow 模块 + 红色修正 + 受控两级去饱和——viewer 默认的 ACES_LEGACY 也走这套，只是加 1.667 亮度增益）、**②EVILS 亮度缩放**（可选开关：只对亮度做 tone map，色度比例原样保留）、**③整条 color grading 烘 32³ 3D LUT**（白平衡/CDL/对比度/vibrance/saturation/曲线全链，saturate 与 OETF 只在最后）。本渲染器现行链只有裸 Narkowicz 逐通道拟合 + 曝光钉在其去饱和最猛的肩部，是"发灰"观感的主源。
+Filament 保住颜色靠三层：**①曲线本身**（完整版 ACES 拟合，AP0/AP1 色域内工作 + glow 模块 + 红色修正 + 受控两级去饱和——viewer 默认的 ACES_LEGACY 也走这套，只是加 1.667 亮度增益）、**②EVILS 亮度缩放**（可选开关：只对亮度做 tone map，色度比例原样保留）、**③整条 color grading 烘 32³ 3D LUT**（白平衡/CDL/对比度/vibrance/saturation/曲线全链，saturate 与 OETF 只在最后）。本渲染器在 8.6 施工前只有裸 Narkowicz 逐通道拟合 + 曝光钉在其去饱和最猛的肩部，是"发灰"观感的主源；该基线已由状态追记的完整 ACES 链取代。
 
 ## 现状定位（ash_renderer 侧证据）
 
@@ -57,7 +57,7 @@ Filament 把整条 grading 预烘焙进 32³ 3D LUT（QualityLevel 控维度）�
 
 - viewer 默认 `exposure = 0.0`（EV 刻度，2^EV 乘在 grading 链最前，Settings.h:203）——Filament 不用曝光救曲线，场景标定靠光度单位（方向光 lux + IBL）。
 - 对比度锚 `MIDDLE_GRAY_ACEScct`（`ColorGrading.cpp:838` contrastOffset 基准）——ACEScct 域中灰，非我们线性域 0.18 直搬。
-- 我们侧对应物：`EXPOSURE = 0.00032` 常量 + 20000 lx 满日照 + 800 lx ambient。8.6 需重校曝光锚点（典型受光面落线性段 ~0.5–0.8 而非肩部 1.7），并把亮度增益位与 Hill 拟合的量纲分开。
+- 我们侧对应物（8.6 施工前）：`EXPOSURE = 0.00032` 常量 + 20000 lx 满日照 + 800 lx ambient。8.6 已重校曝光锚点（典型受光面落线性段 ~0.5–0.8 而非肩部 1.7；结果见下一条），并把亮度增益位与 Hill 拟合的量纲分开。
 - **锚点与曲线选型是两个独立旋钮，锚点随曲线口径重标（8.6.3 实测钉）**：完整 ACES Hill 拟合线性段口径下 `EXPOSURE = 0.00016`——直射中灰 ≈0.25 HDR、白墙 ≈0.85 落线性段上沿，肩部压缩留给真高光；旧锚 0.00032 口径下白墙 ≈1.7 深入肩部（斜率 ~0.12），是受光面去饱和主源。曝光量纲牵动链：8.2.4 的 6.3e-4（预曝光口径）→ 8.4.1 的 0.00032（Narkowicz 肩部口径）→ 8.6.3 的 0.00016——每个锚点只对当时曲线口径成立，复跑双渲染器对照须按新锚点重标。
 
 ## 六、PBR_NEUTRAL 形状与决策
@@ -68,7 +68,7 @@ Khronos PBR Neutral（`ToneMapper.cpp:446-464`，出处 modelviewer.dev tone-map
 
 ## 七、对照差距表
 
-| 层 | Filament | ash_renderer 现状 | 8.6 主张 |
+| 层 | Filament | ash_renderer（8.6 施工前） | 8.6 主张（已施工） |
 |---|---|---|---|
 | 曲线 | 全拟合 ACES（AP0/AP1 + glow + 红修正 + Hill 拟合 + dim surround），LEGACY=同管线+1.667 增益 | 裸 Narkowicz 逐通道（Rec.709） | ✅ 替换为完整版，亮度增益位外露 |
 | 曝光 | EV 旋钮 + 光度单位标定，ACEScct 中灰锚 | EXPOSURE 常量，白墙钉在 1.7 HDR 肩部 | ✅ 锚点重校（受光面落线性段），随曲线替换重标 |

@@ -1,5 +1,7 @@
 # bevy_remote：BRP远程协议与自定义方法
 
+> 行号说明：行号基于 Bevy 0.20.0-dev 本地快照（2026-10 时点），上游提交后可能漂移，以符号名为准。
+
 > 定位：**侦察篇**——2026-09-22 用户问"Bevy 有没有工具能完全展现 World 里所有 Entity 和 Component"，顺藤摸到 `bevy_remote` 并通读源码。**未来 Web Console 的候选底座**：本篇先存档结论，开工时在此基础上展开，不重复侦察。
 > ⚠ 时效警告：0.20 把方法名从旧版 `bevy.query` 风格**整体改名**为 `world.*` 系列，网上旧资料照抄会得到 METHOD_NOT_FOUND；本篇全部核对于本仓库 0.20.0-dev（`crates/bevy_remote/`）。
 
@@ -21,7 +23,7 @@
 
 请求格式标准 JSON-RPC 2.0（`BrpRequest`，`lib.rs:1122`）；响应带 `result` 或 `error`，错误码 = 标准 JSON-RPC 段 + 自定义段（如 `-23401 ENTITY_NOT_FOUND`，`lib.rs:1469` 起）。
 
-## 3. 内置方法全景（0.20 命名，`builtin_methods.rs:46-121` 常量）
+## 3. 内置方法全景（0.20 命名；主族常量见 `builtin_methods.rs:46-121`，stepping 见 `stepping_methods.rs`）
 
 | 分组 | 方法 | 说明 |
 |------|------|------|
@@ -33,6 +35,7 @@
 | 资源 | `world.list_resources` / `get_resources` / `insert_resources` / `remove_resources` / `mutate_resources` | 资源同款读写 |
 | 订阅流 | `world.get_components+watch` / `list_components+watch` / `observe+watch` | watching 型 handler：无变化返回 None 不响应，有变化才推——远程订阅 |
 | 元信息 | `registry.schema` / `rpc.discover` / `app.info` / `diagnostics.list` · `get` / `schedule.list` / `schedule.graph` | 反射类型 schema、可用方法发现、诊断、调度器结构 |
+| 调试步进 | `stepping.status` / `stepping.enable` / `stepping.disable` / `stepping.step_frame` / `stepping.continue_frame` | `bevy_debug_stepping` feature 下的帧步进控制 |
 
 ## 4. 反射边界："完全展现"的口径
 
@@ -79,7 +82,7 @@ handler 能力上限：**可独占 `&mut World`**——内置的 `process_remote
 2. **跨域已留口**：`Headers`/`HostHeaders` 资源给 HTTP 响应加头，源码 doc 里就有 `cors_headers` 示例（`http.rs:184-194`）——`RemoteHttpPlugin::default().with_headers(Headers::new()...)`。⚠ CORS 预检（OPTIONS）是否完备**未验证**，开工先测。
 3. **安全边界**：默认只绑 loopback、**完全无鉴权**——console 只能开发期本地用，绝不 `with_address` 绑 `0.0.0.0` 对外。
 4. **自定义方法当"业务接口"**：内置方法是裸 ECS CRUD，让前端拼反射类型名很脆；渲染器内部状态（bindless 池占用、FlightHelmet 到货统计、collect_scene 采集范围）应注册成自定义方法暴露——前端只调语义接口。
-5. **Unity 类比**：相当于把 Unity Editor attach 到 Player 的通道（Hierarchy/Inspector 走网络读运行时状态）协议化、无头化。官方 Bevy Editor 将来大概率骑在 BRP 上——见《[Bevy编辑器路线与代码热重载](../../开发步骤/1-熟悉Bevy结构/材料/Bevy编辑器路线与代码热重载.md)》（该篇 §"BRP 基建现状"是编辑器路线视角，协议细节以本篇为准；其"调试面板可用"的判断就是本篇 Web Console 落点的出处）。
+5. **Unity 类比**：相当于把 Unity Editor attach 到 Player 的通道（Hierarchy/Inspector 走网络读运行时状态）协议化、无头化。官方 Bevy Editor 将来大概率骑在 BRP 上——见《[Bevy编辑器路线与代码热重载](../../开发步骤/1-熟悉Bevy结构/材料/Bevy编辑器路线与代码热重载.md)》（该篇 §2/§6 是编辑器路线视角，协议细节以本篇为准；其"调试面板可用"的判断就是本篇 Web Console 落点的出处）。
 
 ## 7. 启用成本与源码索引
 

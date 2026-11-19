@@ -20,14 +20,14 @@ Vulkan 给的另外两类东西都是**契约，不是能力**：feature 位（m
 
 ## 二、谁在驱动：帧级常驻的自动链，不是人工触发
 
-build_indirect 的 dispatch 是**帧级常驻的自动驱动**。`frames.rs::record_frame` 里渲染进场之前固定顺序两个 dispatch：
+build_indirect 的 dispatch 是**帧级常驻的自动驱动**。`src/render/frame/record.rs::record_frame` 里渲染进场之前固定顺序两个 dispatch：
 
 ```rust
-if let Some(cull) = &draw.cull         { cull::record(...) }      // ① 剔除：写标记
-if let Some(indirect) = &draw.indirect { indirect::record(...) } // ② 组装：写命令
+if let Some(cull) = &features.frustum_cull { cull::record(...) }      // ① 剔除：写标记
+if let Some(indirect) = &features.indirect { indirect::record(...) } // ② 组装：写命令
 ```
 
-`draw_frame` 每帧组装 `FrameDraw` 时决定要不要录：**在场行数 > 0 就录，= 0（空场/全暂缓）整个不出现在命令缓冲里**——count=0 短路，不需要谁记得去调。它和 cull 同位置（图形命令缓冲内、渲染进场之前）、同族同队列，依赖靠命令缓冲顺序 + 屏障排。
+`draw_frame` 每帧组装 `RenderFeatures` 时决定要不要录：**在场行数 > 0 就录，= 0（空场/全暂缓）整个不出现在命令缓冲里**——count=0 短路，不需要谁记得去调。它和 cull 同位置（图形命令缓冲内、渲染进场之前）、同族同队列，依赖靠命令缓冲顺序 + 屏障排。
 
 值得记录的是**为什么不并进 cull 顺带写命令**（计划待决 1 的落定），这个取舍在后续段还会遇到同类问题：
 
@@ -53,7 +53,7 @@ typedef struct VkDrawIndexedIndirectCommand {
 }                              // 20B，stride 需 4 的倍数
 ```
 
-驱动按**固定偏移**硬解这 20B。WGSL 侧 `IndirectCommand` 只是这个 C 结构的镜像（5×u32 同序，vertex_offset 用 `bitcast<i32>` 塞同 4 字节——池引脚值域恒正，位型对上即可），`indirect_command_layout_mirror` 单测钉镜像关系；错一位，GPU 画出来就是乱的或越界。
+驱动按**固定偏移**硬解这 20B。WGSL 侧 `IndirectCommand` 只是这个 C 结构的镜像（5×u32 同序，vertex_offset 用 `bitcast<i32>` 塞同 4 字节——池引脚值域恒正，位型对上即可）；历史单测 `indirect_command_layout_mirror` 当前已无同名测试，布局以 `INDIRECT_COMMAND_SIZE = 20`（`render/resident/tables/instance_table.rs`）与 WGSL 结构对齐为准——错一位，GPU 画出来就是乱的或越界。
 
 **ObjectRecord = 完全私有契约**：对象表是我们自己的 storage buffer，48B 布局（三池引脚/材质槽/局部 AABB）是我们定的，Vulkan 对内容零要求（只要求 binding 是 STORAGE_BUFFER）。Rust 侧 `pack_object_record` 手工排字节、WGSL 侧抄同一份结构，两份靠 `ObjectRecordLayout` 静态断言互证——改布局 Vulkan 不会拦，只有我们自己的互证断言在管。
 

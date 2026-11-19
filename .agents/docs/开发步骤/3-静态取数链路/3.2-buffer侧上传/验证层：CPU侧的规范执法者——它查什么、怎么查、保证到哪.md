@@ -56,7 +56,7 @@ Vulkan 与 GL/D3D11 最大的分野：**合法性是应用方的义务**。规�
 ## §6 本项目口径
 
 - V1 四态记录（缺陷文档 §10）里"已验证无告警"的含金量 = 执法者确认无此类违规；**裸奔的运行一律记"不构成证据"**。
-- 同步验证在 Context 与探针内常开（`context.rs`/`timeline_probe.rs` 的 `VkValidationFeaturesEXT`），3.4 帧时间受限时一行降级。
+- 同步验证在 Context 内常开（`context.rs` 的 `VkValidationFeaturesEXT`；`timeline_probe.rs` 已随 `5edb4275a` 退役），3.4 帧时间受限时一行降级。
 - 3.3 bindless 起启用 GPU-AV 档位。
 
 关联：[已实现缺陷与修复验收](已实现缺陷与修复验收.md)（D1~D6 与 V1 的全部实证）· [执行路线图](../../学习目标实现步骤.md)（当前执行闸门）· [Timeline 信号量机制篇](Timeline信号量：用法、与阻塞的区别、现代引擎的做法.md)（启用前提与现代引擎对照）

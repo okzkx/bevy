@@ -13,14 +13,14 @@
 
 | 件 | 位置 | 一句话职责 |
 |---|---|---|
-| `cull.wgsl` | `shaders/` | compute 单入口 `cs_main`：读 set2 三表 + push 六平面，写 `marks[slot]` |
-| `vulkan/cull.rs` | `src/vulkan/` | CullPass（compute 管线+layout）+ `frustum_planes`/`aabb_visible`（CPU 参照，库测试钉语义）+ `pack_cull_push` + `record`（录制）+ `CullSettings`/`CullDiagnostics`（开关与诊断账面） |
-| 标记环（第四族） | `vulkan/instance_table.rs` | `mark_rings`：HOST_VISIBLE ×2 帧槽 + set2 扩 b3（COMPUTE-only read_write storage，描述符 init 一次写入） |
-| cull 录制点 | `vulkan/frames.rs` | `FrameDraw.cull`（Option）+ `record_frame` 渲染进场前 dispatch + 5.3 预置屏障 |
+| `cull.wgsl` | `shaders/gpu_driven/` | compute 单入口 `cs_main`：读 set2 三表 + push 六平面，写 `marks[slot]` |
+| `render/passes/visibility/cull.rs` | `src/render/passes/visibility/` | CullPass（compute 管线+layout）+ `frustum_planes`/`aabb_visible`（CPU 参照，库测试钉语义）+ `pack_cull_push` + `record`（录制）+ `CullSettings`/`CullDiagnostics`（开关与诊断账面） |
+| 标记环（第四族） | `render/resident/tables/instance_table.rs` | `mark_rings`：HOST_VISIBLE ×2 帧槽 + set2 扩 b3（COMPUTE-only read_write storage，描述符 init 一次写入） |
+| cull 录制点 | `driver/host/frame.rs` + `render/frame/record.rs` | `RenderFeatures.frustum_cull`（Option）+ `record_frame` 渲染进场前 dispatch + 5.3 预置屏障 |
 | 剔除编排 | `driver/host/frame.rs` | draw_frame 步骤 4a-2：开关裁决 →（关）host 全可见填充 →（开）pack push + dispatch 输入 → 诊断读数落账面 |
 | CullPass 创建/拆除 | `driver/host/init.rs` | init 链 GraphicsPipeline 之后建（借 set2 layout），teardown 反序拆 |
-| 面板剔除段 | `overlay/windows/debug_window.rs` | checkbox（写 CullSettings）+ 读数行（只读 CullDiagnostics） |
-| BRP 方法族 | `remote/cull.rs` + `tools/brp.py` | `cull-stats`（GPU vs CPU 逐实体对照）/ `cull-set`（开关） |
+| 面板剔除段 | `overlay/tool_window/culling.rs` | checkbox（写 CullSettings）+ 读数行（只读 CullDiagnostics） |
+| BRP 方法族 | `remote/features/cull.rs` + `tools/brp.py` | `cull-stats`（GPU vs CPU 逐实体对照）/ `cull-set`（开关） |
 
 ## 2. 逐时刻走读（稳态帧：相机动、场景静）
 
@@ -77,19 +77,19 @@ GPU（异步）
 ## 5. 代码改动简要解析（git show --stat 实数：11 改 3 增，+851/−31）
 
 **新增**：
-- `ash_renderer/shaders/cull.wgsl` —— compute 着色器本体；`@group(0)`（组号随 compute 管线布局，非图形布局的 set2 位次——首跑 VUID 订正钉在头注释里）。
-- `ash_renderer/src/vulkan/cull.rs` —— 本段核心：管线 + 参照实现 + push 排布 + 录制 + 开关/诊断账面，五块合一处；`frustum_planes` 用 `to_cols_array` 手提数学行（列主序 a[i*4+j]）。
-- `ash_renderer/src/remote/cull.rs` —— BRP 两方法（对照/开关），红线边界写在模块文档。
+- `ash_renderer/shaders/gpu_driven/cull.wgsl` —— compute 着色器本体；`@group(0)`（组号随 compute 管线布局，非图形布局的 set2 位次——首跑 VUID 订正钉在头注释里）。
+- `ash_renderer/src/render/passes/visibility/cull.rs` —— 本段核心：管线 + 参照实现 + push 排布 + 录制 + 开关/诊断账面，五块合一处；`frustum_planes` 用 `to_cols_array` 手提数学行（列主序 a[i*4+j]）。
+- `ash_renderer/src/remote/features/cull.rs` —— BRP 两方法（对照/开关），红线边界写在模块文档。
 
 **扩展**（按数据流顺序）：
-- `vulkan/context.rs`（+9）—— 选族过滤加 COMPUTE 硬条件 + 就绪日志钉明（闸门①）。
-- `vulkan/instance_table.rs`（+74）—— 第四族标记环 + set2 b3 + `mark_ring` 访问器；模块文档 hazard 表加一行。
-- `vulkan/frames.rs`（+16）—— `FrameDraw.cull` + `record_frame` 渲染前 dispatch/barrier（消费 cull.rs 自由函数，不持 CullPass 句柄）。
+- `render/core/device/context.rs`（+9）—— 选族过滤加 COMPUTE 硬条件 + 就绪日志钉明（闸门①）。
+- `render/resident/tables/instance_table.rs`（+74）—— 第四族标记环 + set2 b3 + `mark_ring` 访问器；模块文档 hazard 表加一行。
+- `driver/host/frame.rs` + `render/frame/record.rs`（+16）—— `RenderFeatures.frustum_cull` + `record_frame` 渲染前 dispatch/barrier（消费 cull.rs 自由函数，不持 CullPass 句柄）。
 - `driver/host/frame.rs`（+65）—— 步骤 4a-2 全部编排（开关裁决/填充/打包/诊断）+ FrameInput 三字段。
 - `driver/host/init.rs`（+17）、`driver/host/mod.rs`（+3）—— CullPass 建链/拆链 + 两个 init_resource。
-- `vulkan/mod.rs`（+8）—— cull 模块导出面。
-- `overlay/windows/debug_window.rs`（+24）、`overlay/framework/ui.rs`（+7）—— 面板剔除段。
+- `render/mod.rs`（+8）—— cull 模块导出面。
+- `overlay/tool_window/culling.rs`（+24）、`overlay/framework/ui.rs`（+7）—— 面板剔除段。
 - `remote/mod.rs`（+7）—— 方法注册。
 - `tools/brp.py`（+15）—— `cull-stats`/`cull-set` 子命令。
 
-**刻意不做的**：绘制路径零改动（DrawList/图形管线/debug_draw.wgsl 都没碰——标记不进绘制是本段判定线）；上传链零改动（标记环不经 staging）；帧 UBO 零扩容（平面走 push）。
+**刻意不做的**：绘制路径零改动（DrawList/图形管线/场景绘制 shader（现 `shaders/scene/`）都没碰——标记不进绘制是本段判定线）；上传链零改动（标记环不经 staging）；帧 UBO 零扩容（平面走 push）。

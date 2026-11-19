@@ -7,7 +7,7 @@ Hi-Z 剔除之后 CPU 不知道实际画了几个实例，`vkCmdDrawIndexedIndir
 - **两个数不同账**：`drawCount`（命令环长度 N，剔除前）由 CPU 录制时给出 = 在场账本可绘行数；有效绘制数 V = `Σ(instanceCount > 0)`（剔除后）**只存在于显存**。`vkCmdDrawIndexedIndirect` 只要求 CPU 知道 N，不要求知道 V——两者同时成立，无矛盾。
 - **`instanceCount = 0` 的管线语义**：该次 draw 不产生任何顶点着色器调用、不生成三角形、不进入光栅化——几何侧 + 片元侧全省。被剔除实例只付 GPU 前端解析一条 20B 命令的成本（百 ns 级）。
 - **CPU 不知道 V 是设计使然**：N 来自 CPU 自己的账本（合法），V 若跨回 CPU 就是决策权回流（回读墙）；诊断读数（`cull_stats`）只进计量不进决策（读数不投票）。
-- **记录单位 = 实例**：对象表 1 行（slot）= marks 1 位 = 命令环 1 行，`instanceCount ∈ {0,1}` 恒成立；同 mesh 的多个实例是对象表多行，各占各的 slot，可见性逐实例裁决。
+- **记录单位 = 实例**：对象表 1 行（slot）= marks 1 个 u32 标记（4B）= 命令环 1 行，`instanceCount ∈ {0,1}` 恒成立；同 mesh 的多个实例是对象表多行，各占各的 slot，可见性逐实例裁决。
 - **命令内容的产地**：5 个字段没有一个在录制期由 CPU 写进命令——CPU 提前发布原料行（在场环/对象表/LOD 表），GPU compute 拼装，图形执行期按命令自取。`vkCmdDrawIndexedIndirect` 录制期只递 buffer 句柄 + offset + `drawCount` + stride。
 - **升级判定线**：只有把命令环压缩成"仅可见行"（环长 = V）时，条数才变成只有 GPU 知道，才需要换 `vkCmdDrawIndexedIndirectCount`（`draw_indirect_count` 特性）。当前规模不值得。
 
@@ -42,7 +42,7 @@ GPU 前端从 `buffer[offset]` 起顺序消费 `drawCount` 个 `VkDrawIndexedInd
 ## §3 身份传递：记录单位 = 实例，firstInstance 内嵌
 
 ```
-1 个实体（ECS） = 对象表 1 行（slot）= marks 1 位 = 命令环 1 行（instanceCount ∈ {0,1}）
+1 个实体（ECS） = 对象表 1 行（slot）= marks 1 个 u32（4B）= 命令环 1 行（instanceCount ∈ {0,1}）
 ```
 
 - 可见性记录的单位不是 mesh，是**实例**——同 mesh 的 N 个实例是对象表的 N 行，各占各的 slot，各自 model 矩阵，marks/命令环逐行独立，Hi-Z 逐实例裁决（"B 处的桥墩被挡、A/C 可见"）。
@@ -68,14 +68,14 @@ CPU 发布的是**数据行本体**（不是指针——显存里没有指回 CP
 
 ```
 CPU 权威知识（帧首/事件驱动发布）
-  在场环：可绘槽号数组（write_presence_ring，drawlist.rs:238）
-  LOD 表环：pack_lod_entry(first_index, index_count, vertex_base)（:272）
+  在场环：可绘槽号数组（write_presence_ring，drawlist.rs:272）
+  LOD 表环：pack_lod_entry(first_index, index_count, vertex_base)（drawlist.rs:307）
   对象表/材质环：model 矩阵、mesh 引用、材质槽
 GPU 现场知识
   cull compute：视锥 + Hi-Z → marks（只有 GPU 知道）
         ▼
 阶段一（组装）  build_indirect：在场环 × marks × 对象表/LOD 表 → 命令环
-        │ HANDOFF 屏障（DRAW_INDIRECT + INDIRECT_COMMAND_READ，record/compute.rs:32）
+        │ HANDOFF 屏障（DRAW_INDIRECT + INDIRECT_COMMAND_READ，record/compute.rs:33）
 阶段二（执行）  图形前端逐条消费命令：firstInstance → 对象表行；
         firstIndex/vertexOffset → 顶点/索引池；bindless 槽号 → 纹理表
 ```
@@ -131,11 +131,11 @@ Unity 的间接绘制 API 表面同形，语义不同——**buffer 内容和 Vu
 ## 涉及源码 / 来源
 
 - `ash_renderer/shaders/common/mesh.wgsl`——id 链消费端：`mesh_vertex` 按 `instance_index` 读对象表/模型环，`sample_surface` 材质记录 → bindless 大数组
-- `ash_renderer/shaders/build_indirect.wgsl:63-70`——instanceCount 产地（可见/透明/被剔三态 select）
-- `ash_renderer/src/render/frame/frame_draw.rs:327`——`cmd_draw_indexed_indirect(cb, buf, 0, indirect_count, 20B)`
-- `ash_renderer/src/driver/host/frame.rs:204`——`indirect_count = assembly.slots.len()`（N 的出处）
-- `ash_renderer/src/render/passes/visibility/indirect.rs:9-14`——条数判定线、firstInstance 携带槽号、instanceCount 恒 1/0
-- `ash_renderer/src/driver/host/drawlist.rs:238/:272`——在场环发布、mesh 偏移打包（CPU 原料发布）
-- `ash_renderer/src/render/resident/tables/instance_table.rs:15`——命令环角色与写读权
+- `ash_renderer/shaders/gpu_driven/build_indirect.wgsl:63-71`——instanceCount 产地（可见/透明/被剔三态 select）
+- `ash_renderer/src/render/frame/record.rs:235`——`cmd_draw_indexed_indirect(cb, buf, 0, indirect_count, 20B)`
+- `ash_renderer/src/driver/host/frame.rs:226`——`indirect_count = assembly.slots.len()`（N 的出处）
+- `ash_renderer/src/render/passes/visibility/indirect.rs:9-12`——条数判定线、firstInstance 携带槽号、instanceCount 恒 1/0
+- `ash_renderer/src/driver/host/drawlist.rs:272/:307`——在场环发布、mesh 偏移打包（CPU 原料发布）
+- `ash_renderer/src/render/resident/tables/instance_table.rs:14`——命令环角色与写读权
 - Vulkan API 形状与 Unity 对照：Vulkan 1.3 规范 `VkDrawIndexedIndirectCommand` 定义；Unity 官方文档 `Graphics.DrawMeshInstancedIndirect`（bufferWithArgs 五整数、obsolete 指向 RenderMeshIndirect）与 `Graphics.RenderMeshIndirect`（IndirectDrawIndexedArgs 结构体、commandCount 多命令、同一 Mesh）——2026-11-04 核实
 - 姊妹篇：[GPU-Driven 本质](GPU-Driven%20本质.md)（决策点后移与控制面/数据面分家）、[为什么没有全上 GPU 驱动](为什么没有全上%20GPU%20驱动.md)（读数不投票与回读墙）、6.1 段《遮挡剔除的成本、覆盖与粒度》《Hi-Z 遮挡原理》（成本/粒度/滞后正本）

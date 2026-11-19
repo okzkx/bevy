@@ -17,10 +17,10 @@ ECS 侧（跨帧账本 InstanceLedger，scene/mechanism/assets/ledger.rs）
   model_dirty[2]: 模型环待写标记（按帧槽奇偶两套）
   stats: 扫描/处理/上传字节/槽位存量（BRP increment_stats 读数源）
 
-GPU 存储侧（InstanceTables，vulkan/instance_table.rs）
+GPU 存储侧（InstanceTables，render/resident/tables/instance_table.rs）
   对象表  DEVICE_LOCAL 131072 槽 × 48B   写一次/槽；更新=新槽+停尸房
   模型环  HOST_VISIBLE ×2 帧槽 × 64B/槽  draw_frame 每帧增量重写
-  材质环  HOST_VISIBLE ×2 帧槽 × 32B/槽  draw_frame 每帧全量重写
+  材质环  HOST_VISIBLE ×2 帧槽 × 64B/槽  draw_frame 每帧全量重写
   实例槽 free list + 停尸房（排空=等全部帧槽 fence）
   材质槽 bump-only（AssetId → 槽号，跨帧稳定，不回收）
 
@@ -28,8 +28,9 @@ GPU 存储侧（InstanceTables，vulkan/instance_table.rs）
   set0 bindless 双表（3.3 原样）｜set1 每帧 UBO（相机/灯光，4.x 形状不变）
   set2 b0 对象表 / b1 本帧模型环 / b2 本帧材质环（只读 storage）
 
-着色器（debug_draw.wgsl）
-  push 4B = 实例槽号 → VS: objects[slot] + models[slot]
+着色器（shaders/scene/gbuffer/gbuffer_write.wgsl + shaders/common/instance.wgsl）
+  无逐 draw push（5.3 起槽号走 firstInstance）
+  VS 按 @builtin(instance_index) 读 objects[slot] + models[slot]
                      → flat varying 材质槽号 → FS: materials[slot]
 ```
 
@@ -45,12 +46,12 @@ GPU 存储侧（InstanceTables，vulkan/instance_table.rs）
 
 | 文件 | 一句话职责 |
 |---|---|
-| `vulkan/instance_table.rs` | 三份 buffer + 槽位账 + set2 描述符 + 打包函数 + 保守包围盒纯函数（627 行，本段主体） |
-| `vulkan/depth.rs` | DepthTarget/DEPTH_FORMAT 从 frames.rs 独立（3.6 P1 摊薄兑现位） |
+| `render/resident/tables/instance_table.rs` | 三份 buffer + 槽位账 + set2 描述符 + 打包函数 + 保守包围盒纯函数（627 行，本段主体） |
+| `render/core/target/depth.rs` | DepthTarget/DEPTH_FORMAT 从 `driver/host/frame.rs` 独立（3.6 P1 摊薄兑现位） |
 | `driver/host/drawlist.rs` | DrawList 槽位枚举 + 双环写入（host 侧编排，摊薄新家） |
-| `vulkan/mesh_convert.rs`（扩） | 顶点交错同一遍扫出局部 AABB |
-| `vulkan/pool.rs`（扩） | MeshSlot 携带局部 AABB（commit/replace 增参） |
-| `vulkan/resources.rs`（扩） | `BufferRole::DeviceStorage`（DEVICE_LOCAL storage 表角色） |
+| `render/resident/assets/mesh_convert.rs`（扩） | 顶点交错同一遍扫出局部 AABB |
+| `render/resident/assets/pool.rs`（扩） | MeshSlot 携带局部 AABB（commit/replace 增参） |
+| `render/core/device/memory/role.rs`（扩） | `BufferRole::DeviceStorage`（DEVICE_LOCAL storage 表角色） |
 
 ## 3. 逐时刻走读：四类变更
 
@@ -63,11 +64,11 @@ Last·前段   flush_uploads：
   ② 行扫描——mesh 驻留 ✓ 材质容器在：ensure_material_slot(材质槽 bump)
      → alloc_object_slot（free list 优先）→ 旧槽(若有)进停尸房
      → 记录 48B 进 staging（同批）→ bound 落行 → mark_model_dirty（两套奇偶）
-  ③ 合批提交 → 票据；票据值随 FrameDraw.wait_ticket 被图形提交在 GPU 侧等待
+  ③ 合批提交 → 票据；票据值随 `UploadWait`（`RenderFeatures.upload_wait`）被图形提交在 GPU 侧等待
 Last·draw_frame（wait_for_slot 之后）
-  ④ DrawList 槽位枚举：行 → instance_slot + MeshSlot 引脚 → DrawCall{instance,引脚}
+  ④ DrawList 槽位枚举：行 → instance_slot + MeshSlot 引脚 → 可绘槽列表（DrawList 组装缓存）
   ⑤ 模型环增量写（本帧奇偶集）+ 材质环全量写（可绘行材质从容器现读）
-  ⑥ 录制：三集绑定 + 每 draw push 4B 槽号 + cmd_draw_indexed
+  ⑥ 录制：三集绑定 + 一次 cmd_draw_indexed_indirect（命令环；5.3 起无逐 draw push）
   下帧：另一奇偶集的环补写（新槽的模型在两个帧槽各就位一次）
 ```
 
@@ -89,19 +90,21 @@ PostUpdate 传播后 `update_ledger` 只写 `row.model`（不进 dirty，不过�
 ## 4. 失败与稳态
 
 - **失败**：flush 内槽位/材质槽分配失败 = 容量耗尽（131072/65536 上界），Tier② 报错不截断；环写失败 = host-visible 契约被打破，Tier②。停尸房排空失败保留下帧重试（旧槽多活一帧，无悬空）。
-- **稳态**：脏集空 → flush 空批早退（零盘点零上传保持）；DrawList 槽位枚举 O(在场行) 走访 + 材质环 O(唯一材质数) 重写 + 模型环零写入；push 每帧 4B×draw 数（与对象数线性，但这是索引标识不是参数——判定线 1 的"参数本体零推送"）。
+- **稳态**：脏集空 → flush 空批早退（零盘点零上传保持）；DrawList 槽位枚举 O(在场行) 走访 + 材质环 O(唯一材质数) 重写 + 模型环零写入；逐 draw push = 0（5.3 起命令走 indirect，槽号经 firstInstance 传递——判定线 1 的"参数本体零推送"）。
 - **5.2/5.3 的接口预留**：对象记录里的局部 AABB + set2 的 COMPUTE stage 声明是给 compute 剔除的；记录里的范围三参数是给 indirect 写参的。
 
 ## 5. 读数口
 
-BRP `increment_stats` 的 `gpu_tables` 段：object_slots/object_capacity/object_graveyard/object_retired_total/material_slots/material_capacity/push_bytes_per_draw=4；上传日志的"对象记录 N 条(换槽重写)"与"实例槽 x/y(停尸房 z)、材质槽 m/n"。
+BRP `increment_stats` 的 `gpu_tables` 段：object_slots/object_capacity/object_graveyard/object_retired_total/material_slots/material_capacity/push_bytes_per_draw=0；上传日志的"对象记录 N 条(换槽重写)"与"实例槽 x/y(停尸房 z)、材质槽 m/n"。
 
 ## 6. 代码改动简要解析（`git show --stat` 9c78746d5，17 文件 +1321/−303）
 
+> 以下为 5.1 当时改动实数；逐 draw push 已在 5.3 退役（现值 0），文件路径按现行结构标注。
+
 **新增（3 件，925 行）**
 
-- `vulkan/instance_table.rs`（+627）——三表 + 槽位账 + set2 + 打包 + 保守 AABB + 单测 4 枚；本段的全部新 Vulkan 结构。
-- `vulkan/depth.rs`（+144）——DepthTarget/DEPTH_FORMAT 从 frames.rs 迁出（摊薄，纯移动无语义变化）。
+- `render/resident/tables/instance_table.rs`（+627）——三表 + 槽位账 + set2 + 打包 + 保守 AABB + 单测 4 枚；本段的全部新 Vulkan 结构。
+- `render/core/target/depth.rs`（+144）——DepthTarget/DEPTH_FORMAT 从 `driver/host/frame.rs` 迁出（摊薄，纯移动无语义变化）。
 - `driver/host/drawlist.rs`（+154）——槽位枚举 + 模型/材质双环写入（frame.rs 摊薄的新家）。
 
 **扩展（8 件）**
@@ -109,15 +112,15 @@ BRP `increment_stats` 的 `gpu_tables` 段：object_slots/object_capacity/object
 - `driver/upload.rs`（+127/−21）——停尸房段接管 freed_slots、行扫描内记录身份比对与换槽、staging 排布记录段、计量与日志分列。
 - `scene/mechanism/assets/ledger.rs`（+80/−18）——行扩展（slot/bound）、freed_slots 交接账、model_dirty 双奇偶集、update_ledger 三入口适配。
 - `driver/host/frame.rs`（+93/−68）——DrawList 组装外迁 drawlist、双环写入插入点、set2 接线；闸门/acquire/UBO 编排原样。
-- `vulkan/resources.rs`（+14/−2）——`BufferRole::DeviceStorage`（usage/必需属性/优先属性三表各一行）。
-- `vulkan/pool.rs`（+14/−8）——MeshSlot.local_aabb、commit/replace 增参（too_many_arguments 显式豁免）。
-- `vulkan/mesh_convert.rs`（+11）——局部 AABB 同遍扫出。
-- `remote/objects.rs`（+17/−4）——increment_stats 增 `gpu_tables` 段。
+- `render/core/device/memory/role.rs`（+14/−2）——`BufferRole::DeviceStorage`（usage/必需属性/优先属性三表各一行）。
+- `render/resident/assets/pool.rs`（+14/−8）——MeshSlot.local_aabb、commit/replace 增参（too_many_arguments 显式豁免）。
+- `render/resident/assets/mesh_convert.rs`（+11）——局部 AABB 同遍扫出。
+- `remote/edit/objects.rs`（+17/−4）——increment_stats 增 `gpu_tables` 段。
 - `driver/host/init.rs`（+25/−10）——InstanceTables 进创建链/拆除链、管线建链增 set2 layout 参数。
 
 **收缩/替换（6 件）**
 
-- `vulkan/pipeline.rs`（+84 行中多为注释/日志，PushLayout+pack_push+PushData 约 −70 行）——push 冻结表 96B→4B，96B 打包器整体退役；layout 三集。
-- `vulkan/frames.rs`（−161 净）——DepthTarget 迁出 + DrawCall 换 instance u32 + push 4B + 三集绑定。
-- `shaders/debug_draw.wgsl`（+59/−31）——三表读取、flat varying 材质槽、PushParams 缩 4B。
-- `vulkan/mod.rs`、`driver/host/mod.rs`、`examples/upload_probe.rs`——重出口/挂线/新参适配。
+- `render/core/pipeline/`（graphics.rs 等，+84 行中多为注释/日志，PushLayout+pack_push+PushData 约 −70 行）——push 冻结表 96B→4B，96B 打包器整体退役；layout 三集。
+- `driver/host/frame.rs`（−161 净）——DepthTarget 迁出 + DrawCall 换 instance u32 + push 4B + 三集绑定。
+- `shaders/common/instance.wgsl` + `shaders/scene/gbuffer/gbuffer_write.wgsl`（+59/−31）——三表读取、flat varying 材质槽、PushParams 缩 4B。
+- `render/mod.rs`、`driver/host/mod.rs`、`examples/upload_probe.rs`——重出口/挂线/新参适配。

@@ -7,7 +7,7 @@
 | 篇 | 文件 | 定位 |
 |---|---|---|
 | 宪法篇 | [错误处理体系：两Tier思想与优雅退出.md](错误处理体系：两Tier思想与优雅退出.md) | 思想与架构：两 Tier（非必要不 panic）、Tier①/② 落地全景、统一错误通道（§3）、实测证据与后续纪律 |
-| 工具篇 | [错误处理语法糖：frenderer syntax与ash_renderer移植.md](错误处理语法糖：frenderer syntax与ash_renderer移植.md) | frenderer 宏糖全图谱与移植定案：控制流宏 9 件、`LogDebug`/`ResultTierExt` 两 Tier 分流、与 bevy 的分工 |
+| 工具篇 | [错误处理语法糖：frenderer syntax与ash_renderer移植.md](错误处理语法糖：frenderer syntax与ash_renderer移植.md) | frenderer 宏糖历史图谱与移植定案（2026-09-21）；**现行（2026-11-03 起）**：`common/syntax.rs` = 两个 trait（`ResultTierExt` 的 or_warn/or_fatal、`OptionTierExt` 的 ok_or_fatal/ok_or_warn）+ 3 个自由函数/结构（`fatal`、`warning`、`OnceLog`）+ 1 个宏（`unwrap_or_return!`）；`LogDebug`/`WarnOrDefault`/`UnwrapPanic` 与 8 件控制流宏均已退役 |
 | 定案篇 | [代码结构优化：统一错误通道定案.md](代码结构优化：统一错误通道定案.md) | 统一错误通道设计与落地清单：`tier_handler` + `FATAL` + `fatal_gate` 基建、判定线与坑钉 |
 | 规范 | [`../../rules/System错误处理规范.md`](../../rules/System错误处理规范.md) | 可执行约束：签名/判定线/Severity 契约/糖家族/禁令（rules 层，代码评审按它对表） |
 
@@ -16,4 +16,4 @@
 ## 状态
 
 - 2026-10-10 定案同日开工：基建三件 + `draw_frame` 拆壳落地并冒烟；
-- 2026-10-10 全库推广：`upload.rs` 十处、`init_vulkan`、`frames.rs` 两处 panic、BRP 不变式 expect 全部收敛到统一通道，方案升格为规范（rules 层）—— Tier② 就地裁决与 AppExit 写点在业务 system 里已绝迹。
+- 2026-10-10 全库推广：`upload.rs` 十处、`init_vulkan`、`render/frame/record.rs` 两处 panic、BRP 不变式 expect 全部收敛到统一通道，方案升格为规范（rules 层）—— Tier② 就地裁决与 AppExit 写点在业务 system 里已绝迹。

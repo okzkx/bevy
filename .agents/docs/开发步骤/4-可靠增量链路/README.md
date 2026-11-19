@@ -2,6 +2,24 @@
 
 对应[执行路线图](../学习目标实现步骤.md)。本 README 是步骤索引与材料目录；各段任务面板在段目录 README（开工时立），段施工计划随立案入段目录。
 
+> **代码落点以当前 `ash_renderer/src` 为准（2026-11 目录重构后）**：本步骤的历史施工记录/计划正文保留当时路径与行号；现行代码已迁入 `src/render/{passes,resident}`、`src/driver`、`src/remote/{edit,features,census}`，场景机制仍在 `src/scene/mechanism/{assets,editing,generation,host,interaction}`。压缩映射：
+>
+> | 当时路径 | 现行路径 |
+> |---|---|
+> | `vulkan/descriptors.rs` | `render/resident/tables/bindless_texture_table.rs` |
+> | `vulkan/pool.rs` / `images.rs` | `render/resident/assets/pool.rs` / `images.rs` |
+> | `vulkan/instance_table.rs` | `render/resident/tables/instance_table.rs` |
+> | `vulkan/{hiz,occlusion,lod,cull,indirect}.rs` | `render/passes/visibility/同名.rs` |
+> | `vulkan/depth.rs` / `frames.rs` / `perf.rs` | `render/core/target/depth.rs` / `driver/host/frame.rs`+`render/frame/` / `render/stats/perf.rs` |
+> | `vulkan/resources.rs` / `context.rs` / `uploader.rs` / `mesh_convert.rs` | `render/core/device/memory/role.rs` / `render/core/device/context.rs` / `render/core/device/transfer/uploader.rs` / `render/resident/assets/mesh_convert.rs` |
+> | `remote_objects.rs` / `remote_assets.rs` | `remote/edit/objects.rs` / `remote/edit/assets.rs` |
+> | `remote/{cull,draw,lod,residency,gap}.rs` | `remote/features/同名.rs` |
+> | `remote/{objects,assets,shapes,generate}.rs` | `remote/edit/同名.rs` |
+> | `remote/perf.rs` | `remote/census/perf.rs` |
+> | `shaders/{cull,build_indirect,lod_select,occlusion,hiz_downsample}.wgsl` | `shaders/gpu_driven/同名.wgsl` |
+> | `shaders/debug_draw.wgsl` | `shaders/common/instance.wgsl`（记录）+ `shaders/scene/gbuffer/gbuffer_write.wgsl`（绘制） |
+> | `overlay/windows/debug_window.rs` / `overlay/ui.rs` | `overlay/tool_window/*.rs` / `overlay/framework/ui.rs` |
+
 **目的**：从"一次正确上传"发展成能长期处理变更、异步到货、删除和替换的资源链路。
 
 **完成标准**：零变化时实例与资产上传为零；共享资源、换柄、同柄改内容、延迟到货、删除取消、反复加载卸载全覆盖。分别报告扫描数、上传字节、资源存量和处理耗时，不把"零上传"说成"零 CPU 每对象成本"。
@@ -36,14 +54,18 @@
 - [可靠增量链路验收复核](4-验收复核.md)——步骤级验收产出（2026-10-12 复核 / **2026-10-14 归档对账 §8**：基线 `5d7ed829d` → `5d06475db`，11 项问题逐条关闭记录、归档轮复验与开放边界；当前验收结论以 §8 为准）。
 - [施工计划：对象增量三线拆解](4.1-对象增量/施工计划：对象增量三线拆解.md)——4.1 段施工计划（2026-10-10 立案）：判定线草案、三线拆解（发现/槽账本/增量写入）、任务草案与待决边界。
 - [4.1.1-4.1.6-对象增量施工记录：稳定槽账本、增量写入与BRP方法族](4.1-对象增量/4.1.1-4.1.6-对象增量施工记录：稳定槽账本、增量写入与BRP方法族.md)——4.1 主产出（2026-10-10 收官）：判定线总账、四问体例逐任务、钉子八枚。
-- [施工计划：资产增量与同柄内容变化](4.2-资产增量/施工计划：资产增量与同柄内容变化.md)——4.2 段施工计划（2026-10-10 立案，未施工）：判定线草案、发现/失效/重传三线拆解、任务草案与待决边界；含 AssetEvent 五变体与当前上传链"驻留命中即失明"缺口的源码核实。
+- [施工计划：资产增量与同柄内容变化](4.2-资产增量/施工计划：资产增量与同柄内容变化.md)——4.2 段施工计划（2026-10-10 立案，当日施工收官）：判定线草案、发现/失效/重传三线拆解、任务草案与待决边界；含 AssetEvent 五变体与当前上传链"驻留命中即失明"缺口的源码核实。
 - [AssetId变更语义：两条变更通道、Id稳定性取舍与驻留失效实现](4.2-资产增量/AssetId变更语义：两条变更通道、Id稳定性取舍与驻留失效实现.md)——4.2 开工前机制讲解篇（2026-10-10）：换柄/改内容两通道账面对照、Id 锚身份不锚内容的取舍（Unity/UE/git 对照）、不可变边界落点与 4.2 同步面"零新增机制"的逐项对账。
 - [4.2.1-4.2.5-资产增量施工记录：事件读侧、失效联动与同柄重传](4.2-资产增量/4.2.1-4.2.5-资产增量施工记录：事件读侧、失效联动与同柄重传.md)——4.2 主产出（2026-10-10 收官）：判定线总账、swap-on-commit 三通道、待决项落定与钉子六枚。
+- [资产变更流程：从一次mutate到GPU驻留的各级账面](4.2-资产增量/资产变更流程：从一次mutate到GPU驻留的各级账面.md)——4.2 功能流程导读：六个账面层、逐时刻走读与图像/材质差异。
 - [施工计划：异步就绪与失败取消](4.3-异步就绪/施工计划：异步就绪与失败取消.md)——4.3 段施工计划（2026-10-12 立案，同日收官）：判定线草案、pending 账面/失败取消/BRP 驱动三线拆解、任务草案与待决边界；含 `AssetLoadFailedEvent` 独立消息类型与"失败资产=僵尸脏行"缺口的源码核实。
 - [4.3.1-4.3.4-异步就绪施工记录：pending账面、失败取消与动态加载](4.3-异步就绪/4.3.1-4.3.4-异步就绪施工记录：pending账面、失败取消与动态加载.md)——4.3 主产出（2026-10-12 收官）：判定线总账、四问体例逐任务、待决项落定（就绪判定=Assets::get 逐腿递归、失败一次出队、取消=reconcile 出账）与钉子四枚。
 - [异步就绪流程：从load请求到就绪上屏的各级账面](4.3-异步就绪/异步就绪流程：从load请求到就绪上屏的各级账面.md)——4.3 功能流程导读：五级账面全景、逐时刻走读（到货/失败/取消三结局对照）与代码改动简要解析。
+- [资产加载方案对照：frenderer、Addressables、UE与Bevy的异步加载拆解](4.3-异步就绪/资产加载方案对照：frenderer、Addressables、UE与Bevy的异步加载拆解.md)——4.3 知识整理篇：四套异步加载方案的账面对照与取舍。
 - [施工计划：回收与热重载拆解](4.4-回收与热重载/施工计划：回收与热重载拆解.md)——4.4 段施工计划（2026-10-12 立案，同日收官）：判定线草案、卸载回收/在飞销毁与槽位复用/热重载链三线拆解、任务草案与待决边界；含 mesh 孤儿区间、`Removed`/`Unused` 零读侧、file_watcher 未开、revive 链断头四处缺口的源码核实。
 - [4.4.1-4.4.4-回收与热重载施工记录：卸载回收、双停尸房与热重载链](4.4-回收与热重载/4.4.1-4.4.4-回收与热重载施工记录：卸载回收、双停尸房与热重载链.md)——4.4 主产出（2026-10-12 收官）：判定线总账、四问体例逐任务、待决项落定与钉子六枚（复活联动缺口实抓修复为首钉）。
 - [资源回收与热重载流程：从卸载事件到区间复用的各级账面](4.4-回收与热重载/资源回收与热重载流程：从卸载事件到区间复用的各级账面.md)——4.4 功能流程导读：五层账面全景、逐时刻走读（回收周期 + 失败修复链）与代码改动简要解析。
+- [施工计划：待修复清单F23与F24转正](4.6-实测缺陷修复/施工计划：待修复清单F23与F24转正.md)——4.6 段施工计划（2026-10-14 立案，同日收官）。
+- [4.6.1-4.6.2-实测缺陷修复施工记录：注释清扫与拖拽旋转闪烁](4.6-实测缺陷修复/4.6.1-4.6.2-实测缺陷修复施工记录：注释清扫与拖拽旋转闪烁.md)——4.6 主产出（2026-10-14 收官）：F23 注释清扫与 F24 拖拽旋转闪烁修复。
 - [施工计划：右上角坐标轴指示器](4.7-坐标轴指示器/施工计划：右上角坐标轴指示器.md)——4.7 段施工计划（2026-10-14 立案，同日收官）。
 - [4.7.1-右上角坐标轴指示器施工记录：视空间投影与拖拽跟拍验证](4.7-坐标轴指示器/4.7.1-右上角坐标轴指示器施工记录：视空间投影与拖拽跟拍验证.md)——4.7 主产出（2026-10-14 收官）：判定线总账、投影归一化抹前缩的"冻结"假象返工、钉子五枚。

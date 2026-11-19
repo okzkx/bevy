@@ -6,18 +6,18 @@
 
 | 文件 | 一句话职责 |
 |---|---|
-| `shaders/build_indirect.wgsl` | 命令组装 compute：逐在场行读对象表三引脚 + 标记 → 写一条 20B `VkDrawIndexedIndirectCommand`（不可见 `instanceCount=0`，`firstInstance`=槽号） |
-| `src/vulkan/indirect.rs` | 组装管线（IndirectPass：set2 单集 + 4B push count）+ dispatch/屏障录制 + 诊断账面（IndirectStats）+ count 上界执法（maxDrawIndirectCount） |
-| `src/remote/draw.rs` | BRP `ash_renderer/draw_stats`：绘制调用数/命令条数/零实例条数读数（只读，诊断标注） |
-| `shaders/debug_draw.wgsl`（改） | `push.instance` → `@builtin(instance_index)`（firstInstance 携带槽号），图形 push 通道删除 |
-| `src/vulkan/instance_table.rs`（改） | 环家族 4→6：在场环（b4，HOST_VISIBLE）+ 命令环（b5，DEVICE_LOCAL 新角色） |
-| `src/vulkan/frames.rs`（改） | 场景段逐 draw 循环退役 → 一次 `cmd_draw_indexed_indirect`；组装 dispatch 记录位 |
+| `shaders/gpu_driven/build_indirect.wgsl` | 命令组装 compute：逐在场行读对象表三引脚 + 标记 → 写一条 20B `VkDrawIndexedIndirectCommand`（不可见 `instanceCount=0`，`firstInstance`=槽号） |
+| `src/render/passes/visibility/indirect.rs` | 组装管线（IndirectPass：set2 单集 + 4B push count）+ dispatch/屏障录制 + 诊断账面（IndirectStats）+ count 上界执法（maxDrawIndirectCount） |
+| `src/remote/features/draw.rs` | BRP `ash_renderer/draw_stats`：绘制调用数/命令条数/零实例条数读数（只读，诊断标注） |
+| `shaders/scene/gbuffer/gbuffer_write.wgsl`（改） | `push.instance` → `@builtin(instance_index)`（firstInstance 携带槽号），图形 push 通道删除；透明层对应 `shaders/scene/transparent/transparent_forward.wgsl` |
+| `src/render/resident/tables/instance_table.rs`（改） | 环家族 4→6：在场环（b4，HOST_VISIBLE）+ 命令环（b5，DEVICE_LOCAL 新角色） |
+| `src/driver/host/frame.rs` + `src/render/frame/record.rs`（改） | 场景段逐 draw 循环退役 → 一次 `cmd_draw_indexed_indirect`；组装 dispatch 记录位 |
 
 ## 1. 各级账面全景（一帧的静态结构）
 
 ```
 InstanceLedger（账本，CPU）
-  └─ drawlist::assemble ──► DrawAssembly { slots, materials, pending_rows }
+  └─ drawlist::assemble_update ──► DrawabilitySources / 可绘槽列表 { slots, materials, pending_rows }
        │                        （slots = 可绘行槽号列表，暂缓行不进）
        ├─► 在场环 presence_rings[帧槽]（HOST_VISIBLE，全量重写）── set2 b4
        ├─► 材质环 / 模型环（5.1 语义不变）          ── set2 b1/b2
@@ -34,7 +34,7 @@ InstanceLedger（账本，CPU）
 
 1. **wait_for_slot**：帧槽 fence 过——此后对帧槽环（帧 UBO/模型/材质/标记/在场）的宿主写全在此纪律内。
 2. **assemble**：账本 O(N) 走访 → 可绘行槽号 `slots`（实例槽缺/mesh 未驻留/材质缺席 = 暂缓，不进列表）。
-3. **write_rings**：模型增量 + 材质全量 + **在场环全量**（本段新增）写本帧槽。
+3. **环写入**：`write_model_ring`（增量）+ `write_material_ring`（全量）+ **`write_presence_ring`（全量，本段新增）** 写本帧槽。
 4. **cull 半边**（5.2 语义不变）：开关 on → cull dispatch 输入（112B push 六平面 + bound）；off → host 把标记环本帧槽填全 1。诊断读标记。
 5. **indirect 半边**：`indirect_pass.draw(slots.len())` → IndirectDraw（4B push count + 组数）；IndirectStats 刷新（draw_calls_recorded/command_count/zero_instance_count = 行数 − 可见数）。
 6. **record_frame（渲染进场之前，两个 dispatch 顺序执行）**：
@@ -64,12 +64,12 @@ InstanceLedger（账本，CPU）
 
 | 分组 | 文件 | 要点 |
 |---|---|---|
-| feat·闸门 | `vulkan/context.rs`（+27） | base features 首次启用：支持查询快照 → 硬校验 → `enabled_features(multi_draw_indirect)` → 就绪日志钉支持→启用与 maxDrawIndirectCount；`Context::limits()` 查询口 |
-| feat·命令环 | `vulkan/resources.rs`（+18）、`vulkan/instance_table.rs`（+123/−58） | 新 `BufferRole::IndirectCommands`（STORAGE+INDIRECT_BUFFER、DEVICE_LOCAL）；InstanceTables 第五/六族 + set2 b4/b5 + 访问器（presence_ring/indirect_buffer）+ `INDIRECT_COMMAND_SIZE`/`PRESENCE_ENTRY_SIZE` |
-| feat·组装 pass | `vulkan/indirect.rs`（新 264 行）、`build_indirect.wgsl`（新）、`vulkan/mod.rs` | IndirectPass（照 CullPass 形状）+ record（dispatch+屏障 B）+ IndirectStats + 2 单测；shader 逐在场行组装五字段命令 |
-| feat·消费 | `vulkan/frames.rs`（+89/−73）、`vulkan/pipeline.rs`（+28/−28 净删）、`debug_draw.wgsl` | FrameDraw `draws→(indirect_count, indirect_buffer, indirect)`；场景段一次 indirect 提交；图形 push range 与 `PUSH_CONSTANTS_SIZE` 退役；VS 改 `@builtin(instance_index)` |
-| feat·宿主 | `driver/host/drawlist.rs`（+59）、`frame.rs`（+56）、`init.rs`、`mod.rs` | `DrawCall`→`slots` + 在场环写入；draw_frame 组装 indirect dispatch + IndirectStats 刷新；IndirectPass 进 init 链/teardown 序 |
-| feat·通道 | `overlay/windows/debug_window.rs`、`framework/ui.rs`、`remote/draw.rs`（新）、`remote/mod.rs`、`remote/objects.rs`、`tools/brp.py` | egui indirect 读数行；BRP `draw_stats` 方法族 + 十九子命令；`push_bytes_per_draw` 4→0 订正 |
+| feat·闸门 | `render/core/device/context.rs`（+27） | base features 首次启用：支持查询快照 → 硬校验 → `enabled_features(multi_draw_indirect)` → 就绪日志钉支持→启用与 maxDrawIndirectCount；`Context::limits()` 查询口 |
+| feat·命令环 | `render/core/device/memory/role.rs`（+18）、`render/resident/tables/instance_table.rs`（+123/−58） | 新 `BufferRole::IndirectCommands`（STORAGE+INDIRECT_BUFFER、DEVICE_LOCAL）；InstanceTables 第五/六族 + set2 b4/b5 + 访问器（presence_ring/indirect_buffer）+ `INDIRECT_COMMAND_SIZE`/`PRESENCE_ENTRY_SIZE` |
+| feat·组装 pass | `render/passes/visibility/indirect.rs`（新 264 行）、`shaders/gpu_driven/build_indirect.wgsl`（新）、`render/mod.rs` | IndirectPass（照 CullPass 形状）+ record（dispatch+屏障 B）+ IndirectStats + 2 单测；shader 逐在场行组装五字段命令 |
+| feat·消费 | `driver/host/frame.rs` + `render/frame/record.rs`（+89/−73）、`render/core/pipeline/`（+28/−28 净删）、`shaders/scene/gbuffer/gbuffer_write.wgsl` | `RenderFeatures`（原 `FrameDraw`）`draws→(indirect_count, indirect_buffer, indirect)`；场景段一次 indirect 提交；图形 push range 与 `PUSH_CONSTANTS_SIZE` 退役；VS 改 `@builtin(instance_index)` |
+| feat·宿主 | `driver/host/drawlist.rs`（+59）、`driver/host/frame.rs`（+56）、`init.rs`、`mod.rs` | `DrawCall`→`slots` + 在场环写入；draw_frame 组装 indirect dispatch + IndirectStats 刷新；IndirectPass 进 init 链/teardown 序 |
+| feat·通道 | `overlay/tool_window/`、`overlay/framework/ui.rs`、`remote/features/draw.rs`（新）、`remote/mod.rs`、`remote/edit/objects.rs`、`tools/brp.py` | egui indirect 读数行；BRP `draw_stats` 方法族 + 十九子命令；`push_bytes_per_draw` 4→0 订正 |
 | docs | `.agents/docs/开发步骤/5-GPU驱动与常驻大场景/5.3-indirect闭环/*` + 路线图 | 施工记录 + 本文 + 状态三处同步 |
 
 合计 16 改 + 4 新（src 345 insertions / 147 deletions，不含 docs）。

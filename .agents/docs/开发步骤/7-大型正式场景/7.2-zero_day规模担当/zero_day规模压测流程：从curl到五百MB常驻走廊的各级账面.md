@@ -10,7 +10,7 @@ BRP `load_world` 发整场景进场请求 → bevy glTF loader 吃 500MB 自含 
 
 | 文件 | 一层职责 |
 |---|---|
-| `ash_renderer/src/remote/assets.rs`（扩展） | `load_world_cmd`：整场景动态进场的协议薄壳，进场机制零新造 |
+| `ash_renderer/src/remote/edit/assets.rs`（扩展） | `load_world_cmd`：整场景动态进场的协议薄壳，进场机制零新造 |
 | `tools/brp.py`（扩展） | `load-world` 子命令透传 |
 | `tools/scene_zero_day.py` | 一键压测：glb 解析 → 进场等待（相机卫兵）→ 清单对照 → 规模读数 → 预算流送 → 6.5/6.6 复验 → A/B 恢复 → 零 VUID |
 
@@ -38,7 +38,7 @@ BRP `load_world` 发整场景进场请求 → bevy glTF loader 吃 500MB 自含 
 
 | 文件 | ± | 改动要点 |
 |---|---|---|
-| `remote/assets.rs` | +31 | load_world_cmd：协议薄壳 + AssetPath<'static> clone 钉 + 异步语义注释 |
+| `remote/edit/assets.rs` | +31 | load_world_cmd：协议薄壳 + AssetPath<'static> clone 钉 + 异步语义注释 |
 | `remote/mod.rs` | +2/-1 | 方法注册 + use 导入 |
 | `tools/brp.py` | +8 | load-world 子命令（照 load_mesh 形状） |
 | `tools/scene_zero_day.py` | +404 | 一键压测（解析/卫兵轮询/差值断言/五段采证） |

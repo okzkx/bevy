@@ -89,7 +89,7 @@ VA 空间 ─ 描述符 ─┤                                                  
 
 ## 6. 落回 ash_renderer
 
-- **池建在 buffer 层，不在 memory 层**：[MeshPool](../../../../ash_renderer/src/vulkan/pool.rs) 是两条 DEVICE_LOCAL 大 buffer（顶点/索引）+ bump 偏移 + `PoolRange`，解决的是 draw 侧问题（bind 引脚 `vertex_base`/`first_index`、合批拷贝、整段迁移）。[GpuBuffer](../../../../ash_renderer/src/vulkan/resources.rs) 每条独占一块 `VkDeviceMemory`——buffer 数量少时无所谓；image 进场后逐张 `allocate_memory` 会撞 `maxMemoryAllocationCount`（常见 4096）与分配开销，届时才引入 memory 层子分配（一块大内存按偏移绑多资源，对齐按各自 requirements）。
+- **池建在 buffer 层，不在 memory 层**：[MeshPool](../../../../../ash_renderer/src/render/resident/assets/pool.rs) 是两条 DEVICE_LOCAL 大 buffer（顶点/索引）+ bump 偏移 + `PoolRange`，解决的是 draw 侧问题（bind 引脚 `vertex_base`/`first_index`、合批拷贝、整段迁移）。[GpuBuffer](../../../../../ash_renderer/src/render/core/device/memory) 每条独占一块 `VkDeviceMemory`——buffer 数量少时无所谓；image 进场后逐张 `allocate_memory` 会撞 `maxMemoryAllocationCount`（常见 4096）与分配开销，届时才引入 memory 层子分配（一块大内存按偏移绑多资源，对齐按各自 requirements）。
 - **3.3 贴图上传的形态**：复用 3.2 的 stage/票据骨架 → `vkCmdCopyBufferToImage`（重排由 copy 引擎完成，应用永不参与 swizzle）→ copy 前后 image barrier 对（`UNDEFINED → TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL`）。
 - **读回校验**走 `vkCmdCopyImageToBuffer` 回线性 buffer；**LINEAR + host-visible image** 只用于调试/读回（usage 受限、离散卡上功能不全），不做上传主路径。
 - **RenderDoc 能看"解码后"纹理**是走调试器与驱动的互操作、由驱动替它解 swizzle——不是布局公开了。

@@ -32,13 +32,15 @@ Unity 映射：Tier① ≈ catch 后 log + 跳过（frame 不会因单个对象�
 |---|---|
 | `SwapchainOutOfDate` | **控制流不是失败**——acquire/present 过时，重建后重试 |
 | `Vk(vk::Result)` | 其余 Vulkan 调用失败 |
+| `Contract(String)` | 运行期编排契约被打破（状态矛盾、接口误用），状态已不可信 |
+| `Capacity(String)` | 固定容量耗尽或访问越界（显式拒绝，不静默截断） |
 | `Init(String)` | 初始化链路错误（带调用上下文；时序断言也折叠进来） |
 
 ### Tier① 落地（不进通道，就地消化）
 
 - 循环内逐项降级：转换拒绝/规格拒绝/材质未到货 → 就地 warn（一次去重）+ continue，脏行下帧重试（upload.rs §2）；
 - **错误当控制流**：显式 `match`（acquire/present 的 OUT_OF_DATE → rebuild → 重试）——不是所有 Err 都该丢弃，OUT_OF_DATE 的"重试"分支是逻辑本身；
-- 不提前 return 的裁决就地做：present 真失败 → 就地 error + `request_graceful_exit()`（advance 必须照常跑保持帧槽账本一致）；
+- 不提前 return 的裁决就地做：present 真失败 → 先暂存错误、`advance` 照常跑保持帧槽账本一致，再 `return Err(fatal("present 失败，渲染链无法继续", e))`（原 `request_graceful_exit()` 已退役）；
 - 状态告知类（RenderMode 缺席、相机缺席 identity 兜底）→ 就地 warn 一次去重。
 
 ### Tier② 落地（提前 return 的失败，冒泡统一通道）
@@ -48,8 +50,8 @@ try_init_vulkan（? 串链，一切失败折叠成 VulkanError）
   ├─ wrapper.single() 失败 → map_err 成 Init("...时序假设被打破")
   ├─ Context::new(wrapper)?
   ├─ Swapchain::new(&ctx)?
-  └─ FramePool::new(&ctx)?
-        ↓ init_vulkan：.context("Vulkan 初始化失败，宿主壳优雅退出")? 冒泡
+  └─ FramePool::new(&ctx, swapchain.extent)?
+        ↓ init_vulkan：.or_fatal("Vulkan 初始化失败，资源束一个都不插入")? 冒泡
 （错误点不打 log；资源全有或全无，一个都不插入）
         ↓ 统一错误通道
 tier_handler：error 留档（带 system 名与负载）+ 置位 FATAL → fatal_gate 写 AppExit
@@ -67,7 +69,7 @@ fn main() -> AppExit（Termination：Success=0 / Error=1）
 
 | 配套 | 作用 |
 |---|---|
-| `draw_frame.run_if(resource_exists::<Context>)` | 失败帧没有资源，`Res<Context>` 会 panic——守卫让 Update 静默跳过，优雅退出前功不弃 |
+| `draw_frame.run_if(resource_exists::<Context>)` | 失败帧没有资源，`Res<Context>` 会 panic——守卫让 `Last` 静默跳过，优雅退出前功不弃 |
 | 资源**全有或全无**插入 | 部分插入会让 draw_frame 半途 panic，破坏两 Tier |
 | `fn main() -> AppExit` | bevy 已实现 `Termination`（bevy_app/src/app.rs:1597，**没有** `From<AppExit> for ExitCode`，Termination 是正路），退出码 1 传出 |
 
@@ -78,8 +80,9 @@ system 签名 `Result<(), BevyError>`，`?` 冒泡的 Err 由执行器交给统�
 `Severity` 元数据两 Tier 分流：
 
 - `Warning` → handler 就地 warn 丢弃（Tier①，下帧自愈）；
-- 其余 → error 留档 + 置位 `FATAL: AtomicBool`，`fatal_gate` 看门 system（Update
-  早位）写 `AppExit` 优雅退出（Tier②）——handler 是裸函数指针、无 world 访问权，
+- `Ignore`/`Trace`/`Debug`/`Info` → 按 info 记录，不置位（携带方明示可忽略）；
+- 其余（`Error` 与无 payload 的 `Panic`）→ error 留档 + 置位 `FATAL: AtomicBool`，`fatal_gate`
+  看门 system（`First` 早位）写 `AppExit` 优雅退出（Tier②）——handler 是裸函数指针、无 world 访问权，
   退出请求只能经静态位中转；
 - 错误消息用 `.context(...)` 挂进错误值，日志在 handler 统一打（错误点不再 log，
   单点零重复）；**冒泡与否只看"是否要求提前 return"**——循环内逐项降级、时序
@@ -112,7 +115,7 @@ system 签名 `Result<(), BevyError>`，`?` 冒泡的 Err 由执行器交给统�
 
 ## 5. 给后续的纪律
 
-1. **新代码禁 `panic!`/`unwrap()`/`expect()`**——失败按 Tier 归位：可跳过→就地 log/糖（Tier①），影响运行→`?` 冒泡统一通道（Tier②）；一次性装配走 `try_xxx` 串链 + 系统侧 `?` 冒泡；不变式断言改 Err（BRP 侧回协议错误）；
+1. **新代码禁 `panic!`/`unwrap()`/`expect()`**——失败按 Tier 归位：可跳过→就地 log/糖（Tier①），影响运行→`?` 冒泡统一通道（Tier②）；一次性装配走 `try_xxx` 串链 + 系统侧 `?` 冒泡；不变式断言改 Err（BRP 侧回协议错误）。现有例外：`render/resident/assets/bcn_cache.rs` 5 处 `.expect("4B")`（前有长度检查、不会触发），新代码仍按本禁令；
 2. 需要"影响运行"的失败时，先问：system 签名 `Result<(), BevyError>`（或抽 `try_xxx`）了吗？守卫（`run_if(resource_exists)`）加了吗？
 3. OUT_OF_DATE 类"错误当控制流"是唯一允许的显式 match 失败分支——它是逻辑，不是丢弃；
-4. 真要 panic 时（目前不存在此类场景），用 `unwrap_or_panic!`（语法糖家族第 9 件，panic 位）并留下"为什么必须 panic"的注释。
+4. 真要 panic 时（目前不存在此类场景），用 `panic!` 并留下"为什么必须 panic"的注释（`unwrap_or_panic!` 糖已随宏家族退役）。

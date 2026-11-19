@@ -1,6 +1,6 @@
 # GpuBuffer:契约、用法与 frenderer 三分法对照
 
-> 2026-09-24 沉淀。3.2.2.1 内存契约([施工记录](3.2.2.1-内存契约：memory type、usage、绑定与对齐.md))验收后,围绕三个问题的讨论定稿:与 frenderer buffer 三分法(RO/RW/MRW)怎么对应、Bindless 对 buffer 有什么要求、宿主可见内存在本管线里的角色。代码:`ash_renderer/src/vulkan/resources.rs`,探针:`ash_renderer/examples/memory_probe.rs`。
+> 2026-09-24 沉淀。3.2.2.1 内存契约([施工记录](3.2.2.1-内存契约：memory type、usage、绑定与对齐.md))验收后,围绕三个问题的讨论定稿:与 frenderer buffer 三分法(RO/RW/MRW)怎么对应、Bindless 对 buffer 有什么要求、宿主可见内存在本管线里的角色。代码:`ash_renderer/src/vulkan/resources.rs`（现行落点见步骤 README 映射表）,探针:`ash_renderer/examples/memory_probe.rs`（已退役,`5edb4275a`）。
 
 ## §1 GpuBuffer 是什么:契约载体,不是池
 

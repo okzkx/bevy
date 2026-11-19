@@ -98,7 +98,7 @@ Unity 类比：`TextureFormat.RGBA32`（存储布局）与 `GraphicsFormat.R8G8B
 ## 6. 链路两端：入口已实证，出口是 3.4 的待决点
 
 - **入口（已实证）**：15 张 png → image crate 解码补 alpha → Rgba8Unorm(Srgb) → 逐字节进 staging → R8G8B8A8_SRGB/UNORM 的 VkImage（OPTIMAL tiling，重排归 copy 引擎）。整链颜色值未变，唯一的色彩语义变换将在未来采样时由 TMU 做。
-- **出口（待决）**：我们的 swapchain 选 B8G8R8A8_UNORM（[swapchain.rs:67](../../../../ash_renderer/src/vulkan/swapchain.rs)），线性值直出上屏。官方 bevy_render 优先挑 SRGB surface，非 SRGB 也会给 swapchain 套 `add_srgb_suffix()` 的 sRGB view 渲染（crates/bevy_render/src/view/window/mod.rs:399-415）——线性值在 ROP 写出时自动编码。清屏时代两者无感；**3.4 画出受光几何后，缺输出编码会在屏幕上显形（中间调偏暗）**。届时二选一：swapchain 换 SRGB 格式（对齐官方），或着色器端手动编码。动不动由用户拍板，此处只立案。
+- **出口（待决）**：我们的 swapchain 选 B8G8R8A8_UNORM（[swapchain.rs:67](../../../../../ash_renderer/src/render/core/device/swapchain.rs)），线性值直出上屏。官方 bevy_render 优先挑 SRGB surface，非 SRGB 也会给 swapchain 套 `add_srgb_suffix()` 的 sRGB view 渲染（crates/bevy_render/src/view/window/mod.rs:399-415）——线性值在 ROP 写出时自动编码。清屏时代两者无感；**3.4 画出受光几何后，缺输出编码会在屏幕上显形（中间调偏暗）**。届时二选一：swapchain 换 SRGB 格式（对齐官方），或着色器端手动编码。动不动由用户拍板，此处只立案。
 - **"输出端不自动编码"是错觉（2026-09-28 问答钉）**：Vulkan 同样支持写出时自动编码——往 SRGB 格式的 attachment 写线性值，ROP 按逆曲线编码，与采样端解码互为镜像（同样按格式声明、固定功能、仅 RGB）：
 
   ```

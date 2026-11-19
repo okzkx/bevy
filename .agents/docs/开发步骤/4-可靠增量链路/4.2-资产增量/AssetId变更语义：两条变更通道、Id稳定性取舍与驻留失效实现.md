@@ -86,6 +86,6 @@
 
 - `AssetEvent<A>` 五变体 `Added`/`Modified`/`Removed`/`Unused`/`LoadedWithDependencies`，`#[derive(Message, Reflect)]`：`crates/bevy_asset/src/event.rs:49-61`。
 - `Assets::get_mut` 触发 `Modified`、`insert` 触发 `Added`、`remove` 触发 `Removed`：`crates/bevy_asset/src/assets.rs:376/379/391/394/474`。
-- 实体行存柄：`ash_renderer/src/scene/mechanism/assets/ledger.rs:41`；绘制侧每帧现查驻留：`ash_renderer/src/driver/host/frame.rs:232`。
-- 上传链"查无才传"：`ash_renderer/src/driver/upload.rs`（`seen`/`img_seen` 去重 + `pool.resident`/`image_cache.resident`）；材质参数每帧 UBO：`frame.rs:235-243`。
-- 驻留缓存键控：`ash_renderer/src/vulkan/pool.rs:140`、`ash_renderer/src/vulkan/images.rs:383`；帧侧等待闸门：`ash_renderer/src/vulkan/pool.rs`（4.1.1）。
+- 实体行存柄：`ash_renderer/src/scene/mechanism/assets/ledger.rs:41`；绘制侧每帧现查驻留：`ash_renderer/src/driver/host/drawlist.rs:75`。
+- 上传链"查无才传"：`ash_renderer/src/driver/upload.rs`（`seen`/`img_seen` 去重 + `pool.resident`/`image_cache.resident`）；材质参数每帧 UBO：`drawlist.rs:225`（`write_material_ring`）。
+- 驻留缓存键控：`ash_renderer/src/render/resident/assets/pool.rs:165`、`ash_renderer/src/render/resident/assets/images.rs:250`；帧侧等待闸门：`ash_renderer/src/render/resident/assets/pool.rs:378`（4.1.1）。

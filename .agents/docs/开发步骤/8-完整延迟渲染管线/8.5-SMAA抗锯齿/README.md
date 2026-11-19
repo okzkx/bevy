@@ -10,7 +10,7 @@
 
 ## 代码落点
 
-- `render/pipeline/smaa.rs`（SmaaTargets/SmaaPipelines）；`shaders/smaa_edge.wgsl`/`smaa_blend.wgsl`/`smaa_neighborhood.wgsl`（官方 1x 拆分）；接线 `render/pipeline/frames.rs`（tonemap 落点 LDR → edge/blend → neighborhood）+ `driver/host/frame.rs`（闸门③重建清单）。
+- `render/passes/post/smaa.rs`（SmaaTargets/SmaaPipelines）；`shaders/post/smaa/smaa_edge.wgsl`/`smaa_blend.wgsl`/`smaa_neighborhood.wgsl`（官方 1x 拆分）；接线 `render/frame/record.rs`（tonemap 落点 LDR → edge/blend → neighborhood）+ `driver/host/frame.rs`（闸门③重建清单）。
 - BRP：`ash_renderer/smaa_set`（tools/brp.py `smaa-set true|false`）。
 
 ## 任务面板

@@ -7,7 +7,27 @@
 
 **一句话说明**：步骤 2 要立的是项目的地基——禁渲染 Bevy 宿主上跑起自建 Vulkan 清屏循环。四项施工（2.1~2.4）依次定 crate 落位、搭禁渲染壳、打通窗口句柄链、跑通帧循环清屏；只验证"壳"能转，不画任何几何，画场景是步骤 3 的事。
 
-**状态：✅ 历史收官（2026-09-21）**——四项施工的清屏、重建和 WM_CLOSE 实跑记录保留。**2026-09-23 新增源码复核：fence 提前重置、present 信号量复用和退出等待时机仍有缺陷，未修复**。旧成功路径不替代同步验收，见[已实现缺陷与修复验收](../3-静态取数链路/材料/已实现缺陷与修复验收.md)；继续 3.2 上传前需关闭。
+**状态：✅ 历史收官（2026-09-21）**——四项施工的清屏、重建和 WM_CLOSE 实跑记录保留。**2026-09-23 新增源码复核：fence 提前重置、present 信号量复用和退出等待时机仍有缺陷，未修复**。旧成功路径不替代同步验收，见[已实现缺陷与修复验收](../3-静态取数链路/3.2-buffer侧上传/已实现缺陷与修复验收.md)；继续 3.2 上传前需关闭。
+
+> **代码落点说明（2026-11-19 补录）**：本目录是 2026-09 的历史施工记录，正文中的路径与符号保留当时口径；现行代码一律以当前 `ash_renderer/src` 为准。旧→新对照：
+>
+> | 旧路径/符号 | 当前落点 |
+> |---|---|
+> | `src/vulkan/context.rs` | `src/render/core/device/context.rs` |
+> | `src/vulkan/swapchain.rs` | `src/render/core/device/swapchain.rs` |
+> | `src/vulkan/frames.rs` | `src/render/frame/{frame_pool,record}.rs` |
+> | `src/vulkan/pool.rs` | `src/render/resident/assets/pool.rs` |
+> | `src/vulkan/resources.rs` | `src/render/core/device/memory/{contract,role,buffer}.rs` |
+> | `src/vulkan/uploader.rs` / `src/upload.rs` | `src/render/core/device/transfer/uploader.rs` / `src/driver/upload.rs` |
+> | `src/vulkan/{images,descriptors,pipeline}.rs` | `src/render/resident/assets/images.rs` / `src/render/core/{binding,pipeline}/` |
+> | `src/vulkan/mesh_convert.rs` | `src/render/resident/assets/mesh_convert.rs` |
+> | `src/host.rs` | `src/driver/host/{mod,init,frame}.rs` |
+> | `src/syntax.rs` | `src/common/syntax.rs` |
+> | `src/scene/collect.rs` / `CollectedScene` | `src/scene/mechanism/assets/ledger.rs`（`InstanceLedger`/`update_ledger`）+ `src/scene/content/collect_report.rs` |
+> | `src/scene/{world_asset,camera,lights}.rs` / `src/scene/material_hook.rs` | `src/scene/content/{world_asset,camera,lights}.rs` / `src/scene/mechanism/host/material_hook.rs` |
+> | `src/remote.rs` / `src/remote_mouse.rs` | `src/remote/mod.rs` / `src/remote/edit/mouse.rs` |
+> | `src/overlay/ui.rs` / `src/overlay/windows/*` | `src/overlay/framework/ui.rs` / `src/overlay/tool_window/` |
+> | `examples/*_probe.rs` | 已退役（`5edb4275a`），无替代 |
 
 ## 施工顺序（对应路线图"做什么"）
 
@@ -18,12 +38,12 @@
 
 ## 材料清单
 
-- [已实现缺陷与修复验收](../3-静态取数链路/材料/已实现缺陷与修复验收.md)——2026-09-23 复核；本步帧同步与退出问题的当前状态和修复验收，旧图示/记录不能覆盖此勘误。
+- [已实现缺陷与修复验收](../3-静态取数链路/3.2-buffer侧上传/已实现缺陷与修复验收.md)——2026-09-23 复核；本步帧同步与退出问题的当前状态和修复验收，旧图示/记录不能覆盖此勘误。
 
 - 《[窗口链路侦察：WinitPlugin、RawHandleWrapper与事件进ECS.md](材料/窗口链路侦察：WinitPlugin、RawHandleWrapper与事件进ECS.md)》——开篇侦察（2026-09-21）：窗口创建是事件驱动（首窗在 runner `resumed`，非 PreStartup）、**`WinitWindows` 0.19.1 已改 thread_local 的路线图修正**、`RawHandleWrapper` 两条 surface 路径（ash-window trait / 手写 vkCreateWin32SurfaceKHR）、runner 帧心跳结构（about_to_wait → app.update()）
 - 《[VulkanContext字段释义：从Entry到Swapchain.md](材料/VulkanContext字段释义：从Entry到Swapchain.md)》——施工③配套（2026-09-21）：每个字段的"是什么/为什么拆这层/Unity-D3D 映射"，创建链依赖图 + 生命周期四层表（施工④的模块拆分依据；标题为历史名，类型现名 `vulkan::Context`）
 - 《[Context与Swapchain分家：按生命周期拆分.md](材料/Context与Swapchain分家：按生命周期拆分.md)》——施工④配套（2026-09-21）：为什么按寿命切对象（一统结构的三笔账）、三兄弟分家清单、`rebuild` 先拆后建的求值顺序教训、帧级与 swapchain 解耦原理、Unity-D3D 映射与命名定案
-- 《[错误处理语法糖：frenderer syntax与ash_renderer移植.md](../错误处理/错误处理语法糖：frenderer syntax与ash_renderer移植.md)》——收官后增补（2026-09-21）：frenderer 自写错误处理糖全图谱 + `ash_renderer/src/syntax.rs` 移植记录（控制流族 8 宏 + LogDebug/WarnOrDefault + 新增第 9 件 `unwrap_or_panic!`（家族 panic 位，现无调用点））——**工具篇**
+- 《[错误处理语法糖：frenderer syntax与ash_renderer移植.md](../../错误处理/错误处理语法糖：frenderer syntax与ash_renderer移植.md)》——收官后增补（2026-09-21）：frenderer 自写错误处理糖全图谱 + `ash_renderer/src/syntax.rs` 移植记录（控制流族 8 宏 + LogDebug/WarnOrDefault + 新增第 9 件 `unwrap_or_panic!`（家族 panic 位，现无调用点））——**工具篇**
 - 《[错误处理体系：两Tier思想与优雅退出.md](../../错误处理/错误处理体系：两Tier思想与优雅退出.md)》——收官后增补（2026-09-21）：**宪法篇**——用户两 Tier 错误处理思想（非必要不 panic：①不影响运行 warn 丢弃继续 ②影响运行冒泡 main 优雅退出）、VulkanError 类型层、try_init `?` 串链 + AppExit 优雅退出全链、`?` 可用=失败处理集中、实测证据与后续纪律；init 全程零 panic
 - 《[帧流程：一帧之内各Vulkan对象如何接力.md](材料/帧流程：一帧之内各Vulkan对象如何接力.md)》——收官后增补（2026-09-22 同日两轮实测推翻重写）：**原理篇**——两条时间线读帧循环（CPU 五调用全异步、唯一真等在 fence 重录闸门），核心原则 **CPU 对信号量只配置、不读取、无法感知状态**；三同步对象"谁置位 / 谁等令"总表（一收一发，执行者无一为 CPU）、画布旅程闭环、两帧在飞时间线与 OUT_OF_DATE 控制流分流；配两张技术说明图（`_assets/`：双时间线图、画布旅程环图，旧图已删）
 - 《[三者关系：Context、Swapchain与FramePool.md](材料/三者关系：Context、Swapchain与FramePool.md)》——关系总览（2026-09-22）：回答"三者是平行吗"——Bevy Resource 层平级、Vulkan 对象图一根两枝、寿命三层楼；各自代表什么（地基/画布租约/节拍器）、一帧内五步分工归属、两个独立循环（帧槽位 vs image index）、Unity-D3D 关系对照；配两张 AI 技术图（`_assets/`：一根两枝结构图、两个独立循环图）

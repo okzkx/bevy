@@ -60,7 +60,7 @@ cmb 的"当前状态"是一组带槽位的寄存器，bind 系列各管各的：
 ## 6. 工程推论（ash_renderer 落点）
 
 1. **绑定成本记在 CPU 录制侧，不在 GPU 时序侧。** bindless"整帧绑一次"（场景管线三 set 绑一次管几千个 draw）省的就是寄存器台的反复重拨。
-2. **pipeline 切换的 set 槽兼容是状态机槽位规则。** 换 pipeline 后新快照能否继承旧寄存器值，看 layout 兼容性——overlay 管线自有 layout，切过去之后必须重绑 set0（frame_draw.rs 进场注释）。
+2. **pipeline 切换的 set 槽兼容是状态机槽位规则。** 换 pipeline 后新快照能否继承旧寄存器值，看 layout 兼容性——overlay 管线自有 layout，切过去之后必须重绑 set0（`render/passes/overlay/overlay_pipeline.rs` 的重绑注释）。
 3. **compute dispatch 的交接屏障靠类型系统强制。** `core/record/compute.rs` 的 `ComputeHandles::dispatch` 签名强制带 `Handoff` 参数，dispatch 后自动补一道内存屏障——"必须补刀"不靠自觉，靠编不过。
 
 ## 自测四问
@@ -79,4 +79,4 @@ cmb 的"当前状态"是一组带槽位的寄存器，bind 系列各管各的：
 - [同步模型](同步模型.md)——动作命令之间的执行/内存依赖细则、屏障与信号量的分工
 - [多帧在飞竞争](多帧在飞竞争.md)——cmb 之上提交/队列层的竞争与闸门
 - [整帧录制流程](../引擎/整帧录制流程.md)——本工程九段录制编排，本篇解释其命令流里 bind 与 barrier 的分工
-- 工程代码：`core/record/compute.rs`（Handoff 交接屏障收拢）、`frame/frame_draw.rs`（overlay 切管线重绑 set0、bindless 整帧一绑）
+- 工程代码：`core/record/compute.rs`（Handoff 交接屏障收拢）、`render/frame/record.rs`（整帧录制编排、overlay 切管线重绑 set0、bindless 整帧一绑；`UploadWait` 定义在 `render/frame/frame_pool.rs`）

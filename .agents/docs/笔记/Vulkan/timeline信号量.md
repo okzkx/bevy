@@ -22,7 +22,7 @@ timeline 信号量把 binary 的"亮/不亮"一位升级成 **64 位单调递增
 
 把 timeline 拿掉，用 binary 或 fence 重写上传链，各缺一块：
 
-**每批一只 binary**：图形帧要等"备料前所有批次"，等待三元组变成逐帧不同长度的 `Vec<vk::Semaphore>`；binary 不可复用（signal 后必须 wait 掉），两帧在飞 × 动态批数要建信号量池按帧槽回收；CPU 想查"批 3 完成没有"无门，槽位复用还得每批再配一只 fence——对象 2N，账本两套。
+**每批一只 binary**：图形帧要等"备料前所有批次"，等待列表变成逐帧不同长度的 `Vec<vk::Semaphore>`；binary 不可复用（signal 后必须 wait 掉），两帧在飞 × 动态批数要建信号量池按帧槽回收；CPU 想查"批 3 完成没有"无门，槽位复用还得每批再配一只 fence——对象 2N，账本两套。
 
 **改用 fence**：fence 挂不进 `queue_submit` 的 wait（信号量的专利），图形帧想等上传只能 CPU 先 `waitForFence` 阻塞——上传与渲染串行化，多帧在飞报废，transfer 队列失去存在意义。
 
@@ -45,7 +45,7 @@ semaphores: [ticket_semaphore], values: [snapshot]   // snapshot = 备料时刻�
 |---|---|---|
 | 创建 | `uploader.rs` | `TIMELINE` + `initial_value: 0` |
 | 取号+发出 | `uploader.rs` `submit_batch` | CPU 取 `next_ticket`，写 staging、录拷贝，transfer 队列 signal 该值，不挂 fence；提交成功才登记 `slot.in_flight` |
-| 消费①图形帧 | `frame_draw.rs` + `frame.rs` | 备料点 `UploadWait::snapshot` 记 `last_issued_ticket`，帧尾提交 `ALL_COMMANDS` 阶段等该值，CPU 不阻塞 |
+| 消费①图形帧 | `render/frame/frame_pool.rs`（`UploadWait`）+ `render/frame/record.rs`（提交）+ `driver/host/frame.rs`（调用） | 备料点 `UploadWait::snapshot` 记 `last_issued_ticket`，帧尾提交 `ALL_COMMANDS` 阶段等该值，CPU 不阻塞 |
 | 消费②CPU | `uploader.rs` `wait_until` | 先 `get_semaphore_counter_value` 查值（快路径零开销），未完成才 `vkWaitSemaphores` 阻塞（5s 超时） |
 | 消费③mip 续批 | `uploader/image.rs` | 图形队列 wait T → signal T+1，同一根线链式接力 |
 
@@ -97,13 +97,13 @@ graphics:        wait T ──(排在帧后)── [blit] signal T+1   ← 比�
 - **快照在 overlay 图集整传之后**：图集批可能多发一张号，拍早了本帧 UI 贴图不在等待值里，图形队列读到未完成的 transfer 写。
 - **CPU 登记在提交成功之后**：`slot.in_flight`/`next_ticket` 的推进以 transfer `queue_submit` 成功为前提，提交失败不产生幽灵票据。
 - **ALL_COMMANDS 等 + 内存可见性搭车**：transfer 写的消费方散布在各着色段，逐个挑阶段不值得；信号量内存语义隐含全量，CONCURRENT 共享下没有所有权屏障，跨队列可见性全由这一次等待兜底。
-- **CPU 可读不是回读**：计数器是驱动维护的数值，读取零成本；本工程 CPU 读只在槽位复用与退出排空两处，主路径等待全在 GPU 端。
+- **CPU 可读不是回读**：计数器是驱动维护的数值，读取零成本。本工程 CPU 侧读/等票据共四处：上传槽复用前的 `wait_until`（`uploader.rs`）、池扩容迁移的 `wait_all_uploads`（`pool.rs`）、回收排空的 `wait_until`（`images.rs`/`pool.rs`）、加载弹窗读 `completed_ticket`（`load_popup.rs`）；主路径等待全在 GPU 端。退出排空走 `device_wait_idle`（`init.rs`），不读票据。
 
 ## 自测
 
 1. 为什么"等值 N"能推出"前 N 批都完成"？若两批的 signal 值相同会怎样？
 2. binary + fence 组合补齐上传链，各缺哪一块？fence 为什么救不了图形帧的 GPU 侧等待？
-3. 快照若拍在图集整传之前，症状是什么？为什么票 0 不能进等待三元组？
+3. 快照若拍在图集整传之前，症状是什么？为什么票 0 不能进等待列表？
 4. barrier 为什么做不了"图形帧等 transfer 提交"？跨队列所有权屏障例外在哪？
 5. 号 3 的批次复用槽 0 时等的是哪个号？为什么槽 1 先跑完，计数器也不会先到 2？
 6. mip 续批不串回单调序，会出现哪两重后果？为什么同族同队列时不触发？
@@ -111,8 +111,8 @@ graphics:        wait T ──(排在帧后)── [blit] signal T+1   ← 比�
 ## 引用
 
 - 《[同步模型](同步模型.md)》——三闸门作用域判定线的正本
-- 《[信号量设计缘由](信号量设计缘由.md)》——三件套分工、全工程三只信号量清点
+- 《[信号量设计缘由](信号量设计缘由.md)》——三件套分工、全工程三类信号量清点
 - 《[多帧在飞竞争](多帧在飞竞争.md)》——票据闸门在四竞争对里的位置
 - `ash_renderer/src/render/core/device/transfer/uploader.rs`——取号、发出、CPU 查值/等待
-- `ash_renderer/src/render/frame/frame_draw.rs`——`UploadWait` 快照与图形帧提交等待
+- `ash_renderer/src/render/frame/frame_pool.rs` / `ash_renderer/src/render/frame/record.rs`——`UploadWait` 快照与图形帧提交等待
 - `ash_renderer/src/render/core/device/transfer/uploader/image.rs`——mip 续批链式接力

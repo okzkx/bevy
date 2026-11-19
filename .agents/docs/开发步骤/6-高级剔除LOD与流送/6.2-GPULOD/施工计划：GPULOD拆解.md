@@ -20,10 +20,10 @@
 
 6.1 收官后的链路：视锥剔除（5.2）→ 遮挡测试（6.1）→ build_indirect → 一次 indirect 绘制；所有实例仍按各自 mesh 最细档绘制——**"看得见但不必画细"的那部分开销还没省**。6.2 补 LOD：
 
-- **对象记录自带 mesh 区间副本**（[instance_table.rs](../../../../ash_renderer/src/vulkan/instance_table.rs)）：48B 记录 = first_index/index_count/vertex_base/材质槽/局部包围盒（`instance_table.rs:56`、布局镜像 `:77-96`）——每实例一份区间副本，LOD 换档即改写这三字段，命令组装侧（build_indirect.wgsl 读记录写 20B 命令，[indirect.rs](../../../../ash_renderer/src/vulkan/indirect.rs) `:255-270`）天然是联动点。
-- **MeshPool 按 `AssetId<Mesh>` 驻留**（[pool.rs](../../../../ash_renderer/src/vulkan/pool.rs) `:181`）：LOD 档 = 同一逻辑 mesh 的多个独立 Mesh 资产、各占一个 MeshSlot（细分阶梯由生成器/测试实体出，见 §2 核实 1）；GPU 侧需要"对象槽 → 各档区间"的新形状（§5 待决 3）。
+- **对象记录自带 mesh 区间副本**（[instance_table.rs](../../../../../ash_renderer/src/render/resident/tables/instance_table.rs)）：48B 记录 = first_index/index_count/vertex_base/材质槽/局部包围盒（`instance_table.rs:56`、布局镜像 `:77-96`）——每实例一份区间副本，LOD 换档即改写这三字段，命令组装侧（build_indirect.wgsl 读记录写 20B 命令，[indirect.rs](../../../../../ash_renderer/src/render/passes/visibility/indirect.rs) `:255-270`）天然是联动点。
+- **MeshPool 按 `AssetId<Mesh>` 驻留**（[pool.rs](../../../../../ash_renderer/src/render/resident/assets/pool.rs) `:181`）：LOD 档 = 同一逻辑 mesh 的多个独立 Mesh 资产、各占一个 MeshSlot（细分阶梯由生成器/测试实体出，见 §2 核实 1）；GPU 侧需要"对象槽 → 各档区间"的新形状（§5 待决 3）。
 - **标记链现状**：视锥标记 u32/槽 + 6.1 遮挡标记独立 u32/槽（`instance_table.rs:62-64`）——LOD 档位的传递通道待决（独立环 vs 位打包，§5 待决 2）。
-- **cull push 有余量**：112B（六平面 96 + bound + 垫 16，[cull.rs](../../../../ash_renderer/src/vulkan/cull.rs) `:40-43`），maxPushConstantsSize ≥128 保底——LOD 参数（判据阈值/迟滞带/开关）有 16B 余量可用（§5 待决 5）。
+- **cull push 有余量**：112B（六平面 96 + bound + 垫 16，[cull.rs](../../../../../ash_renderer/src/render/passes/visibility/cull.rs) `:40-43`），maxPushConstantsSize ≥128 保底——LOD 参数（判据阈值/迟滞带/开关）有 16B 余量可用（§5 待决 5）。
 - **投影现成可共用**：6.1 金字塔选层已做 AABB 投屏 + 按像素尺寸选 mip——LOD 选档判据同族（屏幕覆盖尺寸），一次投影两处消费（§5 待决 1）。
 - **bevy 参照**（当前 checkout 实存）：**无传统 per-mesh LOD 组件/系统**（grep 无 `Lod` 组件实抓）；[meshlet](../../../../../crates/bevy_pbr/src/meshlet/mod.rs) 是 cluster 级更细路线（cull_shared.wesl 含 screen-size 思想），学判据思想、不搬 cluster 架构（cluster 级归外置，见 §6）。
 
@@ -76,6 +76,6 @@ compute 环境/存储环/indirect 既有能力面全覆盖，本段无新 Vulkan
 - **6.1 投影复用**：[6.1 施工记录](../6.1-Hi-Z遮挡/6.1.1-6.1.6-Hi-Z遮挡施工记录：测试实体载具、深度金字塔、遮挡第二pass与A_B计量.md)——AABB 投屏与按像素尺寸选层公式（判据同族），遮挡第二 pass 的 pass 拆分先例（LOD 选档落独立 pass 还是 cull 内扩展，照 6.1 待决 3 同款取舍）。
 - **5.5 计量底座**：[段 README](../../5-GPU驱动与常驻大场景/5.5-分档压测/README.md)——GPU timestamp 帧区间/分位数账本/BRP perf 读数族，三开关矩阵零新建计量。
 - **bevy 参照**（当前 checkout 实存）：[meshlet/cull_shared.wesl](../../../../../crates/bevy_pbr/src/meshlet/cull_shared.wesl)——screen-size 判据思想参照（cluster 级路线本身不归本段，若将来立项另走流程）；bevy mesh 构造器（细分阶梯出处，随 §2 核实 1 钉明）。
-- **4.1 账本链路**：多档 mesh 经既有 [remote/objects.rs](../../../../../ash_renderer/src/remote/objects.rs) 方法族与 4.1 账本进 GPU，渲染路径零触碰（6.1.1 同款边界）。
+- **4.1 账本链路**：多档 mesh 经既有 [remote/objects.rs](../../../../../ash_renderer/src/remote/edit/objects.rs) 方法族与 4.1 账本进 GPU，渲染路径零触碰（6.1.1 同款边界）。
 - **环与状态纪律**：[环机制篇](../../5-GPU驱动与常驻大场景/5.1-常驻绘制数据/环机制：HostVisible数据的帧槽轮转与fence纪律.md)——LOD 状态若走宿主镜像须守 fence 纪律；时序契约同 6.1（选档/改写每帧全量重写，不新增等待闸门）。
 - **边界外挂**：cluster 级微几何（meshlet/vis-buffer 谱系）不归本段——bevy meshlet 为实验性参照本体，如立项另走立案流程；vis-buffer 相邻路线已登记[外置拓展条目 5](../../外置拓展需求.md)。流送（档位淘汰）归 6.3/6.4。

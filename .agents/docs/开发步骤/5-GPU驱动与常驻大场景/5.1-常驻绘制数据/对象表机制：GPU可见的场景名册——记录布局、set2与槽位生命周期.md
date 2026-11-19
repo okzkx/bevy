@@ -9,7 +9,7 @@
 ## §1 记录布局：48B 的每个字节都有名字
 
 ```wgsl
-// debug_draw.wgsl——GPU 视角
+// shaders/common/instance.wgsl——GPU 视角（场景绘制消费端在 shaders/scene/gbuffer/gbuffer_write.wgsl）
 struct ObjectRecord {
     first_index: u32,      // 索引池：这段 mesh 的索引从哪个号开始
     index_count: u32,      // 画多少个索引
@@ -39,7 +39,7 @@ set2（自建 pool，每帧槽一套，init 一次写入永不更新）
 ```
 
 - **只读 storage**（`var<storage, read>`）：shader 只读，naga 产出 NonWritable 修饰的 SSBO——读侧语义自洽（表内容归写者管的纪律在类型上可见）。
-- **描述符 init 一次写入**：buffer 容量固定不重建 → 描述符指向的 buffer 永不换 → 没有任何运行期描述符更新。这和 set0 的 UAB（运行期逐槽发布）是两种更新语义，所以**自建 pool** 不混进 BindlessTables 的 UAB 池（pool 旗标、容量对账、max_sets 各管各的）。
+- **描述符 init 一次写入**：buffer 容量固定不重建 → 描述符指向的 buffer 永不换 → 没有任何运行期描述符更新。这和 set0 的 UAB（运行期逐槽发布）是两种更新语义，所以**自建 pool** 不混进 `BindlessTextureTable` 的 UAB 池（pool 旗标、容量对账、max_sets 各管各的）。
 - **stage 超集** `COMPUTE|VERTEX|FRAGMENT`：5.2 的 compute 剔除将读同一批表——layout 一次声明到位，届时零改动。
 - b1/b2 按**帧槽各一套 set**：环按帧槽轮转，描述符必须跟着指到"本帧那一份"——这是环结构对描述符形状的直接要求。
 - 与 set0/set1 的关系：三个 set = 三种变化节奏（资产级/每帧全局/per-object），保留旧集是因为里面的数据照旧在用；set2 不并入 set0 是冻结边界解冻最小化（旧集 binding 表与 UBO 128B 一个字节没动）。

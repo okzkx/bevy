@@ -84,12 +84,12 @@ Blender 导入器把归一化数组的索引引用翻译回"所有物"层级，�
 - 场景根实体：`Transform + Visibility + Name`，scene 无 name 时兜底 `"Scene{i}"`（`loader/mod.rs:1056-1066`）——"Scene0" 的来源。
 - `load_node` 递归：node 实体挂 `Transform + Visibility + Name`（`loader/mod.rs:1560-1563`）；node 带相机则把 `Camera3d + Projection` 组件**插在 node 实体上**（`loader/mod.rs:1623`），带灯则 spawn **node 的子实体**挂 `DirectionalLight` 等（`loader/mod.rs:1781`）——两者落点不同。
 - 每个 primitive 一个 node 子实体：`Mesh3d` + `Aabb`（`loader/mod.rs:1690-1695`），`Name = "{mesh 名}.{材质名}"`（`loader/mod.rs:1754`）。
-- 材质挂接：官方干这事的 `GltfExtensionHandlerPbr` 是 `pub(crate)` 且随 PbrPlugin 被本项目禁用，故由自写 `AshMaterialHook::on_spawn_mesh_and_material` 按标签取柄插 `MeshMaterial3d`（`ash_renderer/src/scene/mechanism/host/material_hook.rs:106`）。
+- 材质挂接：官方干这事的 `GltfExtensionHandlerPbr` 是 `pub(crate)` 且随 PbrPlugin 被本项目禁用，故由自写 `AshMaterialHook::on_spawn_mesh_and_material` 按标签取柄插 `MeshMaterial3d`（`ash_renderer/src/scene/mechanism/host/material_hook.rs:92`，函数自 `:79` 起）。
 - 收口：`WorldAsset::new(world)` 把整棵草稿树打包成资产，以 `"Scene0"` 标签挂进 Gltf 资产（`loader/mod.rs:1149`）。
 
 ### 段 2：进场——反射展开进主 World
 
-- 项目侧 Startup 只有两行：`server.load("…#Scene0")` + `spawn(WorldAssetRoot)`（`ash_renderer/src/scene/content/world_asset.rs:26`）；`WorldAssetRoot` 的 `Changed` 查询把柄排进 spawner 队列，资产未到货则每帧重试。
+- 项目侧 Startup 只有两行：`server.load("…#Scene0")` + `spawn(WorldAssetRoot)`（`ash_renderer/src/scene/content/world_asset.rs:46-47`）；`WorldAssetRoot` 的 `Changed` 查询把柄排进 spawner 队列，资产未到货则每帧重试。
 - 资产 `Added` 后 `world_instance_spawner_system` 把草稿 World 的组件经 `AppTypeRegistry` **反射写入**主 World 新实体，用 `EntityHashMap` 重映射全部实体引用（父子、蒙皮关节），再把草稿树顶层实体统一挂到 `WorldAssetRoot` 名下（`crates/bevy_world_serialization/src/world_asset_spawner.rs:565`）；未注册反射的类型在此 panic（`world_asset_spawner.rs:635`——material_hook 补 `register_asset_reflect` 的原因）。
 
 ### 概念落点表
@@ -128,6 +128,6 @@ Blender 导入器把归一化数组的索引引用翻译回"所有物"层级，�
 ## 6 与本项目接口
 
 - **3.10 树窗口**：只读展示主 World 实体树（`Children`/`ChildOf` 递归），`[mesh] [mat]` 标按组件存在性；点选产出 `SelectedEntity`，是 3.11 实体编辑的目标来源。
-- **3.1.4 采集**：`CollectedScene` 采的就是 primitive 实体（6/6 带父链）——primitive 实体是渲染消费的最小单位。
+- **3.1.4 采集**：`InstanceLedger` 账本每实体一行，采的就是 primitive 实体（6/6 带父链；4.1 起由 `CollectedScene` 快照改为跨帧账本）——primitive 实体是渲染消费的最小单位。
 - **3.11/3.12 编辑落点**：Transform 编辑落在 node/primitive 实体的 `Transform` 组件上，BRP 直控调同款实现。
 - **柄即接口**：实体树只持 `Handle`/`AssetId`，内容全在资产容器——3.2/3.3 上传链只认 `AssetId<Mesh>`/贴图柄，与实体树解耦。

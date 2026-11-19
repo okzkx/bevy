@@ -2,6 +2,24 @@
 
 对应[执行路线图](../学习目标实现步骤.md)。本 README 是步骤索引与材料目录；各段任务面板在段目录 README（开工时立），段施工计划随立案入段目录。
 
+> **代码落点以当前 `ash_renderer/src` 为准（2026-11 目录重构后）**：本步骤的历史施工记录/计划正文保留当时路径与行号；现行代码已迁入 `src/render/{passes,resident}`、`src/driver`、`src/remote/{edit,features,census}`，场景机制仍在 `src/scene/mechanism/{assets,editing,generation,host,interaction}`。压缩映射：
+>
+> | 当时路径 | 现行路径 |
+> |---|---|
+> | `vulkan/descriptors.rs` | `render/resident/tables/bindless_texture_table.rs` |
+> | `vulkan/pool.rs` / `images.rs` | `render/resident/assets/pool.rs` / `images.rs` |
+> | `vulkan/instance_table.rs` | `render/resident/tables/instance_table.rs` |
+> | `vulkan/{hiz,occlusion,lod,cull,indirect}.rs` | `render/passes/visibility/同名.rs` |
+> | `vulkan/depth.rs` / `frames.rs` / `perf.rs` | `render/core/target/depth.rs` / `driver/host/frame.rs`+`render/frame/` / `render/stats/perf.rs` |
+> | `vulkan/resources.rs` / `context.rs` / `uploader.rs` / `mesh_convert.rs` | `render/core/device/memory/role.rs` / `render/core/device/context.rs` / `render/core/device/transfer/uploader.rs` / `render/resident/assets/mesh_convert.rs` |
+> | `remote_objects.rs` / `remote_assets.rs` | `remote/edit/objects.rs` / `remote/edit/assets.rs` |
+> | `remote/{cull,draw,lod,residency,gap}.rs` | `remote/features/同名.rs` |
+> | `remote/{objects,assets,shapes,generate}.rs` | `remote/edit/同名.rs` |
+> | `remote/perf.rs` | `remote/census/perf.rs` |
+> | `shaders/{cull,build_indirect,lod_select,occlusion,hiz_downsample}.wgsl` | `shaders/gpu_driven/同名.wgsl` |
+> | `shaders/debug_draw.wgsl` | `shaders/common/instance.wgsl`（记录）+ `shaders/scene/gbuffer/gbuffer_write.wgsl`（绘制） |
+> | `overlay/windows/debug_window.rs` / `overlay/ui.rs` | `overlay/tool_window/*.rs` / `overlay/framework/ui.rs` |
+
 **目的**：先让 GPU 独立决定画哪些实例，再扩大规模；不能用逐对象 CPU draw 的结果验证 GPU-driven 大场景目标。
 
 **完成标准**：小场景验证正确后再扩到 1 万、5 万、10 万档实际渲染实例；CPU 不回读可见集、不逐对象重建 draw list。1 万为起始档、5 万为目标档、10 万为压力档，能承载的规模由测量给出，不预先声称三档都能达到固定帧率。
@@ -25,21 +43,25 @@
 ## 材料清单
 
 - [功能流程导读：GPU驱动闭环全景](功能流程导读：GPU驱动闭环全景.md)——5.1~5.5 收官后的链路全景走读（2026-10-23 产出；三张表/视锥剔除/indirect 闭环/大场景/计量底座，配机制图五张在 `_assets/`）。
-- [施工计划：最小GPU驱动闭环与常驻大场景五段拆解](施工计划：最小GPU驱动闭环与常驻大场景五段拆解.md)——步骤 5 主施工计划（2026-10-15 立案，未施工）：五段拆解、判定线草案、边界与待决问题、底座核实（bevy GPU 内核 `.wesl` 出处、逐 draw push constants 现状、compute 能力面现状）。
+- [施工计划：最小GPU驱动闭环与常驻大场景五段拆解](施工计划：最小GPU驱动闭环与常驻大场景五段拆解.md)——步骤 5 主施工计划（2026-10-15 立案；五段已按此拆解施工收官）：五段拆解、判定线草案、边界与待决问题、底座核实（bevy GPU 内核 `.wesl` 出处、逐 draw push constants 现状、compute 能力面现状）。
 - [5.1.1-5.1.6-常驻绘制数据施工记录：对象表、模型环与push退役](5.1-常驻绘制数据/5.1.1-5.1.6-常驻绘制数据施工记录：对象表、模型环与push退役.md)——5.1 主产出（2026-10-15 收官）：判定线总账、待决七项落定、钉子六枚（model 拆出模型环的 hazard 发现为首钉）。
 - [GPU常驻绘制数据流程：从账本行到实例索引的各级账面](5.1-常驻绘制数据/GPU常驻绘制数据流程：从账本行到实例索引的各级账面.md)——5.1 功能流程导读：三表写形状分家全景、四类变更走读、代码改动解析。
 - [施工计划：常驻绘制数据拆解](5.1-常驻绘制数据/施工计划：常驻绘制数据拆解.md)——5.1 段施工计划（2026-10-15 立案，同日收官）。
+- [GPU驱动第一课：从逐draw推参数到实例索引读表——新旧两套写法对照](5.1-常驻绘制数据/GPU驱动第一课：从逐draw推参数到实例索引读表——新旧两套写法对照.md)——5.1 入门讲解篇：新旧两套写法、三张表与环的来由。
+- [三张表的设计决策：更新频率、写入方式与备选方案对照](5.1-常驻绘制数据/三张表的设计决策：更新频率、写入方式与备选方案对照.md)——5.1 设计决策篇：三表定型与备选方案对打。
+- [对象表机制：GPU可见的场景名册——记录布局、set2与槽位生命周期](5.1-常驻绘制数据/对象表机制：GPU可见的场景名册——记录布局、set2与槽位生命周期.md)——5.1 机制篇：对象表记录布局、描述符与槽位生命周期。
+- [环机制：HostVisible数据的帧槽轮转与fence纪律](5.1-常驻绘制数据/环机制：HostVisible数据的帧槽轮转与fence纪律.md)——5.1 机制篇：环结构、fence 纪律与增量/全量填充。
 - [施工计划：GPU视锥剔除拆解](5.2-GPU视锥剔除/施工计划：GPU视锥剔除拆解.md)——5.2 段施工计划（2026-10-15 立案，同日收官）：前置闸门四件的现状核实（选族未查 COMPUTE、build.rs 无 stage 过滤、synchronization2 未启用——订正主计划失真）、任务拆解、待决七项。
 - [5.2.1-5.2.5-GPU视锥剔除施工记录：compute管线、可见标记与验证通道](5.2-GPU视锥剔除/5.2.1-5.2.5-GPU视锥剔除施工记录：compute管线、可见标记与验证通道.md)——5.2 主产出（2026-10-15 收官）：判定线总账、闸门四件留痕、钉子五枚（组号随管线布局为首钉——首跑 VUID-07988/08600 实抓）、待决七项落定。
 - [GPU视锥剔除流程：从相机平面到标记环的各级账面](5.2-GPU视锥剔除/GPU视锥剔除流程：从相机平面到标记环的各级账面.md)——5.2 功能流程导读：每帧剔除链走读、新文件分工表、同步与 hazard 面、代码改动解析（11 改 3 增，+851/−31）。
 - [施工计划：indirect闭环拆解](5.3-indirect闭环/施工计划：indirect闭环拆解.md)——5.3 段施工计划（2026-10-19 立案，同日收官）：能力面闸门三件（立案期订正主计划"无需额外 feature"失真：multi_draw_indirect 是 base features 位、draw_indirect_count 是 Vulkan12Features 保留位，均须显式启用）、任务拆解五项、判定线草案五条、待决六项。
 - [5.3.1-5.3.5-indirect闭环施工记录：能力闸门、命令组装与图形消费](5.3-indirect闭环/5.3.1-5.3.5-indirect闭环施工记录：能力闸门、命令组装与图形消费.md)——5.3 主产出（2026-10-19 收官）：判定线总账、在场环方案钉明（幽灵对象盲区否决固定槽位起步口径）、待决六项落定、钉子四枚。
 - [indirect闭环流程：从账本行到一次绘制提交的各级账面](5.3-indirect闭环/indirect闭环流程：从账本行到一次绘制提交的各级账面.md)——5.3 功能流程导读：六族环全景、逐时刻走读、两段式屏障依赖表、失败与稳态路径。
-- [indirect闭环机制三问：API边界、dispatch驱动与布局归属](5.3-indirect闭环/indirect闭环机制三问：API边界、dispatch驱动与布局归属.md)——5.3 机制深潜（收官问答钉）：API 本质 = 决策点后移到 GPU 执行时、dispatch 驱动与独立 pass 取舍、布局归属分界线。
-- [施工计划：常驻大场景组织拆解](5.4-常驻大场景组织/施工计划：常驻大场景组织拆解.md)——5.4 段施工计划（2026-10-19 立案，未施工）：定位与容量前提核实（对象表 131072 覆盖 10 万档属实、mip 静态 mip0 现状四处联动点）、任务拆解五项、判定线草案六条、待决八项（生成器形态倾向运行期 spawn 走 4.1 账本链路、chunk 粒度倾向空间网格、mip 生成倾向 GPU blit）。
+- [indirect闭环的边界与归属：API能力、dispatch驱动与布局契约](5.3-indirect闭环/indirect闭环的边界与归属：API能力、dispatch驱动与布局契约.md)——5.3 机制深潜（收官问答钉）：API 本质 = 决策点后移到 GPU 执行时、dispatch 驱动与独立 pass 取舍、布局归属分界线。
+- [施工计划：常驻大场景组织拆解](5.4-常驻大场景组织/施工计划：常驻大场景组织拆解.md)——5.4 段施工计划（2026-10-19 立案，同日施工收官）：定位与容量前提核实（对象表 131072 覆盖 10 万档属实、mip 静态 mip0 现状四处联动点）、任务拆解五项、判定线草案六条、待决八项（生成器形态倾向运行期 spawn 走 4.1 账本链路、chunk 粒度倾向空间网格、mip 生成倾向 GPU blit）。
 - [5.4.1-5.4.5-常驻大场景组织施工记录：生成器、chunk组织与mip链](5.4-常驻大场景组织/5.4.1-5.4.5-常驻大场景组织施工记录：生成器、chunk组织与mip链.md)——5.4 主产出（2026-10-19 收官）：判定线总账、待决八项落定、blit 续批施工订正、钉子六枚（含读图受阻钉）。
 - [常驻大场景流程：从生成参数到chunk增删与mip上屏的各级账面](5.4-常驻大场景组织/常驻大场景流程：从生成参数到chunk增删与mip上屏的各级账面.md)——5.4 功能流程导读：新文件分工、生成/chunk/mip 三条时刻走读、失败与稳态路径、代码改动实数。
-- [施工计划：分档压测拆解](5.5-分档压测/施工计划：分档压测拆解.md)——5.5 段施工计划（2026-10-19 立案，未施工）：定位与容量/计量现状核实（GPU timestamp 代码零出现）、任务拆解五项、判定线草案五条（含材质环 O(N) 走访继承读数）、待决六项、底座指向。
+- [施工计划：分档压测拆解](5.5-分档压测/施工计划：分档压测拆解.md)——5.5 段施工计划（2026-10-19 立案，同日施工收官）：定位与容量/计量现状核实（GPU timestamp 代码零出现）、任务拆解五项、判定线草案五条（含材质环 O(N) 走访继承读数）、待决六项、底座指向。
 - [5.5.1-5.5.5-分档压测施工记录：矩阵钉死、GPU计时底座与三档读数](5.5-分档压测/5.5.1-5.5.5-分档压测施工记录：矩阵钉死、GPU计时底座与三档读数.md)——5.5 主产出（2026-10-19 收官）：判定线总账、待决六项落定、钉子五枚（QUERY_RESULT_WAIT 挂死为首钉）。
 - [分档性能记录：三档压测读数与瓶颈归因](5.5-分档压测/分档性能记录：三档压测读数与瓶颈归因.md)——步骤 5 产出"分档性能记录"落点：三档三形态读数、增长斜率（CPU 线性项如实报告）、瓶颈归因（GPU 图形段主导）与承载结论。
 - [分档压测流程：从压测矩阵到帧样本账与三档采集的各级账面](5.5-分档压测/分档压测流程：从压测矩阵到帧样本账与三档采集的各级账面.md)——5.5 功能流程导读：测量仪器分工、帧样本一生走读、代码改动实数（13 文件 +217/−19 + 新增 2）。
