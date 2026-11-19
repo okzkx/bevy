@@ -260,7 +260,14 @@ pub(crate) fn draw_frame(
     let transparent_frame = transparent_draw(transparent, slot, indirect_count)?;
     // shadow：命令组装（读 shadow 标记 + LOD 档位环，逐在场行 × 每 cascade，无遮挡参与、
     // LOD 再粗一档）与 depth pass 同门；空场/关闭整段跳过，set 与深度图屏障恒录。
-    let shadow_frame = shadow_frame_draw(shadow, instances, &scene.pool, slot, indirect_count)?;
+    let shadow_frame = shadow_frame_draw(
+        shadow,
+        instances,
+        &scene.pool,
+        gpu.tables.descriptor_set(),
+        slot,
+        indirect_count,
+    )?;
     let (smaa_edge_blend, smaa_nb) = smaa_draws(post, slot);
 
     // —— ④⑤ 场景资源与规格（feature 各束的共用底座，②⑤⑧ 复绑）

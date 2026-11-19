@@ -12,7 +12,8 @@
 // - set2 b0/b1/b2：对象表/模型环/材质环（记录尺寸见 common/instance.wgsl）。
 //
 // alpha：不透明 pass 不带 alpha——albedo.a 恒写 1.0（背景判定看合成端的
-// depth==0）；alpha<1 的行由透明层画（build_indirect 把它们的 instanceCount 置 0）。
+// depth==0）。MASK 材质在本 pass 做片元裁切；混合行由透明层画
+//（build_indirect 把它们的 instanceCount 置 0）。
 enable wgpu_binding_array;
 // #import mesh
 
@@ -70,6 +71,11 @@ fn fs_main(in: VsOut) -> GBufferOut {
     // 坑：TBN 用 dpdx/dpdy，必须在一致控制流里算（所以放在 if 外）；放进分支会因
     // helper invocation 分歧得到未定义值（画面黑/白紊乱）。
     let tbn = cotangent_frame(normalize(in.world_normal), in.world_pos, in.uv);
+    // —— alpha 裁切（MASK）：采样 alpha = 贴图 a × factor a，低于阈值丢弃镂空片元。
+    // 放在 TBN 导数之后：discard 会破坏 helper invocation，导数此前已算完。
+    if (mat.alpha_mode == ALPHA_MODE_MASK && surf.albedo.a < mat.alpha_cutoff) {
+        discard;
+    }
     var n = normalize(in.world_normal);
     if (mat.tex_normal != NO_TEXTURE) {
         let nt = textureSampleLevel(

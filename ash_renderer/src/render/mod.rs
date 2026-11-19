@@ -74,15 +74,17 @@ pub(crate) use resident::tables::frame_uniform_table::{
     FRAME_MODE_POSITION, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
 };
 pub use resident::tables::instance_table::{
-    conservative_world_aabb, pack_lod_entry, pack_material_record, pack_model, pack_object_record,
-    InstanceTables, GAP_MARK_SIZE, INDIRECT_COMMAND_SIZE, LOD_ENTRY_SIZE, LOD_LEVEL_SIZE,
-    LOD_TABLE_STRIDE, MARK_SIZE, MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS, MODEL_STRIDE,
-    NO_TEXTURE_INDEX, OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY,
+    conservative_world_aabb, material_alpha_fields, material_is_transparent, pack_lod_entry,
+    pack_material_record, pack_model, pack_object_record, InstanceTables, MaterialAlpha,
+    ALPHA_MODE_BLEND, ALPHA_MODE_MASK, ALPHA_MODE_OPAQUE, GAP_MARK_SIZE, INDIRECT_COMMAND_SIZE,
+    LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MARK_SIZE, MATERIAL_RECORD_SIZE,
+    MAX_LOD_LEVELS, MODEL_STRIDE, NO_TEXTURE_INDEX, OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY,
 };
 pub use stats::egui_pass_timing::EguiPassTiming;
 pub(crate) use stats::monitor_history::MonitorHistory;
 pub use stats::perf::{FrameSample, GpuTimer, PerfLedger};
 // 不导出 LIGHT_TYPE_SPOT：聚光灯还没实现，导出了也没人用
+pub use self::core::binding::set_layout::DescSet;
 pub use self::core::device::memory::buffer::GpuBuffer;
 pub use self::core::device::memory::contract::{align_up, MemoryContract};
 pub use self::core::device::memory::role::BufferRole;

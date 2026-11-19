@@ -1,6 +1,6 @@
-// 透明行收集（compute 单入口）：从在场环筛材质 alpha<1 的行，atomicAdd
-// 紧凑成"透明行索引 + 深度键"列表——深度键（模型包围盒中心的视图深度）是
-// transparent_sort bitonic 排序的排序键。
+// 透明行收集（compute 单入口）：从在场环筛进透明层的行（材质 alpha 模式，口径同
+// 宿主 material_is_transparent），atomicAdd 紧凑成"透明行索引 + 深度键"列表——深度键
+//（模型包围盒中心的视图深度）是 transparent_sort bitonic 排序的排序键。
 //
 // 接口：set0 = set2（对象表 b0 / 模型环 b1 / 材质环 b2 / 在场环 b4），
 // set1 = 光源分簇集（只读 b0 ClusterParams 的 view_proj），set2 = 透明命令链集
@@ -37,8 +37,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let slot = presence[i];
     let rec = objects[slot];
-    let alpha = materials[rec.material_index].base_color.a;
-    if (alpha < 1.0) {
+    if (material_is_transparent(materials[rec.material_index])) {
         let idx = atomicAdd(&t_count[0], 1u);
         if (idx < TRANSPARENT_CAPACITY) {
             t_index_list[idx] = slot;

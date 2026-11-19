@@ -7,7 +7,7 @@ use bevy::{ecs::system::SystemParam, math::Mat4, prelude::*};
 use crate::{
     common::syntax::{OptionTierExt, ResultTierExt},
     render::{
-        cascade_matrices, frustum_planes, pack_shadow_uniforms, InstanceTables, MeshPool,
+        cascade_matrices, frustum_planes, pack_shadow_uniforms, DescSet, InstanceTables, MeshPool,
         ShadowBuildPass, ShadowCascadeInput, ShadowCascades, ShadowFrameDraw, ShadowPasses,
         ShadowPipeline, ShadowSettings, ShadowTargets, ShadowUniformsData, ShadowWriteDraw,
         SHADOW_CASCADES, SHADOW_MAP_SIZE,
@@ -80,6 +80,7 @@ pub(super) fn shadow_frame_draw(
     shadow: &ShadowInput,
     instances: &InstanceTables,
     pool: &MeshPool,
+    bindless_set: DescSet,
     slot: usize,
     count: u32,
 ) -> Result<ShadowFrameDraw, BevyError> {
@@ -90,6 +91,7 @@ pub(super) fn shadow_frame_draw(
             write: ShadowWriteDraw {
                 pipeline: shadow.pipeline.rec(),
                 instance_set: instances.frame_set(slot),
+                bindless_set,
                 views: std::array::from_fn(|c| targets.map_view(c)),
                 commands: std::array::from_fn(|c| targets.command(slot, c)),
                 command_count: count,

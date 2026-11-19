@@ -15,9 +15,9 @@ use serde_json::{json, Value};
 use ash_macros::system;
 
 use crate::render::{
-    cluster_reference, conservative_world_aabb, ClusterGrid, Context, LightClusters, LightRecord,
-    LightTable, MeshPool, TransparentTargets, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT,
-    TRANSPARENT_CAPACITY,
+    cluster_reference, conservative_world_aabb, material_is_transparent, ClusterGrid, Context,
+    LightClusters, LightRecord, LightTable, MeshPool, TransparentTargets, LIGHT_FLAG_SHADOW,
+    LIGHT_TYPE_POINT, TRANSPARENT_CAPACITY,
 };
 use crate::scene::InstanceLedger;
 
@@ -247,7 +247,7 @@ pub(crate) fn cluster_census(In(_params): In<Option<Value>>, world: &mut World) 
 
 /// `ash_renderer/transparent_sort_check`：GPU bitonic 排序 vs CPU 深度排序参照
 /// 的对照读数口。GPU 侧 = 帧槽 0 透明索引/键列表回读（一次性 staging，低频）；
-/// CPU 参照 = 账本可绘行中材质 alpha<1 的行，键 = 包围盒世界中心视图深度（与
+/// CPU 参照 = 账本可绘行中材质进透明层的行，键 = 包围盒世界中心视图深度（与
 /// transparent_collect.wgsl 同公式），升序排后逐元素对照（键容差 1e-4 + 行集合
 /// 相等）。前提：相机与变换自排序帧以来未变。
 ///
@@ -273,7 +273,7 @@ pub(crate) fn transparent_sort_check(
         let Some(material) = std_materials.get(&row.material) else {
             continue;
         };
-        if material.base_color.to_linear().alpha >= 1.0 {
+        if !material_is_transparent(material) {
             continue;
         }
         let (wmin, wmax) =

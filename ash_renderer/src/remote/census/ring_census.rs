@@ -14,9 +14,9 @@ use serde_json::{json, Value};
 use ash_macros::system;
 
 use crate::render::{
-    pack_material_record, pack_model, pack_object_record, readback_buffer, BindlessTextureTable,
-    Context, ImageCache, InstanceTables, MeshPool, INDIRECT_COMMAND_SIZE, MARK_SIZE,
-    MATERIAL_RECORD_SIZE, MODEL_STRIDE, NO_TEXTURE_INDEX, OBJECT_RECORD_SIZE,
+    material_alpha_fields, pack_material_record, pack_model, pack_object_record, readback_buffer,
+    BindlessTextureTable, Context, ImageCache, InstanceTables, MeshPool, INDIRECT_COMMAND_SIZE,
+    MARK_SIZE, MATERIAL_RECORD_SIZE, MODEL_STRIDE, NO_TEXTURE_INDEX, OBJECT_RECORD_SIZE,
 };
 use crate::scene::InstanceLedger;
 
@@ -34,6 +34,8 @@ fn decode_material_record(bytes: &[u8]) -> BrpResult {
         "reflectance": f32_at(bytes, 24)?,
         "tex": [u32_at(bytes, 32)?, u32_at(bytes, 36)?, u32_at(bytes, 40)?, u32_at(bytes, 44)?],
         "sampler": u32_at(bytes, 48)?,
+        "alpha_mode": u32_at(bytes, 52)?,
+        "alpha_cutoff": f32_at(bytes, 56)?,
     }))
 }
 
@@ -123,6 +125,7 @@ pub(crate) fn ring_census(In(params): In<Option<Value>>, world: &mut World) -> B
                 .map(|slots| slots.texture)
                 .unwrap_or(NO_TEXTURE_INDEX)
         };
+        let alpha = material_alpha_fields(material);
         expected.push(RowExpect {
             entity,
             slot,
@@ -141,6 +144,7 @@ pub(crate) fn ring_census(In(params): In<Option<Value>>, world: &mut World) -> B
                     optional_slot(material.occlusion_texture.as_ref()),
                 ],
                 slots.sampler,
+                alpha,
             ),
         });
     }

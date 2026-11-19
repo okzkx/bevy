@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use ash::{vk, Device};
 use bevy::asset::AssetId;
 use bevy::log::info;
+use bevy::material::AlphaMode;
 use bevy::math::Mat4;
 use bevy::pbr::StandardMaterial;
 
@@ -83,8 +84,58 @@ pub(crate) const MATERIAL_TABLE_CAPACITY: u32 = 1 << 16;
 pub const OBJECT_RECORD_SIZE: u64 = 48;
 /// 模型环步长（mat4x4f），按实例槽索引。
 pub const MODEL_STRIDE: u64 = 64;
-/// 材质记录字节数（vec4 + PBR 标量 ×3 + 垫 + 贴图槽 ×4 + 采样器 + 垫，对齐 16）。
+/// 材质记录字节数（vec4 + PBR 标量 ×3 + 垫 + 贴图槽 ×4 + 采样器 + alpha 模式/阈值，对齐 16）。
 pub const MATERIAL_RECORD_SIZE: u64 = 64;
+
+/// 材质 alpha 模式（与 shader `MaterialRecord.alpha_mode` 同值域）。
+pub const ALPHA_MODE_OPAQUE: u32 = 0;
+/// 镂空：片元 alpha 低于阈值即丢弃。
+pub const ALPHA_MODE_MASK: u32 = 1;
+/// 混合：进透明层。
+pub const ALPHA_MODE_BLEND: u32 = 2;
+
+/// 材质的 alpha 分类结果（模式 + 裁切阈值），与 GPU 记录同域。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialAlpha {
+    pub mode: u32,
+    pub cutoff: f32,
+}
+
+/// 材质 alpha 分类（CPU 侧唯一口径，GPU 记录与透明层筛选同源）。
+///
+/// blend 族统一按混合处理。`AlphaToCoverage` 在单采样下退化为 `Mask(0.5)`（Bevy 同义）。
+pub fn material_alpha_fields(material: &StandardMaterial) -> MaterialAlpha {
+    match material.alpha_mode {
+        AlphaMode::Mask(cutoff) => MaterialAlpha {
+            mode: ALPHA_MODE_MASK,
+            cutoff,
+        },
+        AlphaMode::AlphaToCoverage => MaterialAlpha {
+            mode: ALPHA_MODE_MASK,
+            cutoff: 0.5,
+        },
+        AlphaMode::Blend | AlphaMode::Premultiplied | AlphaMode::Add | AlphaMode::Multiply => {
+            MaterialAlpha {
+                mode: ALPHA_MODE_BLEND,
+                cutoff: 0.0,
+            }
+        }
+        AlphaMode::Opaque => MaterialAlpha {
+            mode: ALPHA_MODE_OPAQUE,
+            cutoff: 0.0,
+        },
+    }
+}
+
+/// 是否进透明层：blend 族恒透明；opaque 材质保留 factor alpha<1 的兜底（旧行为）。
+/// Mask 行恒走不透明 pass（片元端裁切），即使 base_color.a < 1 也不进混合层。
+pub fn material_is_transparent(material: &StandardMaterial) -> bool {
+    match material_alpha_fields(material).mode {
+        ALPHA_MODE_BLEND => true,
+        ALPHA_MODE_OPAQUE => material.base_color.to_linear().alpha < 1.0,
+        _ => false,
+    }
+}
 
 /// 贴图槽缺席哨兵：材质没挂该贴图时写本值，shader 跳过采样（base_color 总是有槽，
 /// 缺图时用 fallback 白图，不用本哨兵）。
@@ -147,7 +198,11 @@ struct MaterialRecordLayout {
     tex_metallic_roughness: u32,
     tex_occlusion: u32,
     sampler_index: u32,
-    _pad: [u32; 3],
+    /// alpha 模式（[`ALPHA_MODE_OPAQUE`] / [`ALPHA_MODE_MASK`] / [`ALPHA_MODE_BLEND`]）。
+    alpha_mode: u32,
+    /// Mask 的裁切阈值；其余模式写 0（shader 端按模式分支，不靠阈值哨兵）。
+    alpha_cutoff: f32,
+    _pad: u32,
 }
 
 const _: () = {
@@ -160,6 +215,8 @@ const _: () = {
     assert!(std::mem::offset_of!(MaterialRecordLayout, tex_metallic_roughness) == 40);
     assert!(std::mem::offset_of!(MaterialRecordLayout, tex_occlusion) == 44);
     assert!(std::mem::offset_of!(MaterialRecordLayout, sampler_index) == 48);
+    assert!(std::mem::offset_of!(MaterialRecordLayout, alpha_mode) == 52);
+    assert!(std::mem::offset_of!(MaterialRecordLayout, alpha_cutoff) == 56);
     assert!(std::mem::size_of::<MaterialRecordLayout>() as u64 == MATERIAL_RECORD_SIZE);
 };
 
@@ -193,12 +250,15 @@ pub fn pack_material_record(
     reflectance: f32,
     tex_slots: [u32; 4],
     sampler_index: u32,
+    alpha: MaterialAlpha,
 ) -> [u8; MATERIAL_RECORD_SIZE as usize] {
     let mut out = [0u8; MATERIAL_RECORD_SIZE as usize];
     put_vec4(&mut out, 0, &base_color);
     put_f32s(&mut out, 16, &[metallic, perceptual_roughness, reflectance]);
     put_u32s(&mut out, 32, &tex_slots);
     put_u32(&mut out, 48, sampler_index);
+    put_u32(&mut out, 52, alpha.mode);
+    put_f32s(&mut out, 56, &[alpha.cutoff]);
     out
 }
 
@@ -687,7 +747,8 @@ impl Drop for InstanceTables {
 mod tests {
     use super::{
         conservative_world_aabb, pack_lod_entry, pack_material_record, pack_model,
-        pack_object_record, LOD_ENTRY_SIZE, MATERIAL_RECORD_SIZE, OBJECT_RECORD_SIZE,
+        pack_object_record, MaterialAlpha, ALPHA_MODE_MASK, LOD_ENTRY_SIZE, MATERIAL_RECORD_SIZE,
+        OBJECT_RECORD_SIZE,
     };
     use bevy::math::{Mat4, Vec3};
 
@@ -763,7 +824,7 @@ mod tests {
         assert_eq!(m.to_cols_array(), cols);
     }
 
-    /// 材质记录 64B 布局：PBR 三标量 + 四贴图槽 + 采样器偏移
+    /// 材质记录 64B 布局：PBR 三标量 + 四贴图槽 + 采样器 + alpha 模式/阈值偏移
     /// 逐项互证，缺席哨兵按位写入。
     #[test]
     fn pack_material_record_layout() {
@@ -774,6 +835,10 @@ mod tests {
             0.5,
             [7, u32::MAX, 9, u32::MAX],
             3,
+            MaterialAlpha {
+                mode: ALPHA_MODE_MASK,
+                cutoff: 0.5,
+            },
         );
         assert_eq!(bytes.len(), MATERIAL_RECORD_SIZE as usize);
         let read_f32 = |o: usize| f32::from_le_bytes(bytes[o..o + 4].try_into().expect("4B"));
@@ -791,9 +856,11 @@ mod tests {
         assert_eq!(read_u32(40), 9);
         assert_eq!(read_u32(44), u32::MAX, "occlusion 缺席哨兵");
         assert_eq!(read_u32(48), 3);
+        assert_eq!(read_u32(52), ALPHA_MODE_MASK);
+        assert_eq!(read_f32(56), 0.5, "Mask 裁切阈值");
         // 垫区保持 0
         assert_eq!(read_u32(28), 0);
-        assert_eq!(read_u32(52), 0);
+        assert_eq!(read_u32(60), 0);
     }
 
     /// LOD 变体条目 12B 布局：first_index/index_count/vertex_base 同序

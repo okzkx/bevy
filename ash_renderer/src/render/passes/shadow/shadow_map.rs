@@ -30,6 +30,7 @@ use crate::render::core::binding::set_layout::{
 use crate::render::core::binding::shader_abi;
 use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
 use crate::render::core::target::depth::{DepthTarget, DEPTH_FORMAT};
+use crate::render::resident::tables::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
 use crate::render::resident::tables::instance_table::{
     INDIRECT_COMMAND_SIZE, INSTANCE_SET_DESC, MARK_SIZE, OBJECT_TABLE_CAPACITY,
 };
@@ -73,6 +74,8 @@ pub(crate) static SHADOW_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
 pub struct ShadowWriteDraw {
     pub pipeline: PipelineRef,
     pub instance_set: DescSet,
+    /// bindless 纹理表（MASK 裁切采样 base_color；与场景管线同一个集对象）。
+    pub bindless_set: DescSet,
     pub views: [vk::ImageView; SHADOW_CASCADES],
     pub commands: [vk::Buffer; SHADOW_CASCADES],
     /// 顶点/索引池（indirect 命令引脚定位到池内——与主管线同一池契约）。
@@ -263,8 +266,8 @@ impl Drop for ShadowTargets {
     }
 }
 
-/// shadow 域 depth-only 绘制管线 + layout（[instance_set 实例表, shadow set] + 4B push =
-/// cascade 索引）。无色附件，深度 D32 reverse-Z（清 0 + GREATER，与主链同向）。
+/// shadow 域 depth-only 绘制管线 + layout（[instance_set 实例表, shadow set, bindless set] +
+/// 4B push = cascade 索引）。无色附件，深度 D32 reverse-Z（清 0 + GREATER，与主链同向）。
 #[derive(bevy::prelude::Resource)]
 pub struct ShadowPipeline {
     handle: PipelineHandle,
@@ -277,7 +280,11 @@ pub(crate) static SHADOW_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
     label: "shadow_write",
     shader: &shader_abi::SHADOW_WRITE,
     entries: &[c"vs_main", c"fs_main"],
-    sets: &[&INSTANCE_SET_DESC, &SHADOW_SET_DESC],
+    sets: &[
+        &INSTANCE_SET_DESC,
+        &SHADOW_SET_DESC,
+        &BINDLESS_TEXTURE_SET_DESC,
+    ],
     push: Some(PushRange {
         stages: vk::ShaderStageFlags::VERTEX,
         size: SHADOW_PUSH_SIZE,
@@ -303,16 +310,23 @@ impl ShadowPipeline {
         layout: vk::PipelineLayout,
         stages: &[vk::PipelineShaderStageCreateInfo<'_>],
     ) -> Result<Self> {
-        // 顶点输入与主管线同一份 32B 交错格式，这里只取位置
+        // 顶点输入与主管线同一份 32B 交错格式：位置 + UV（MASK 裁切采样用）
         let vertex_binding = [vk::VertexInputBindingDescription::default()
             .binding(0)
             .stride(crate::render::VERTEX_STRIDE as u32)
             .input_rate(vk::VertexInputRate::VERTEX)];
-        let vertex_attributes = [vk::VertexInputAttributeDescription::default()
-            .location(0)
-            .binding(0)
-            .format(vk::Format::R32G32B32_SFLOAT)
-            .offset(0)];
+        let vertex_attributes = [
+            vk::VertexInputAttributeDescription::default()
+                .location(0)
+                .binding(0)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(0),
+            vk::VertexInputAttributeDescription::default()
+                .location(2)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(24),
+        ];
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&vertex_binding)
             .vertex_attribute_descriptions(&vertex_attributes);
@@ -353,8 +367,9 @@ impl ShadowPipeline {
             .push_next(&mut rendering_info);
         let pipeline = create_graphics_pipeline(device, &info)?;
         info!(
-            "shadow 管线就绪: depth-only dynamic rendering（D32 reverse-Z GREATER），\
-             顶点输入 32B 交错 pos 位，4B push cascade 索引，[instance_set, shadow set]"
+            "shadow 管线就绪: depth-only dynamic rendering（D32 reverse-Z GREATER，MASK 片元裁切），\
+             顶点输入 32B 交错 pos+uv，4B push cascade 索引，\
+             [instance_set, shadow set, bindless set]"
         );
         Ok(Self {
             handle: PipelineHandle::new(device, layout, pipeline, SHADOW_WRITE_PIPELINE.sets),
@@ -386,7 +401,12 @@ impl ShadowWriteDraw {
                         .layer_count(1)
                         .depth_attachment(&shadow_depth_attachment),
                 );
-                bind_graphics(device, cb, &self.pipeline, &[self.instance_set, shadow_set]);
+                bind_graphics(
+                    device,
+                    cb,
+                    &self.pipeline,
+                    &[self.instance_set, shadow_set, self.bindless_set],
+                );
                 bind_vertex_index(device, cb, self.vertex_buffer, self.index_buffer);
                 set_viewport_scissor(device, cb, map_extent);
                 // 4B push = 级联索引

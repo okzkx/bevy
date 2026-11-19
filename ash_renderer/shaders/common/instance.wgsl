@@ -11,8 +11,9 @@ struct ObjectRecord {
     aabb_max: vec4f,
 }
 
-// 材质记录（64B）：base_color @0 / PBR 标量 @16..32 / 贴图槽 @32..48 / 采样器 @48。
-// 贴图槽缺席为 NO_TEXTURE；base_color 恒在场（缺席走 fallback 白图）。
+// 材质记录（64B）：base_color @0 / PBR 标量 @16..32 / 贴图槽 @32..48 / 采样器 @48 /
+// alpha 模式 @52 / 裁切阈值 @56。贴图槽缺席为 NO_TEXTURE；base_color 恒在场
+//（缺席走 fallback 白图）。
 struct MaterialRecord {
     base_color: vec4f,
     metallic: f32,
@@ -24,11 +25,25 @@ struct MaterialRecord {
     tex_metallic_roughness: u32,
     tex_occlusion: u32,
     sampler_index: u32,
+    alpha_mode: u32,
+    alpha_cutoff: f32,
     // 坑：垫到 64B 必须用标量——vec3<u32> 按 16 对齐会排到 64..76，步长撑到
     // 80 ≠ 宿主 MATERIAL_RECORD_SIZE 64，槽 ≥1 的材质全体错位
     _pad1: u32,
-    _pad2: u32,
-    _pad3: u32,
+}
+
+// 材质 alpha 模式（与宿主 ALPHA_MODE_* 同值域）。
+const ALPHA_MODE_OPAQUE: u32 = 0u;
+const ALPHA_MODE_MASK: u32 = 1u;
+const ALPHA_MODE_BLEND: u32 = 2u;
+
+// 是否进透明层（与宿主 material_is_transparent 同口径）：blend 族恒透明；opaque
+// 保留 factor alpha<1 的兜底；mask 行恒走不透明 pass 的片元裁切。
+fn material_is_transparent(mat: MaterialRecord) -> bool {
+    if (mat.alpha_mode == ALPHA_MODE_BLEND) {
+        return true;
+    }
+    return mat.alpha_mode == ALPHA_MODE_OPAQUE && mat.base_color.a < 1.0;
 }
 
 // LOD 变体条目（12B）：绘制引脚三元组；index_count = 0 为未驻留哨兵。

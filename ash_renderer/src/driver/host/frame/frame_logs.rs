@@ -50,7 +50,7 @@ impl FrameLogs {
         }
         if total_rows > 0 && pending_rows == 0 {
             self.override_logged.log(|| info!(
-                "材质调试覆盖：{} 个 primitive 全部按不透明绘制——blend 关闭（alpha<1 的 {} 行照常画出，glTF BLEND 镜片在此列）；材质参数/贴图槽走材质环（每帧从容器现读）；着色模式按 ASH_RENDER_MODE（三态，见灯光 UBO 日志）",
+                "材质调试覆盖：{} 个 primitive 全部按不透明绘制——blend 关闭（进透明层的 {} 行照常画出，glTF BLEND 镜片在此列）；材质参数/贴图槽走材质环（每帧从容器现读）；着色模式按 ASH_RENDER_MODE（三态，见灯光 UBO 日志）",
                 total_rows,
                 alpha_override,
             ));

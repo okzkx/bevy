@@ -48,9 +48,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         bitcast<i32>(pins.vertex_base),
         slot,
     );
-    // 透明行不进 shadow depth（方向光项只在 opaque 光照累积采样）；引脚全缺（可绘行基准
-    // 恒驻留，理论不可达）防御为 0 实例
-    let transparent = materials[rec.material_index].base_color.a < 1.0;
+    // 透明行不进 shadow depth（方向光项只在 opaque 光照累积采样）；MASK 行进（片元端
+    // 裁切）；引脚全缺（可绘行基准恒驻留，理论不可达）防御为 0 实例
+    let transparent = material_is_transparent(materials[rec.material_index]);
     let base = select(1u, 0u, transparent || pins.index_count == 0u);
     cmd.instance_count = base * shadow_marks[slot * 4u + 0u];
     commands_c0[i] = cmd;

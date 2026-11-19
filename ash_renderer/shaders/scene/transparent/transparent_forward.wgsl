@@ -5,7 +5,7 @@
 //（3D cluster 索引 = 屏幕 tile × 深度片）。
 //
 // blend 形态（管线端 SRC_ALPHA/ONE_MINUS_SRC_ALPHA）：输出直色（非预乘），
-// alpha = 材质 base_color.a。深度 = 不透明 G-buffer 深度附件重绑（loadOp
+// alpha = 贴图 a × 材质 base_color.a。深度 = 不透明 G-buffer 深度附件重绑（loadOp
 // LOAD、只测不写——被不透明覆盖的透明片元被 depth test 剔除）。
 //
 // 接口：set0/set1/set2 与 G-buffer 写入管线相同；set3 = 光源分簇集

@@ -21,9 +21,10 @@ use std::collections::BTreeSet;
 use crate::common::bytes::put_u32s;
 use crate::common::syntax::ResultTierExt;
 use crate::render::{
-    pack_lod_entry, pack_material_record, pack_model, BindlessTextureTable, ImageCache,
-    InstanceTables, MeshPool, LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE,
-    MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS, MODEL_STRIDE, NO_TEXTURE_INDEX,
+    material_alpha_fields, material_is_transparent, pack_lod_entry, pack_material_record,
+    pack_model, BindlessTextureTable, ImageCache, InstanceTables, MeshPool, LOD_ENTRY_SIZE,
+    LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS, MODEL_STRIDE,
+    NO_TEXTURE_INDEX,
 };
 use crate::scene::{anchor_level, DrawListVerify, InstanceLedger, InstanceRow, LodGroups};
 
@@ -55,7 +56,7 @@ impl<'a> DrawabilitySources<'a> {
     }
 
     /// 可绘判定闭包：实例槽缺 / 锚未驻留 / 材质容器缺席 = None（暂缓）；
-    /// 可绘 = (槽号, 材质身份, alpha<1)。
+    /// 可绘 = (槽号, 材质身份, 是否进透明层)。
     pub(crate) fn eval(
         self,
     ) -> impl FnMut(&InstanceRow) -> Option<(u32, AssetId<StandardMaterial>, bool)> + 'a {
@@ -74,8 +75,8 @@ impl<'a> DrawabilitySources<'a> {
             };
             self.pool.resident(anchor_id)?;
             let material = self.std_materials.get(&row.material)?;
-            let alpha = material.base_color.to_linear().alpha < 1.0;
-            Some((slot, row.material.id(), alpha))
+            let transparent = material_is_transparent(material);
+            Some((slot, row.material.id(), transparent))
         }
     }
 }
@@ -92,7 +93,7 @@ pub(crate) fn assemble_update(ledger: &mut InstanceLedger, sources: DrawabilityS
 
 impl DrawListVerify {
     /// 对照模式逐帧比对：开关关着直接返回；开着跑全量参照 vs 增量缓存
-    /// （槽号列表、暂缓数、材质集、alpha<1 计数）逐字段比对，不一致只记进
+    /// （槽号列表、暂缓数、材质集、透明行数）逐字段比对，不一致只记进
     /// 账面，不中断渲染、不驱动绘制。
     pub(crate) fn verify_assembly(&mut self, ledger: &InstanceLedger, sources: DrawabilitySources) {
         if !self.enabled {
@@ -132,7 +133,7 @@ impl DrawListVerify {
                 ));
             } else if view.alpha_override != ref_alpha {
                 mismatch = Some(format!(
-                    "alpha<1 行数不一致（增量 {} vs 全量 {ref_alpha}）",
+                    "透明行数不一致（增量 {} vs 全量 {ref_alpha}）",
                     view.alpha_override,
                 ));
             }
@@ -145,7 +146,7 @@ impl DrawListVerify {
 }
 
 /// 全量参照走访：与增量缓存同判定的 O(账本行) 枚举，只进比对不进绘制。
-/// 返回（槽号列表 Entity 序，去重材质身份，暂缓行数，alpha<1 行数）。
+/// 返回（槽号列表 Entity 序，去重材质身份，暂缓行数，透明行数）。
 fn assemble_reference(
     ledger: &InstanceLedger,
     sources: DrawabilitySources,
@@ -247,6 +248,7 @@ impl InstanceTables {
             let optional_slot = |texture: Option<&Handle<Image>>| {
                 resident(texture).map_or(NO_TEXTURE_INDEX, |slots| slots.texture)
             };
+            let alpha = material_alpha_fields(material);
             let bytes = pack_material_record(
                 [color.red, color.green, color.blue, color.alpha],
                 material.metallic,
@@ -259,6 +261,7 @@ impl InstanceTables {
                     optional_slot(material.occlusion_texture.as_ref()),
                 ],
                 slots.sampler,
+                alpha,
             );
             self.material_ring(frame)
                 .write(u64::from(slot) * MATERIAL_RECORD_SIZE, &bytes)

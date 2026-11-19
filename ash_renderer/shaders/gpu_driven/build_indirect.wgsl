@@ -8,7 +8,7 @@
 // 接口（组号见 cull.wgsl 的说明）：
 // - set0 b0：对象表（48B ObjectRecord）：LOD 表条目全哨兵时回退到基准引脚，可绘行的
 //   基准 mesh 恒驻留。
-// - set0 b2：材质环（读 base_color.a：透明行 alpha<1 在本环 instanceCount=0，由透明层
+// - set0 b2：材质环（读 alpha 模式：进透明层的行在本环 instanceCount=0，由透明层
 //   transparent_gather 出命令，不重复绘制）。
 // - set0 b3：剔除标记（u32/实例槽；cull.wgsl 写，或主视图剔除关时 host 全可见填充）。
 // - set0 b4：在场环（u32 可绘行槽号，draw_frame 全量重写；退休槽/暂缓行不在列表 =
@@ -57,7 +57,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pins = pick_lod_entry(rec, slot, selected);
     let visible = marks[slot];
     // 透明行由透明层 transparent_gather 出命令（材质环驱动，GPU 决策）
-    let transparent = materials[rec.material_index].base_color.a < 1.0;
+    let transparent = material_is_transparent(materials[rec.material_index]);
     // 引脚全缺（可绘行基准恒驻留，理论不可达）防御为 0 实例：不画不悬空
     let opaque_count = select(visible, 0u, pins.index_count == 0u);
     let instance_count = select(opaque_count, 0u, transparent);
