@@ -48,11 +48,12 @@ struct SurfaceSample {
     occlusion: f32,
 }
 
-// 材质参数换算：贴图通道乘标量后 clamp。mip 固定 level 0。所有贴图共用记录里的
-// sampler_index。
+// 材质参数换算：贴图通道乘标量后 clamp。base_color 用隐式 LOD（mip 滤波）——alpha
+// 裁切依赖它，固定 level 0 会让远处镂空边缘起噪；其余贴图仍固定 level 0。所有贴图
+// 共用记录里的 sampler_index。
 fn sample_surface(mat: MaterialRecord, uv: vec2f) -> SurfaceSample {
     var s: SurfaceSample;
-    s.albedo = textureSampleLevel(textures[mat.tex_base_color], samplers[mat.sampler_index], uv, 0.0)
+    s.albedo = textureSample(textures[mat.tex_base_color], samplers[mat.sampler_index], uv)
         * mat.base_color;
     var metallic = mat.metallic;
     var perceptual_roughness = mat.perceptual_roughness;
