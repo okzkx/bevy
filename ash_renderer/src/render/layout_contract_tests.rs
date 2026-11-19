@@ -312,7 +312,7 @@ fn pool_sizes_and_flags_derive_from_declarations() {
     assert_eq!(TRANSPARENT_SET_DESC.dense_storage(), Some(4));
     assert_eq!(BINDLESS_TEXTURE_SET_DESC.dense_storage(), None);
 
-    // shadow 每份集 = 1 UBO + 4 阴影图 + 5 storage；×2 份
+    // shadow 每份集 = 1 UBO + 4 阴影图 + 9 storage（标记 + 两族命令环）；×2 份
     let sizes = SHADOW_SET_DESC.pool_sizes_vec(2);
     let get = |ty| {
         sizes
@@ -322,7 +322,7 @@ fn pool_sizes_and_flags_derive_from_declarations() {
     };
     assert_eq!(get(vk::DescriptorType::UNIFORM_BUFFER), Some(2));
     assert_eq!(get(vk::DescriptorType::SAMPLED_IMAGE), Some(8));
-    assert_eq!(get(vk::DescriptorType::STORAGE_BUFFER), Some(10));
+    assert_eq!(get(vk::DescriptorType::STORAGE_BUFFER), Some(18));
 
     // 合并：一份常驻双表（每 binding 满载 TABLE_CAPACITY）+ 2 帧槽 UBO
     let merged = merged_pool_sizes(&[
@@ -349,7 +349,7 @@ fn writer_validates_writes_against_declaration() {
     use crate::common::error::VulkanError;
     use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 
-    // 合法写入：shadow 集 b0 UBO + 4 张图 + 5 storage，一次写满
+    // 合法写入：shadow 集 b0 UBO + 4 张图 + 9 storage，一次写满
     let set = vk::DescriptorSet::from_raw(7);
     let mut w = DescriptorWriter::new(&SHADOW_SET_DESC, set);
     w.buffer(0, vk::Buffer::from_raw(1), 0, 64);
@@ -360,6 +360,7 @@ fn writer_validates_writes_against_declaration() {
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         );
         w.buffer(6 + c, vk::Buffer::from_raw(20 + c as u64), 0, 128);
+        w.buffer(10 + c, vk::Buffer::from_raw(40 + c as u64), 0, 128);
     }
     w.buffer(5, vk::Buffer::from_raw(30), 0, 128);
     assert!(w.check().is_ok());

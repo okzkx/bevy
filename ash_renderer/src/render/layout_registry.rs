@@ -21,7 +21,9 @@ use crate::render::passes::post::smaa::{
     SMAA_NEIGHBORHOOD_PIPELINE,
 };
 use crate::render::passes::shadow::shadow_build::SHADOW_BUILD_PIPELINE;
-use crate::render::passes::shadow::shadow_map::{SHADOW_SET_DESC, SHADOW_WRITE_PIPELINE};
+use crate::render::passes::shadow::shadow_map::{
+    SHADOW_SET_DESC, SHADOW_WRITE_MASK_PIPELINE, SHADOW_WRITE_PIPELINE,
+};
 use crate::render::passes::transparent::{
     TRANSPARENT_COLLECT_PIPELINE, TRANSPARENT_FORWARD_PIPELINE, TRANSPARENT_GATHER_PIPELINE,
     TRANSPARENT_SET_DESC, TRANSPARENT_SORT_PIPELINE,
@@ -41,6 +43,7 @@ use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
     &GBUFFER_WRITE_PIPELINE,
     &SHADOW_WRITE_PIPELINE,
+    &SHADOW_WRITE_MASK_PIPELINE,
     &TRANSPARENT_FORWARD_PIPELINE,
     &OVERLAY_PIPELINE,
     &GBUFFER_COMPOSITE_PIPELINE,

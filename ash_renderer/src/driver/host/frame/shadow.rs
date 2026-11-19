@@ -90,10 +90,12 @@ pub(super) fn shadow_frame_draw(
             build: shadow.build_pass.draw(count),
             write: ShadowWriteDraw {
                 pipeline: shadow.pipeline.rec(),
+                mask_pipeline: shadow.pipeline.mask_rec(),
                 instance_set: instances.frame_set(slot),
                 bindless_set,
                 views: std::array::from_fn(|c| targets.map_view(c)),
                 commands: std::array::from_fn(|c| targets.command(slot, c)),
+                mask_commands: std::array::from_fn(|c| targets.mask_command(slot, c)),
                 command_count: count,
                 vertex_buffer: pool
                     .vertex_buffer()

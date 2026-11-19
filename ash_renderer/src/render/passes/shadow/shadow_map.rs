@@ -39,6 +39,8 @@ pub const SHADOW_BINDING_UNIFORM: u32 = 0;
 const SHADOW_BINDING_MAP0: u32 = 1;
 const SHADOW_BINDING_MARK0: u32 = 5;
 const SHADOW_BINDING_CMD0: u32 = 6;
+/// MASK 行命令环（b10..b13）：与 b6..9 同形，由 shadow_build 按材质 alpha 模式分流。
+const SHADOW_BINDING_MASK_CMD0: u32 = 10;
 
 const _: () = assert!(
     SHADOW_CASCADES == 4,
@@ -48,7 +50,7 @@ const CS: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
 const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
 
 /// shadow 集：b0 均匀数据（绘制/合成/剔除都读）/ b1..b4 各级阴影图（合成采样）/
-/// b5 剔除标记 / b6..b9 各级命令环（后两类只给 compute）。
+/// b5 剔除标记 / b6..b9 不透明命令环 / b10..b13 MASK 命令环（后两类只给 compute）。
 pub(crate) static SHADOW_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "shadow",
     &[
@@ -66,6 +68,10 @@ pub(crate) static SHADOW_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
         BindingDesc::new(SHADOW_BINDING_CMD0 + 1, DescKind::StorageBuffer, CS),
         BindingDesc::new(SHADOW_BINDING_CMD0 + 2, DescKind::StorageBuffer, CS),
         BindingDesc::new(SHADOW_BINDING_CMD0 + 3, DescKind::StorageBuffer, CS),
+        BindingDesc::new(SHADOW_BINDING_MASK_CMD0, DescKind::StorageBuffer, CS),
+        BindingDesc::new(SHADOW_BINDING_MASK_CMD0 + 1, DescKind::StorageBuffer, CS),
+        BindingDesc::new(SHADOW_BINDING_MASK_CMD0 + 2, DescKind::StorageBuffer, CS),
+        BindingDesc::new(SHADOW_BINDING_MASK_CMD0 + 3, DescKind::StorageBuffer, CS),
     ],
 );
 
@@ -73,11 +79,14 @@ pub(crate) static SHADOW_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
 #[derive(Clone, Copy)]
 pub struct ShadowWriteDraw {
     pub pipeline: PipelineRef,
+    /// MASK 行专用管线（片元端 alpha 裁切；不透明行继续走无 FS 的 depth-only 管线）。
+    pub mask_pipeline: PipelineRef,
     pub instance_set: DescSet,
     /// bindless 纹理表（MASK 裁切采样 base_color；与场景管线同一个集对象）。
     pub bindless_set: DescSet,
     pub views: [vk::ImageView; SHADOW_CASCADES],
     pub commands: [vk::Buffer; SHADOW_CASCADES],
+    pub mask_commands: [vk::Buffer; SHADOW_CASCADES],
     /// 顶点/索引池（indirect 命令引脚定位到池内——与主管线同一池契约）。
     pub vertex_buffer: vk::Buffer,
     pub index_buffer: vk::Buffer,
@@ -97,6 +106,8 @@ pub struct ShadowTargets {
     ubos: Vec<GpuBuffer>,
     marks: Vec<GpuBuffer>,
     commands: Vec<GpuBuffer>,
+    /// MASK 行命令环（与不透明环同形、同容量，按材质 alpha 模式分流）。
+    mask_commands: Vec<GpuBuffer>,
 }
 
 impl ShadowTargets {
@@ -125,11 +136,12 @@ impl ShadowTargets {
             ubos: Vec::new(),
             marks: Vec::new(),
             commands: Vec::new(),
+            mask_commands: Vec::new(),
         };
         this.build(ctx)?;
         info!(
             "shadow 资源就绪: {SHADOW_CASCADES} 级联 × {SHADOW_MAP_SIZE}² D32（reverse-Z clear 0）\
-             × {} 帧槽（UBO {SHADOW_UBO_SIZE}B / 标记 / 命令环四族）",
+             × {} 帧槽（UBO {SHADOW_UBO_SIZE}B / 标记 / 不透明与 MASK 两族命令环）",
             MAX_FRAMES_IN_FLIGHT,
         );
         Ok(this)
@@ -154,10 +166,12 @@ impl ShadowTargets {
         for _ in 0..slots {
             self.ubos
                 .push(mk(BufferRole::FrameUniform, u64::from(SHADOW_UBO_SIZE))?);
-            // 标记单份交错（[槽][cascade]）；命令环 ×cascade
+            // 标记单份交错（[槽][cascade]）；不透明/MASK 两族命令环各 ×cascade
             self.marks.push(mk(BufferRole::Storage, mark_size)?);
             for _ in 0..SHADOW_CASCADES {
                 self.commands
+                    .push(mk(BufferRole::IndirectCommands, cmd_size)?);
+                self.mask_commands
                     .push(mk(BufferRole::IndirectCommands, cmd_size)?);
             }
         }
@@ -207,6 +221,12 @@ impl ShadowTargets {
                     0,
                     vk::WHOLE_SIZE,
                 );
+                writer.buffer(
+                    SHADOW_BINDING_MASK_CMD0 + c as u32,
+                    self.mask_commands[slot * SHADOW_CASCADES + c].buffer(),
+                    0,
+                    vk::WHOLE_SIZE,
+                );
             }
             writer.submit(device)?;
         }
@@ -241,6 +261,12 @@ impl ShadowTargets {
         self.commands[slot * SHADOW_CASCADES + cascade].buffer()
     }
 
+    /// 本帧槽 cascade c 的 MASK 行命令环（INDIRECT 用途，alpha 裁切管线读）。
+    #[must_use]
+    pub fn mask_command(&self, slot: usize, cascade: usize) -> vk::Buffer {
+        self.mask_commands[slot * SHADOW_CASCADES + cascade].buffer()
+    }
+
     /// 级联深度图视图（录制附件用）。
     #[must_use]
     pub fn map_view(&self, cascade: usize) -> vk::ImageView {
@@ -266,11 +292,15 @@ impl Drop for ShadowTargets {
     }
 }
 
-/// shadow 域 depth-only 绘制管线 + layout（[instance_set 实例表, shadow set, bindless set] +
-/// 4B push = cascade 索引）。无色附件，深度 D32 reverse-Z（清 0 + GREATER，与主链同向）。
+/// shadow 域两条 depth-only 绘制管线（[instance_set, shadow set] + 4B push = cascade 索引；
+/// MASK 管线再加 bindless set）。无色附件，深度 D32 reverse-Z（清 0 + GREATER，与主链同向）。
+///
+/// 拆两条的原因：alpha 裁切的 `discard` 会关掉 early-Z，且不透明几何也要跑片元着色器。
+/// 不透明行继续走无 FS 的旧管线（early-Z 有效），只有 MASK 行走裁切管线。
 #[derive(bevy::prelude::Resource)]
 pub struct ShadowPipeline {
-    handle: PipelineHandle,
+    depth: PipelineHandle,
+    mask: PipelineHandle,
 }
 
 /// 4B push：cascade 索引（逐 pass 推一次）。
@@ -279,6 +309,19 @@ const SHADOW_PUSH_SIZE: u32 = 4;
 pub(crate) static SHADOW_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
     label: "shadow_write",
     shader: &shader_abi::SHADOW_WRITE,
+    entries: &[c"vs_main", c"fs_main"],
+    sets: &[&INSTANCE_SET_DESC, &SHADOW_SET_DESC],
+    push: Some(PushRange {
+        stages: vk::ShaderStageFlags::VERTEX,
+        size: SHADOW_PUSH_SIZE,
+    }),
+    color_formats: &[],
+    depth_format: Some(DEPTH_FORMAT),
+};
+
+pub(crate) static SHADOW_WRITE_MASK_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "shadow_write_mask",
+    shader: &shader_abi::SHADOW_WRITE_MASK,
     entries: &[c"vs_main", c"fs_main"],
     sets: &[
         &INSTANCE_SET_DESC,
@@ -294,14 +337,34 @@ pub(crate) static SHADOW_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
 };
 
 impl ShadowPipeline {
-    /// 建管线链（shader module → layout → depth-only 管线；失败全有或全无）。
+    /// 建两条管线（shader module → layout → depth-only 管线；失败全有或全无）。
     ///
     /// # Errors
     /// 配方对账不过，或 shader module / layout / pipeline 任一创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
-        SHADOW_WRITE_PIPELINE.build(ctx, layouts, |layout, stages| {
-            Self::create_pipeline(&ctx.device, layout, stages)
-        })
+        let depth = SHADOW_WRITE_PIPELINE.build(ctx, layouts, |layout, stages| {
+            Self::create_pipeline(
+                &ctx.device,
+                layout,
+                stages,
+                SHADOW_WRITE_PIPELINE.sets,
+                false,
+            )
+        })?;
+        let mask = SHADOW_WRITE_MASK_PIPELINE.build(ctx, layouts, |layout, stages| {
+            Self::create_pipeline(
+                &ctx.device,
+                layout,
+                stages,
+                SHADOW_WRITE_MASK_PIPELINE.sets,
+                true,
+            )
+        })?;
+        info!(
+            "shadow 管线就绪: depth-only dynamic rendering（D32 reverse-Z GREATER）两条——\
+             不透明无 FS（early-Z）+ MASK 片元裁切（pos+uv，bindless），4B push cascade 索引"
+        );
+        Ok(Self { depth, mask })
     }
 
     /// 管线状态装配（layout 已建；module 由 [`PipelineDesc::build`] 回收）。
@@ -309,24 +372,29 @@ impl ShadowPipeline {
         device: &Device,
         layout: vk::PipelineLayout,
         stages: &[vk::PipelineShaderStageCreateInfo<'_>],
-    ) -> Result<Self> {
-        // 顶点输入与主管线同一份 32B 交错格式：位置 + UV（MASK 裁切采样用）
+        sets: &'static [&'static SetLayoutDesc],
+        with_uv: bool,
+    ) -> Result<PipelineHandle> {
+        // 顶点输入与主管线同一份 32B 交错格式；MASK 管线额外要 UV（裁切采样用）
         let vertex_binding = [vk::VertexInputBindingDescription::default()
             .binding(0)
             .stride(crate::render::VERTEX_STRIDE as u32)
             .input_rate(vk::VertexInputRate::VERTEX)];
-        let vertex_attributes = [
-            vk::VertexInputAttributeDescription::default()
-                .location(0)
-                .binding(0)
-                .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(0),
-            vk::VertexInputAttributeDescription::default()
-                .location(2)
-                .binding(0)
-                .format(vk::Format::R32G32_SFLOAT)
-                .offset(24),
-        ];
+        let position = vk::VertexInputAttributeDescription::default()
+            .location(0)
+            .binding(0)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(0);
+        let uv = vk::VertexInputAttributeDescription::default()
+            .location(2)
+            .binding(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(24);
+        let vertex_attributes: Vec<_> = if with_uv {
+            vec![position, uv]
+        } else {
+            vec![position]
+        };
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&vertex_binding)
             .vertex_attribute_descriptions(&vertex_attributes);
@@ -366,25 +434,25 @@ impl ShadowPipeline {
             .layout(layout)
             .push_next(&mut rendering_info);
         let pipeline = create_graphics_pipeline(device, &info)?;
-        info!(
-            "shadow 管线就绪: depth-only dynamic rendering（D32 reverse-Z GREATER，MASK 片元裁切），\
-             顶点输入 32B 交错 pos+uv，4B push cascade 索引，\
-             [instance_set, shadow set, bindless set]"
-        );
-        Ok(Self {
-            handle: PipelineHandle::new(device, layout, pipeline, SHADOW_WRITE_PIPELINE.sets),
-        })
+        Ok(PipelineHandle::new(device, layout, pipeline, sets))
     }
 
-    /// 录制投影（帧输入束携带）。
+    /// 不透明行管线（帧输入束携带）。
     #[must_use]
     pub(crate) fn rec(&self) -> PipelineRef {
-        self.handle.rec()
+        self.depth.rec()
+    }
+
+    /// MASK 行管线（帧输入束携带）。
+    #[must_use]
+    pub(crate) fn mask_rec(&self) -> PipelineRef {
+        self.mask.rec()
     }
 }
 
 impl ShadowWriteDraw {
-    /// 逐级联一次动态渲染 + 一次 indirect draw（reverse-Z，clear 0）。布局屏障由调用方
+    /// 逐级联一次动态渲染 + 两次 indirect draw（不透明无 FS / MASK 片元裁切；reverse-Z，clear 0）。
+    /// 布局屏障由调用方
     /// [`ShadowFrameDraw::record_depth`](super::shadow_frame::ShadowFrameDraw::record_depth) 恒录。
     pub(crate) fn record(&self, device: &Device, cb: vk::CommandBuffer, shadow_set: DescSet) {
         unsafe {
@@ -401,17 +469,13 @@ impl ShadowWriteDraw {
                         .layer_count(1)
                         .depth_attachment(&shadow_depth_attachment),
                 );
-                bind_graphics(
-                    device,
-                    cb,
-                    &self.pipeline,
-                    &[self.instance_set, shadow_set, self.bindless_set],
-                );
-                bind_vertex_index(device, cb, self.vertex_buffer, self.index_buffer);
-                set_viewport_scissor(device, cb, map_extent);
-                // 4B push = 级联索引
+                // 4B push = 级联索引（两条管线 layout 分开，各推一次）
                 let mut cascade_push = [0u8; 4];
                 put_u32(&mut cascade_push, 0, c as u32);
+                // 不透明行：无 FS 的 depth-only 管线（无 discard，early-Z 有效）
+                bind_graphics(device, cb, &self.pipeline, &[self.instance_set, shadow_set]);
+                bind_vertex_index(device, cb, self.vertex_buffer, self.index_buffer);
+                set_viewport_scissor(device, cb, map_extent);
                 device.cmd_push_constants(
                     cb,
                     self.pipeline.layout,
@@ -422,6 +486,29 @@ impl ShadowWriteDraw {
                 device.cmd_draw_indexed_indirect(
                     cb,
                     self.commands[c],
+                    0,
+                    self.command_count,
+                    INDIRECT_COMMAND_SIZE as u32,
+                );
+                // MASK 行：片元端按贴图 alpha 裁切
+                bind_graphics(
+                    device,
+                    cb,
+                    &self.mask_pipeline,
+                    &[self.instance_set, shadow_set, self.bindless_set],
+                );
+                bind_vertex_index(device, cb, self.vertex_buffer, self.index_buffer);
+                set_viewport_scissor(device, cb, map_extent);
+                device.cmd_push_constants(
+                    cb,
+                    self.mask_pipeline.layout,
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    &cascade_push,
+                );
+                device.cmd_draw_indexed_indirect(
+                    cb,
+                    self.mask_commands[c],
                     0,
                     self.command_count,
                     INDIRECT_COMMAND_SIZE as u32,
