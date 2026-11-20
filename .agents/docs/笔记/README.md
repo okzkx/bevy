@@ -68,6 +68,7 @@
 - [Filament 色调映射参考](光照与材质/Filament%20色调映射参考.md)——完整 ACES 成像链与常量的逐处对照
 - [Unity PBR 调研](光照与材质/Unity%20PBR%20调研.md)——URP 材质、BRDF 与 IBL 的落地清单
 - [Unity SCGI 调研](光照与材质/Unity%20SCGI%20调研.md)——Surface Cache GI 与三大灵感来源
+- [Unity SCGI 实现](光照与材质/Unity%20SCGI%20实现.md)——从场景变更到屏幕辐照度纹理的源码级数据流
 - [全局光照谱系](光照与材质/全局光照谱系调研.md)——按数据住址分四族的选型地图
 - [体素渲染调研](光照与材质/体素渲染调研.md)——VXGI 与 3D 光源分簇的成败复盘
 - [Alpha 裁切与 MASK 材质](光照与材质/Alpha裁切与MASK材质.md)——丢片元不是混合；代价随填充量走
