@@ -19,11 +19,12 @@
 //! | [`features::shadow`] | 阴影：开关 + 逐 cascade 标记对照 |
 //! | [`features::render_settings`] | 画面设置：Bloom/tonemap、SMAA、着色调试模式 |
 //! | [`features::sky`] | 程序化天空：参数读写（`sky_set`/`sky_stats`）与常量天空自检开关（`sky_uniform`） |
-//! | [`features::ibl`] | 环境光照：开关/强度（`ibl_set`）、SH-L2/自检/捕获账本读数（`ibl_stats`）与 cubemap 逐面读回（`ibl_census`） |
+//! | [`features::ibl`] | 环境光照：开关/强度/漫反射编码（`ibl_set`）、SH-L2/自检/GlobalProbe 读数（`ibl_stats`）与 cubemap/DFG/桶全量读回（`ibl_census`） |
 //! | [`features::draw`] | indirect 闭环读数与组装对照开关 |
 //! | [`features::residency`] | 驻留管理器读数与设置 |
 //! | [`features::gap`] | GPU 缺口请求读数与模式 |
 //! | [`census::ring_census`](mod@census::ring_census) | 环与常驻表 GPU 内容 vs 宿主期望字节对账 |
+//! | [`census::frame_dump`] | LDR 帧取证读回（`frame_dump`：写 PPM；锁屏/遮挡下画面 A/B 的兜底） |
 //! | [`census::perf`] | 性能读数、原始样本导出与 workload 变更形态开关 |
 //! | [`census::monitor`] | 持续监控读数（与 egui 监控窗口同账）与帧率同步开关 |
 //! | [`census::layout_contract`](mod@census::layout_contract) | 描述符集布局与管线配方清单 |
@@ -55,6 +56,7 @@ use bevy::{
 
 use self::{
     census::{
+        frame_dump::frame_dump,
         layout_contract::layout_contract,
         monitor::{frame_sync_cmd, monitor_stats},
         perf::{perf_samples, perf_stats, workload},
@@ -160,6 +162,7 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/ibl_set", ibl_set)
                 .with_method_main("ash_renderer/ibl_stats", ibl_stats)
                 .with_method_main("ash_renderer/ibl_census", ibl_census)
+                .with_method_main("ash_renderer/frame_dump", frame_dump)
                 .with_method_main("ash_renderer/layout_contract", layout_contract),
             RemoteHttpPlugin::default().with_port(port),
         ));

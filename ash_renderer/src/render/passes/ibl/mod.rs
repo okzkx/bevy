@@ -11,6 +11,7 @@
 //! 回到步骤 8 的 `albedo · ambient_color`，逐位一致——这是回归硬线。
 
 mod environment;
+pub(crate) mod octahedral;
 
 use ash::{vk, Device};
 
@@ -19,17 +20,20 @@ use crate::render::core::binding::set_layout::DescSet;
 pub use environment::half_to_f32;
 pub use environment::{
     IblBakeInput, IblBakePlan, IblEnvironment, IBL_CUBE_MIPS, IBL_CUBE_SIZE, IBL_MAX_MIP,
-    IBL_SH_BUFFER_SIZE, IBL_STATS_BUFFER_SIZE, IBL_STATS_FLOATS,
+    IBL_PROBE_BUCKETS, IBL_PROBE_BUFFER_SIZE, IBL_PROBE_RESOLUTION, IBL_SH_BUFFER_SIZE,
+    IBL_STATS_BUFFER_SIZE, IBL_STATS_FLOATS,
 };
 pub(crate) use environment::{
-    BRDF_LUT_PIPELINE, IBL_CAPTURE_SET_DESC, IBL_DFG_SET_DESC, IBL_PREFILTER_SET_DESC,
-    IBL_SET_DESC, IBL_SH_CHECK_SET_DESC, IBL_SH_PROJECT_SET_DESC, IBL_SH_REDUCE_SET_DESC,
-    PREFILTER_PIPELINE, SH_CHECK_PIPELINE, SH_PROJECT_PIPELINE, SH_REDUCE_PIPELINE,
-    SKY_CAPTURE_PIPELINE,
+    BRDF_LUT_PIPELINE, GLOBAL_PROBE_PIPELINE, IBL_CAPTURE_SET_DESC, IBL_DFG_SET_DESC,
+    IBL_GLOBAL_PROBE_SET_DESC, IBL_PREFILTER_SET_DESC, IBL_SET_DESC, IBL_SH_CHECK_SET_DESC,
+    IBL_SH_PROJECT_SET_DESC, IBL_SH_REDUCE_SET_DESC, PREFILTER_PIPELINE, SH_CHECK_PIPELINE,
+    SH_PROJECT_PIPELINE, SH_REDUCE_PIPELINE, SKY_CAPTURE_PIPELINE,
 };
 
-/// IBL 漫反射编码：SH-L2（本段恒此值；9.3 的 16 桶另立）。
+/// IBL 漫反射编码：SH-L2（9.2 的默认）。
 pub const IBL_MODE_SH_L2: u32 = 0;
+/// IBL 漫反射编码：GlobalProbe 16 桶（9.3；与 patch 同格式的兜底编码）。
+pub const IBL_MODE_PROBE16: u32 = 1;
 
 /// 环境光照设置（宿主真源；BRP `ibl_set` 与帧 UBO 同源）。
 #[derive(bevy::prelude::Resource)]
@@ -39,7 +43,7 @@ pub struct IblSettings {
     pub enabled: bool,
     /// IBL 强度倍数（漫反射与高光同乘）。
     pub intensity: f32,
-    /// 漫反射编码（帧 UBO `ibl_mode`；本段恒 [`IBL_MODE_SH_L2`]）。
+    /// 漫反射编码（帧 UBO `ibl_mode`）：[`IBL_MODE_SH_L2`] 或 [`IBL_MODE_PROBE16`]。
     pub mode: u32,
 }
 

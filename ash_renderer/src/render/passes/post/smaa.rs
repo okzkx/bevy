@@ -18,6 +18,8 @@ use bevy::prelude::Resource;
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::role::BufferRole;
+use crate::render::core::device::readback::OneShotReadback;
+use crate::render::core::record::barrier::ImageBarrier;
 use crate::render::resident::assets::images::GpuImage;
 use crate::render::{Context, MAX_FRAMES_IN_FLIGHT};
 
@@ -449,6 +451,74 @@ impl SmaaTargets {
     #[must_use]
     pub fn ldr_image(&self, slot: usize) -> vk::Image {
         self.ldrs[slot].image()
+    }
+
+    /// 读回 LDR 后链目标（RGBA8，行主序；`slot` = 帧槽 0/1）。BRP `frame_dump` 的
+    /// 帧取证口：一次性拷贝 + fence，取到的是该槽最近一个完整帧（≤1 帧陈旧）。
+    /// 只在 BRP 诊断路径调用，不进取景/绘制热路径。
+    ///
+    /// # Errors
+    /// 一次性 staging / 命令池 / 提交 / 映射失败。
+    pub fn readback_ldr(&self, ctx: &Context, slot: usize) -> Result<Vec<u8>> {
+        let extent = self.extent;
+        let byte_size = u64::from(extent.width) * u64::from(extent.height) * 4;
+        let mut bytes = vec![0u8; byte_size as usize];
+        unsafe {
+            let readback = OneShotReadback::begin(ctx, byte_size)?;
+            // 帧尾 LDR 停在 SHADER_READ_ONLY（tonemap 写完后转可采样供 SMAA）
+            ImageBarrier::transition(
+                self.ldr_image(slot),
+                vk::ImageAspectFlags::COLOR,
+                (
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                ),
+                (
+                    vk::PipelineStageFlags::ALL_COMMANDS,
+                    vk::PipelineStageFlags::TRANSFER,
+                ),
+                (
+                    vk::AccessFlags::MEMORY_WRITE,
+                    vk::AccessFlags::TRANSFER_READ,
+                ),
+            )
+            .record(&ctx.device, readback.cb);
+            let region = vk::BufferImageCopy::default()
+                .image_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .layer_count(1),
+                )
+                .image_extent(vk::Extent3D {
+                    width: extent.width,
+                    height: extent.height,
+                    depth: 1,
+                });
+            ctx.device.cmd_copy_image_to_buffer(
+                readback.cb,
+                self.ldr_image(slot),
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                readback.staging,
+                std::slice::from_ref(&region),
+            );
+            ImageBarrier::transition(
+                self.ldr_image(slot),
+                vk::ImageAspectFlags::COLOR,
+                (
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                ),
+                (
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER
+                        | vk::PipelineStageFlags::FRAGMENT_SHADER,
+                ),
+                (vk::AccessFlags::TRANSFER_READ, vk::AccessFlags::SHADER_READ),
+            )
+            .record(&ctx.device, readback.cb);
+            readback.finish_and_read(ctx, &mut bytes)?;
+        }
+        Ok(bytes)
     }
 }
 

@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use crate::render::{
     FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_IBL_DIFFUSE, FRAME_MODE_IBL_SPECULAR,
     FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC, FRAME_MODE_NORMAL, FRAME_MODE_POSITION,
-    FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
+    FRAME_MODE_PROBE_BUCKETS, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
 };
 
 /// 场景着色模式（UBO `mode` 的宿主侧形态）。
@@ -34,11 +34,13 @@ pub enum RenderMode {
     IblDiffuse,
     /// IBL 高光贡献直出（`ibl_specular * EXPOSURE`；IBL 关时黑）。
     IblSpecular,
+    /// GlobalProbe 桶可视化：法线选桶 → 桶中心方向着色（9.3 的映射/接缝取证）。
+    ProbeBuckets,
 }
 
 impl RenderMode {
     /// 全部模式（名称解析遍历用）。
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Lambert,
         Self::Unlit,
         Self::Normal,
@@ -50,11 +52,12 @@ impl RenderMode {
         Self::Depth,
         Self::IblDiffuse,
         Self::IblSpecular,
+        Self::ProbeBuckets,
     ];
 
     /// 可选名称提示（env 拼写错误告警与 BRP 未知模式报错共用）。
     pub const NAME_HINT: &'static str =
-        "filament(lambert 兼容)/unlit/normal/position/metallic/roughness/ao/reflectance/depth/ibl_diffuse/ibl_specular";
+        "filament(lambert 兼容)/unlit/normal/position/metallic/roughness/ao/reflectance/depth/ibl_diffuse/ibl_specular/probe_buckets";
 
     /// 模式名（唯一名称表）。
     #[must_use]
@@ -71,6 +74,7 @@ impl RenderMode {
             Self::Depth => "depth",
             Self::IblDiffuse => "ibl_diffuse",
             Self::IblSpecular => "ibl_specular",
+            Self::ProbeBuckets => "probe_buckets",
         }
     }
 
@@ -112,6 +116,7 @@ impl RenderMode {
             Self::Depth => FRAME_MODE_DEPTH,
             Self::IblDiffuse => FRAME_MODE_IBL_DIFFUSE,
             Self::IblSpecular => FRAME_MODE_IBL_SPECULAR,
+            Self::ProbeBuckets => FRAME_MODE_PROBE_BUCKETS,
         }
     }
 }

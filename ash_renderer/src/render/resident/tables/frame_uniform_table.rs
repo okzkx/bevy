@@ -56,6 +56,8 @@ pub const FRAME_MODE_DEPTH: u32 = 8;
 pub const FRAME_MODE_IBL_DIFFUSE: u32 = 9;
 /// IBL 高光贡献直出（`ibl_specular * EXPOSURE`；IBL 关时黑）。
 pub const FRAME_MODE_IBL_SPECULAR: u32 = 10;
+/// GlobalProbe 桶可视化：法线选桶 → 桶中心方向 RGB 编码（9.3 的映射取证）。
+pub const FRAME_MODE_PROBE_BUCKETS: u32 = 11;
 
 /// 无方向光时的占位方向（xyz 已是合法方向，避免归一化出 NaN；灯色全零）。
 /// 建表初值与 draw_frame 的无灯分支共用。
