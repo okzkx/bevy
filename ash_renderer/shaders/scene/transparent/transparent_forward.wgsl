@@ -58,7 +58,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     light_sum = accumulate_cluster_lights(
         light_sum, params, in.clip.xy, pixel, in.world_pos, V, n, NoV, surf.occlusion);
 
-    // 环境光项在光源循环外（与不透明合成同款语义）
+    // 环境光项在光源循环外（与不透明合成同款语义）。自发光同不透明层：按 Bevy
+    // StandardMaterial 默认（emissive_exposure_weight = 0）不随曝光缩放，加在
+    // 曝光乘算之外，仍写进 HDR 跟着进 Bloom；alpha 继续由混合状态乘。
     let ambient = albedo.rgb * frame.ambient_color.rgb;
-    return vec4f((light_sum + ambient) * EXPOSURE, albedo.a);
+    return vec4f((light_sum + ambient) * EXPOSURE + surf.emissive, albedo.a);
 }

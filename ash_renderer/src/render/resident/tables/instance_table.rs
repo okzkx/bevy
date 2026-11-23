@@ -84,8 +84,9 @@ pub(crate) const MATERIAL_TABLE_CAPACITY: u32 = 1 << 16;
 pub const OBJECT_RECORD_SIZE: u64 = 48;
 /// 模型环步长（mat4x4f），按实例槽索引。
 pub const MODEL_STRIDE: u64 = 64;
-/// 材质记录字节数（vec4 + PBR 标量 ×3 + 垫 + 贴图槽 ×4 + 采样器 + alpha 模式/阈值，对齐 16）。
-pub const MATERIAL_RECORD_SIZE: u64 = 64;
+/// 材质记录字节数（vec4 + PBR 标量 ×3 + 贴图槽 ×5 + 采样器 + alpha 模式/阈值 +
+/// 自发光 vec4，16B 对齐）。
+pub const MATERIAL_RECORD_SIZE: u64 = 80;
 
 /// 材质 alpha 模式（与 shader `MaterialRecord.alpha_mode` 同值域）。
 pub const ALPHA_MODE_OPAQUE: u32 = 0;
@@ -191,7 +192,8 @@ struct MaterialRecordLayout {
     metallic: f32,
     perceptual_roughness: f32,
     reflectance: f32,
-    _pad0: u32,
+    /// 自发光贴图槽；缺席写 [`NO_TEXTURE_INDEX`] 哨兵。
+    tex_emissive: u32,
     tex_base_color: u32,
     /// 缺席写 [`NO_TEXTURE_INDEX`] 哨兵，shader 端分支跳过采样。
     tex_normal: u32,
@@ -203,6 +205,10 @@ struct MaterialRecordLayout {
     /// Mask 的裁切阈值；其余模式写 0（shader 端按模式分支，不靠阈值哨兵）。
     alpha_cutoff: f32,
     _pad: u32,
+    /// 自发光因子（线性域，rgb 有效；w 未用写 0）。贴图存在时与贴图相乘。
+    /// 放最后一个 16B 槽刚好填满尾段；vec3 同样按 16 对齐，插在中间会把后续字段
+    /// 推到下一个 16B 槽位。
+    emissive: [f32; 4],
 }
 
 const _: () = {
@@ -210,6 +216,7 @@ const _: () = {
     assert!(std::mem::offset_of!(MaterialRecordLayout, metallic) == 16);
     assert!(std::mem::offset_of!(MaterialRecordLayout, perceptual_roughness) == 20);
     assert!(std::mem::offset_of!(MaterialRecordLayout, reflectance) == 24);
+    assert!(std::mem::offset_of!(MaterialRecordLayout, tex_emissive) == 28);
     assert!(std::mem::offset_of!(MaterialRecordLayout, tex_base_color) == 32);
     assert!(std::mem::offset_of!(MaterialRecordLayout, tex_normal) == 36);
     assert!(std::mem::offset_of!(MaterialRecordLayout, tex_metallic_roughness) == 40);
@@ -217,6 +224,7 @@ const _: () = {
     assert!(std::mem::offset_of!(MaterialRecordLayout, sampler_index) == 48);
     assert!(std::mem::offset_of!(MaterialRecordLayout, alpha_mode) == 52);
     assert!(std::mem::offset_of!(MaterialRecordLayout, alpha_cutoff) == 56);
+    assert!(std::mem::offset_of!(MaterialRecordLayout, emissive) == 64);
     assert!(std::mem::size_of::<MaterialRecordLayout>() as u64 == MATERIAL_RECORD_SIZE);
 };
 
@@ -241,24 +249,32 @@ pub fn pack_object_record(
     out
 }
 
-/// 材质记录 → 64B 字节（偏移见 [`MaterialRecordLayout`]）。
+/// 材质记录 → 80B 字节（偏移见 [`MaterialRecordLayout`]）。
 #[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "与记录字段逐项对应，便于写侧/对账侧逐参数核对"
+)]
 pub fn pack_material_record(
     base_color: [f32; 4],
     metallic: f32,
     perceptual_roughness: f32,
     reflectance: f32,
     tex_slots: [u32; 4],
+    tex_emissive: u32,
     sampler_index: u32,
     alpha: MaterialAlpha,
+    emissive: [f32; 4],
 ) -> [u8; MATERIAL_RECORD_SIZE as usize] {
     let mut out = [0u8; MATERIAL_RECORD_SIZE as usize];
     put_vec4(&mut out, 0, &base_color);
     put_f32s(&mut out, 16, &[metallic, perceptual_roughness, reflectance]);
+    put_u32(&mut out, 28, tex_emissive);
     put_u32s(&mut out, 32, &tex_slots);
     put_u32(&mut out, 48, sampler_index);
     put_u32(&mut out, 52, alpha.mode);
     put_f32s(&mut out, 56, &[alpha.cutoff]);
+    put_f32s(&mut out, 64, &emissive);
     out
 }
 
@@ -824,8 +840,8 @@ mod tests {
         assert_eq!(m.to_cols_array(), cols);
     }
 
-    /// 材质记录 64B 布局：PBR 三标量 + 四贴图槽 + 采样器 + alpha 模式/阈值偏移
-    /// 逐项互证，缺席哨兵按位写入。
+    /// 材质记录 80B 布局：PBR 三标量 + 五贴图槽 + 采样器 + alpha 模式/阈值 +
+    /// 自发光因子偏移逐项互证，缺席哨兵按位写入。
     #[test]
     fn pack_material_record_layout() {
         let bytes = pack_material_record(
@@ -834,11 +850,13 @@ mod tests {
             0.5,
             0.5,
             [7, u32::MAX, 9, u32::MAX],
+            5,
             3,
             MaterialAlpha {
                 mode: ALPHA_MODE_MASK,
                 cutoff: 0.5,
             },
+            [0.25, 0.5, 0.75, 0.0],
         );
         assert_eq!(bytes.len(), MATERIAL_RECORD_SIZE as usize);
         let read_f32 = |o: usize| f32::from_le_bytes(bytes[o..o + 4].try_into().expect("4B"));
@@ -851,6 +869,7 @@ mod tests {
             0.5,
             "reflectance 记录原值（clamp 换算在 shader 端）"
         );
+        assert_eq!(read_u32(28), 5, "emissive 贴图槽");
         assert_eq!(read_u32(32), 7);
         assert_eq!(read_u32(36), u32::MAX, "normal 缺席哨兵");
         assert_eq!(read_u32(40), 9);
@@ -858,9 +877,12 @@ mod tests {
         assert_eq!(read_u32(48), 3);
         assert_eq!(read_u32(52), ALPHA_MODE_MASK);
         assert_eq!(read_f32(56), 0.5, "Mask 裁切阈值");
+        assert_eq!(read_f32(64), 0.25, "emissive 因子 r");
+        assert_eq!(read_f32(68), 0.5, "emissive 因子 g");
+        assert_eq!(read_f32(72), 0.75, "emissive 因子 b");
         // 垫区保持 0
-        assert_eq!(read_u32(28), 0);
         assert_eq!(read_u32(60), 0);
+        assert_eq!(read_u32(76), 0);
     }
 
     /// LOD 变体条目 12B 布局：first_index/index_count/vertex_base 同序

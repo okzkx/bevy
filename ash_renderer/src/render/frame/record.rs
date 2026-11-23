@@ -117,12 +117,13 @@ impl FramePool {
         )
         .record(device, cb);
 
-        // 进场屏障三：G-buffer 三附件 + HDR 目标 UNDEFINED→附件。每帧 loadOp CLEAR 覆写全部
+        // 进场屏障三：G-buffer 四附件 + HDR 目标 UNDEFINED→附件。每帧 loadOp CLEAR 覆写全部
         // 像素，本槽上一轮使用已被 fence 等完（同进场屏障二），旧内容不要。
         for gbuffer_image in [
             res.gbuffer.albedo_image(slot),
             res.gbuffer.normal_image(slot),
             res.gbuffer.matparam_image(slot),
+            res.gbuffer.emissive_image(slot),
             res.gbuffer.hdr_image(slot),
         ] {
             ImageBarrier::discard_to_color(
@@ -199,7 +200,7 @@ impl FramePool {
 
         mark.mark(TimestampPoint::Shadow);
 
-        // ---- ④ G-buffer：不透明物体写三色附件 + 深度 ----
+        // ---- ④ G-buffer：不透明物体写四色附件 + 深度 ----
         // 全部 loadOp CLEAR（背景像素内容无意义，合成按 depth==0 判背景）；深度清 0（reverse-Z
         // 远平面），STORE 供合成与 Hi-Z 采样。
         // 附件数必须与管线声明一致（VUID-06179：colorAttachmentCount 相等）
@@ -207,6 +208,7 @@ impl FramePool {
             color_attachment(res.gbuffer.albedo_view(slot), Some([0.0, 0.0, 0.0, 0.0])),
             color_attachment(res.gbuffer.normal_view(slot), Some([0.0, 0.0, 0.0, 0.0])),
             color_attachment(res.gbuffer.matparam_view(slot), Some([0.0, 0.0, 0.0, 1.0])),
+            color_attachment(res.gbuffer.emissive_view(slot), Some([0.0, 0.0, 0.0, 0.0])),
         ];
         let depth_attachment = reverse_z_depth_attachment(frame.depth.view);
         device.cmd_begin_rendering(
@@ -246,7 +248,7 @@ impl FramePool {
         mark.mark(TimestampPoint::GBuffer);
 
         // ---- ⑤ 合成 + 透明前向：G-buffer 转只读 → 合成光照写 HDR → 透明层混合 → HDR 转只读 ----
-        // G-buffer 三色附件 → SHADER_READ_ONLY，深度 → DEPTH_READ_ONLY，供合成采样；dst 含
+        // G-buffer 四色附件 → SHADER_READ_ONLY，深度 → DEPTH_READ_ONLY，供合成采样；dst 含
         // COMPUTE 是因为 Hi-Z 归约也读深度。透明层会在合成后把深度再转回附件。
         let color_to_read = |image| ImageBarrier {
             dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER
@@ -258,6 +260,8 @@ impl FramePool {
             color_to_read(res.gbuffer.normal_image(slot)),
             // matparam：合成 pass 光照累积的 PBR 入参采样面
             color_to_read(res.gbuffer.matparam_image(slot)),
+            // emissive：合成 pass 光照累积的自发光项
+            color_to_read(res.gbuffer.emissive_image(slot)),
             ImageBarrier::depth_attachment_to_read_only(frame.depth.image),
         ] {
             barrier.record(device, cb);

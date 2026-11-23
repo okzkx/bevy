@@ -98,7 +98,7 @@ pub use frame::render_mode::RenderMode;
 pub use frame::scene_resources::SceneResources;
 pub use passes::gbuffer::gbuffer_pipeline::GBufferPipeline;
 pub use passes::gbuffer::gbuffer_targets::{
-    GBufferTargets, ALBEDO_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
+    GBufferTargets, ALBEDO_FORMAT, EMISSIVE_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
 };
 pub use passes::lighting::cluster::{
     cluster_reference, pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, ClusterFrameDraw,

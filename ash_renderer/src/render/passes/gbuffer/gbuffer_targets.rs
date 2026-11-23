@@ -10,14 +10,15 @@
 //! | 1 | 1 | normal | R16G16B16A16_SFLOAT | 世界空间法线 xyz 直存（w 未用） |
 //! | 2 | — | motion vectors | 不分配 | 预留 |
 //! | 3 | 2 | matparam | R8G8B8A8_UNORM | 材质标量：r=metallic / g=AO / b=perceptualRoughness / a=reflectance |
+//! | 4 | 3 | emissive | R16G16B16A16_SFLOAT | 自发光（贴图 rgb × 因子，线性域，可超 1） |
 //! | — | 深度 | depth | D32_SFLOAT | reverse-Z 深度（本体按帧槽在 [`crate::render::core::target::depth`]） |
 //!
 //! **HDR 中间目标**（R16G16B16A16_SFLOAT）：合成与透明前向层写入，present tonemap
 //! 从它采样。透明层要在它上面混合，建目标时查证格式支持混合（[`ColorTarget::new`]）。
 //!
 //! 采样集（[`GBufferTargets::sampled_set`]）把附件视图按只读布局发布：合成读
-//! albedo/normal/matparam/depth，Bloom prefilter 与 present tonemap 读 hdr。深度视图
-//! 归 FramePool，本结构须先于 FramePool 销毁（拆除序保证）。
+//! albedo/normal/matparam/emissive/depth，Bloom prefilter 与 present tonemap 读 hdr。深度
+//! 视图归 FramePool，本结构须先于 FramePool 销毁（拆除序保证）。
 
 use ash::{vk, Device};
 use bevy::log::info;
@@ -41,6 +42,9 @@ pub const NORMAL_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 /// 这些标量 8bit 精度足够。
 pub const MATPARAM_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 
+/// 自发光附件格式：线性域 rgb，可超过 1（贴图 × 因子后原样进 HDR，不随曝光锚缩放）。
+pub const EMISSIVE_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
+
 /// 采样集 binding 编号（合成、Bloom prefilter 与 present tonemap 共用同一布局）。
 const SAMPLED_BINDING_ALBEDO: u32 = 0;
 const SAMPLED_BINDING_NORMAL: u32 = 1;
@@ -48,10 +52,11 @@ const SAMPLED_BINDING_HDR: u32 = 2;
 const SAMPLED_BINDING_DEPTH: u32 = 3;
 const SAMPLED_BINDING_SAMPLER: u32 = 4;
 const SAMPLED_BINDING_MATPARAM: u32 = 5;
+const SAMPLED_BINDING_EMISSIVE: u32 = 6;
 
 const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
 
-/// G-buffer 采样集：五张附件视图 + 一个共享采样器，片元阶段读。
+/// G-buffer 采样集：六张附件视图 + 一个共享采样器，片元阶段读。
 pub(crate) static GBUFFER_SAMPLED_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "gbuffer_sampled",
     &[
@@ -60,6 +65,7 @@ pub(crate) static GBUFFER_SAMPLED_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
         BindingDesc::new(SAMPLED_BINDING_HDR, DescKind::SampledImage, FS),
         BindingDesc::new(SAMPLED_BINDING_DEPTH, DescKind::SampledImage, FS),
         BindingDesc::new(SAMPLED_BINDING_MATPARAM, DescKind::SampledImage, FS),
+        BindingDesc::new(SAMPLED_BINDING_EMISSIVE, DescKind::SampledImage, FS),
         BindingDesc::new(SAMPLED_BINDING_SAMPLER, DescKind::Sampler, FS),
     ],
 );
@@ -69,6 +75,7 @@ struct GBufferSlot {
     albedo: ColorTarget,
     normal: ColorTarget,
     matparam: ColorTarget,
+    emissive: ColorTarget,
     hdr: ColorTarget,
 }
 
@@ -88,8 +95,8 @@ pub struct GBufferTargets {
 }
 
 impl GBufferTargets {
-    /// 每帧槽建 albedo/normal/matparam/hdr 四张目标并写好采样集。深度视图由调用
-    /// 方传（本体归 FramePool）。
+    /// 每帧槽建 albedo/normal/matparam/emissive/hdr 五张目标并写好采样集。深度视图由
+    /// 调用方传（本体归 FramePool）。
     ///
     /// # Errors
     /// 格式 feature 不足、Vulkan 创建/分配失败、描述符集分配/写入失败。
@@ -105,7 +112,8 @@ impl GBufferTargets {
         };
         this.build(ctx, extent, depth_views)?;
         info!(
-            "G-buffer 附件就绪: albedo {ALBEDO_FORMAT:?} + normal {NORMAL_FORMAT:?} + matparam {MATPARAM_FORMAT:?} + HDR {HDR_FORMAT:?} \
+            "G-buffer 附件就绪: albedo {ALBEDO_FORMAT:?} + normal {NORMAL_FORMAT:?} + matparam {MATPARAM_FORMAT:?} \
+             + emissive {EMISSIVE_FORMAT:?} + HDR {HDR_FORMAT:?} \
              × {} 帧槽（motion vectors 留位不分配，槽位契约见模块注释）",
             depth_views.len(),
         );
@@ -142,6 +150,12 @@ impl GBufferTargets {
         self.slots[slot].matparam.view()
     }
 
+    /// 第 `slot` 帧槽的 emissive 附件视图（颜色附件 3）。
+    #[must_use]
+    pub fn emissive_view(&self, slot: usize) -> vk::ImageView {
+        self.slots[slot].emissive.view()
+    }
+
     /// 第 `slot` 帧槽的 HDR 中间目标视图（合成/透明层颜色附件 0）。
     #[must_use]
     pub fn hdr_view(&self, slot: usize) -> vk::ImageView {
@@ -164,6 +178,12 @@ impl GBufferTargets {
     #[must_use]
     pub fn matparam_image(&self, slot: usize) -> vk::Image {
         self.slots[slot].matparam.image()
+    }
+
+    /// 第 `slot` 帧槽的 emissive image 句柄（同上）。
+    #[must_use]
+    pub fn emissive_image(&self, slot: usize) -> vk::Image {
+        self.slots[slot].emissive.image()
     }
 
     /// 第 `slot` 帧槽的 HDR image 句柄（同上）。
@@ -215,6 +235,13 @@ impl GBufferTargets {
                         MATPARAM_FORMAT,
                         false,
                         "G-buffer matparam",
+                    )?,
+                    emissive: ColorTarget::new(
+                        ctx,
+                        extent,
+                        EMISSIVE_FORMAT,
+                        false,
+                        "G-buffer emissive",
                     )?,
                     hdr: ColorTarget::new(ctx, extent, HDR_FORMAT, true, "HDR 中间目标")?,
                 })
@@ -374,11 +401,16 @@ unsafe fn build_sampling_inner(
                     slot.matparam.view(),
                     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 )
+                .image(
+                    SAMPLED_BINDING_EMISSIVE,
+                    slot.emissive.view(),
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                )
                 .sampler(SAMPLED_BINDING_SAMPLER, sampler);
             writer.submit(device)?;
         }
         info!(
-            "G-buffer 采样集就绪: b0 albedo / b1 normal / b2 hdr / b3 depth / b4 线性采样器 / b5 matparam × {} 帧槽（{}x{}）",
+            "G-buffer 采样集就绪: b0 albedo / b1 normal / b2 hdr / b3 depth / b4 线性采样器 / b5 matparam / b6 emissive × {} 帧槽（{}x{}）",
             depth_views.len(),
             extent.width,
             extent.height,

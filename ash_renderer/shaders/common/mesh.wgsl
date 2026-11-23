@@ -46,11 +46,13 @@ struct SurfaceSample {
     metallic: f32,
     perceptual_roughness: f32,
     occlusion: f32,
+    // 自发光（线性域）：贴图 rgb × 材质因子；没贴图时就是因子本身
+    emissive: vec3f,
 }
 
 // 材质参数换算：贴图通道乘标量后 clamp。base_color 用隐式 LOD（mip 滤波）——alpha
-// 裁切依赖它，固定 level 0 会让远处镂空边缘起噪；其余贴图仍固定 level 0。所有贴图
-// 共用记录里的 sampler_index。
+// 裁切依赖它，固定 level 0 会让远处镂空边缘起噪；emissive 同走隐式 LOD（颜色图）；
+// 其余贴图仍固定 level 0。所有贴图共用记录里的 sampler_index。
 fn sample_surface(mat: MaterialRecord, uv: vec2f) -> SurfaceSample {
     var s: SurfaceSample;
     s.albedo = textureSample(textures[mat.tex_base_color], samplers[mat.sampler_index], uv)
@@ -72,5 +74,12 @@ fn sample_surface(mat: MaterialRecord, uv: vec2f) -> SurfaceSample {
         s.occlusion = textureSampleLevel(
             textures[mat.tex_occlusion], samplers[mat.sampler_index], uv, 0.0).r;
     }
+    // glTF 语义：emissiveTexture rgb × emissiveFactor；没贴图时因子直接生效
+    var emissive = mat.emissive.rgb;
+    if (mat.tex_emissive != NO_TEXTURE) {
+        emissive = emissive * textureSample(
+            textures[mat.tex_emissive], samplers[mat.sampler_index], uv).rgb;
+    }
+    s.emissive = emissive;
     return s;
 }

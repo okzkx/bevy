@@ -25,17 +25,19 @@ use crate::remote::common::{
     readback::{bytes_at, f32_at, read_buffer, u32_at, words},
 };
 
-/// 64B 材质记录解码（偏移镜像写侧 `MaterialRecordLayout` 的静态断言表）。
+/// 80B 材质记录解码（偏移镜像写侧 `MaterialRecordLayout` 的静态断言表）。
 fn decode_material_record(bytes: &[u8]) -> BrpResult {
     Ok(json!({
         "albedo": [f32_at(bytes, 0)?, f32_at(bytes, 4)?, f32_at(bytes, 8)?, f32_at(bytes, 12)?],
         "metallic": f32_at(bytes, 16)?,
         "roughness": f32_at(bytes, 20)?,
         "reflectance": f32_at(bytes, 24)?,
+        "tex_emissive": u32_at(bytes, 28)?,
         "tex": [u32_at(bytes, 32)?, u32_at(bytes, 36)?, u32_at(bytes, 40)?, u32_at(bytes, 44)?],
         "sampler": u32_at(bytes, 48)?,
         "alpha_mode": u32_at(bytes, 52)?,
         "alpha_cutoff": f32_at(bytes, 56)?,
+        "emissive": [f32_at(bytes, 64)?, f32_at(bytes, 68)?, f32_at(bytes, 72)?],
     }))
 }
 
@@ -90,7 +92,7 @@ pub(crate) fn ring_census(In(params): In<Option<Value>>, world: &mut World) -> B
         mat_slot: u32,
         mesh_id: AssetId<Mesh>,
         model_bytes: [u8; 64],
-        material_bytes: [u8; 64],
+        material_bytes: [u8; MATERIAL_RECORD_SIZE as usize],
     }
     let mut expected: Vec<RowExpect> = Vec::new();
     let mut rows_without_slot = 0usize;
@@ -126,6 +128,7 @@ pub(crate) fn ring_census(In(params): In<Option<Value>>, world: &mut World) -> B
                 .unwrap_or(NO_TEXTURE_INDEX)
         };
         let alpha = material_alpha_fields(material);
+        let emissive = material.emissive;
         expected.push(RowExpect {
             entity,
             slot,
@@ -143,8 +146,10 @@ pub(crate) fn ring_census(In(params): In<Option<Value>>, world: &mut World) -> B
                     optional_slot(material.metallic_roughness_texture.as_ref()),
                     optional_slot(material.occlusion_texture.as_ref()),
                 ],
+                optional_slot(material.emissive_texture.as_ref()),
                 slots.sampler,
                 alpha,
+                [emissive.red, emissive.green, emissive.blue, 0.0],
             ),
         });
     }
@@ -240,7 +245,7 @@ pub(crate) fn ring_census(In(params): In<Option<Value>>, world: &mut World) -> B
     for (row, expected_record) in expected.iter().zip(&expected_records) {
         let mut model_match = [false; FRAMES];
         let mut material_match = [false; FRAMES];
-        let mut material_actual = [[0u8; 64]; FRAMES];
+        let mut material_actual = [[0u8; MATERIAL_RECORD_SIZE as usize]; FRAMES];
         let mut tables = res_mut::<InstanceTables>(world)?;
         for frame in 0..FRAMES {
             let mut model_buf = [0u8; 64];

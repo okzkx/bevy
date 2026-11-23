@@ -1,4 +1,4 @@
-//! G-buffer 写入管线：不透明物体写 albedo / normal / matparam 三个颜色附件和深度。
+//! G-buffer 写入管线：不透明物体写 albedo / normal / matparam / emissive 四个颜色附件和深度。
 //!
 //! - 布局配方 [`GBUFFER_WRITE_PIPELINE`]：set0 是 [`crate::render::BindlessTextureTable`] 的常驻集，
 //!   set1 是 [`crate::render::FrameUniformTable`] 的每帧集，set2 是 [`crate::render::InstanceTables`] 的实例表，不另建。没有 push：
@@ -38,6 +38,7 @@ pub(crate) static GBUFFER_WRITE_PIPELINE: PipelineDesc = PipelineDesc {
         crate::render::ALBEDO_FORMAT,
         crate::render::NORMAL_FORMAT,
         crate::render::MATPARAM_FORMAT,
+        crate::render::EMISSIVE_FORMAT,
     ],
     depth_format: Some(crate::render::core::target::depth::DEPTH_FORMAT),
 };

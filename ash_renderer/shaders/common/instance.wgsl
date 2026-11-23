@@ -11,15 +11,15 @@ struct ObjectRecord {
     aabb_max: vec4f,
 }
 
-// 材质记录（64B）：base_color @0 / PBR 标量 @16..32 / 贴图槽 @32..48 / 采样器 @48 /
-// alpha 模式 @52 / 裁切阈值 @56。贴图槽缺席为 NO_TEXTURE；base_color 恒在场
-//（缺席走 fallback 白图）。
+// 材质记录（80B）：base_color @0 / PBR 标量 @16..28 / 贴图槽 @28..48（自发光在前，
+// 其余四张随后）/ 采样器 @48 / alpha 模式 @52 / 裁切阈值 @56 / 自发光因子 @64。
+// 贴图槽缺席为 NO_TEXTURE；base_color 恒在场（缺席走 fallback 白图）。
 struct MaterialRecord {
     base_color: vec4f,
     metallic: f32,
     perceptual_roughness: f32,
     reflectance: f32,
-    _pad0: u32,
+    tex_emissive: u32,
     tex_base_color: u32,
     tex_normal: u32,
     tex_metallic_roughness: u32,
@@ -27,9 +27,12 @@ struct MaterialRecord {
     sampler_index: u32,
     alpha_mode: u32,
     alpha_cutoff: f32,
-    // 坑：垫到 64B 必须用标量——vec3<u32> 按 16 对齐会排到 64..76，步长撑到
-    // 80 ≠ 宿主 MATERIAL_RECORD_SIZE 64，槽 ≥1 的材质全体错位
-    _pad1: u32,
+    // 垫到 64B：让后面的 vec4 落在 16B 对齐位置
+    _pad0: u32,
+    // 自发光因子（线性域，rgb 有效；w 未用）。用 vec4 占满尾部 16B，与宿主
+    // [f32; 4] 逐字节对齐（vec3<f32> 同样按 16 对齐，插字段时容易被推到下一个
+    // 16B 槽位，导致跨端偏移错位）
+    emissive: vec4f,
 }
 
 // 材质 alpha 模式（与宿主 ALPHA_MODE_* 同值域）。

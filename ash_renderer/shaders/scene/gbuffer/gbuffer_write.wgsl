@@ -1,10 +1,11 @@
 // 不透明 deferred G-buffer 写入：albedo（线性反照率）+ normal（世界空间 xyz
 // 直存）+ matparam（r=metallic / g=AO / b=perceptualRoughness / a=reflectance）
-// + 深度（reverse-Z）。光照在 gbuffer_composite.wgsl（全屏光照累积）。
+// + emissive（自发光，贴图 rgb × 因子）+ 深度（reverse-Z）。光照在
+// gbuffer_composite.wgsl（全屏光照累积）。
 //
 // 材质换算（common/mesh.wgsl sample_surface）：metallic_roughness 贴图乘标量、
-// perceptualRoughness clamp 0.045、occlusion 贴图 R 通道取 AO；normal map 用屏幕空间
-// 推导的 TBN 扰动世界法线（glTF 资产不保证有 TANGENT 属性）。
+// perceptualRoughness clamp 0.045、occlusion 贴图 R 通道取 AO、emissive 贴图乘因子；
+// normal map 用屏幕空间推导的 TBN 扰动世界法线（glTF 资产不保证有 TANGENT 属性）。
 //
 // 接口：
 // - set0 b0/b1：纹理数组 + sampler 数组（runtime array，build.rs 补丁器补 capability）。
@@ -58,6 +59,7 @@ struct GBufferOut {
     @location(0) albedo: vec4f,
     @location(1) normal: vec4f,
     @location(2) matparam: vec4f,
+    @location(3) emissive: vec4f,
 }
 
 @fragment
@@ -89,5 +91,7 @@ fn fs_main(in: VsOut) -> GBufferOut {
         vec4f(n, 0.0),
         // a = reflectance 原值（介电体 F0 = 0.16·reflectance² 在光照端换算）
         vec4f(surf.metallic, surf.occlusion, surf.perceptual_roughness, mat.reflectance),
+        // 自发光：没有 emissive 贴图/因子的材质这里就是 0
+        vec4f(surf.emissive, 0.0),
     );
 }

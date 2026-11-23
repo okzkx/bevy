@@ -1,6 +1,6 @@
-// 延迟光照累积（全屏）：读 G-buffer（albedo/normal/matparam/depth），逐像素查
+// 延迟光照累积（全屏）：读 G-buffer（albedo/normal/matparam/emissive/depth），逐像素查
 // 3D cluster 列表（索引 = 光源常驻表槽号）逐灯累加 BRDF（common/brdf.wgsl），叠加
-// 方向光（乘 PCSS 阴影可见性）与环境光，输出 HDR。
+// 方向光（乘 PCSS 阴影可见性）、环境光与自发光，输出 HDR。
 //
 // 模式（frame.mode，FRAME_MODE_*）：
 // - 0 Shading：BRDF 光照累积（未知值同样走此分支）
@@ -21,6 +21,7 @@ enable wgpu_binding_array;
 @group(1) @binding(3) var depth_tex: texture_2d<f32>;
 @group(1) @binding(4) var gbuf_sampler: sampler;
 @group(1) @binding(5) var matparam_tex: texture_2d<f32>;
+@group(1) @binding(6) var emissive_tex: texture_2d<f32>;
 @group(2) @binding(0) var<storage, read> cluster_params: ClusterParams;
 @group(2) @binding(1) var<storage, read> lights: array<LightRecord>;
 @group(2) @binding(2) var<storage, read> clusters: array<ClusterRecord>;
@@ -215,5 +216,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
 
     // 环境光：albedo × ambient
     let ambient = albedo.rgb * frame.ambient_color.rgb;
-    return vec4f((light_sum + ambient) * EXPOSURE, 1.0);
+    // 自发光：不受光照/阴影/AO 影响，直接加进 HDR。Bevy StandardMaterial 默认
+    // emissive_exposure_weight = 0，即自发光不随相机曝光缩放；本引擎的 EXPOSURE
+    // 锚在 20000 lx 直射（0.00016），跟着乘会把 glTF 的 emissiveFactor=1 压到
+    // 不可见。加在曝光乘算之外，结果同样写进 HDR、跟着进 Bloom。
+    let emissive = textureSampleLevel(emissive_tex, gbuf_sampler, in.uv, 0.0).rgb;
+    return vec4f((light_sum + ambient) * EXPOSURE + emissive, 1.0);
 }

@@ -243,12 +243,13 @@ impl InstanceTables {
             };
             let slots = resident(material.base_color_texture.as_ref())
                 .unwrap_or_else(BindlessTextureTable::fallback_slots);
-            // 其余三贴图缺席写 NO_TEXTURE_INDEX（shader 跳过采样）。roughness 记 perceptual
+            // 其余四贴图缺席写 NO_TEXTURE_INDEX（shader 跳过采样）。roughness 记 perceptual
             // 域、reflectance 记原值，clamp 与换算在 shader 端
             let optional_slot = |texture: Option<&Handle<Image>>| {
                 resident(texture).map_or(NO_TEXTURE_INDEX, |slots| slots.texture)
             };
             let alpha = material_alpha_fields(material);
+            let emissive = material.emissive;
             let bytes = pack_material_record(
                 [color.red, color.green, color.blue, color.alpha],
                 material.metallic,
@@ -260,8 +261,10 @@ impl InstanceTables {
                     optional_slot(material.metallic_roughness_texture.as_ref()),
                     optional_slot(material.occlusion_texture.as_ref()),
                 ],
+                optional_slot(material.emissive_texture.as_ref()),
                 slots.sampler,
                 alpha,
+                [emissive.red, emissive.green, emissive.blue, 0.0],
             );
             self.material_ring(frame)
                 .write(u64::from(slot) * MATERIAL_RECORD_SIZE, &bytes)
