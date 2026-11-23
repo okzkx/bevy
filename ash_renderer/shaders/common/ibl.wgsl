@@ -116,6 +116,25 @@ fn uniform_sphere(xi: vec2f) -> vec3f {
     return vec3f(r * cos(phi), r * sin(phi), z);
 }
 
+// ---- 环境项的两处防噪处理（9.2.8）：不透明与透明共用，别在两侧各写一份 ----
+
+// IBL 用的入射法线：双面几何（帘布/叶片）的背面法线朝外，dot(n,V)<0 时 DFG 落到掠射
+// 端 A/B≈1，高光 ≈ 整张环境辐射——再叠法线贴图的逐像素抖动就是白点。这里翻到视向
+// 侧；直接光不用它（那条路径与 9.2.7 基线保持逐位一致）。
+fn ibl_normal(n: vec3f, v: vec3f) -> vec3f {
+    return select(n, -n, dot(n, v) < 0.0);
+}
+
+// IBL 高光粗糙度 + specular AA：法线贴图的高频细节逐像素改反射方向，而 mip 只由材质
+// 粗糙度决定，管不住屏幕空间法线差值。用导数方差把粗糙度撑开（Toksvig 的屏幕空间
+// 近似）：帘布/叶片的白点靠它撑平，平滑表面（导数近 0）的增量可忽略。
+fn ibl_roughness(n: vec3f, perceptual_roughness: f32) -> f32 {
+    let dn_x = dpdx(n);
+    let dn_y = dpdy(n);
+    let variance = dot(dn_x, dn_x) + dot(dn_y, dn_y);
+    return clamp(sqrt(perceptual_roughness * perceptual_roughness + variance), 0.0, 1.0);
+}
+
 // ---- split-sum 高光 ----
 
 // 预滤波 cubemap 采样：mip = perceptualRoughness × (mip 数−1)，硬件三线性在相邻

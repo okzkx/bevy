@@ -33,8 +33,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (no_l > 0.0) {
             let no_h = max(h.z, 0.0);
             let vo_h = max(dot(v, h), 0.0);
-            // G_Vis = G · VoH / (NoH · NoV)：把几何项折进可见性，F 项分离后就是 A/B
-            let g = V_SmithGGXCorrelated(a, no_v, no_l);
+            // G_Vis = G · VoH / (NoH · NoV)，其中 G = 4·NoL·NoV·V（brdf.wgsl 给的是
+            // 可见性形态 V，已含 1/(4·NoL·NoV)）。坑：直接把 V 当 G 用会多除一次
+            // 4·NoL·NoV，掠射端按 1/NoV³ 发散——9.2.8 之前的 DFG 就是这个错，钳 1
+            // 只是压住了 Inf，却在地平线附近留下一段陡变：8bit 法线的 NoV 抖动经它
+            // 放大，就是帘布/石墙上的高光火花。
+            let g = 4.0 * no_l * no_v * V_SmithGGXCorrelated(a, no_v, no_l);
             let g_vis = g * vo_h / max(no_h * no_v, 1e-6);
             let fc = pow5(1.0 - vo_h);
             scale += (1.0 - fc) * g_vis;
@@ -42,11 +46,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     let inv = 1.0 / f32(DFG_SAMPLES);
-    // 坑：NoV→0 且粗糙度→0 时 G_Vis = G·VoH/(NoH·NoV) 按 1/NoV³ 发散（Denominator 的
-    // 1e-6 护栏挡不住），积分值可达 1e6 量级；RGBA16F 存成 Inf，随后高光 Inf → HDR
-    // Inf → Bloom 的 soft-knee 出现 Inf/Inf = NaN，整块 tile 变黑（实测 53 像素拖黑
-    // 大半个画面）。物理上 A+B 是反射率（≤ 1），超 1 的值全是数值产物；钳到 1 顺带
-    // 压掉掠射角的塑料感爆点（叶片/路面正常贴图的高频法线在 A 大的区域会闪白）。
+    // 钳 1 保留为数值护栏：物理上 A+B 是反射率（≤ 1），超 1 全是数值产物；
+    // 修正 G_Vis 后只在极端角落兜底，不再承担"压掉掠射爆点"的职责。
     let dfg_a = min(scale * inv, 1.0);
     let dfg_b = min(bias * inv, 1.0);
     textureStore(dst, vec2<i32>(gid.xy), vec4f(dfg_a, dfg_b, 0.0, 1.0));

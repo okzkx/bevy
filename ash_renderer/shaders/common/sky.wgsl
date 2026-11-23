@@ -61,6 +61,19 @@ fn sky_intersect_sphere(sphere_radius: f32, cos_chi: f32, r: f32) -> vec2f {
     return r * vec2f(-cos_chi - s, -cos_chi + s);
 }
 
+// 球求交的稳定形式：k = (r² − S²)/r² 由调用方用**高度差**算成小量，判别式直接
+// `c² − k`；上面那个 "ratio² − (1−c²)" 在近切线时是两个近 1 数相减，d 的符号会逐
+// 像素抖翻——地平线以下整片椒盐噪点就是这么来的（见 9.2.8 施工记录）。
+// 返回 (近交点, 远交点)；无交返回负值。
+fn sky_intersect_k(cos_chi: f32, r: f32, k: f32) -> vec2f {
+    let d = saturate(cos_chi * cos_chi) - k;
+    if (d < 0.0) {
+        return vec2f(-1.0, -1.0);
+    }
+    let s = sqrt(d);
+    return r * vec2f(-cos_chi - s, -cos_chi + s);
+}
+
 // Chapman 近似（HDRP 同式）：z = r / 标高。
 fn sky_chapman_upper(z: f32, cos_theta: f32) -> f32 {
     let c = cos_theta;
@@ -168,18 +181,24 @@ fn sky_radiance(dir: vec3f, include_sun: bool) -> vec3f {
         return frame.sky_uniform.rgb;
     }
     let planet_r = max(frame.sky_geo.x, 1.0);
-    let atmos_r = max(frame.sky_geo.y, planet_r + 1.0);
-    // 海拔约定：海平面 = 世界 y = 0（相机在山谷/地下时按 0 兜底）
-    let r0 = planet_r + max(frame.camera_pos.y, 0.0);
+    let atmos_h = max(frame.sky_geo.y - planet_r, 1.0);
+    // 海拔约定：海平面 = 世界 y = 0。地下按 1 m 兜底——r0 与行星半径重合时地面球求交
+    // 在近切线处退化，地平线以下会整片变成逐像素明暗噪点（9.2.8 实测的地下机位）。
+    let altitude = max(frame.camera_pos.y, 1.0);
+    let r0 = planet_r + altitude;
     let up = vec3f(0.0, 1.0, 0.0);
     let cos_chi = dir.y;
 
-    let t_atmos = sky_intersect_sphere(atmos_r, cos_chi, r0);
+    // k = (r0² − S²)/r0² 全部由高度差算：|k| 量级 1e-7（1 m 海拔）～1e-2，近切线时
+    // 不再是两个近 1 数相减
+    let k_ground = altitude * (2.0 * planet_r + altitude) / (r0 * r0);
+    let k_atmos = (altitude - atmos_h) * (2.0 * planet_r + altitude + atmos_h) / (r0 * r0);
+    let t_atmos = sky_intersect_k(cos_chi, r0, k_atmos);
     if (t_atmos.y < 0.0) {
         return vec3f(0.0);
     }
     var t_end = t_atmos.y;
-    let t_ground = sky_intersect_sphere(planet_r, cos_chi, r0);
+    let t_ground = sky_intersect_k(cos_chi, r0, k_ground);
     var hit_ground = false;
     if (t_ground.x > 1e-3 && t_ground.x < t_end) {
         t_end = t_ground.x;

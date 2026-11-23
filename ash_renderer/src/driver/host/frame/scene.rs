@@ -198,7 +198,9 @@ impl FrameUniformTable {
                         0.0,
                     ],
                     sky_sun: [sky.sun_gain, sky.sun_radius, 0.0, 0.0],
-                    ibl_enabled: u32::from(ibl.enabled),
+                    // 天空是环境光的上游（9.2.8）：天空关掉时环境项回退步骤 8 的常量
+                    // ambient（不是黑），与 Unity 的 Ambient Mode=Skybox 同语义。
+                    ibl_enabled: u32::from(ibl.enabled && sky.enabled),
                     ibl_mode: ibl.mode,
                     ibl_intensity: ibl.intensity,
                     // 常量天空：w 是开关。关时 rgb 保留原值也无妨（着色器先看 w）

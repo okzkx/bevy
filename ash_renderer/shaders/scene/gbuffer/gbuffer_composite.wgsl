@@ -240,22 +240,26 @@ struct IblTerms {
 
 fn ibl_environmental(
     pixel: PixelParams,
-    n: vec3f,
+    n_in: vec3f,
     v: vec3f,
-    no_v: f32,
     perceptual_roughness: f32,
 ) -> IblTerms {
     var terms: IblTerms;
     if (frame.ibl_enabled == 0u) {
         return terms;
     }
+    // 9.2.8：入射法线翻到视向侧（双面几何背面）+ specular AA（法线导数撑开粗糙度）。
+    // 两个辅助函数在 common/ibl.wgsl，透明层同口径。
+    let n = ibl_normal(n_in, v);
+    let no_v = clampNoV(saturate(dot(n, v)));
+    let p_ibl = ibl_roughness(n, perceptual_roughness);
     // E(n) 已含余弦卷积（A_l 折叠在系数里），Lambert BRDF 只再乘 1/π
     terms.diffuse = pixel.diffuseColor * Fd_Lambert() * sh_irradiance(n, sh_coeffs)
         * frame.ibl_intensity;
     // 坑：粗糙度必须用 perceptualRoughness（matparam.b），pixel.roughness 是 α = p²，
     // 直接喂 mip 会把粗糙面算得过锐
     terms.specular = ibl_specular(
-        env_cube, ibl_sampler, dfg_lut, n, v, no_v, pixel.f0, perceptual_roughness, IBL_MAX_MIP)
+        env_cube, ibl_sampler, dfg_lut, n, v, no_v, pixel.f0, p_ibl, IBL_MAX_MIP)
         * frame.ibl_intensity;
     return terms;
 }
@@ -338,7 +342,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
 
     // 环境项：IBL 开 = 漫反射 + 高光（替换旧常量项）；关 = 步骤 8 原文 albedo × ambient。
     // 两条调试档（9/10）直出 IBL 单项贡献，用来读方向性与能量。
-    let ibl = ibl_environmental(pixel, n, V, NoV, matparam.b);
+    let ibl = ibl_environmental(pixel, n, V, matparam.b);
     if frame.mode == MODE_IBL_DIFFUSE {
         return vec4f(ibl.diffuse * EXPOSURE, 1.0);
     }

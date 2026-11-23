@@ -138,10 +138,15 @@ struct IblCensusParams {
     /// true = 读回 DFG LUT 而不是 cubemap。
     #[serde(default)]
     lut: bool,
+    /// 与 `lut: true` 搭配：回该行（y = perceptualRoughness，0..127）的 128 个 A/B。
+    #[serde(default)]
+    row: Option<u32>,
 }
 
 /// `ash_renderer/ibl_census`：读回环境 cubemap 某一级的六个面，报 min/max/mean、
-/// 非有限值计数与中心像素（面方向与接缝的取证口）。只进验证，不进绘制路径。
+/// 非有限值计数与中心像素（面方向与接缝的取证口）；`lut: true` 改读 DFG LUT 的
+/// min/max/非有限计数，`lut + row` 回该行 128 个 A/B（DFG 形状的取证口——只看
+/// min/max 看不出"掠射端整段钳 1"这类形状问题，见 9.2.8）。只进验证，不进绘制路径。
 ///
 /// # Errors
 /// mip 越界 / 资源缺席 / 读回失败。
@@ -164,6 +169,20 @@ pub(crate) fn ibl_census(In(params): In<Option<Value>>, world: &mut World) -> Br
         let rgba = env
             .readback_dfg(ctx)
             .map_err(internal_err("DFG LUT 读回失败"))?;
+        // 单行取样：y = 粗糙度行，x = NoV，A/B 分开给（验收 DFG 形状用）
+        if let Some(row) = p.row {
+            // LUT 是方图：行宽 = sqrt(texel 数)
+            let width = (rgba.len() / 4).isqrt();
+            let row = (row as usize).min(width.saturating_sub(1));
+            let base = row * width * 4;
+            let mut a = Vec::with_capacity(width);
+            let mut b = Vec::with_capacity(width);
+            for texel in rgba[base..base + width * 4].as_chunks::<4>().0 {
+                a.push(texel[0]);
+                b.push(texel[1]);
+            }
+            return Ok(json!({ "lut": true, "row": row, "a": a, "b": b }));
+        }
         let mut min = f32::INFINITY;
         let mut max = f32::NEG_INFINITY;
         let mut non_finite = 0u64;

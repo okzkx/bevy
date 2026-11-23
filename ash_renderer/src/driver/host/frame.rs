@@ -162,12 +162,14 @@ pub(crate) fn draw_frame(
     )?;
     // 环境光照烘焙计划：脏帧才重烘（sky_hash 含大气参数/太阳/100 m 量化海拔），
     // ibl_enabled=false 时只可能带"布局初始化"一次。判定只在这里做，录制层照单执行。
+    // 天空是环境光的上游（9.2.8）：天空关掉时不捕获、环境项回退常量 ambient
+    //（与 UBO 里 ibl_enabled 的合成口径一致）。
     let ibl_plan = scene.ibl_env.prepare(&IblBakeInput {
         sky: &scene.sky,
         dir_to_light: light.dir_to_light,
         light_color: light.light_color,
         altitude: view.camera.map_or(0.0, |c| c.pos.y),
-        enabled: scene.ibl_settings.enabled,
+        enabled: scene.ibl_settings.enabled && scene.sky.enabled,
     });
     let scene_aabb = scene_world_aabb(ledger, &scene.pool);
     shadow.write_ubo(slot, &view, &light, scene_aabb)?;

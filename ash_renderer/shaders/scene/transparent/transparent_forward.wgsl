@@ -73,10 +73,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     // alpha 继续由混合状态乘。
     var environment = albedo.rgb * frame.ambient_color.rgb;
     if (frame.ibl_enabled != 0u) {
-        let e = sh_irradiance(n, sh_coeffs);
+        // 9.2.8：视向侧法线 + specular AA（与不透明同口径，见 common/ibl.wgsl）
+        let n_ibl = ibl_normal(n, V);
+        let no_v = clampNoV(saturate(dot(n_ibl, V)));
+        let p_ibl = ibl_roughness(n_ibl, surf.perceptual_roughness);
+        let e = sh_irradiance(n_ibl, sh_coeffs);
         let diffuse = pixel.diffuseColor * Fd_Lambert() * e * frame.ibl_intensity;
         let specular = ibl_specular(
-            env_cube, ibl_sampler, dfg_lut, n, V, NoV, pixel.f0, surf.perceptual_roughness,
+            env_cube, ibl_sampler, dfg_lut, n_ibl, V, no_v, pixel.f0, p_ibl,
             IBL_MAX_MIP) * frame.ibl_intensity;
         environment = diffuse + specular;
     }
