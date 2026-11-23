@@ -6,7 +6,8 @@ use std::slice;
 
 use ash::{vk, Device};
 
-/// 一条图像布局屏障，只作用于第 0 层 mip、第 0 层 layer，不做队列族所有权转移。
+/// 一条图像布局屏障，默认只作用于第 0 层 mip、第 0 层 layer（[`Self::with_range`] 可扩到
+/// 多 mip/多层的子资源范围，cube 的全子资源迁移就要它）。
 /// 每条单独录成一次 `vkCmdPipelineBarrier`，阶段掩码就用本条的 src/dst。
 #[derive(Clone, Copy)]
 pub(crate) struct ImageBarrier {
@@ -18,9 +19,53 @@ pub(crate) struct ImageBarrier {
     pub src_access: vk::AccessFlags,
     pub dst_stage: vk::PipelineStageFlags,
     pub dst_access: vk::AccessFlags,
+    pub base_mip: u32,
+    pub level_count: u32,
+    pub base_layer: u32,
+    pub layer_count: u32,
 }
 
 impl ImageBarrier {
+    /// 通用布局迁移：四元组由调用方给（阶段/访问成对，布局成对），子资源范围取默认
+    /// （mip0 / layer0），要跨 mip/层再用 [`Self::with_range`] 覆盖。
+    pub(crate) fn transition(
+        image: vk::Image,
+        aspect: vk::ImageAspectFlags,
+        layouts: (vk::ImageLayout, vk::ImageLayout),
+        stages: (vk::PipelineStageFlags, vk::PipelineStageFlags),
+        access: (vk::AccessFlags, vk::AccessFlags),
+    ) -> Self {
+        Self {
+            image,
+            aspect,
+            old_layout: layouts.0,
+            new_layout: layouts.1,
+            src_stage: stages.0,
+            src_access: access.0,
+            dst_stage: stages.1,
+            dst_access: access.1,
+            base_mip: 0,
+            level_count: 1,
+            base_layer: 0,
+            layer_count: 1,
+        }
+    }
+
+    /// 覆盖子资源范围（cube 的全子资源 = `(0, mips, 0, 6)`）。
+    pub(crate) fn with_range(
+        mut self,
+        base_mip: u32,
+        level_count: u32,
+        base_layer: u32,
+        layer_count: u32,
+    ) -> Self {
+        self.base_mip = base_mip;
+        self.level_count = level_count;
+        self.base_layer = base_layer;
+        self.layer_count = layer_count;
+        self
+    }
+
     /// 丢弃旧内容、转成颜色附件准备写入。只等 `src_stage` 执行完，不需要让旧内容可见。
     pub(crate) fn discard_to_color(image: vk::Image, src_stage: vk::PipelineStageFlags) -> Self {
         Self {
@@ -32,6 +77,10 @@ impl ImageBarrier {
             src_access: vk::AccessFlags::empty(),
             dst_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             dst_access: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            base_mip: 0,
+            level_count: 1,
+            base_layer: 0,
+            layer_count: 1,
         }
     }
 
@@ -46,6 +95,10 @@ impl ImageBarrier {
             src_access: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
             dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER,
             dst_access: vk::AccessFlags::SHADER_READ,
+            base_mip: 0,
+            level_count: 1,
+            base_layer: 0,
+            layer_count: 1,
         }
     }
 
@@ -65,6 +118,10 @@ impl ImageBarrier {
             dst_stage: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
                 | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
             dst_access: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            base_mip: 0,
+            level_count: 1,
+            base_layer: 0,
+            layer_count: 1,
         }
     }
 
@@ -79,6 +136,10 @@ impl ImageBarrier {
             src_access: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER,
             dst_access: vk::AccessFlags::SHADER_READ,
+            base_mip: 0,
+            level_count: 1,
+            base_layer: 0,
+            layer_count: 1,
         }
     }
 
@@ -95,6 +156,10 @@ impl ImageBarrier {
             dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER
                 | vk::PipelineStageFlags::COMPUTE_SHADER,
             dst_access: vk::AccessFlags::SHADER_READ,
+            base_mip: 0,
+            level_count: 1,
+            base_layer: 0,
+            layer_count: 1,
         }
     }
 
@@ -115,6 +180,10 @@ impl ImageBarrier {
                 | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
                 | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             dst_access: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ,
+            base_mip: 0,
+            level_count: 1,
+            base_layer: 0,
+            layer_count: 1,
         }
     }
 
@@ -148,8 +217,10 @@ impl ImageBarrier {
             .subresource_range(
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(self.aspect)
-                    .level_count(1)
-                    .layer_count(1),
+                    .base_mip_level(self.base_mip)
+                    .level_count(self.level_count)
+                    .base_array_layer(self.base_layer)
+                    .layer_count(self.layer_count),
             )
             .src_access_mask(self.src_access)
             .dst_access_mask(self.dst_access);

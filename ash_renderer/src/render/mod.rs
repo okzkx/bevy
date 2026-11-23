@@ -5,7 +5,7 @@
 //! |---|---|
 //! | `core` | `device`：context、swapchain、内存与 buffer、诊断回读、队列传输与 timeline ticket；`target`：颜色/深度附件；`binding`：set 布局声明、shader ABI 表、管线布局配方；`pipeline`：图形/compute/全屏管线骨架；`record`：绑定、屏障、dispatch、全屏 pass 的录制助手 |
 //! | `resident` | 常驻 GPU 数据：mesh 大池、贴图缓存、bindless 描述符表、每帧 UBO、实例表、光源表 |
-//! | `passes` | 渲染功能，一个功能一个模块：visibility（剔除/Hi-Z/遮挡/LOD/indirect）、gbuffer、shadow、lighting、transparent、post、sky、overlay |
+//! | `passes` | 渲染功能，一个功能一个模块：visibility（剔除/Hi-Z/遮挡/LOD/indirect）、gbuffer、shadow、lighting、transparent、post、sky、ibl、overlay |
 //! | `frame` | 帧槽与同步、整帧录制编排、帧率同步设置、着色调试模式 |
 //! | `stats` | GPU 计时、帧样本账、监控历史、egui pass 计时 |
 //!
@@ -41,7 +41,7 @@ pub use passes::visibility::hiz::{
 };
 pub use passes::visibility::hiz_frame::HizFrameDraw;
 // 诊断回读助手：BRP 读数方法族（remote/）与 render 内部共用，crate 级重出口。
-pub(crate) use self::core::device::readback::readback_buffer;
+pub(crate) use self::core::device::readback::{readback_buffer, OneShotReadback};
 pub(crate) use core::device::transfer::{block_bytes, Ticket};
 pub use core::device::transfer::{
     CopyRegion, ImageRelease, Release, StagingCopy, StagingImageCopy, UploadBatch, Uploader,
@@ -70,8 +70,9 @@ pub use resident::tables::frame_uniform_table::{
     pack_frame_uniforms, FrameUniformTable, FrameUniformsData, PLACEHOLDER_DIR_TO_LIGHT,
 };
 pub(crate) use resident::tables::frame_uniform_table::{
-    FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC, FRAME_MODE_NORMAL,
-    FRAME_MODE_POSITION, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
+    FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_IBL_DIFFUSE, FRAME_MODE_IBL_SPECULAR,
+    FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC, FRAME_MODE_NORMAL, FRAME_MODE_POSITION,
+    FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
 };
 pub use resident::tables::instance_table::{
     conservative_world_aabb, material_alpha_fields, material_is_transparent, pack_lod_entry,
@@ -99,6 +100,11 @@ pub use frame::scene_resources::SceneResources;
 pub use passes::gbuffer::gbuffer_pipeline::GBufferPipeline;
 pub use passes::gbuffer::gbuffer_targets::{
     GBufferTargets, ALBEDO_FORMAT, EMISSIVE_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
+};
+pub use passes::ibl::{
+    half_to_f32, IblBakeDraw, IblBakeInput, IblBakePlan, IblEnvironment, IblFrameDraw, IblSettings,
+    IBL_CUBE_MIPS, IBL_CUBE_SIZE, IBL_MAX_MIP, IBL_SH_BUFFER_SIZE, IBL_STATS_BUFFER_SIZE,
+    IBL_STATS_FLOATS,
 };
 pub use passes::lighting::cluster::{
     cluster_reference, pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, ClusterFrameDraw,

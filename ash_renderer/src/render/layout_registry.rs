@@ -8,6 +8,12 @@ use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayoutDesc;
 use crate::render::passes::gbuffer::gbuffer_pipeline::GBUFFER_WRITE_PIPELINE;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
+use crate::render::passes::ibl::{
+    BRDF_LUT_PIPELINE, IBL_CAPTURE_SET_DESC, IBL_DFG_SET_DESC, IBL_PREFILTER_SET_DESC,
+    IBL_SET_DESC, IBL_SH_CHECK_SET_DESC, IBL_SH_PROJECT_SET_DESC, IBL_SH_REDUCE_SET_DESC,
+    PREFILTER_PIPELINE, SH_CHECK_PIPELINE, SH_PROJECT_PIPELINE, SH_REDUCE_PIPELINE,
+    SKY_CAPTURE_PIPELINE,
+};
 use crate::render::passes::lighting::cluster::{CLUSTER_BUILD_PIPELINE, LIGHT_CLUSTER_SET_DESC};
 use crate::render::passes::lighting::composite_pipeline::GBUFFER_COMPOSITE_PIPELINE;
 use crate::render::passes::overlay::overlay_pipeline::OVERLAY_PIPELINE;
@@ -64,6 +70,12 @@ pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
     &TRANSPARENT_SORT_PIPELINE,
     &TRANSPARENT_GATHER_PIPELINE,
     &HIZ_DOWNSAMPLE_PIPELINE,
+    &SKY_CAPTURE_PIPELINE,
+    &SH_PROJECT_PIPELINE,
+    &SH_REDUCE_PIPELINE,
+    &SH_CHECK_PIPELINE,
+    &PREFILTER_PIPELINE,
+    &BRDF_LUT_PIPELINE,
 ];
 
 /// 宿主声明并建出的全部 set 布局。
@@ -81,4 +93,11 @@ pub(crate) const ALL_SETS: &[&SetLayoutDesc] = &[
     &SMAA_B_SET_DESC,
     &HIZ_REDUCE_SET_DESC,
     &HIZ_OCCLUSION_SET_DESC,
+    &IBL_CAPTURE_SET_DESC,
+    &IBL_SH_PROJECT_SET_DESC,
+    &IBL_SH_REDUCE_SET_DESC,
+    &IBL_SH_CHECK_SET_DESC,
+    &IBL_PREFILTER_SET_DESC,
+    &IBL_DFG_SET_DESC,
+    &IBL_SET_DESC,
 ];

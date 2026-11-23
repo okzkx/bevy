@@ -18,7 +18,8 @@
 //! | [`features::cluster`] | cluster 光照与透明层：灯表增删改读、cluster/透明排序对照 |
 //! | [`features::shadow`] | 阴影：开关 + 逐 cascade 标记对照 |
 //! | [`features::render_settings`] | 画面设置：Bloom/tonemap、SMAA、着色调试模式 |
-//! | [`features::sky`] | 程序化天空：参数读写（`sky_set`/`sky_stats`） |
+//! | [`features::sky`] | 程序化天空：参数读写（`sky_set`/`sky_stats`）与常量天空自检开关（`sky_uniform`） |
+//! | [`features::ibl`] | 环境光照：开关/强度（`ibl_set`）、SH-L2/自检/捕获账本读数（`ibl_stats`）与 cubemap 逐面读回（`ibl_census`） |
 //! | [`features::draw`] | indirect 闭环读数与组装对照开关 |
 //! | [`features::residency`] | 驻留管理器读数与设置 |
 //! | [`features::gap`] | GPU 缺口请求读数与模式 |
@@ -77,11 +78,12 @@ use self::{
         cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
         draw::{draw_stats, drawlist_verify_set},
         gap::{gap_census, gap_set, gap_stats},
+        ibl::{ibl_census, ibl_set, ibl_stats},
         lod::{lod_census, lod_set_enabled, lod_set_params},
         render_settings::{bloom_set, set_render_mode, smaa_set},
         residency::{residency_set, residency_stats},
         shadow::{shadow_set, shadow_stats},
-        sky::{sky_set, sky_stats},
+        sky::{sky_set, sky_stats, sky_uniform},
     },
 };
 
@@ -154,6 +156,10 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/shadow_stats", shadow_stats)
                 .with_method_main("ash_renderer/sky_set", sky_set)
                 .with_method_main("ash_renderer/sky_stats", sky_stats)
+                .with_method_main("ash_renderer/sky_uniform", sky_uniform)
+                .with_method_main("ash_renderer/ibl_set", ibl_set)
+                .with_method_main("ash_renderer/ibl_stats", ibl_stats)
+                .with_method_main("ash_renderer/ibl_census", ibl_census)
                 .with_method_main("ash_renderer/layout_contract", layout_contract),
             RemoteHttpPlugin::default().with_port(port),
         ));

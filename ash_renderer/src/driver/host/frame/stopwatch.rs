@@ -8,7 +8,7 @@ use bevy::ecs::error::BevyError;
 use crate::common::syntax::ResultTierExt;
 use crate::render::{FrameSample, GpuTimer, PerfLedger};
 
-/// 帧秒表（`frame_body` 的局部）：CPU 六段计时 + GPU 八段读数，帧末一次入账。
+/// 帧秒表（`frame_body` 的局部）：CPU 六段计时 + GPU 九段读数，帧末一次入账。
 ///
 /// 段落严格按帧内执行顺序起止；让路帧（最小化 / acquire 过时）走不到 [`Self::push`]，
 /// 不入账。
@@ -24,7 +24,7 @@ pub(super) struct FrameStopwatch {
     record_submit_ms: f32,
     present_ms: f32,
     /// GPU 各段毫秒（本槽两帧前的提交，稳态下与当前帧同构；停用时恒 0）。
-    gpu_sections: [f32; 8],
+    gpu_sections: [f32; 9],
 }
 
 impl FrameStopwatch {
@@ -39,7 +39,7 @@ impl FrameStopwatch {
             rings_ms: 0.0,
             record_submit_ms: 0.0,
             present_ms: 0.0,
-            gpu_sections: [0.0; 8],
+            gpu_sections: [0.0; 9],
         }
     }
 
@@ -53,7 +53,7 @@ impl FrameStopwatch {
         self.gpu_sections = timer
             .fetch(slot)
             .or_fatal("GPU 帧计时取回失败，渲染链无法继续")?
-            .unwrap_or([0.0; 8]);
+            .unwrap_or([0.0; 9]);
         Ok(())
     }
 
@@ -105,6 +105,7 @@ impl FrameStopwatch {
             gpu_lighting_ms: self.gpu_sections[3],
             gpu_hiz_ms: self.gpu_sections[4],
             gpu_present_ms: self.gpu_sections[5],
+            gpu_ibl_capture_ms: self.gpu_sections[8],
             gpu_total_ms: self.gpu_sections[7], // [6] = 尾段，不入账
             instance_rows,
             visible_rows,

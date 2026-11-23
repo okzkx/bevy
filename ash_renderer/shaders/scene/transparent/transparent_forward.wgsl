@@ -9,10 +9,12 @@
 // LOAD、只测不写——被不透明覆盖的透明片元被 depth test 剔除）。
 //
 // 接口：set0/set1/set2 与 G-buffer 写入管线相同；set3 = 光源分簇集
-//（b0 ClusterParams / b1 lights / b2 cluster 列表）。
+//（b0 ClusterParams / b1 lights / b2 cluster 列表）；set4 = IBL 集（与环境基线同源，
+// 透明层也接 IBL——它不是 GI，9.7 的 SCGI 仍只作用于不透明）。
 enable wgpu_binding_array;
 // #import mesh
 // #import cluster_lighting
+// #import ibl
 
 @group(0) @binding(0) var textures: binding_array<texture_2d<f32>>;
 @group(0) @binding(1) var samplers: binding_array<sampler>;
@@ -23,6 +25,11 @@ enable wgpu_binding_array;
 @group(3) @binding(0) var<storage, read> params: ClusterParams;
 @group(3) @binding(1) var<storage, read> lights: array<LightRecord>;
 @group(3) @binding(2) var<storage, read> clusters: array<ClusterRecord>;
+// set4 环境光照：b0 预滤波 cube、b1 采样器、b2 DFG LUT、b3 SH-L2 系数
+@group(4) @binding(0) var env_cube: texture_cube<f32>;
+@group(4) @binding(1) var ibl_sampler: sampler;
+@group(4) @binding(2) var dfg_lut: texture_2d<f32>;
+@group(4) @binding(3) var<storage, read> sh_coeffs: array<vec4f, 9>;
 
 @vertex
 fn vs_main(
@@ -40,7 +47,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     let mat = materials[in.material];
     let surf = sample_surface(mat, in.uv);
     let albedo = surf.albedo;
-    let n = normalize(in.world_normal);
+    // 零法线兜底（同不透明 G-buffer 写入口径）：退化面片不让 NaN 进光照
+    let n = safe_normalize(in.world_normal, vec3f(0.0, 1.0, 0.0));
     let pixel = getStandardPixelParams(albedo.rgb, surf.metallic, surf.perceptual_roughness, mat.reflectance);
 
     let V = normalize(frame.camera_pos.xyz - in.world_pos);
@@ -58,9 +66,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     light_sum = accumulate_cluster_lights(
         light_sum, params, in.clip.xy, pixel, in.world_pos, V, n, NoV, surf.occlusion);
 
-    // 环境光项在光源循环外（与不透明合成同款语义）。自发光同不透明层：按 Bevy
-    // StandardMaterial 默认（emissive_exposure_weight = 0）不随曝光缩放，加在
-    // 曝光乘算之外，仍写进 HDR 跟着进 Bloom；alpha 继续由混合状态乘。
-    let ambient = albedo.rgb * frame.ambient_color.rgb;
-    return vec4f((light_sum + ambient) * EXPOSURE + surf.emissive, albedo.a);
+    // 环境项在光源循环外（与不透明合成同款语义）：IBL 开 = SH-L2 漫反射 + split-sum
+    // 高光（替换旧常量项）；关 = 步骤 8 原文 albedo × ambient。粗糙度用 surf 的
+    // perceptualRoughness（不是 α）。自发光同不透明层：按 Bevy StandardMaterial 默认
+    // （emissive_exposure_weight = 0）不随曝光缩放，加在曝光乘算之外，仍写进 HDR；
+    // alpha 继续由混合状态乘。
+    var environment = albedo.rgb * frame.ambient_color.rgb;
+    if (frame.ibl_enabled != 0u) {
+        let e = sh_irradiance(n, sh_coeffs);
+        let diffuse = pixel.diffuseColor * Fd_Lambert() * e * frame.ibl_intensity;
+        let specular = ibl_specular(
+            env_cube, ibl_sampler, dfg_lut, n, V, NoV, pixel.f0, surf.perceptual_roughness,
+            IBL_MAX_MIP) * frame.ibl_intensity;
+        environment = diffuse + specular;
+    }
+    return vec4f((light_sum + environment) * EXPOSURE + surf.emissive, albedo.a);
 }

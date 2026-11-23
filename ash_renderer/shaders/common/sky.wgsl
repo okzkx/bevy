@@ -162,6 +162,11 @@ fn sky_optical_depth(r: f32, cos_theta: f32, above_horizon: bool) -> vec3f {
 }
 
 fn sky_radiance(dir: vec3f, include_sun: bool) -> vec3f {
+    // 常量天空（9.2.0 自检开关）：可见天空与捕获同时变成常量 L，于是 E(n)=πL 是解析
+    // 真值。不受 sky_intensity 影响——自检锚点必须是精确的 L；生产路径 w=0 走下面。
+    if (frame.sky_uniform.w > 0.5) {
+        return frame.sky_uniform.rgb;
+    }
     let planet_r = max(frame.sky_geo.x, 1.0);
     let atmos_r = max(frame.sky_geo.y, planet_r + 1.0);
     // 海拔约定：海平面 = 世界 y = 0（相机在山谷/地下时按 0 兜底）

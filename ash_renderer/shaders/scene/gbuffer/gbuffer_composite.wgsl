@@ -7,6 +7,10 @@
 // - 1 Unlit / 2 Normal / 3 Position：反照率 / 世界法线 / 深度重建世界位置直出
 // - 4..8 调试显示：matparam 单通道灰度直出（metallic/roughness/AO/reflectance）
 //   + reverse-Z 深度线性化灰度
+// - 9/10 IBL 漫反射/高光贡献直出（IBL 关时黑）
+//
+// 环境项：IBL 开 = SH-L2 漫反射 + split-sum 高光（**替换**旧常量项，不叠加）；
+// IBL 关 = 步骤 8 原文 `albedo · ambient_color`，逐位一致（回归硬线）。
 //
 // 背景判定：reverse-Z 深度清 0 = 远平面 → 程序化天空（sky_enabled 关时回清屏色）。
 enable wgpu_binding_array;
@@ -15,6 +19,7 @@ enable wgpu_binding_array;
 // #import shadow_ubo
 // #import fullscreen
 // #import sky
+// #import ibl
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(1) @binding(0) var albedo_tex: texture_2d<f32>;
@@ -33,6 +38,12 @@ enable wgpu_binding_array;
 @group(3) @binding(2) var shadow_map1: texture_2d<f32>;
 @group(3) @binding(3) var shadow_map2: texture_2d<f32>;
 @group(3) @binding(4) var shadow_map3: texture_2d<f32>;
+// set4 环境光照：b0 预滤波 cube（全 mip）、b1 采样器（cube 与 LUT 共用）、b2 DFG LUT、
+// b3 SH-L2 系数（9×vec4，已折叠余弦卷积的 A_l）
+@group(4) @binding(0) var env_cube: texture_cube<f32>;
+@group(4) @binding(1) var ibl_sampler: sampler;
+@group(4) @binding(2) var dfg_lut: texture_2d<f32>;
+@group(4) @binding(3) var<storage, read> sh_coeffs: array<vec4f, 9>;
 
 const MODE_SHADING: u32 = 0u;   // 宿主侧名为 FRAME_MODE_LAMBERT
 const MODE_UNLIT: u32 = 1u;
@@ -43,6 +54,8 @@ const MODE_ROUGHNESS: u32 = 5u;
 const MODE_AO: u32 = 6u;
 const MODE_REFLECTANCE: u32 = 7u;
 const MODE_DEPTH: u32 = 8u;
+const MODE_IBL_DIFFUSE: u32 = 9u;
+const MODE_IBL_SPECULAR: u32 = 10u;
 
 // 清屏色（线性域），须与宿主侧 CLEAR_COLOR 同值
 const CLEAR_COLOR: vec3f = vec3f(0.02, 0.06, 0.14);
@@ -218,6 +231,35 @@ fn world_from_depth(uv: vec2f, depth: f32) -> vec3f {
     return world.xyz / world.w;
 }
 
+// —— 环境光照（IBL）：漫反射 SH-L2 辐照度 + 高光 split-sum。IBL 关时两项为 0
+// （调用方用 select 回旧常量项，不在这里混合）。
+struct IblTerms {
+    diffuse: vec3f,
+    specular: vec3f,
+}
+
+fn ibl_environmental(
+    pixel: PixelParams,
+    n: vec3f,
+    v: vec3f,
+    no_v: f32,
+    perceptual_roughness: f32,
+) -> IblTerms {
+    var terms: IblTerms;
+    if (frame.ibl_enabled == 0u) {
+        return terms;
+    }
+    // E(n) 已含余弦卷积（A_l 折叠在系数里），Lambert BRDF 只再乘 1/π
+    terms.diffuse = pixel.diffuseColor * Fd_Lambert() * sh_irradiance(n, sh_coeffs)
+        * frame.ibl_intensity;
+    // 坑：粗糙度必须用 perceptualRoughness（matparam.b），pixel.roughness 是 α = p²，
+    // 直接喂 mip 会把粗糙面算得过锐
+    terms.specular = ibl_specular(
+        env_cube, ibl_sampler, dfg_lut, n, v, no_v, pixel.f0, perceptual_roughness, IBL_MAX_MIP)
+        * frame.ibl_intensity;
+    return terms;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
     let albedo = textureSampleLevel(albedo_tex, gbuf_sampler, in.uv, 0.0);
@@ -294,12 +336,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
             * shadow;
     }
 
-    // 环境光：albedo × ambient
+    // 环境项：IBL 开 = 漫反射 + 高光（替换旧常量项）；关 = 步骤 8 原文 albedo × ambient。
+    // 两条调试档（9/10）直出 IBL 单项贡献，用来读方向性与能量。
+    let ibl = ibl_environmental(pixel, n, V, NoV, matparam.b);
+    if frame.mode == MODE_IBL_DIFFUSE {
+        return vec4f(ibl.diffuse * EXPOSURE, 1.0);
+    }
+    if frame.mode == MODE_IBL_SPECULAR {
+        return vec4f(ibl.specular * EXPOSURE, 1.0);
+    }
     let ambient = albedo.rgb * frame.ambient_color.rgb;
+    let environment = select(ambient, ibl.diffuse + ibl.specular, frame.ibl_enabled != 0u);
     // 自发光：不受光照/阴影/AO 影响，直接加进 HDR。Bevy StandardMaterial 默认
     // emissive_exposure_weight = 0，即自发光不随相机曝光缩放；本引擎的 EXPOSURE
     // 锚在 20000 lx 直射（0.00016），跟着乘会把 glTF 的 emissiveFactor=1 压到
     // 不可见。加在曝光乘算之外，结果同样写进 HDR、跟着进 Bloom。
     let emissive = textureSampleLevel(emissive_tex, gbuf_sampler, in.uv, 0.0).rgb;
-    return vec4f((light_sum + ambient) * EXPOSURE + emissive, 1.0);
+    return vec4f((light_sum + environment) * EXPOSURE + emissive, 1.0);
 }

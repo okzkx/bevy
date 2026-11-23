@@ -2,6 +2,7 @@
 //! 消费时序排列。场景资源与规格不在这里，见 [`SceneResources`](super::scene_resources::SceneResources)。
 
 use super::frame_pool::UploadWait;
+use crate::render::passes::ibl::IblFrameDraw;
 use crate::render::passes::lighting::cluster::ClusterFrameDraw;
 use crate::render::passes::overlay::overlay_pipeline::UiDraw;
 use crate::render::passes::post::post_chain::PostChainDraw;
@@ -36,6 +37,8 @@ pub struct RenderFeatures<'a> {
     pub cluster: ClusterFrameDraw,
     /// 透明层：收集/排序/组装 dispatch + 透明绘制（空场为 None）。
     pub transparent: Option<TransparentFrame>,
+    /// 环境光照：② 段烘焙（脏帧才录）与 ⑤ 段绑进合成/透明前向的 IBL 集。
+    pub ibl: IblFrameDraw<'a>,
     // —— ⑦⑧ 后链 + UI ——
     /// ⑦⑧ 后链束：Bloom → tonemap → SMAA → neighborhood（全部来自 `post`）。
     pub post: PostChainDraw,

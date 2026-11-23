@@ -1,20 +1,21 @@
-//! GPU timestamp 计时与帧样本账。每帧槽一只 TIMESTAMP query pool（[`QUERIES_PER_FRAME`] = 8 位），
-//! 帧内写 8 个 timestamp，下一轮该槽 fence 等完后取回。
+//! GPU timestamp 计时与帧样本账。每帧槽一只 TIMESTAMP query pool（[`QUERIES_PER_FRAME`] = 9 位），
+//! 帧内写 9 个 timestamp，下一轮该槽 fence 等完后取回。
 //!
-//! 采样阶段：T0 用 TOP_OF_PIPE；T1..T7 用 BOTTOM_OF_PIPE，等记录序之前的命令全部走完才写。
+//! 采样阶段：T0 用 TOP_OF_PIPE；其余用 BOTTOM_OF_PIPE，等记录序之前的命令全部走完才写。
 //! 坑：段界若用 TOP_OF_PIPE，timestamp 不等前面的工作，段间屏障也约束不到它，读数会系统性
 //! 偏小甚至挪到相邻段。
 //!
 //! | 位 | 采样点 | 区间（到上一位） |
 //! |---|---|---|
 //! | T0 | 进场屏障前、compute 段前 | 原点 |
-//! | T1 | compute 段（剔除/遮挡/LOD/组装/光源列表/透明）后 | compute |
-//! | T2 | shadow depth pass 后 | shadow |
-//! | T3 | G-buffer pass 后 | G-buffer |
-//! | T4 | 合成 + 透明层后 | 合成（含透明） |
-//! | T5 | Hi-Z 归约后 | Hi-Z 构建 |
-//! | T6 | Bloom/tonemap/SMAA/neighborhood + UI 后 | 后处理 + UI |
-//! | T7 | end_command_buffer 前 | 尾段（不入账）；全帧取 T0→T7 |
+//! | T1 | IBL 烘焙（捕获/SH/预滤波）后 | IBL 捕获（T0→T1，不入 compute 区间） |
+//! | T2 | compute 段（剔除/遮挡/LOD/组装/光源列表/透明）后 | compute（含 IBL 捕获） |
+//! | T3 | shadow depth pass 后 | shadow |
+//! | T4 | G-buffer pass 后 | G-buffer |
+//! | T5 | 合成 + 透明层后 | 合成（含透明） |
+//! | T6 | Hi-Z 归约后 | Hi-Z 构建 |
+//! | T7 | Bloom/tonemap/SMAA/neighborhood + UI 后 | 后处理 + UI |
+//! | T8 | end_command_buffer 前 | 尾段（不入账）；全帧取 T0→T8 |
 //!
 //! timestamp 只用于诊断：队列族 `timestamp_valid_bits == 0` 时降级停用（warn 一次），不阻断渲染。
 //!
@@ -35,8 +36,8 @@ fn wrapping_timestamp_delta(start: u64, end: u64, mask: u64) -> u64 {
     end.wrapping_sub(start) & mask
 }
 
-/// 每帧槽查询位数（T0..T7，见模块注释）。
-pub(crate) const QUERIES_PER_FRAME: u32 = 8;
+/// 每帧槽查询位数（T0..T8，见模块注释）。
+pub(crate) const QUERIES_PER_FRAME: u32 = 9;
 
 /// timestamp 采样点位：变体名 = 该点收尾的段，数值 = query pool 内槽位号。
 /// 各点位在录制体里的落位见模块注释表。
@@ -44,20 +45,22 @@ pub(crate) const QUERIES_PER_FRAME: u32 = 8;
 pub enum TimestampPoint {
     /// 原点：进场屏障前、compute 段前（TOP_OF_PIPE，见 [`GpuTimer::reset_and_start`]）。
     FrameStart = 0,
-    /// compute 段（剔除/遮挡/LOD/组装/光源列表/透明）结束。
-    Compute = 1,
+    /// IBL 烘焙（捕获 → SH → 预滤波）结束；不烘焙的帧它 ≈ FrameStart。
+    IblCapture = 1,
+    /// compute 段（剔除/遮挡/LOD/组装/光源列表/透明）结束（含 IBL 烘焙）。
+    Compute = 2,
     /// shadow depth pass 结束。
-    Shadow = 2,
+    Shadow = 3,
     /// G-buffer pass 结束。
-    GBuffer = 3,
+    GBuffer = 4,
     /// 合成 + 透明层结束。
-    Lighting = 4,
+    Lighting = 5,
     /// Hi-Z 归约结束。
-    HiZ = 5,
+    HiZ = 6,
     /// 后处理 + UI（Bloom/tonemap/SMAA/neighborhood + UI）结束。
-    PostUi = 6,
+    PostUi = 7,
     /// 全帧结束（end_command_buffer 前，不入账；全帧取 FrameStart→FrameEnd）。
-    FrameEnd = 7,
+    FrameEnd = 8,
 }
 
 /// 一帧的计量样本：CPU 分段 + GPU 区间 + 规模读数，全部毫秒。
@@ -87,6 +90,8 @@ pub struct FrameSample {
     pub gpu_lighting_ms: f32,
     /// Hi-Z 金字塔构建。
     pub gpu_hiz_ms: f32,
+    /// IBL 烘焙（捕获 + SH 投影/归约/自检 + 预滤波）；不烘焙的帧 ≈ 0。
+    pub gpu_ibl_capture_ms: f32,
     /// 后处理 + UI（Bloom/tonemap/SMAA/neighborhood + UI）。
     pub gpu_present_ms: f32,
     /// T0→T7 全帧。
@@ -305,12 +310,13 @@ impl GpuTimer {
         }
     }
 
-    /// 取本槽上一轮的时间戳，换算成 7 段（T0→T1 … T6→T7）+ 全帧 T0→T7，共 8 项毫秒。
-    /// 须在本槽 fence 等完后调用（`wait_for_slot` 之后）。停用、该槽没录过或结果未就绪返回 None。
+    /// 取本槽上一轮的时间戳，换算成 7 段（T0→T2 … T7→T8）+ 全帧 T0→T8 + IBL 捕获
+    /// （T0→T1），共 9 项毫秒。须在本槽 fence 等完后调用（`wait_for_slot` 之后）。
+    /// 停用、该槽没录过或结果未就绪返回 None。
     ///
     /// # Errors
     /// 取结果失败（如设备丢失）。
-    pub fn fetch(&mut self, slot: usize) -> Result<Option<[f32; 8]>> {
+    pub fn fetch(&mut self, slot: usize) -> Result<Option<[f32; 9]>> {
         if !self.enabled || !self.recorded[slot].load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -349,6 +355,7 @@ impl GpuTimer {
             seg(HiZ, PostUi),
             seg(PostUi, FrameEnd),
             seg(FrameStart, FrameEnd),
+            seg(FrameStart, IblCapture),
         ]))
     }
 }

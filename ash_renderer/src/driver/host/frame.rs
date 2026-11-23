@@ -27,8 +27,8 @@ use ash_macros::system;
 use crate::{
     common::syntax::fatal,
     render::{
-        ClusterFrameDraw, HizFrameDraw, PostChainDraw, RenderFeatures, SceneResources, UiDraw,
-        UploadWait,
+        ClusterFrameDraw, HizFrameDraw, IblBakeDraw, IblBakeInput, IblFrameDraw, PostChainDraw,
+        RenderFeatures, SceneResources, UiDraw, UploadWait,
     },
     scene::InstanceLedger,
 };
@@ -152,8 +152,23 @@ pub(crate) fn draw_frame(
         ledger.is_empty(),
         logs,
     );
-    gpu.frame_uniform_table
-        .write_frame_ubo(slot, &view, &light, render_mode, &scene.sky)?;
+    gpu.frame_uniform_table.write_frame_ubo(
+        slot,
+        &view,
+        &light,
+        render_mode,
+        &scene.sky,
+        &scene.ibl_settings,
+    )?;
+    // 环境光照烘焙计划：脏帧才重烘（sky_hash 含大气参数/太阳/100 m 量化海拔），
+    // ibl_enabled=false 时只可能带"布局初始化"一次。判定只在这里做，录制层照单执行。
+    let ibl_plan = scene.ibl_env.prepare(&IblBakeInput {
+        sky: &scene.sky,
+        dir_to_light: light.dir_to_light,
+        light_color: light.light_color,
+        altitude: view.camera.map_or(0.0, |c| c.pos.y),
+        enabled: scene.ibl_settings.enabled,
+    });
     let scene_aabb = scene_world_aabb(ledger, &scene.pool);
     shadow.write_ubo(slot, &view, &light, scene_aabb)?;
     post.write_slot_ubos(slot)?;
@@ -302,6 +317,15 @@ pub(crate) fn draw_frame(
             set: cluster.clusters.frame_set(slot),
         },
         transparent: transparent_frame,
+        ibl: IblFrameDraw {
+            bake: Some(ibl_plan)
+                .filter(|plan| !plan.is_empty())
+                .map(|plan| IblBakeDraw {
+                    env: &scene.ibl_env,
+                    plan,
+                }),
+            set: scene.ibl_env.frame_set(),
+        },
         // —— ⑦⑧ 后链 + UI
         post: PostChainDraw {
             tonemap: post.tonemap.rec(),
