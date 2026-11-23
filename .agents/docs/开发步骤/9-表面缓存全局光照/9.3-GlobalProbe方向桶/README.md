@@ -6,30 +6,31 @@
 
 **一句话说明**：从 9.2 的天空 cubemap 生成 16 桶 × RGBL1 的 GlobalProbe，按法线选桶求值，并用 A/B 对照 L2；本段不产生空间缓存、不发射射线、不替代 L2 作为默认（除非数据支持）。
 
-**当前状态：📝 施工计划已立案，未开工（2026-11-20 立案；2026-11-23 按物理天空/9.2 同步修订，[施工计划：GlobalProbe方向桶](施工计划：GlobalProbe方向桶.md)）**。
+**当前状态：📝 施工计划已立案并按 9.2 落地复核，未开工（2026-11-20 立案；2026-11-23 同步修订与落地复核，[施工计划：GlobalProbe方向桶](施工计划：GlobalProbe方向桶.md)）。9.2（含 9.2.8）已收官，落地带来的硬约束（IBL 默认关、天光联动、视向侧法线、IBL 集 b4 空位）已并入计划 §0.0 复核清单。**
 
 ## 代码落点（提案）
 
 - `shaders/common/octahedral.wgsl`（新）：八面体球↔方映射、方向→桶索引、桶中心方向；9.5/9.7 的 cell/patch 桶位共用同一份。
 - `shaders/scene/ibl/global_probe.wgsl`（新）：16 桶 × 32 样本的 L1 投影与余弦卷积；写 16×RGBL1 buffer。
-- `shaders/common/ibl.wgsl`：增加 `probe16_eval(n)` 与 `ibl_mode` 分支。
-- `src/render/passes/ibl/`：GlobalProbe buffer、脏标记复用 9.2 的捕获节流、pass 录制。
-- `src/remote/features/ibl.rs`：`ibl_set` 扩 `diffuse_mode`，`ibl_stats` 回显 16 桶摘要。
-- `src/render/frame/render_mode.rs`：可选桶可视化调试档（若加，序号接在 9.2 的 mode 9/10 之后）。
+- `shaders/common/ibl.wgsl`：增加 `probe16_eval`（值参数形状：调用方按桶索引传 4 个 `vec4`）与 `ibl_mode` 分支。
+- `src/render/passes/ibl/environment.rs`：probe buffer（1KB，`BufferRole::DeviceStorage`）、投影管线与捕获侧 set、帧集加 b4；脏标记复用 9.2 的捕获节流，写→读屏障随 SH/stats 一起收口。
+- `src/remote/features/ibl.rs`：`ibl_set` 扩 `diffuse_mode`，`ibl_stats` 回显 16 桶摘要；`ibl_census` 可选 `probe: true` 全量读回。
+- `src/render/frame/render_mode.rs`：可选桶可视化调试档（若加，序号 11 接在 9.2 的 mode 9/10 之后）。
 
 ## 任务面板（随段施工计划 §1 同步）
 
 | 任务 | 交付（详见段施工计划） | 状态 |
 |---|---|---|
 | 9.3.1 八面体公共片段 | `octahedral.wgsl`：映射、`direction_to_bucket_index`、`bucket_index_to_direction`；与 Unity `Common.hlsl:161-182` 同式 | ⬜ |
-| 9.3.2 16 桶 L1 投影 | `global_probe.wgsl`：16 组、每组 32 样本、组内归约、`A0/A1` 卷积；16×64B（4×vec4/条，共 1KB）buffer | ⬜ |
-| 9.3.3 查询与模式切换 | `ibl_mode` 0 = SH-L2、1 = GlobalProbe；composite/transparent 的漫反射分支 | ⬜ |
-| 9.3.4 BRP 与调试视图 | `ibl_set` 的 `diffuse_mode`（`sh_l2` / `probe16`）；`ibl_stats` 16 桶摘要；桶可视化（可选） | ⬜ |
+| 9.3.2 16 桶 L1 投影 | `global_probe.wgsl`：16 桶 × 32 样本（线程形状可简化为一桶一线程串行）、`A0/A1` 卷积；16×64B（4×vec4/条，共 1KB）buffer；捕获侧 set 与 9.2 烘焙链接入 | ⬜ |
+| 9.3.3 查询与模式切换 | `ibl_mode` 0 = SH-L2、1 = GlobalProbe；composite/transparent 的漫反射分支，法线复用 9.2.8 翻转后的 `n`；帧集 b4 绑 probe buffer | ⬜ |
+| 9.3.4 BRP 与调试视图 | `ibl_set` 的 `diffuse_mode`（`sh_l2` / `probe16`）；`ibl_stats` 16 桶摘要与 `ibl_census` 全量读回（可选）；桶可视化（可选） | ⬜ |
 | 9.3.5 判定线与 A/B | 桶方向正确性、`sky_uniform` 常量天空自检、L2 vs 16 桶读图、接缝/收益记录、回归矩阵 | ⬜ |
 
 ## 材料清单
 
-- [施工计划：GlobalProbe方向桶](施工计划：GlobalProbe方向桶.md)——算法、映射约定、A/B 口径、任务拆分、判定线、测试方案与坑（2026-11-20 立案；2026-11-23 同步修订）。
+- [施工计划：GlobalProbe方向桶](施工计划：GlobalProbe方向桶.md)——算法、映射约定、A/B 口径、任务拆分、判定线、测试方案与坑（2026-11-20 立案；2026-11-23 同步修订与落地复核）。
+- [9.2 段 README](../9.2-天空盒IBL/README.md)、[9.2.7 判定线与计量](../9.2-天空盒IBL/9.2.7-判定线与计量.md)与[9.2.8 现场复检补修](../9.2-天空盒IBL/9.2.8-高光火花、天空地平线噪点与天光开关联动.md)——本段的落地基线与回归口径（IBL 默认关、天光联动、视向侧法线）。
 - [9.2 施工计划 §0.9](../9.2-天空盒IBL/施工计划：天空盒IBL.md)——`sky_uniform` 常量天空开关（9.3 的能量自检依赖它）。
 - [施工计划：天空盒、IBL 与表面缓存全局光照八段拆解](../施工计划：天空盒、IBL 与表面缓存全局光照八段拆解.md)——§2 9.3 节与 §5 目录组织。
 - [SH 与光照探针](../../../笔记/光照与材质/SH与光照探针.md)——GlobalProbe 16 桶与 Cell 16 槽的区别、16 桶 vs L2 的对照。
