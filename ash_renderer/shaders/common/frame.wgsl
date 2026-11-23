@@ -1,7 +1,7 @@
-// 每帧 UBO（304B）：字段序与 src/render/resident/tables/frame_uniform_table.rs 布局
-// 镜像的 offset_of! 断言一致（0/64/80/96/112/116/120/128/192/208/224/240/256/272/288），
+// 每帧 UBO（336B）：字段序与 src/render/resident/tables/frame_uniform_table.rs 布局
+// 镜像的 offset_of! 断言一致（0/64/80/96/112/116/120/128/192/208/224/240/256/272/288/304/308/312/320），
 // 描述符 range = FRAME_UBO_SIZE。
-// 只读前缀字段的 pass 也导入完整定义——绑定的 UBO 恒为 304B，range 足够。
+// 只读前缀字段的 pass 也导入完整定义——绑定的 UBO 恒为 336B，range 足够。
 struct FrameUniforms {
     view_proj: mat4x4f,
     // 表面到光方向（dir_to_light = transform.back()；w 未用），
@@ -25,4 +25,11 @@ struct FrameUniforms {
     sky_geo: vec4f,      // x = 行星半径(m)；y = 大气顶半径(m)；z = 臭氧层中心高(m)；w = 臭氧层全宽(m)
     sky_ground: vec4f,   // xyz = 地面反照率；w 未用
     sky_sun: vec4f,      // x = 太阳圆盘增益；y = 太阳角半径(rad)；zw 未用
+    ibl_enabled: u32,    // 0 关 / 1 开（关 = albedo · ambient_color，步骤 8 原文）
+    ibl_mode: u32,       // 漫反射编码：0 = SH-L2（9.3 的 1 = 16 桶）
+    ibl_intensity: f32,  // IBL 强度倍数
+    _pad2: u32,
+    // 常量天空（9.2.0 自检开关）：xyz = 辐亮度；w = 1 开 / 0 关。
+    // 开时 sky_radiance 直接返回 rgb（不受 sky_intensity 影响，自检锚点须精确）。
+    sky_uniform: vec4f,
 }

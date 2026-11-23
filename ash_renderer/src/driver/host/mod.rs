@@ -25,9 +25,9 @@ use bevy::{
 };
 
 use crate::render::{
-    BloomSettings, Context, CullDiagnostics, CullSettings, FrameSyncSettings, IndirectStats,
-    LodDiagnostics, LodSettings, OcclusionDiagnostics, OcclusionSettings, PerfLedger, RenderMode,
-    ShadowSettings, SkySettings, SmaaSettings,
+    BloomSettings, Context, CullDiagnostics, CullSettings, FrameSyncSettings, IblSettings,
+    IndirectStats, LodDiagnostics, LodSettings, OcclusionDiagnostics, OcclusionSettings,
+    PerfLedger, RenderMode, ShadowSettings, SkySettings, SmaaSettings,
 };
 use crate::scene::DrawListVerify;
 use ash_macros::system;
@@ -72,6 +72,8 @@ impl Plugin for AshHostPlugin {
             .init_resource::<SmaaSettings>()
             // 程序化天空参数：天空面板与 BRP sky_set 写同一份
             .init_resource::<SkySettings>()
+            // 环境光照设置（默认关）：BRP ibl_set 写
+            .init_resource::<IblSettings>()
             .init_resource::<PerfLedger>()
             // DrawList 组装对照账面（BRP 开关对照模式）
             .init_resource::<DrawListVerify>()

@@ -7,12 +7,13 @@ use crate::render::core::binding::shader_abi;
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::record::graphics::PipelineRef;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
+use crate::render::passes::ibl::IBL_SET_DESC;
 use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET_DESC;
 use crate::render::passes::shadow::shadow_map::SHADOW_SET_DESC;
 use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
 use crate::render::Context;
 
-/// set 依次为帧 UBO、G-buffer 采样集、光源分簇集、阴影集。
+/// set 依次为帧 UBO、G-buffer 采样集、光源分簇集、阴影集、IBL 集。
 pub(crate) static GBUFFER_COMPOSITE_PIPELINE: PipelineDesc = PipelineDesc {
     label: "gbuffer_composite",
     shader: &shader_abi::GBUFFER_COMPOSITE,
@@ -22,6 +23,7 @@ pub(crate) static GBUFFER_COMPOSITE_PIPELINE: PipelineDesc = PipelineDesc {
         &GBUFFER_SAMPLED_SET_DESC,
         &LIGHT_CLUSTER_SET_DESC,
         &SHADOW_SET_DESC,
+        &IBL_SET_DESC,
     ],
     push: None,
     color_formats: &[crate::render::HDR_FORMAT],

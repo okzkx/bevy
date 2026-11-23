@@ -9,13 +9,14 @@ use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
 use crate::render::core::pipeline::graphics::{create_graphics_pipeline, PipelineHandle};
 use crate::render::core::record::graphics::PipelineRef;
+use crate::render::passes::ibl::IBL_SET_DESC;
 use crate::render::passes::lighting::cluster::LIGHT_CLUSTER_SET_DESC;
 use crate::render::resident::tables::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
 use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
 use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::Context;
 
-/// set 依次为 set0/set1/set2 和光源分簇集。
+/// set 依次为 set0/set1/set2、光源分簇集与 IBL 集。
 pub(crate) static TRANSPARENT_FORWARD_PIPELINE: PipelineDesc = PipelineDesc {
     label: "transparent_forward",
     shader: &shader_abi::TRANSPARENT_FORWARD,
@@ -25,6 +26,7 @@ pub(crate) static TRANSPARENT_FORWARD_PIPELINE: PipelineDesc = PipelineDesc {
         &FRAME_UNIFORM_SET_DESC,
         &INSTANCE_SET_DESC,
         &LIGHT_CLUSTER_SET_DESC,
+        &IBL_SET_DESC,
     ],
     push: None,
     color_formats: &[crate::render::HDR_FORMAT],

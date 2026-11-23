@@ -123,6 +123,15 @@ fn surfaceShading(pixel: PixelParams, light_l: vec3f, light_colorIntensity: vec4
 }
 
 // 方向光 L：UBO dir_to_light 归一化，零向量兜底朝上。
+// 归一化兜底：零向量/NaN 输入返回 fallback（退化面片/插值抵消的零法线 → normalize(0)=NaN）。
+// 坑：NaN 法线会把下游所有点积（直接光、IBL）全带成 NaN，经 Bloom 的 soft-knee
+// （Inf/Inf）扩散成大块黑斑——必须在归一化处挡住。
+fn safe_normalize(v: vec3f, fallback: vec3f) -> vec3f {
+    let len2 = dot(v, v);
+    let finite = len2 == len2 && len2 < 1e30;
+    return select(fallback, v * inverseSqrt(max(len2, 1e-30)), finite && len2 > 1e-20);
+}
+
 fn safe_light_dir(l_raw: vec3f) -> vec3f {
     return select(vec3f(0.0, 1.0, 0.0), normalize(l_raw), dot(l_raw, l_raw) > 1e-8);
 }

@@ -6,6 +6,7 @@ pub(crate) mod cluster;
 pub(crate) mod cull;
 pub(crate) mod draw;
 pub(crate) mod gap;
+pub(crate) mod ibl;
 pub(crate) mod lod;
 pub(crate) mod render_settings;
 pub(crate) mod residency;

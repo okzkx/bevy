@@ -36,7 +36,7 @@ pub(crate) static FRAME_UNIFORM_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
 
 /// 每帧 UBO 字节数（set1 b0；偏移见 `FrameUniformTableLayout` 静态断言）。range 在写描述符时
 /// 给出，改尺寸不影响 binding 形状与 pipeline layout。
-pub const FRAME_UBO_SIZE: u64 = 304;
+pub const FRAME_UBO_SIZE: u64 = 336;
 
 /// UBO `mode` 字段取值（语义见 `gbuffer_composite.wgsl`）；4 起只有合成 pass 使用，用来直出
 /// G-buffer 单通道调试。
@@ -52,6 +52,10 @@ pub const FRAME_MODE_AO: u32 = 6;
 pub const FRAME_MODE_REFLECTANCE: u32 = 7;
 /// reverse-Z 深度线性化灰度（clip.w / far；透视下 w 即视空间深度）。
 pub const FRAME_MODE_DEPTH: u32 = 8;
+/// IBL 漫反射贡献直出（`ibl_diffuse * EXPOSURE`；IBL 关时黑）。
+pub const FRAME_MODE_IBL_DIFFUSE: u32 = 9;
+/// IBL 高光贡献直出（`ibl_specular * EXPOSURE`；IBL 关时黑）。
+pub const FRAME_MODE_IBL_SPECULAR: u32 = 10;
 
 /// 无方向光时的占位方向（xyz 已是合法方向，避免归一化出 NaN；灯色全零）。
 /// 建表初值与 draw_frame 的无灯分支共用。
@@ -89,6 +93,14 @@ pub struct FrameUniformsData {
     pub sky_ground: [f32; 4],
     /// x = 太阳圆盘增益；y = 太阳角半径（弧度）；zw 未用。
     pub sky_sun: [f32; 4],
+    /// IBL 开关（0 关 / 1 开；关 = 回步骤 8 的 `albedo · ambient`，逐位一致）。
+    pub ibl_enabled: u32,
+    /// IBL 漫反射编码（本段恒 0 = SH-L2；9.3 的 1 = 16 桶）。
+    pub ibl_mode: u32,
+    /// IBL 强度倍数（积分到 HDR 的乘子）。
+    pub ibl_intensity: f32,
+    /// 常量天空（9.2.0 自检开关）：xyz = 辐亮度；w = 1 开 / 0 关（开时忽略太阳与大气参数）。
+    pub sky_uniform: [f32; 4],
 }
 
 /// [`FrameUniformsData`] 的 WGSL uniform 布局镜像：不参与运行时，只用 `offset_of!` 静态断言
@@ -111,6 +123,11 @@ struct FrameUniformTableLayout {
     sky_geo: [f32; 4],
     sky_ground: [f32; 4],
     sky_sun: [f32; 4],
+    ibl_enabled: u32,
+    ibl_mode: u32,
+    ibl_intensity: f32,
+    _pad2: u32,
+    sky_uniform: [f32; 4],
 }
 
 const _: () = {
@@ -129,11 +146,15 @@ const _: () = {
     assert!(std::mem::offset_of!(FrameUniformTableLayout, sky_geo) == 256);
     assert!(std::mem::offset_of!(FrameUniformTableLayout, sky_ground) == 272);
     assert!(std::mem::offset_of!(FrameUniformTableLayout, sky_sun) == 288);
-    assert!(std::mem::size_of::<FrameUniformTableLayout>() == 304);
-    assert!(FRAME_UBO_SIZE == 304);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, ibl_enabled) == 304);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, ibl_mode) == 308);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, ibl_intensity) == 312);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, sky_uniform) == 320);
+    assert!(std::mem::size_of::<FrameUniformTableLayout>() == 336);
+    assert!(FRAME_UBO_SIZE == 336);
 };
 
-/// [`FrameUniformsData`] → 304B uniform 字节（偏移见 `FrameUniformTableLayout`）。
+/// [`FrameUniformsData`] → 336B uniform 字节（偏移见 `FrameUniformTableLayout`）。
 #[must_use]
 pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usize] {
     let mut out = [0u8; FRAME_UBO_SIZE as usize];
@@ -153,6 +174,11 @@ pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usiz
     put_vec4(&mut out, 256, &d.sky_geo);
     put_vec4(&mut out, 272, &d.sky_ground);
     put_vec4(&mut out, 288, &d.sky_sun);
+    put_u32(&mut out, 304, d.ibl_enabled);
+    put_u32(&mut out, 308, d.ibl_mode);
+    put_f32(&mut out, 312, d.ibl_intensity);
+    // 316..320 对齐垫保持 0
+    put_vec4(&mut out, 320, &d.sky_uniform);
     out
 }
 
@@ -175,6 +201,10 @@ fn identity_frame_uniforms() -> FrameUniformsData {
         sky_geo: [0.0; 4],
         sky_ground: [0.0; 4],
         sky_sun: [0.0; 4],
+        ibl_enabled: 0,
+        ibl_mode: 0,
+        ibl_intensity: 0.0,
+        sky_uniform: [0.0; 4],
     }
 }
 
@@ -252,6 +282,12 @@ impl FrameUniformTable {
     /// 第 `frame` 帧槽的 UBO（写相机/灯光数据，须在该帧槽 fence 之后）。
     pub fn ubo(&mut self, frame: usize) -> &mut GpuBuffer {
         &mut self.ubos[frame]
+    }
+
+    /// 第 `frame` 帧槽 UBO 的裸句柄（只读；给要在自己描述符集里绑帧 UBO 的内部 pass）。
+    #[must_use]
+    pub fn ubo_handle(&self, frame: usize) -> vk::Buffer {
+        self.ubos[frame].buffer()
     }
 }
 

@@ -7,8 +7,9 @@
 use bevy::prelude::*;
 
 use crate::render::{
-    FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC, FRAME_MODE_NORMAL,
-    FRAME_MODE_POSITION, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
+    FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_IBL_DIFFUSE, FRAME_MODE_IBL_SPECULAR,
+    FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC, FRAME_MODE_NORMAL, FRAME_MODE_POSITION,
+    FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
 };
 
 /// 场景着色模式（UBO `mode` 的宿主侧形态）。
@@ -29,11 +30,15 @@ pub enum RenderMode {
     Reflectance,
     /// reverse-Z 深度线性化灰度。
     Depth,
+    /// IBL 漫反射贡献直出（`ibl_diffuse * EXPOSURE`；IBL 关时黑）。
+    IblDiffuse,
+    /// IBL 高光贡献直出（`ibl_specular * EXPOSURE`；IBL 关时黑）。
+    IblSpecular,
 }
 
 impl RenderMode {
     /// 全部模式（名称解析遍历用）。
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Lambert,
         Self::Unlit,
         Self::Normal,
@@ -43,11 +48,13 @@ impl RenderMode {
         Self::AmbientOcclusion,
         Self::Reflectance,
         Self::Depth,
+        Self::IblDiffuse,
+        Self::IblSpecular,
     ];
 
     /// 可选名称提示（env 拼写错误告警与 BRP 未知模式报错共用）。
     pub const NAME_HINT: &'static str =
-        "filament(lambert 兼容)/unlit/normal/position/metallic/roughness/ao/reflectance/depth";
+        "filament(lambert 兼容)/unlit/normal/position/metallic/roughness/ao/reflectance/depth/ibl_diffuse/ibl_specular";
 
     /// 模式名（唯一名称表）。
     #[must_use]
@@ -62,6 +69,8 @@ impl RenderMode {
             Self::AmbientOcclusion => "ao",
             Self::Reflectance => "reflectance",
             Self::Depth => "depth",
+            Self::IblDiffuse => "ibl_diffuse",
+            Self::IblSpecular => "ibl_specular",
         }
     }
 
@@ -101,6 +110,8 @@ impl RenderMode {
             Self::AmbientOcclusion => FRAME_MODE_AO,
             Self::Reflectance => FRAME_MODE_REFLECTANCE,
             Self::Depth => FRAME_MODE_DEPTH,
+            Self::IblDiffuse => FRAME_MODE_IBL_DIFFUSE,
+            Self::IblSpecular => FRAME_MODE_IBL_SPECULAR,
         }
     }
 }

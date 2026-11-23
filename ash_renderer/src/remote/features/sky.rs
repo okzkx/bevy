@@ -246,6 +246,52 @@ pub(crate) fn sky_stats(In(_params): In<Option<Value>>, world: &mut World) -> Br
     Ok(current(res::<SkySettings>(world)?))
 }
 
+/// `ash_renderer/sky_uniform`：常量天空开关（9.2 自检专用）。独立方法——它带"清空
+/// 语义"（关 = 回物理天空），与 `sky_set` 的"缺省字段不动"是两种更新形状。
+/// 请求 `{"enabled": bool, "color": [r,g,b]?}`；开时 `sky_radiance` 直接返回
+/// `color`（忽略大气/太阳/`intensity`），于是 SH-L2 的 `E(n) = π·color` 是解析真值。
+#[system]
+pub(crate) fn sky_uniform(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let p: serde_json::Map<String, Value> =
+        parse_params(params, "params 缺失：需要 enabled（可选 color）")?;
+    let mut sky = res_mut::<SkySettings>(world)?;
+    let mut echo = json!({});
+    if let Some(v) = p.get("color") {
+        let arr = v
+            .as_array()
+            .filter(|a| a.len() == 3)
+            .ok_or_else(|| invalid_params("color 需要长度 3 的数组"))?;
+        let mut rgb = [0.0f32; 3];
+        for (i, c) in arr.iter().enumerate() {
+            let f = c
+                .as_f64()
+                .ok_or_else(|| invalid_params(format!("color[{i}] 非数值")))?
+                as f32;
+            if !f.is_finite() || f < 0.0 {
+                return Err(invalid_params(format!("color[{i}] 须为非负有限值")));
+            }
+            rgb[i] = f;
+        }
+        sky.uniform_radiance = rgb;
+        echo["color"] = json!(rgb);
+    }
+    if let Some(v) = p.get("enabled") {
+        let enabled = v
+            .as_bool()
+            .ok_or_else(|| invalid_params("enabled 非布尔"))?;
+        sky.uniform_enabled = enabled;
+        echo["enabled"] = json!(enabled);
+    }
+    if echo.as_object().is_none_or(|o| o.is_empty()) {
+        return Err(invalid_params("无有效字段（enabled/color 任一）"));
+    }
+    Ok(json!({
+        "applied": echo,
+        "uniform_enabled": sky.uniform_enabled,
+        "uniform_radiance": sky.uniform_radiance,
+    }))
+}
+
 /// 天空参数现值（`sky_set` 回显与 `sky_stats` 共用）。
 fn current(sky: &SkySettings) -> Value {
     json!({

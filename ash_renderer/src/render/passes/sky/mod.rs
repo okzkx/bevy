@@ -42,6 +42,12 @@ pub struct SkySettings {
     pub sun_gain: f32,
     /// 太阳圆盘角半径（弧度）。
     pub sun_radius: f32,
+    /// 常量天空开关（9.2 自检专用）：开 = `sky_radiance` 直接返回
+    /// [`Self::uniform_radiance`]，忽略大气/太阳与 `intensity`。
+    /// 生产路径恒关；只由 BRP `sky_uniform` 写。
+    pub uniform_enabled: bool,
+    /// 常量天空辐亮度（线性、pre-exposure 域）。`E(n) = π·L` 是 SH-L2 的解析锚点。
+    pub uniform_radiance: [f32; 3],
 }
 
 impl Default for SkySettings {
@@ -66,6 +72,8 @@ impl Default for SkySettings {
             ground_albedo: [0.25, 0.25, 0.25],
             sun_gain: 1.5,
             sun_radius: 0.01,
+            uniform_enabled: false,
+            uniform_radiance: [0.0; 3],
         }
     }
 }

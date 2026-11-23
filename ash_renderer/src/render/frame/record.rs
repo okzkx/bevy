@@ -151,8 +151,12 @@ impl FramePool {
             .record(device, cb);
         }
 
-        // ---- ② compute 前置：剔除 → 遮挡 → LOD → indirect 组装 → shadow 组装 → 光源列表 → 透明层 ----
-        // 顺序即依赖，各步之间的屏障都在各自的 record 内。
+        // ---- ② compute 前置：IBL 烘焙 → 剔除 → 遮挡 → LOD → indirect 组装 → shadow 组装 →
+        // 光源列表 → 透明层。顺序即依赖，各步之间的屏障都在各自的 record 内。
+        // IBL 烘焙放最前：脏帧才录（不脏整段返回、零屏障），本帧稍后的合成/透明就能读到
+        // 新的 SH/预滤波结果，不存在滞后一帧；全子资源布局迁移也在它里面收口。
+        feature.ibl.record_bake(device, cb, slot);
+        mark.mark(TimestampPoint::IblCapture);
         if let Some(frustum_cull) = &feature.frustum_cull {
             frustum_cull.record(device, cb, res.instance_set, feature.shadow.set);
         }
@@ -281,6 +285,7 @@ impl FramePool {
                 res.gbuffer.sampled_set(slot),
                 feature.cluster.set,
                 feature.shadow.set,
+                feature.ibl.set,
             ],
         }
         .record(device, cb);
@@ -322,6 +327,7 @@ impl FramePool {
                     res.frame_set,
                     res.instance_set,
                     feature.cluster.set,
+                    feature.ibl.set,
                 ],
             );
             set_viewport_scissor(device, cb, extent);
@@ -392,6 +398,10 @@ impl FramePool {
             src_access: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
             dst_stage: vk::PipelineStageFlags::BOTTOM_OF_PIPE,
             dst_access: vk::AccessFlags::empty(),
+            base_mip: 0,
+            level_count: 1,
+            base_layer: 0,
+            layer_count: 1,
         }
         .record(device, cb);
 

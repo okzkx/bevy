@@ -18,11 +18,12 @@ use crate::{
     render::{
         AtlasGpu, BindlessTextureTable, BloomPipelines, BloomTargets, ClusterBuildPass,
         CompositePipeline, Context, CullPass, FramePool, FrameUniformTable, GBufferPipeline,
-        GBufferTargets, GpuTimer, HizPyramid, ImageCache, IndirectPass, InstanceTables,
-        LightClusters, LightTable, LodPass, MeshPool, OcclusionPass, OverlayPipeline,
-        PresentTonemapPipeline, SetLayouts, ShadowBuildPass, ShadowPipeline, ShadowTargets,
-        SmaaPipelines, SmaaTargets, Swapchain, TransparentPasses, TransparentPipeline,
-        TransparentTargets, UiVertexRing, Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
+        GBufferTargets, GpuTimer, HizPyramid, IblEnvironment, ImageCache, IndirectPass,
+        InstanceTables, LightClusters, LightTable, LodPass, MeshPool, OcclusionPass,
+        OverlayPipeline, PresentTonemapPipeline, SetLayouts, ShadowBuildPass, ShadowPipeline,
+        ShadowTargets, SmaaPipelines, SmaaTargets, Swapchain, TransparentPasses,
+        TransparentPipeline, TransparentTargets, UiVertexRing, Uploader, MAX_FRAMES_IN_FLIGHT,
+        TABLE_CAPACITY,
     },
 };
 
@@ -107,6 +108,9 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         .map(|s| frames.depth_image(s))
         .collect();
     let hiz = HizPyramid::new(&ctx, swapchain.extent, &depth_images)?;
+    // 环境光照资源族（进程级，不随 swapchain 重建）：捕获 set 直接绑帧 UBO，所以要在
+    // 帧 UBO 表之后建
+    let ibl = IblEnvironment::new(&ctx, &frame_uniform_table)?;
 
     // ---- 管线：无状态，只借 GPU 表与渲染目标提供的描述符布局。各布局先登记进
     // SetLayouts，各管线按自己的布局配方取用并与 shader ABI 对账。声明的附件格式必须和实际
@@ -124,6 +128,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         smaa_targets.layout_a(),
         smaa_targets.layout_b(),
         hiz.occlusion_layout(),
+        ibl.set_layout(),
     ])?;
     layouts.name_all(&ctx);
     // 图形管线（PipelineHandle）：swapchain 输出格式已由 Swapchain::new 固定为常量
@@ -167,6 +172,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         bloom_targets,
         smaa_targets,
         hiz,
+        ibl,
         gbuffer_pipeline,
         shadow_pipeline,
         transparent_pipeline,
@@ -234,6 +240,7 @@ macro_rules! init_chain {
 init_chain! {
     OcclusionPass => occlusion_pass,
     HizPyramid => hiz,
+    IblEnvironment => ibl,
     CompositePipeline => composite_pipeline,
     PresentTonemapPipeline => tonemap_pipeline,
     BloomPipelines => bloom_pipelines,
