@@ -13,11 +13,12 @@
 - **输出链**：HDR → Bloom → Filament ACES → SMAA 直出；固定曝光 `EXPOSURE = 0.00016`。
 - **环境光完全缺失方向性**：背景是清屏色（`CLEAR_COLOR`），没有天空盒；材质只有 `albedo × ambient_color` 的常量环境项，没有 IBL、没有天空高光、没有 GI；场景观感平灰（zero_day 归因已记）。
 - **透明层**同样只有常量环境项，没有环境反射。
+- **2026-11-23 现状补记**：9.1 已收官，背景改为物理天空；环境项仍是常量——本节其余内容（IBL/GI 缺口）仍然成立。
 
 步骤 9 分两层换掉这个现状：
 
 1. **环境基线（9.1～9.3）**：程序化天空 → 环境 cubemap → SH-L2 漫反射 + 预滤波高光 + DFG LUT；GlobalProbe 16 桶作为方向类别 LUT 与后续 patch 的兜底格式。
-2. **世界空间 GI（9.4～9.8）**：在 IBL 基线上，用 Volume/cell/patch 缓存把"体积内的漫反射间接"换成逐位置/逐表面的估计；体积外回退 IBL。
+2. **世界空间 GI（9.4～9.8）**：在 IBL 基线上，用 Volume/cell/patch 缓存把"体积内的漫反射间接"换成逐位置/逐表面的估计；体积外保持 9.3 的漫反射编码（SH-L2 或 GlobalProbe，同属 IBL 基线）。
 
 它不动步骤 5/6 的 GPU-driven 骨架，也不动步骤 8 的直接光与阴影链。**"环境项回退可逐位还原"是贯穿全程的红线**：9.2 之前 `ibl_enabled=false` + `sky_enabled=false` = 步骤 8；9.7 之后 `gi_enabled=false` = IBL 基线。
 
@@ -70,10 +71,10 @@
 
 | 决定 | 选择 | 理由 |
 |---|---|---|
-| 天空来源 | 解析渐变 + 太阳圆盘，`sky_radiance(dir, include_sun)` | 全动态场景/TOD 不需要 HDR 资产与多套 cubemap 混合；可见天空与 IBL 同源；BRP 可调参，便于验证 |
+| 天空来源 | 物理天空 + 太阳圆盘，`sky_radiance(dir, include_sun)`（2026-11-23 起；立案时为解析渐变，同日被 9.1 追加段替换） | 全动态场景/TOD 不需要 HDR 资产与多套 cubemap 混合；可见天空与 IBL 同源；BRP 可调参，便于验证 |
 | 漫反射 | SH-L2（9 系数/通道，折叠余弦卷积） | 标准 IBL；L2 能表达地平线带；27 floats 成本可忽略；与 9.3 的 16×L1 可 A/B |
 | 高光 | GGX 预滤波 cubemap + DFG LUT（128²） | 标准 split-sum；8.2 已把 DFG LUT 留给 IBL（[Filament BRDF参考](../../笔记/光照与材质/Filament%20BRDF参考.md) §6） |
-| 太阳 | 可见天空画圆盘；IBL 捕获排除 | 太阳是高立体角/高频亮斑，进 SH/预滤波会污染低频项，并与直接光高光双计（Unity `_SUNDISK_NONE` 同目的） |
+| 太阳 | 可见天空画圆盘；IBL 捕获只排圆盘（米氏前向峰保留，HDRP cubemap 烘焙同口径） | 圆盘是高立体角/高频亮斑，进 SH/预滤波会污染低频项，并与直接光高光双计（Unity `_SUNDISK_NONE` 同目的） |
 | 更新 | 天空参数 hash 脏标记 + 0.1s 节流；可见天空每帧解析 | TOD 是慢变量；静止零成本；Unity SCGI 的 `GlobalProbe` 也是事件驱动（`SurfaceCache.cs:773-780`） |
 | GlobalProbe | 16 桶 × RGBL1（4×4 八面体，32 样本/桶） | 与 patch 同格式兜底；方向类别 LUT；是否默认由 A/B 决定（§3） |
 | 不做 | SSR、局部反射探针、云层/大气散射、AO 本体 | 9.2 只做天空环境高光；这些另立或后置 |
@@ -84,16 +85,18 @@
 
 | 段 | 交付范围 | 判定线草案（独立验收） |
 |---|---|---|
-| 9.1 程序化天空盒 | 解析天空函数（天顶/地平线/地面渐变 + 可见太阳圆盘 + 可选光晕）；合成 pass 背景分支替换清屏色；天空参数进帧 UBO；`sky_enabled`；BRP `sky_set` | 天空可见、太阳方向与方向光一致；`sky_enabled=false` 与步骤 8 逐位一致；天空只改背景，不改受光像素 |
-| 9.2 天空盒 IBL | 环境 cubemap 捕获（256²×6，脏标记 + 节流，排除太阳）；SH-L2 漫反射投影；GGX 预滤波 mip 链 + DFG LUT；不透明/透明环境项替换为 IBL；`ibl_enabled` | `ibl_enabled=false` 回步骤 8 受光像素；均匀天空 `E=πL`；天空方向性可见；金属/光滑面有反射；太阳不双计 |
-| 9.3 GlobalProbe 方向桶 | 16 桶 × RGBL1（4×4 八面体，32 样本/桶）；法线选桶求值；`ibl_mode` L2/16 桶 A/B；为 9.7 Volume 外兜底建格式 | 桶方向映射正确；均匀天空每桶 `E=πL`；A/B 有数据；默认模式有依据 |
+| 9.1 程序化天空盒 | **实际为物理天空**（三介质单次散射 + Chapman 透射率 + 地面反照率 + 太阳圆盘；立案时为解析渐变，同日被 9.1 追加段替换）；合成 pass 背景分支替换清屏色；天空参数进帧 UBO；`sky_enabled`；BRP `sky_set` | 天空可见、太阳方向与方向光一致；日落红移；`sky_enabled=false` 与步骤 8 逐位一致；天空只改背景，不改受光像素 |
+| 9.2 天空盒 IBL | 物理天空捕获成环境 cubemap（256²×6，脏标记 + 节流，排太阳圆盘）；SH-L2 漫反射投影；GGX 预滤波 mip 链 + DFG LUT；不透明/透明环境项替换为 IBL；`ibl_enabled`；`sky_uniform` 常量天空自检开关 | `ibl_enabled=false` 回步骤 8 受光像素；`sky_uniform` 常量天空 `E=πL`；天空方向性可见；金属/光滑面有反射；太阳圆盘不双计 |
+| 9.3 GlobalProbe 方向桶 | 16 桶 × RGBL1（4×4 八面体，32 样本/桶）；法线选桶求值；`ibl_mode` L2/16 桶 A/B；为 9.7 Volume 外兜底建格式 | 桶方向映射正确；`sky_uniform` 常量天空每桶 `E=πL`；A/B 有数据；默认模式有依据 |
 | 9.4 求交器与射线基建 | 硬件 ray query 主后端 + 可替换接口；BLAS 挂驻留资产、TLAS 每帧从实例表构建；命中点属性重建 | 可对场景求交并返回命中属性；移动/流送后命中跟随、无悬空；feature 关闭走降级路径 |
 | 9.5 世界空间表面缓存：patch 池 | Volume + 级联格子 + 16 方向桶 + 定长 ring；屏幕播种/复用/滚动/心跳/整理；rank 语义；motion vectors 前置件 | patch 分布与 G-buffer 吻合；显存恒定；chunk 增删移动后跟随；稳态零增长 |
 | 9.6 irradiance 更新 | 每活跃 patch 半球采样；直接光（方向/点光/自发光）与缓存自查询多跳；L1 投影 + 方差引导时域混合；bounce 分配 | 多跳色渗可见；开关灯 lag 如实记录；收敛后射线预算降档；空间滤波 A/B |
-| 9.7 屏幕 gather 与最终注入 | 1/4 查表（rank 0）+ 空间/时域滤波 + 去噪 + 双边上采样 + L1 压缩；替换 Volume 内的 IBL 漫反射，体积外回退 9.3 | SCGI 关 = IBL 基线；漏光案例留档；查询不读 rank 1；成本随分辨率不随实例数 |
+| 9.7 屏幕 gather 与最终注入 | 1/4 查表（rank 0）+ 空间/时域滤波 + 去噪 + 双边上采样 + L1 压缩；替换 Volume 内的 IBL 漫反射，体积外保持 9.3 的漫反射编码（同属 IBL 基线） | SCGI 关 = IBL 基线；漏光案例留档；查询不读 rank 1；成本随分辨率不随实例数 |
 | 9.8 动态验收、压测与局限对照 | 动态几何/动态光照收敛行为；Volume 边界与兜底；成组压测；已知局限逐项自检 | 静态游历零重传零泄漏；动态无永久残影；压测成组；GPU-driven 闭环不回退 |
 
 ### 9.1 程序化天空盒
+
+> **2026-11-23 补记**：本段已收官；渐变模型同日被**物理天空**（A 档单次散射、无 LUT）替换，以下立案原文保留作历史，现行交付/判定线以[9.1 追加计划](9.1-程序化天空盒/施工计划：物理天空（9.1追加）.md)与[段 README](9.1-程序化天空盒/README.md)为准。
 
 - **一句话说明**：用解析天空函数替换清屏色，产出可见的程序化天空与可复用的 `sky_radiance(dir)`；本段不捕获 cubemap、不投影 SH、不改任何材质的环境光。
 - **交付**：
@@ -108,15 +111,16 @@
 
 - **一句话说明**：把 9.1 的程序化天空捕获为环境 cubemap，投影 SH-L2 漫反射并预滤波高光，替换不透明与透明的常量环境项；本段不产生世界空间缓存、射线或 SCGI。
 - **交付**：
-  - 环境 cubemap：256²×6 RGBA16F、cube 兼容、mip 链；`sky_radiance(dir, false)` 捕获（排除太阳圆盘）；天空参数 hash 脏标记 + 0.1s 节流；② 段 compute 录制。
-  - SH-L2：1024 Hammersley 方向投影，9 系数/通道，`A0=π/A1=2π/3/A2=π/4` 折叠；storage buffer 9×vec4（144B）；均匀天空 `E=πL` 自检。
-  - 高光：GGX 预滤波 mip 链 + 128² DFG LUT（或解析 `EnvBRDFApprox` 兜底）；`prefiltered(R, perceptualRoughness) · (F0·A+B)`。
+  - 常量天空开关（9.2.0）：帧 UBO 304→336，`sky_uniform` 让 `sky_radiance` 返回常量辐亮度；只为自检，默认关。
+  - 环境 cubemap：256²×6 RGBA16F、cube 兼容、9 级 mip；`sky_radiance(dir, false)` 捕获（只排太阳圆盘，米氏前向峰保留）；`sky_hash`（含 100 m 量化海拔）脏标记 + 0.1s 节流；② 段 compute 录制；`ImageBarrier` 加子资源范围以覆盖 9 mip × 6 层。
+  - SH-L2：1024 Hammersley 方向投影，9 系数/通道，`A0=π/A1=2π/3/A2=π/4` 折叠；storage buffer 9×vec4（144B）；两条自检（l=0 归一化对 `mean(L)`、`E_sh` 对暴力余弦积分）。
+  - 高光：GGX 预滤波 mip 1..8 + 128² DFG LUT（或解析 `EnvBRDFApprox` 兜底）；`prefiltered(R, perceptualRoughness) · (F0·A+B)`。
   - 注入：不透明合成与透明前向都把 `albedo × ambient_color` 替换为 `diffuseColor/π·E(n)·ibl_intensity + specular`；`ibl_enabled=false` 逐位回退。
-  - 帧 UBO 272→288：`ibl_enabled`/`ibl_intensity`/`ibl_mode`（9.3 用）。
+  - 帧 UBO 304→336：`ibl_enabled`/`ibl_mode`/`ibl_intensity`（304/308/312）+ `sky_uniform`（320）。
   - 新 IBL 描述符集（group 4）：cube + sampler + DFG LUT + SH buffer；cubemap 不走 bindless 2D 表（set0 只收 `texture_2d`）。
   - `ibl_set`/`ibl_stats`；mode 9/10 调试视图（IBL 漫反射/高光贡献）。
-- **落点**：`shaders/common/ibl.wgsl`、`shaders/scene/ibl/`、`src/render/passes/ibl/`、两个光照着色 pass、两个管线配方、`src/remote/features/ibl.rs`、`frame_uniform_table.rs`。
-- **判定线草案**：①`sky_enabled=false` + `ibl_enabled=false` 全帧 = 步骤 8；②IBL 隔离只改受光像素；③均匀天空 `E=πL`；④方向性/高光/透明可见；⑤太阳不双计；⑥室内漏光记录；⑦零 VUID、clippy 全净。
+- **落点**：`shaders/common/ibl.wgsl`、`shaders/scene/ibl/`、`src/render/passes/ibl/`、两个光照着色 pass、两个管线配方、`src/remote/features/ibl.rs`、`frame_uniform_table.rs`、`core/record/barrier.rs`、`driver/host/init.rs`。
+- **判定线草案**：①`sky_enabled=false` + `ibl_enabled=false` 全帧 = 步骤 8；②IBL 隔离只改受光像素；③`sky_uniform` 常量天空 `E=πL` + 两条积分自检；④方向性/高光/透明可见；⑤太阳圆盘不双计（米氏峰允许）；⑥室内漏光记录；⑦零 VUID、clippy 全净。
 
 ### 9.3 GlobalProbe 方向桶
 
@@ -127,7 +131,7 @@
   - `ibl_mode`：0 = SH-L2（默认），1 = GlobalProbe；不透明/透明漫反射求值分支。
   - `ibl_set` 的 `diffuse_mode`；`ibl_stats` 16 桶摘要；可选桶可视化调试档。
 - **落点**：`shaders/common/octahedral.wgsl`、`shaders/scene/ibl/global_probe.wgsl`、`shaders/common/ibl.wgsl`、`src/render/passes/ibl/`、`src/remote/features/ibl.rs`。
-- **判定线草案**：①六轴/随机方向映射正确；②均匀天空每桶 `E=πL`；③A/B 读图与接缝记录；④`ibl_mode=1` 可用；⑤零 VUID、clippy 全净。
+- **判定线草案**：①六轴/随机方向映射正确；②`sky_uniform` 常量天空每桶 `E=πL`；③A/B 读图与接缝记录；④`ibl_mode=1` 可用；⑤零 VUID、clippy 全净。
 
 ### 9.4 求交器与射线基建
 
@@ -203,7 +207,7 @@
 
 | 待决 | 段 | 选项 | 裁决时机 |
 |---|---|---|---|
-| 天空模型复杂度 | 9.1 | 解析渐变 + 太阳圆盘 / Preetham-Hosek / 加云 | 9.1 立案时拍板；提案=解析渐变，Preetham 后置 |
+| 天空模型复杂度 | 9.1 | 解析渐变 + 太阳圆盘 / Preetham-Hosek / 加云 | **已裁决（2026-11-23）**：物理天空（三介质单次散射 + Chapman 透射率 + 地面反照率，A 档无 LUT）；渐变模型同日替换，见 [9.1 追加计划](9.1-程序化天空盒/施工计划：物理天空（9.1追加）.md) |
 | cubemap 分辨率 | 9.2 | 128² / 256² | 9.2 立案时按高光质量与显存拍板；提案=256² |
 | 高光预滤波与 DFG | 9.2 | GGX 预滤波 + LUT / mip 链 + 解析 `EnvBRDFApprox` | 9.2 立案时拍板；提案=LUT 收尾，解析近似可作 9.2 内的过渡 |
 | IBL 更新频率 | 9.2 | 每帧 / 0.1s 节流 / 参数增量阈值 | 9.2 实测后钉明；提案=hash + 0.1s |
@@ -267,12 +271,12 @@ shaders/common/gi_*.wgsl                 # SH、cell 地址、采样、压缩等
 - 不做 denoiser 模型/学习式重建；不用 DLSS/FSR 类时域重建替 GI 收敛。
 - 不与步骤 7 的内容生成耦合；VT 仍按调研结论不立项（外置条目 6）。
 - **求交器后端**：射线抽象保留可替换语义（接口不泄漏 `VK_KHR_ray_query` 类型）；硬件 ray query 为 9.4 主后端，compute 软件求交降为可延后任务，不作为本步完成门槛（取代路线图原"软件求交底线"表述，2026-11-20 选型拍板）。
-- **天空/IBL**：不做 HDR 天空盒资产管线、不做 SSR、不做云层/大气散射；程序化天空的 `sky_radiance` 接口保留以后换 Preetham 的余地。
+- **天空/IBL**：不做 HDR 天空盒资产管线、不做 SSR、不做云层与大气透视/体积雾；物理天空的 `sky_radiance` 接口保留以后接多重散射 LUT（9.1 B 档）的余地。
 
 ## 7. 步骤级判定线与性能口径
 
 1. **环境项可分层回退**：`sky_enabled=false` + `ibl_enabled=false` = 步骤 8；`ibl_enabled=true` + `gi_enabled=false` = IBL 基线；`gi_enabled=true` = SCGI。每一层的开关 A/B 都要有画面与统计对照。
-2. **IBL 能量自检**：均匀天空 `E(n)=πL`；天空方向性（上/下/太阳侧）与高光（金属/粗糙度）读图可辨；太阳不双计。
+2. **IBL 能量自检**：`sky_uniform` 常量天空 `E(n)=πL`（9.2.0 的测试开关；物理天空本身没有均匀配置）；两条积分自检（l=0 归一化、`E_sh` 对暴力余弦积分）；天空方向性（上/下/太阳侧）与高光（金属/粗糙度）读图可辨；太阳圆盘不双计（米氏峰允许）。
 3. **射线预算按 patch 不按像素**：记录活跃 patch 数、每帧射线数、样本档位、收敛前后的预算变化；成本随 patch 数增长，不随分辨率线性增长（屏幕侧滤波除外，单列）。
 4. **显存成组**：环境 cubemap/预滤波/DFG LUT/SH/GlobalProbe、cell 表、patch 池、BLAS/TLAS、屏幕目标分别记录，与贴图预算同场测。
 5. **动态行为**：开关灯/移动/增删/流送进出/TOD 天空的收敛与滞后量级如实记录，不承诺固定帧数。

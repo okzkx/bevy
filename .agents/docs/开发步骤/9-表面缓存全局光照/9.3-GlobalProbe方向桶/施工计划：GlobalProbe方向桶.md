@@ -1,12 +1,21 @@
 # 施工计划：9.3 GlobalProbe 方向桶
 
-> 2026-11-20 立案（纯文档，重规划）。对应[步骤 9 README](../README.md)、[八段拆解 §2 9.3](../施工计划：天空盒、IBL 与表面缓存全局光照八段拆解.md)与[路线图步骤 9 表](../../学习目标实现步骤.md)。本文管 9.3 段做什么、按什么顺序、验收什么；"实际做了什么"开工后另立施工记录，不回写本文。
+> 2026-11-20 立案（纯文档，重规划）；**2026-11-23 按 9.1 物理天空 / 9.2 同步修订**（常量天空自检改由 9.2.0 的 `sky_uniform` 提供，UBO 尺寸随 9.2 更新到 336B）。对应[步骤 9 README](../README.md)、[八段拆解 §2 9.3](../施工计划：天空盒、IBL 与表面缓存全局光照八段拆解.md)与[路线图步骤 9 表](../../学习目标实现步骤.md)。本文管 9.3 段做什么、按什么顺序、验收什么；"实际做了什么"开工后另立施工记录，不回写本文。
 >
-> **当前状态：📝 施工计划已立案，未开工（2026-11-20）**。
+> **当前状态：📝 施工计划已立案，未开工（2026-11-20 立案；2026-11-23 同步修订）**。
 
 **一句话说明**：从 9.2 的天空 cubemap 生成 16 桶 × RGBL1 的 GlobalProbe，按法线选桶求值，并用 A/B 对照 L2；本段不产生空间缓存、不发射射线、不替代 L2 作为默认（除非数据支持）。
 
 ## 0. 立案期裁决（施工可推翻但须记录）
+
+### 0.0 2026-11-23 同步修订清单（相对 2026-11-20 版）
+
+| 项 | 旧口径 | 现行口径 | 依据 |
+|---|---|---|---|
+| 常量天空自检 | `sky_set` 设天顶/地平线/地面同色 | 9.2.0 的 `sky_uniform` 常量天空开关（物理天空没有这三个颜色参数） | [9.2 施工计划 §0.9](../9.2-天空盒IBL/施工计划：天空盒IBL.md) |
+| 帧 UBO | `ibl_mode` 在 272→288 的扩列里 | 304→336 的扩列里（`ibl_mode` 偏移 308） | `frame_uniform_table.rs:39` 现状 304 |
+| 定向天空配方 | `sky_set {"zenith":…,"horizon":…,"ground":…}` | 物理天空参数（`sky_set` 只收大气/地面反照率/太阳） | `src/remote/features/sky.rs:96-99` |
+| 捕获源 | 「天空 cubemap」 | 物理天空 cubemap；只排太阳圆盘，米氏前向峰保留 | 9.1 追加段 |
 
 ### 0.1 定位：方向类别 LUT + 与 patch 同构的兜底
 
@@ -22,7 +31,7 @@
 1. **与 patch 同构的兜底**：9.5 的 patch 池、9.7 的屏幕 gather 都用 RGBL1；GlobalProbe 用同一种数据格式，9.7 在 Volume 外可以无缝回退。
 2. **方向类别 LUT**：比单个 L2 更"局部"的分段近似，能保留地平线/太阳侧的对比；代价是桶边界硬切换、无插值、可能有接缝。
 
-**它不是**：空间缓存、遮挡求解器、位置变化的来源，也不是"比 L2 更准"的自动结论。9.3 的判定线是 A/B，不是"桶越多越好"。
+**它不是**：空间缓存、遮挡求解器、位置变化的来源，也不是"比 L2 更准"的自动结论，更不是 IBL 的替代层——它只换漫反射编码，高光（9.2 预滤波 cubemap + DFG LUT）与透明层仍走 IBL。9.3 的判定线是 A/B，不是"桶越多越好"。
 
 ### 0.2 算法：16 组 × 32 样本的半球 L1
 
@@ -42,7 +51,7 @@ for bucket in 0..16:
 
 - 采样方向在**桶中心方向的半球**内均匀采样；桶是八面体方格，不是严格的球冠，邻近桶会有角度重叠——这是 Unity 同款近似，接受。
 - 16 组各 32 线程，组内归约；总样本 512 次 cubemap 采样，成本可忽略，跟 9.2 的捕获脏标记同批重算。
-- **能量自检**：均匀天空辐亮度 `L` → 每桶在桶中心方向的 `E(n) = πL`，与 9.2 的 L2 口径一致。注意每桶只采一个半球，半球的 SH **L1 不一定为零**（半球本身有方向性）；不要把 `l1≈0` 当判据，只核对 `E(bucket_center)`。
+- **能量自检**：`sky_uniform`（9.2.0）设常量辐亮度 `L` → 每桶在桶中心方向的 `E(n) = πL`，与 9.2 的 L2 口径一致。注意每桶只采一个半球，半球的 SH **L1 不一定为零**（半球本身有方向性）；不要把 `l1≈0` 当判据，只核对 `E(bucket_center)`。物理天空本身没有均匀配置，所以这条判定线依赖 9.2.0 的测试开关，不靠调大气参数凑。
 
 ### 0.3 八面体映射：与 Unity 同式，抽成公共片段
 
@@ -99,11 +108,12 @@ E(n) = probe[idx+0].xyz + probe[idx+1].xyz·n.x + probe[idx+2].xyz·n.y + probe[
 
 ### 0.5 模式切换：L2 主路径，16 桶 A/B
 
-- 9.2 已在帧 UBO 预留 `ibl_mode`（272→288 的字段）。9.3 定义：
+- 9.2 已在帧 UBO 预留 `ibl_mode`（304→336 扩列，偏移 308）。9.3 定义：
   - `0 = SH-L2`（9.2 的默认）；
   - `1 = GlobalProbe 16 桶`。
 - 不透明合成与透明前向都按 `ibl_mode` 选漫反射求值；高光不受影响（仍走 9.2 的预滤波 cubemap）。
-- 9.7 的屏幕 gather 在 Volume 外回退时，优先用 GlobalProbe（与 patch 同格式）；Volume 内仍走 patch。
+- **二选一，不是级联也不是叠加**：两次投影互相独立（都直接读源 cubemap），重烘时两份都算、都存（L2 144B、probe 1KB，成本可忽略）；着色时按 `ibl_mode` 取其中一个。所以 `ibl_mode=1` 只是"绕过 L2 的求值"，不删数据、不改高光、可逐帧切回，A/B 不需要重烘。
+- 9.7 的屏幕 gather 在 Volume 外回退时，优先用 GlobalProbe（与 patch 同格式的**漫反射编码**，仍属 IBL 基线）；Volume 内仍走 patch。高光始终走 9.2 的预滤波 cubemap，与兜底选择无关。
 - **默认值由 A/B 决定**：先用同一个天空、同一个 `ibl_intensity`，只在 `sh_l2`/`probe16` 之间切；记录画面差异、接缝、崩溃/NaN。若 16 桶没有可量化收益或有明显接缝，保留 L2 默认，16 桶只作 9.7 的兜底通路——这也是本段的价值，不丢。
 
 ### 0.6 更新：复用 9.2 的捕获脏标记
@@ -127,7 +137,7 @@ E(n) = probe[idx+0].xyz + probe[idx+1].xyz·n.x + probe[idx+2].xyz·n.y + probe[
 | 9.3.2 16 桶 L1 投影 | `global_probe.wgsl`：16 组 × 32 样本、组内归约、`2π/32` 归一化、`A0/A1` 卷积、折叠 L1；写 16×4 vec4 buffer | `shaders/scene/ibl/global_probe.wgsl`（新）、`src/render/passes/ibl/` | ⬜ |
 | 9.3.3 查询与模式切换 | `ibl_mode` 分支；composite/transparent 的漫反射求值；IBL set b4 buffer | `shaders/common/ibl.wgsl`、`gbuffer_composite.wgsl`、`transparent_forward.wgsl`、`src/render/passes/ibl/` | ⬜ |
 | 9.3.4 BRP 与调试 | `ibl_set` 的 `diffuse_mode`；`ibl_stats` 摘要；可选 mode 11 桶可视化 | `src/remote/features/ibl.rs`、`src/render/frame/render_mode.rs` | ⬜ |
-| 9.3.5 判定线与 A/B | 桶方向正确性、均匀天空自检、L2 vs 16 桶读图、接缝/收益记录、回归矩阵 | 记录文件随施工产出 | ⬜ |
+| 9.3.5 判定线与 A/B | 桶方向正确性、`sky_uniform` 常量天空自检、L2 vs 16 桶读图、接缝/收益记录、回归矩阵 | 记录文件随施工产出 | ⬜ |
 
 ### 任务间依赖
 
@@ -138,7 +148,7 @@ E(n) = probe[idx+0].xyz + probe[idx+1].xyz·n.x + probe[idx+2].xyz·n.y + probe[
 ## 2. 判定线（照八段拆解 §2 9.3 细化）
 
 1. **方向映射正确**：CPU 镜像单测覆盖随机方向的球→方→球往返、六轴（±X/±Y/±Z）落桶；shader 侧用 mode 11 或数值回读核对同一组方向。
-2. **均匀天空自检**：均匀天空 `L` 下每桶在桶中心方向的 `E(n)=πL`（半球 L1 不为零是正常的）；16 条 buffer 有限值、无 NaN。
+2. **常量天空自检**：`sky_uniform` 设常量 `L` 下每桶在桶中心方向的 `E(n)=πL`（半球 L1 不为零是正常的）；16 条 buffer 有限值、无 NaN。
 3. **查询方向正确**：非均匀天空（太阳侧亮）下，法线转向亮侧时 `E(n)` 变大；桶边界处只有预期内的硬切换，不出现镜像/错位。
 4. **A/B 有数据**：同一天空/强度下 `sh_l2` vs `probe16` 的读图差异、接缝、成本记录；结论写"默认选谁、为什么"，不写"16 桶更准"这种先验结论。
 5. **兜底通路可用**：`ibl_mode=1` 在不透明/透明都能跑；9.7 的 Volume 外回退可以只换查询函数，不换数据格式。
@@ -152,9 +162,10 @@ E(n) = probe[idx+0].xyz + probe[idx+1].xyz·n.x + probe[idx+2].xyz·n.y + probe[
 - **BRP 配方**（`tools/brp.py raw`）：
   - L2：`--method ash_renderer/ibl_set --params-json '{"diffuse_mode":"sh_l2"}'`
   - 16 桶：`--method ash_renderer/ibl_set --params-json '{"diffuse_mode":"probe16"}'`
-  - 定向天空：`--method ash_renderer/sky_set --params-json '{"zenith":[80,160,400],"horizon":[600,500,400],"ground":[50,40,30],"sun_gain":4.0}'`
+  - 定向天空：`--method ash_renderer/sky_set --params-json '{"mie":20e-6,"sun_gain":4.0}'`（物理天空，只改米氏/太阳增益；风向与太阳由宿主场景给）
+  - 常量天空：`--method ash_renderer/sky_uniform --params-json '{"enabled":true,"color":[800,800,800]}'`（9.2.0 的测试开关）
   - 读数：`--method ash_renderer/ibl_stats`
-- **数值自检**：`ibl_stats` 读 ±X/±Y/±Z 六方向的 `E(n)`；均匀天空下应全部 `πL`；非均匀天空下应随方向单调变化。
+- **数值自检**：`ibl_stats` 读 ±X/±Y/±Z 六方向的 `E(n)`；`sky_uniform` 打开时应全部 `πL`；物理天空下应随方向单调变化。
 - **视觉验证**：PrintWindow 抓图 + 当前会话模型读图；取证落 `.temp/9.3/`，结论与截图路径入施工记录。
 - **构建**：`cargo fmt --check -p ash_renderer`、`cargo clippy -p ash_renderer --all-targets`、`cargo test -p ash_renderer`；VUID 与 WM_CLOSE 退出码。
 
@@ -163,7 +174,7 @@ E(n) = probe[idx+0].xyz + probe[idx+1].xyz·n.x + probe[idx+2].xyz·n.y + probe[
 1. **八面体映射写反**：`oct_wrap` 的符号、`select` 的 true/false 顺序、下半球四角方向，任何一处反了都会让桶镜像。CPU 单测先过，再接 GPU。
 2. **桶索引与 patch 桶位漂移**：9.5 起 cell/patch 也用同一套桶；本段必须把函数抽到 `octahedral.wgsl`，禁止复制一份改改变量名。
 3. **采样半球与桶形状不一致**：桶是方格、采样是半球，邻近桶重叠；这是已知近似，不要试图用"严格球冠"修，会把 Unity 对照打乱。
-4. **归一化/卷积顺序**：先乘 `2π/32`，再余弦卷积，再折叠；顺序错了能量会差 `π` 或 `2π`，用均匀天空自检抓。
+4. **归一化/卷积顺序**：先乘 `2π/32`，再余弦卷积，再折叠；顺序错了能量会差 `π` 或 `2π`，用 `sky_uniform` 常量天空自检抓。
 5. **分量顺序**：本工程统一 x/y/z；Unity 的 `RGBL1` 是 y/z/x。照抄 Unity 的投影代码时别连分量顺序一起抄。
 6. **RGBL1 对齐**：WGSL `vec3` 16B 对齐，4×vec4/条 = 64B；如果为了省 256B 手工拆 12 floats，读写会更容易错，不值得。
 7. **A/B 不公平**：两次对照必须同一天空、同一 `ibl_intensity`、同一机位；不要一边用 L2 一边偷偷改天空。
@@ -186,4 +197,4 @@ E(n) = probe[idx+0].xyz + probe[idx+1].xyz·n.x + probe[idx+2].xyz·n.y + probe[
 - [SH 与光照探针](../../../笔记/光照与材质/SH与光照探针.md)——GlobalProbe 16 桶与 Cell 16 槽的区别、16 桶 vs L2 的对照表。
 - [Unity SCGI 实现](../../../笔记/光照与材质/Unity%20SCGI%20实现.md)——`GlobalProbe.compute` / `GlobalProbe.hlsl`、`Common.hlsl` 的八面体映射与 `RGBL1` 布局。
 - [Unity SCGI 调研](../../../笔记/光照与材质/Unity%20SCGI%20调研.md)——`DistanceFallback` 的质量档与局限。
-- 本工程现状锚点：`shaders/common/frame.wgsl`（9.2 后的 UBO）、`src/render/resident/tables/frame_uniform_table.rs`（`ibl_mode` 字段）、`shaders/scene/gbuffer/gbuffer_composite.wgsl` 与 `shaders/scene/transparent/transparent_forward.wgsl`（漫反射求值点）。
+- 本工程现状锚点：`shaders/common/frame.wgsl`（9.2 后的 UBO 336B）、`src/render/resident/tables/frame_uniform_table.rs`（`ibl_mode` 字段）、`shaders/scene/gbuffer/gbuffer_composite.wgsl` 与 `shaders/scene/transparent/transparent_forward.wgsl`（漫反射求值点）、`shaders/common/sky.wgsl`（`sky_uniform` 分支）。

@@ -2,7 +2,7 @@
 
 对应[步骤 9 README](../README.md)与[路线图步骤 9 节](../../学习目标实现步骤.md)。
 
-**目的**：步骤 8 的背景是清屏色，场景没有可见天空，也没有可被 IBL 捕获的环境光来源。本段先用解析天空函数把背景换成"天顶—地平线—地面"渐变加可见太阳圆盘，并把天空参数做成每帧可调、BRP 可写的形状，为 9.2 的天空 cubemap 捕获提供唯一真源。
+**目的**：步骤 8 的背景是清屏色，场景没有可见天空，也没有可被 IBL 捕获的环境光来源。本段先把背景换成程序化天空——立案时是"天顶—地平线—地面"渐变，同日按用户裁决替换为**物理天空**（三介质单次散射 + 太阳圆盘）——并把天空参数做成每帧可调、BRP 可写的形状，为 9.2 的天空 cubemap 捕获提供唯一真源。
 
 **一句话说明**：用解析天空函数替换清屏色，产出可见的程序化天空与可复用的 `sky_radiance(dir)`；本段不捕获 cubemap、不投影 SH、不改任何材质的环境光。
 
@@ -13,7 +13,7 @@
 - `shaders/common/sky.wgsl`（新）：`sky_radiance(dir, include_sun)`——大气单次散射积分（瑞利/米氏/臭氧 + Chapman 透射率 + 地面反照率）+ 太阳圆盘；不声明绑定，参数来自 `FrameUniforms`。
 - `shaders/scene/gbuffer/gbuffer_composite.wgsl`：背景分支从 `CLEAR_COLOR` 改为程序化天空（`sky_enabled` 关时原样回清屏色）。
 - `src/render/resident/tables/frame_uniform_table.rs`：帧 UBO 208→304B（`sky_enabled`/`sky_intensity` + 六个 `sky_*` 行：三介质/行星/地面/太阳），布局断言与打包。
-- `src/render/passes/sky/mod.rs`（新）：`SkySettings` 资源与默认梯度；9.2 起同目录扩捕获与 SH 投影。
+- `src/render/passes/sky/mod.rs`（新）：`SkySettings` 资源与物理天空默认常数；9.2 起同目录扩捕获与 SH 投影。
 - `src/remote/features/sky.rs`（新）：`sky_set` / `sky_stats` BRP 方法族。
 - `src/overlay/tool_window/sky.rs`（新）：程序化天空盒面板页（用户追加要求，见 [9.1.4](9.1.4-设置资源BRP与天空面板.md)；物理天空版重排为六节，见 [9.1.6](9.1.6-物理天空模型与参数面.md)）。
 - `src/driver/host/frame/scene.rs`：`SceneInput` 增加天空资源，`write_frame_ubo` 写入六字段。
