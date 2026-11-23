@@ -8,7 +8,7 @@
 
 use ash::{vk, Device};
 
-use crate::common::bytes::{put_mat4, put_u32, put_vec4};
+use crate::common::bytes::{put_f32, put_mat4, put_u32, put_vec4};
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{
@@ -36,7 +36,7 @@ pub(crate) static FRAME_UNIFORM_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
 
 /// 每帧 UBO 字节数（set1 b0；偏移见 `FrameUniformTableLayout` 静态断言）。range 在写描述符时
 /// 给出，改尺寸不影响 binding 形状与 pipeline layout。
-pub const FRAME_UBO_SIZE: u64 = 208;
+pub const FRAME_UBO_SIZE: u64 = 304;
 
 /// UBO `mode` 字段取值（语义见 `gbuffer_composite.wgsl`）；4 起只有合成 pass 使用，用来直出
 /// G-buffer 单通道调试。
@@ -71,12 +71,28 @@ pub struct FrameUniformsData {
     pub light_color: [f32; 4],
     /// 着色模式（`FRAME_MODE_*`）。
     pub mode: u32,
+    /// 天空开关（0 关 / 1 开；关 = 背景回清屏色）。
+    pub sky_enabled: u32,
+    /// 天空整体亮度倍数（标定旋钮）。
+    pub sky_intensity: f32,
     /// 相机世界位置（xyz，光照用 V = normalize(camera_pos − world)；w 未用）。无相机帧为 0。
     pub camera_pos: [f32; 4],
+    /// xyz = 海平面瑞利散射系数（1/米）；w = 瑞利标高（米）。
+    pub sky_rayleigh: [f32; 4],
+    /// x = 海平面米氏散射系数（1/米）；y = 米氏标高（米）；z = 各向异性 g；w 未用。
+    pub sky_mie: [f32; 4],
+    /// xyz = 臭氧吸收系数（1/米）；w 未用。
+    pub sky_ozone: [f32; 4],
+    /// x = 行星半径；y = 大气顶半径；z = 臭氧层中心高度；w = 臭氧层全宽（米）。
+    pub sky_geo: [f32; 4],
+    /// xyz = 行星地面反照率；w 未用。
+    pub sky_ground: [f32; 4],
+    /// x = 太阳圆盘增益；y = 太阳角半径（弧度）；zw 未用。
+    pub sky_sun: [f32; 4],
 }
 
 /// [`FrameUniformsData`] 的 WGSL uniform 布局镜像：不参与运行时，只用 `offset_of!` 静态断言
-/// 核对 [`pack_frame_uniforms`] 的偏移。uniform 对齐 16，mode 后垫到 128。
+/// 核对 [`pack_frame_uniforms`] 的偏移。uniform 对齐 16，天空六个 vec4 各占一个槽。
 #[repr(C)]
 struct FrameUniformTableLayout {
     view_proj: [f32; 16],
@@ -84,9 +100,17 @@ struct FrameUniformTableLayout {
     ambient_color: [f32; 4],
     light_color: [f32; 4],
     mode: u32,
-    _pad: [u32; 3],
+    sky_enabled: u32,
+    sky_intensity: f32,
+    _pad: u32,
     inv_view_proj: [f32; 16],
     camera_pos: [f32; 4],
+    sky_rayleigh: [f32; 4],
+    sky_mie: [f32; 4],
+    sky_ozone: [f32; 4],
+    sky_geo: [f32; 4],
+    sky_ground: [f32; 4],
+    sky_sun: [f32; 4],
 }
 
 const _: () = {
@@ -95,13 +119,21 @@ const _: () = {
     assert!(std::mem::offset_of!(FrameUniformTableLayout, ambient_color) == 80);
     assert!(std::mem::offset_of!(FrameUniformTableLayout, light_color) == 96);
     assert!(std::mem::offset_of!(FrameUniformTableLayout, mode) == 112);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, sky_enabled) == 116);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, sky_intensity) == 120);
     assert!(std::mem::offset_of!(FrameUniformTableLayout, inv_view_proj) == 128);
     assert!(std::mem::offset_of!(FrameUniformTableLayout, camera_pos) == 192);
-    assert!(std::mem::size_of::<FrameUniformTableLayout>() == 208);
-    assert!(FRAME_UBO_SIZE == 208);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, sky_rayleigh) == 208);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, sky_mie) == 224);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, sky_ozone) == 240);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, sky_geo) == 256);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, sky_ground) == 272);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, sky_sun) == 288);
+    assert!(std::mem::size_of::<FrameUniformTableLayout>() == 304);
+    assert!(FRAME_UBO_SIZE == 304);
 };
 
-/// [`FrameUniformsData`] → 208B uniform 字节（偏移见 `FrameUniformTableLayout`）。
+/// [`FrameUniformsData`] → 304B uniform 字节（偏移见 `FrameUniformTableLayout`）。
 #[must_use]
 pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usize] {
     let mut out = [0u8; FRAME_UBO_SIZE as usize];
@@ -110,13 +142,22 @@ pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usiz
     put_vec4(&mut out, 80, &d.ambient_color);
     put_vec4(&mut out, 96, &d.light_color);
     put_u32(&mut out, 112, d.mode);
-    // 116..128 对齐垫保持 0
+    put_u32(&mut out, 116, d.sky_enabled);
+    put_f32(&mut out, 120, d.sky_intensity);
+    // 124..128 对齐垫保持 0
     put_mat4(&mut out, 128, &d.inv_view_proj);
     put_vec4(&mut out, 192, &d.camera_pos);
+    put_vec4(&mut out, 208, &d.sky_rayleigh);
+    put_vec4(&mut out, 224, &d.sky_mie);
+    put_vec4(&mut out, 240, &d.sky_ozone);
+    put_vec4(&mut out, 256, &d.sky_geo);
+    put_vec4(&mut out, 272, &d.sky_ground);
+    put_vec4(&mut out, 288, &d.sky_sun);
     out
 }
 
-/// 建表初值（identity 矩阵、占位灯光、Lambert）：首帧写入前若被读到，也不是未定义内容。
+/// 建表初值（identity 矩阵、占位灯光、Lambert、天空关）：首帧写入前若被读到，
+/// 也不是未定义内容。
 fn identity_frame_uniforms() -> FrameUniformsData {
     FrameUniformsData {
         view_proj: bevy::math::Mat4::IDENTITY,
@@ -125,7 +166,15 @@ fn identity_frame_uniforms() -> FrameUniformsData {
         ambient_color: [0.0; 4],
         light_color: [0.0; 4],
         mode: FRAME_MODE_LAMBERT,
+        sky_enabled: 0,
+        sky_intensity: 0.0,
         camera_pos: [0.0; 4],
+        sky_rayleigh: [0.0; 4],
+        sky_mie: [0.0; 4],
+        sky_ozone: [0.0; 4],
+        sky_geo: [0.0; 4],
+        sky_ground: [0.0; 4],
+        sky_sun: [0.0; 4],
     }
 }
 

@@ -153,7 +153,7 @@ pub(crate) fn draw_frame(
         logs,
     );
     gpu.frame_uniform_table
-        .write_frame_ubo(slot, &view, &light, render_mode)?;
+        .write_frame_ubo(slot, &view, &light, render_mode, &scene.sky)?;
     let scene_aabb = scene_world_aabb(ledger, &scene.pool);
     shadow.write_ubo(slot, &view, &light, scene_aabb)?;
     post.write_slot_ubos(slot)?;

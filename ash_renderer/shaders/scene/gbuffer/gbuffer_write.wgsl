@@ -9,7 +9,7 @@
 //
 // 接口：
 // - set0 b0/b1：纹理数组 + sampler 数组（runtime array，build.rs 补丁器补 capability）。
-// - set1 b0：每帧 UBO（FrameUniforms 208B；本 pass 只用 view_proj）。
+// - set1 b0：每帧 UBO（FrameUniforms 272B；本 pass 只用 view_proj）。
 // - set2 b0/b1/b2：对象表/模型环/材质环（记录尺寸见 common/instance.wgsl）。
 //
 // alpha：不透明 pass 不带 alpha——albedo.a 恒写 1.0（背景判定看合成端的

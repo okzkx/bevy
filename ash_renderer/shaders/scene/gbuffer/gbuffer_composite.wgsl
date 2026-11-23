@@ -8,12 +8,13 @@
 // - 4..8 调试显示：matparam 单通道灰度直出（metallic/roughness/AO/reflectance）
 //   + reverse-Z 深度线性化灰度
 //
-// 背景判定：reverse-Z 深度清 0 = 远平面 → 输出清屏色。
+// 背景判定：reverse-Z 深度清 0 = 远平面 → 程序化天空（sky_enabled 关时回清屏色）。
 enable wgpu_binding_array;
 // #import frame
 // #import cluster_lighting
 // #import shadow_ubo
 // #import fullscreen
+// #import sky
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(1) @binding(0) var albedo_tex: texture_2d<f32>;
@@ -221,9 +222,20 @@ fn world_from_depth(uv: vec2f, depth: f32) -> vec3f {
 fn fs_main(in: VsOut) -> @location(0) vec4f {
     let albedo = textureSampleLevel(albedo_tex, gbuf_sampler, in.uv, 0.0);
     let depth = textureSampleLevel(depth_tex, gbuf_sampler, in.uv, 0.0);
-    // 背景：reverse-Z 清 0 = 远平面，无几何写深度——输出清屏色
+    // 背景：reverse-Z 清 0 = 远平面，无几何写深度
     if (depth.r <= 1e-6) {
-        return vec4f(CLEAR_COLOR, 1.0);
+        // 天空只在 Shading 画：调试视图（mode 1..8）保持清屏色，免得仪器视图被污染。
+        // 关天空时原样回清屏色（不乘曝光、不做等价变形），与无天空基线逐位一致。
+        if (frame.sky_enabled == 0u || frame.mode != MODE_SHADING) {
+            return vec4f(CLEAR_COLOR, 1.0);
+        }
+        // 方向 = 近平面点 − 相机位置（透视下就是该像素的射线方向）。坑：不能用
+        // ndc.z=0（远平面）反投影——reverse-Z + 无限远投影下那是 w=0 的无穷远点，
+        // 归一化出 NaN，天空会退化成全屏地平线色。ndc.z=1 是近平面，反投影有限。
+        let v = world_from_depth(in.uv, 1.0) - frame.camera_pos.xyz;
+        let dir = select(vec3f(0.0, 1.0, 0.0), normalize(v), dot(v, v) > 1e-12);
+        // 天空与直接光同在 pre-exposure 域：这里乘曝光，天空函数内部不乘
+        return vec4f(sky_radiance(dir, true) * EXPOSURE, 1.0);
     }
     if frame.mode == MODE_UNLIT {
         return vec4f(albedo.rgb, 1.0);
