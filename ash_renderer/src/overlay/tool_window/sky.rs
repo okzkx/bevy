@@ -1,6 +1,11 @@
-//! 程序化天空盒页：天空参数（渐变三色/强度/过渡幂/太阳圆盘/光晕）就地写
-//! [`SkySettings`]。`draw_frame` 每帧照资源写帧 UBO，改参下一帧生效；BRP
-//! `sky_set`/`sky_stats` 写读同一份，AI 调参与面板手动调互不冲突。
+//! 物理天空页：大气三介质（瑞利/米氏/臭氧）、地面反照率、太阳圆盘与亮度倍数，
+//! 控件就地写 [`SkySettings`]。`draw_frame` 每帧照资源写帧 UBO，改参下一帧生效；
+//! BRP `sky_set`/`sky_stats` 写读同一份，AI 调参与面板手动调互不冲突。
+//!
+//! 显示单位：散射/吸收系数是 1e-6 /米 量级，面板按 ×1e-6 显示、写回时还原；
+//! 高度按米（臭氧层按公里）。BRP 侧一律原始 SI 单位。
+
+use std::ops::RangeInclusive;
 
 use crate::render::SkySettings;
 
@@ -14,29 +19,109 @@ impl SkyPage<'_> {
         let Self { sky } = self;
         ui.checkbox(&mut sky.enabled, "天空（sky_enabled）");
         ui.monospace("BRP: ash_renderer/sky_set / sky_stats");
-        ui.separator();
-        ui.strong("渐变");
-        // 颜色是线性辐亮度系数（0..1），整体亮度走"强度"
-        color_row(ui, "天顶", &mut sky.zenith);
-        color_row(ui, "地平线", &mut sky.horizon);
-        color_row(ui, "地面", &mut sky.ground);
         ui.add(
-            egui::Slider::new(&mut sky.intensity, 0.0..=10000.0)
-                .text("强度")
+            egui::Slider::new(&mut sky.intensity, 0.0..=10.0)
+                .text("亮度倍数")
+                .fixed_decimals(2),
+        );
+        ui.separator();
+
+        ui.strong("大气 · 瑞利（空气分子）");
+        scaled_slider(
+            ui,
+            "R（×1e-6 /m）",
+            &mut sky.rayleigh_scattering[0],
+            1e6,
+            0.0..=100.0,
+        );
+        scaled_slider(
+            ui,
+            "G（×1e-6 /m）",
+            &mut sky.rayleigh_scattering[1],
+            1e6,
+            0.0..=100.0,
+        );
+        scaled_slider(
+            ui,
+            "B（×1e-6 /m）",
+            &mut sky.rayleigh_scattering[2],
+            1e6,
+            0.0..=100.0,
+        );
+        ui.add(
+            egui::Slider::new(&mut sky.rayleigh_scale_height, 500.0..=20_000.0)
+                .text("标高（m）")
+                .fixed_decimals(0),
+        );
+        ui.separator();
+
+        ui.strong("大气 · 米氏（气溶胶）");
+        scaled_slider(
+            ui,
+            "散射（×1e-6 /m）",
+            &mut sky.mie_scattering,
+            1e6,
+            0.0..=100.0,
+        );
+        ui.add(
+            egui::Slider::new(&mut sky.mie_scale_height, 100.0..=10_000.0)
+                .text("标高（m）")
                 .fixed_decimals(0),
         );
         ui.add(
-            egui::Slider::new(&mut sky.horizon_exponent, 0.05..=8.0)
-                .text("天顶过渡幂")
-                .fixed_decimals(2),
-        );
-        ui.add(
-            egui::Slider::new(&mut sky.ground_exponent, 0.05..=8.0)
-                .text("地面过渡幂")
+            egui::Slider::new(&mut sky.mie_anisotropy, -0.9..=0.95)
+                .text("各向异性 g")
                 .fixed_decimals(2),
         );
         ui.separator();
-        ui.strong("太阳（方向/颜色跟随方向光）");
+
+        ui.strong("大气 · 臭氧（吸收）");
+        scaled_slider(
+            ui,
+            "R（×1e-6 /m）",
+            &mut sky.ozone_absorption[0],
+            1e6,
+            0.0..=5.0,
+        );
+        scaled_slider(
+            ui,
+            "G（×1e-6 /m）",
+            &mut sky.ozone_absorption[1],
+            1e6,
+            0.0..=5.0,
+        );
+        scaled_slider(
+            ui,
+            "B（×1e-6 /m）",
+            &mut sky.ozone_absorption[2],
+            1e6,
+            0.0..=5.0,
+        );
+        ui.add(
+            egui::Slider::new(&mut sky.ozone_center, 0.0..=60_000.0)
+                .text("中心高（km）")
+                .custom_formatter(|v, _| format!("{:.1}", v / 1000.0)),
+        );
+        ui.add(
+            egui::Slider::new(&mut sky.ozone_width, 1_000.0..=40_000.0)
+                .text("全宽（km）")
+                .custom_formatter(|v, _| format!("{:.1}", v / 1000.0)),
+        );
+        ui.separator();
+
+        ui.strong("行星");
+        ui.add(
+            egui::Slider::new(&mut sky.atmosphere_height, 1_000.0..=120_000.0)
+                .text("大气壳厚（m）")
+                .fixed_decimals(0),
+        );
+        ui.horizontal(|ui| {
+            ui.label("地面反照率");
+            ui.color_edit_button_rgb(&mut sky.ground_albedo);
+        });
+        ui.separator();
+
+        ui.strong("太阳");
         // 角半径存弧度，界面按角度调
         let mut deg = sky.sun_radius.to_degrees();
         if ui
@@ -55,23 +140,26 @@ impl SkyPage<'_> {
                 .text("圆盘增益")
                 .fixed_decimals(2),
         );
-        ui.add(
-            egui::Slider::new(&mut sky.glow_intensity, 0.0..=2.0)
-                .text("光晕强度")
-                .fixed_decimals(2),
-        );
-        ui.add(
-            egui::Slider::new(&mut sky.glow_falloff, 0.5..=64.0)
-                .text("光晕衰减幂")
-                .fixed_decimals(1),
-        );
     }
 }
 
-/// 颜色行：标签 + RGB 拾色按钮（拾色器改颜色，强度另调）。
-fn color_row(ui: &mut egui::Ui, label: &str, rgb: &mut [f32; 3]) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.color_edit_button_rgb(rgb);
-    });
+/// 按 ×`scale` 显示、写回时还原的滑杆（散射系数 1e-6 量级，原始值没法直接调）。
+fn scaled_slider(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    scale: f32,
+    range: RangeInclusive<f32>,
+) {
+    let mut shown = *value * scale;
+    if ui
+        .add(
+            egui::Slider::new(&mut shown, range)
+                .text(label)
+                .fixed_decimals(2),
+        )
+        .changed()
+    {
+        *value = shown / scale;
+    }
 }

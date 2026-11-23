@@ -1,6 +1,9 @@
-//! 程序化天空方法族：`sky_set`（天空参数写入，缺省字段不动）与 `sky_stats`（当前
+//! 物理天空方法族：`sky_set`（大气参数写入，缺省字段不动）与 `sky_stats`（当前
 //! 值只读回显）。天空面板写同一份 [`SkySettings`]，`draw_frame` 每帧照资源写帧 UBO，
 //! 改参下一帧生效。
+//!
+//! 单位：长度/高度用米，散射与吸收系数用 1/米（量级 1e-6，面板里按 ×1e-6 显示），
+//! 角度用弧度。
 
 use bevy::{
     prelude::*,
@@ -56,7 +59,7 @@ fn set_f32(
     Ok(())
 }
 
-/// 可省颜色的校验 + 写入 + 回显（长度 3、非负有限）。
+/// 可省三分量字段（非负有限）的校验 + 写入 + 回显。
 fn set_rgb(
     echo: &mut Value,
     p: &serde_json::Map<String, Value>,
@@ -89,16 +92,16 @@ fn set_rgb(
     Ok(())
 }
 
-/// `ash_renderer/sky_set`：程序化天空参数。
-/// 请求 `{"enabled": bool?, "zenith": [r,g,b]?, "horizon": [r,g,b]?,
-/// "ground": [r,g,b]?, "intensity": f32?, "horizon_exponent": f32?,
-/// "ground_exponent": f32?, "sun_radius": f32?, "sun_gain": f32?,
-/// "glow_intensity": f32?, "glow_falloff": f32?}`——缺省字段不动。
+/// `ash_renderer/sky_set`：物理天空参数。请求字段全部可省，缺省不动：
+/// `{"enabled", "intensity", "planet_radius", "atmosphere_height",
+/// "rayleigh":[r,g,b], "rayleigh_scale_height", "mie", "mie_scale_height",
+/// "mie_anisotropy", "ozone":[r,g,b], "ozone_center", "ozone_width",
+/// "ground_albedo":[r,g,b], "sun_gain", "sun_radius"}`。
 #[system]
 pub(crate) fn sky_set(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: serde_json::Map<String, Value> = parse_params(
         params,
-        "params 缺失：需要 enabled/zenith/horizon/ground/intensity/… 之一",
+        "params 缺失：需要 enabled/intensity/rayleigh/mie/ozone/… 之一",
     )?;
     let mut sky = res_mut::<SkySettings>(world)?;
     let mut echo = json!({});
@@ -109,44 +112,107 @@ pub(crate) fn sky_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRe
         sky.enabled = enabled;
         echo["enabled"] = json!(enabled);
     }
-    set_rgb(&mut echo, &p, "zenith", &mut sky.zenith, "天顶色")?;
-    set_rgb(&mut echo, &p, "horizon", &mut sky.horizon, "地平线色")?;
-    set_rgb(&mut echo, &p, "ground", &mut sky.ground, "地面色")?;
     set_f32(
         &mut echo,
         &p,
         "intensity",
         &mut sky.intensity,
-        "天空强度",
+        "天空亮度倍数",
         |v| v >= 0.0,
         "须为非负有限值",
     )?;
     set_f32(
         &mut echo,
         &p,
-        "horizon_exponent",
-        &mut sky.horizon_exponent,
-        "地平线→天顶过渡幂",
+        "planet_radius",
+        &mut sky.planet_radius,
+        "行星半径",
         |v| v > 0.0,
         "须为正有限值",
     )?;
     set_f32(
         &mut echo,
         &p,
-        "ground_exponent",
-        &mut sky.ground_exponent,
-        "地平线→地面过渡幂",
+        "atmosphere_height",
+        &mut sky.atmosphere_height,
+        "大气壳厚度",
+        |v| v > 0.0,
+        "须为正有限值",
+    )?;
+    set_rgb(
+        &mut echo,
+        &p,
+        "rayleigh",
+        &mut sky.rayleigh_scattering,
+        "瑞利散射系数",
+    )?;
+    set_f32(
+        &mut echo,
+        &p,
+        "rayleigh_scale_height",
+        &mut sky.rayleigh_scale_height,
+        "瑞利标高",
         |v| v > 0.0,
         "须为正有限值",
     )?;
     set_f32(
         &mut echo,
         &p,
-        "sun_radius",
-        &mut sky.sun_radius,
-        "太阳角半径",
-        |v| v > 0.0 && v < MAX_SUN_RADIUS,
-        "须落在 (0, π/2)",
+        "mie",
+        &mut sky.mie_scattering,
+        "米氏散射系数",
+        |v| v >= 0.0,
+        "须为非负有限值",
+    )?;
+    set_f32(
+        &mut echo,
+        &p,
+        "mie_scale_height",
+        &mut sky.mie_scale_height,
+        "米氏标高",
+        |v| v > 0.0,
+        "须为正有限值",
+    )?;
+    set_f32(
+        &mut echo,
+        &p,
+        "mie_anisotropy",
+        &mut sky.mie_anisotropy,
+        "米氏各向异性 g",
+        |v| v > -1.0 && v < 1.0,
+        "须落在 (-1, 1)",
+    )?;
+    set_rgb(
+        &mut echo,
+        &p,
+        "ozone",
+        &mut sky.ozone_absorption,
+        "臭氧吸收系数",
+    )?;
+    set_f32(
+        &mut echo,
+        &p,
+        "ozone_center",
+        &mut sky.ozone_center,
+        "臭氧层中心高度",
+        |v| v >= 0.0,
+        "须为非负有限值",
+    )?;
+    set_f32(
+        &mut echo,
+        &p,
+        "ozone_width",
+        &mut sky.ozone_width,
+        "臭氧层全宽",
+        |v| v > 0.0,
+        "须为正有限值",
+    )?;
+    set_rgb(
+        &mut echo,
+        &p,
+        "ground_albedo",
+        &mut sky.ground_albedo,
+        "地面反照率",
     )?;
     set_f32(
         &mut echo,
@@ -160,24 +226,15 @@ pub(crate) fn sky_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRe
     set_f32(
         &mut echo,
         &p,
-        "glow_intensity",
-        &mut sky.glow_intensity,
-        "光晕强度",
-        |v| v >= 0.0,
-        "须为非负有限值",
-    )?;
-    set_f32(
-        &mut echo,
-        &p,
-        "glow_falloff",
-        &mut sky.glow_falloff,
-        "光晕衰减幂",
-        |v| v > 0.0,
-        "须为正有限值",
+        "sun_radius",
+        &mut sky.sun_radius,
+        "太阳角半径",
+        |v| v > 0.0 && v < MAX_SUN_RADIUS,
+        "须落在 (0, π/2)",
     )?;
     if echo.as_object().is_none_or(|o| o.is_empty()) {
         return Err(invalid_params(
-            "无有效字段（enabled/zenith/horizon/ground/intensity/… 任一）",
+            "无有效字段（enabled/intensity/rayleigh/mie/ozone/… 任一）",
         ));
     }
     Ok(json!({ "applied": echo, "current": current(&sky) }))
@@ -193,15 +250,19 @@ pub(crate) fn sky_stats(In(_params): In<Option<Value>>, world: &mut World) -> Br
 fn current(sky: &SkySettings) -> Value {
     json!({
         "enabled": sky.enabled,
-        "zenith": sky.zenith,
-        "horizon": sky.horizon,
-        "ground": sky.ground,
         "intensity": sky.intensity,
-        "horizon_exponent": sky.horizon_exponent,
-        "ground_exponent": sky.ground_exponent,
-        "sun_radius": sky.sun_radius,
+        "planet_radius": sky.planet_radius,
+        "atmosphere_height": sky.atmosphere_height,
+        "rayleigh": sky.rayleigh_scattering,
+        "rayleigh_scale_height": sky.rayleigh_scale_height,
+        "mie": sky.mie_scattering,
+        "mie_scale_height": sky.mie_scale_height,
+        "mie_anisotropy": sky.mie_anisotropy,
+        "ozone": sky.ozone_absorption,
+        "ozone_center": sky.ozone_center,
+        "ozone_width": sky.ozone_width,
+        "ground_albedo": sky.ground_albedo,
         "sun_gain": sky.sun_gain,
-        "glow_intensity": sky.glow_intensity,
-        "glow_falloff": sky.glow_falloff,
+        "sun_radius": sky.sun_radius,
     })
 }

@@ -134,7 +134,7 @@ impl<'a> FrameView<'a> {
 }
 
 /// 本帧槽主 UBO：相机矩阵 + 灯光 + 材质模式 + 相机世界位置（光照累积 V 向量）+
-/// 天空参数（vec3 各占一个 16B 槽，w 塞配套标量，见 `frame.wgsl`）。
+/// 物理天空参数（vec3 各占一个 16B 槽，w 塞配套标量，见 `frame.wgsl`）。
 impl FrameUniformTable {
     /// impl 留在 driver 层而非 frame_uniform_table.rs：方法消费帧侧私有的
     /// FrameView/FrameLight（scene/lighting 两文件），放 render 侧会反向依赖
@@ -160,20 +160,38 @@ impl FrameUniformTable {
                     sky_enabled: u32::from(sky.enabled),
                     sky_intensity: sky.intensity,
                     camera_pos: view.camera_pos4(),
-                    sky_zenith: [
-                        sky.zenith[0],
-                        sky.zenith[1],
-                        sky.zenith[2],
-                        sky.horizon_exponent,
+                    sky_rayleigh: [
+                        sky.rayleigh_scattering[0],
+                        sky.rayleigh_scattering[1],
+                        sky.rayleigh_scattering[2],
+                        sky.rayleigh_scale_height,
                     ],
-                    sky_horizon: [
-                        sky.horizon[0],
-                        sky.horizon[1],
-                        sky.horizon[2],
-                        sky.ground_exponent,
+                    sky_mie: [
+                        sky.mie_scattering,
+                        sky.mie_scale_height,
+                        sky.mie_anisotropy,
+                        0.0,
                     ],
-                    sky_ground: [sky.ground[0], sky.ground[1], sky.ground[2], sky.sun_radius],
-                    sky_sun: [sky.sun_gain, sky.glow_intensity, sky.glow_falloff, 0.0],
+                    sky_ozone: [
+                        sky.ozone_absorption[0],
+                        sky.ozone_absorption[1],
+                        sky.ozone_absorption[2],
+                        0.0,
+                    ],
+                    // 大气顶半径由行星半径 + 壳厚现算，着色器只读一个值
+                    sky_geo: [
+                        sky.planet_radius,
+                        sky.planet_radius + sky.atmosphere_height,
+                        sky.ozone_center,
+                        sky.ozone_width,
+                    ],
+                    sky_ground: [
+                        sky.ground_albedo[0],
+                        sky.ground_albedo[1],
+                        sky.ground_albedo[2],
+                        0.0,
+                    ],
+                    sky_sun: [sky.sun_gain, sky.sun_radius, 0.0, 0.0],
                 }),
             )
             .or_fatal("帧 UBO 写失败，渲染链无法继续")
