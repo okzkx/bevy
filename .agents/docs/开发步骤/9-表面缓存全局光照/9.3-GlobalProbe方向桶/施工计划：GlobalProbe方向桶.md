@@ -2,7 +2,7 @@
 
 > 2026-11-20 立案（纯文档，重规划）；**2026-11-23 按 9.1 物理天空 / 9.2 同步修订**（常量天空自检改由 9.2.0 的 `sky_uniform` 提供，UBO 尺寸随 9.2 更新到 336B）；**2026-11-23 晚按 9.2 落地实况复核**（9.2 与 9.2.8 已收官：IBL 默认关且与天空开关串联、视向侧法线口径、IBL 集 b4 空位、两个读回口与 shader 编译机制——逐项见 §0.0 两张清单）。对应[步骤 9 README](../README.md)、[八段拆解 §2 9.3](../施工计划：天空盒、IBL 与表面缓存全局光照八段拆解.md)与[路线图步骤 9 表](../../学习目标实现步骤.md)。本文管 9.3 段做什么、按什么顺序、验收什么；"实际做了什么"开工后另立施工记录，不回写本文。
 >
-> **当前状态：📝 施工计划已立案并按 9.2 落地复核，未开工（2026-11-20 立案；2026-11-23 同步修订 + 落地复核）**。
+> **当前状态：✅ 收官（2026-11-23）。** 任务 9.3.1～9.3.5 全部落地，判定线七条全过；A/B 结论 = 默认保留 SH-L2、16 桶作 9.7 兜底（详见[9.3 段 README](README.md)与[判定线](9.3.5-判定线与计量.md)）。
 
 **一句话说明**：从 9.2 的天空 cubemap 生成 16 桶 × RGBL1 的 GlobalProbe，按法线选桶求值，并用 A/B 对照 L2；本段不产生空间缓存、不发射射线、不替代 L2 作为默认（除非数据支持）。
 
@@ -156,11 +156,11 @@ E(n) = probe[idx+0].xyz + probe[idx+1].xyz·n.x + probe[idx+2].xyz·n.y + probe[
 
 | 任务 | 交付 | 落点 | 状态 |
 |---|---|---|---|
-| 9.3.1 八面体公共片段 | `octahedral.wgsl`：`oct_wrap`、球↔方、`direction_to_bucket_index`、`bucket_index_to_direction`；CPU 侧镜像单元测试（往返 + 六轴落桶） | `shaders/common/octahedral.wgsl`（新）、`src/render/passes/ibl/` 或 `src/common/` 的测试 | ⬜ |
-| 9.3.2 16 桶 L1 投影 | `global_probe.wgsl`：16 桶 × 32 样本（线程形状可简化为一桶一线程串行）、`2π/32` 归一化、`A0/A1` 卷积、折叠 L1；写 16×4 vec4 buffer（1KB，`BufferRole::DeviceStorage`）；新增捕获侧 set（b0 = mip0 cube、b1 = 采样器、b2 = probe buffer）并接进 9.2 的烘焙链（`sh_check` 之后），写→读屏障随 SH/stats 一起收口 | `shaders/scene/ibl/global_probe.wgsl`（新）、`src/render/passes/ibl/environment.rs` | ⬜ |
-| 9.3.3 查询与模式切换 | `ibl_mode` 分支（0 = `sh_irradiance`、1 = `probe16_eval`）；composite/transparent 两处漫反射求值都换来源，法线复用 9.2.8 翻转后的 `n`；IBL 帧集加 b4 绑 probe buffer（b0..b3 已占） | `shaders/common/ibl.wgsl`、`gbuffer_composite.wgsl`、`transparent_forward.wgsl`、`src/render/passes/ibl/environment.rs`（帧集加 b4） | ⬜ |
-| 9.3.4 BRP 与调试 | `ibl_set` 的 `diffuse_mode`；`ibl_stats` 摘要与 `ibl_census` 全量读回（可选）；可选 mode 11 桶可视化 | `src/remote/features/ibl.rs`、`src/render/frame/render_mode.rs` | ⬜ |
-| 9.3.5 判定线与 A/B | 桶方向正确性、`sky_uniform` 常量天空自检、L2 vs 16 桶读图、接缝/收益记录、回归矩阵 | 记录文件随施工产出 | ⬜ |
+| 9.3.1 八面体公共片段 | `octahedral.wgsl`：`oct_wrap`、球↔方、`direction_to_bucket_index`、`bucket_index_to_direction`；CPU 侧镜像单元测试（往返 + 六轴落桶） | `shaders/common/octahedral.wgsl`（新）、`src/render/passes/ibl/` 或 `src/common/` 的测试 | ✅ |
+| 9.3.2 16 桶 L1 投影 | `global_probe.wgsl`：16 桶 × 32 样本（线程形状可简化为一桶一线程串行）、`2π/32` 归一化、`A0/A1` 卷积、折叠 L1；写 16×4 vec4 buffer（1KB，`BufferRole::DeviceStorage`）；新增捕获侧 set（b0 = mip0 cube、b1 = 采样器、b2 = probe buffer）并接进 9.2 的烘焙链（`sh_check` 之后），写→读屏障随 SH/stats 一起收口 | `shaders/scene/ibl/global_probe.wgsl`（新）、`src/render/passes/ibl/environment.rs` | ✅ |
+| 9.3.3 查询与模式切换 | `ibl_mode` 分支（0 = `sh_irradiance`、1 = `probe16_eval`）；composite/transparent 两处漫反射求值都换来源，法线复用 9.2.8 翻转后的 `n`；IBL 帧集加 b4 绑 probe buffer（b0..b3 已占） | `shaders/common/ibl.wgsl`、`gbuffer_composite.wgsl`、`transparent_forward.wgsl`、`src/render/passes/ibl/environment.rs`（帧集加 b4） | ✅ |
+| 9.3.4 BRP 与调试 | `ibl_set` 的 `diffuse_mode`；`ibl_stats` 摘要与 `ibl_census` 全量读回（可选）；可选 mode 11 桶可视化 | `src/remote/features/ibl.rs`、`src/render/frame/render_mode.rs` | ✅ |
+| 9.3.5 判定线与 A/B | 桶方向正确性、`sky_uniform` 常量天空自检、L2 vs 16 桶读图、接缝/收益记录、回归矩阵 | 记录文件随施工产出 | ✅ |
 
 ### 任务间依赖
 
