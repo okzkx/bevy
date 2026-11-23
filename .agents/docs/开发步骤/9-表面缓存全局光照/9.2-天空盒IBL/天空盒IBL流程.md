@@ -76,6 +76,7 @@ DFG LUT 128²（一次性）──→ A/B
   - 漫反射 `diffuseColor/π · E(n) · intensity`（`E` 已含余弦卷积）；
   - 高光 `prefiltered(R) · (F0·A + B) · intensity`（`R = reflect(−V,n)`，mip = p·8）；
   - 调试档 9/10 直出单项贡献。
+- **9.2.8 的两处防噪**：IBL 项先把法线翻到视向侧（`ibl_normal`，双面几何背面不让 DFG 落到掠射端），再用屏幕空间法线导数把粗糙度撑开（`ibl_roughness`，Toksvig 近似）；DFG LUT 本身修了积分器（见 §6）。
 
 ### 4.4 稳态（不脏）
 
@@ -86,7 +87,7 @@ DFG LUT 128²（一次性）──→ A/B
 | 情况 | 行为 |
 |---|---|
 | `ibl_enabled=false` | 不捕获、不读 IBL 项；等于步骤 8 基线（逐位一致） |
-| `sky_enabled=false` + IBL 开 | 背景清屏色、几何仍吃 IBL（正交开关，可"有 IBL 无可见天空"） |
+| `sky_enabled=false` + IBL 开 | 背景清屏色 + **环境项回退常量 `albedo·ambient`**（9.2.8 起天空是环境光上游：不捕获、`ibl_stats` 计数不增；不再有"有 IBL 无可见天空"） |
 | 常量天空（`sky_uniform.w=1`） | 可见天空与捕获同时变成常量 `L`（不经 `sky_intensity`），`E(n)=πL` 可解析验收 |
 | 太阳排除（三介质/地面=0） | SH 全 0、IBL 两项≈0（圆盘不进捕获） |
 | 设备缺 `STORAGE_IMAGE`/线性过滤/5 个 set | 初始化报错退出（不静默降级） |
@@ -119,4 +120,9 @@ DFG LUT 128²（一次性）──→ A/B
 | `perf.rs` / `stopwatch.rs` / `census/perf.rs` | 9 位 timestamp、`gpu_ibl_capture_ms` |
 | `render_mode.rs` | 11 项（`ibl_diffuse`/`ibl_specular`） |
 | `brdf.wgsl` / `gbuffer_write.wgsl` / `transparent_forward.wgsl` | `safe_normalize` 兜底（退化法线 NaN 的源头修复） |
-| `brdf_lut.wgsl` | A/B 钳到 1（NoV→0 发散 → fp16 Inf → Bloom NaN 的修复） |
+| `brdf_lut.wgsl` | A/B 钳到 1（NoV→0 发散 → fp16 Inf → Bloom NaN 的修复）；**9.2.8 修积分器**：`G = 4·NoL·NoV·V` 再除 `NoH·NoV`，钳 1 降为数值护栏 |
+| `shaders/common/ibl.wgsl`（9.2.8） | `ibl_normal`（视向侧法线）+ `ibl_roughness`（屏幕空间 specular AA），不透明/透明共用 |
+| `gbuffer_composite.wgsl` / `transparent_forward.wgsl`（9.2.8） | IBL 项改用上述两个辅助函数（直接光不动） |
+| `shaders/common/sky.wgsl`（9.2.8） | 海拔按 1 m 兜底 + 球求交稳定式 `d = c² − k`（地平线以下椒盐噪点） |
+| `driver/host/frame/scene.rs` / `frame.rs`（9.2.8） | `ibl_enabled` 与捕获条件都乘 `sky.enabled`（天空关 → 常量 ambient） |
+| `src/remote/features/ibl.rs`（9.2.8） | `ibl_census` 加 `row`：读回 DFG 单行 128 个 A/B |

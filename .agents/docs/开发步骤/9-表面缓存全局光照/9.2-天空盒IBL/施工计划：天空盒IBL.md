@@ -2,7 +2,7 @@
 
 > 2026-11-20 立案（纯文档，重规划）；**2026-11-23 按 9.1 物理天空落地同步修订**（渐变天空已被物理天空替换，本段捕获源、UBO 尺寸、自检口径随之更新，见 §0.0）。对应[步骤 9 README](../README.md)、[八段拆解 §2 9.2](../施工计划：天空盒、IBL 与表面缓存全局光照八段拆解.md)与[路线图步骤 9 表](../../学习目标实现步骤.md)。本文管 9.2 段做什么、按什么顺序、验收什么；"实际做了什么"开工后另立施工记录，不回写本文。
 >
-> **当前状态：✅ 收官（2026-11-23）。八任务 9.2.0～9.2.7 全部落地，判定线 12 条全过——[施工记录](README.md#任务面板随段施工计划-1-同步)与[天空盒IBL流程](天空盒IBL流程.md)；判定线证据见 [9.2.7](9.2.7-判定线与计量.md)。本文只保留计划口径，实现取舍与实测不回写。**
+> **当前状态：✅ 收官（2026-11-23）。九任务 9.2.0～9.2.8 全部落地，判定线 12 条全过——[施工记录](README.md#任务面板随段施工计划-1-同步)与[天空盒IBL流程](天空盒IBL流程.md)；判定线证据见 [9.2.7](9.2.7-判定线与计量.md)。9.2.8 是收官后的现场复检补修（高光火花 / DFG 积分器 / 天空地平线噪点 / 天光开关联动），只修缺陷不改数据链。本文只保留计划口径，实现取舍与实测不回写。**
 
 **一句话说明**：把 9.1 的物理天空捕获为环境 cubemap，投影 SH-L2 漫反射并预滤波高光，替换不透明与透明的常量环境项；本段不产生世界空间缓存、射线或 SCGI。
 
@@ -206,6 +206,7 @@ shaded       = light_sum + albedo · ambient_color
 | 9.2.5 高光注入 | split-sum：`prefiltered(R) · (F0·A + B)`；composite + transparent；太阳高光仍走直接光；`energyCompensation` 裁决 | `shaders/common/ibl.wgsl`、两个着色 pass | ✅ |
 | 9.2.6 调试/BRP/管线收口 | `ibl_set`/`ibl_stats`（新 `src/remote/features/ibl.rs` + `remote/mod.rs` 登记）；mode 9/10；`RenderMode::ALL` 9→11；`RenderFeatures` 新增 IBL 束字段 | `src/remote/features/ibl.rs`、`render/frame/render_features.rs`、`render_mode.rs` | ✅ |
 | 9.2.7 判定线与计量 | IBL 关基线、`sky_uniform` 均匀天空自检、太阳排除负例、金属/透明/室内对照、捕获耗时、回归矩阵、施工记录 | 记录文件随施工产出 | ✅ [9.2.7](9.2.7-判定线与计量.md) |
+| 9.2.8 现场复检补修 | DFG 积分器 G_Vis 修正（可见性 V 当 G 的 `1/NoV³` 发散）；IBL 视向侧法线 + specular AA；`sky_enabled` 联动环境项与捕获；天空海拔 1 m 兜底 + 球求交稳定式；`ibl_census` 加 `row` | `brdf_lut.wgsl`、`common/ibl.wgsl`、两个光照 pass、`sky.wgsl`、`frame.rs`/`frame/scene.rs`、`remote/features/ibl.rs` | ✅ [9.2.8](9.2.8-高光火花、天空地平线噪点与天光开关联动.md) |
 
 ### 任务间依赖
 
