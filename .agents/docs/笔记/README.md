@@ -67,6 +67,7 @@
 - [Filament BRDF 参考](光照与材质/Filament%20BRDF参考.md)——标准模型 BRDF 与多光源的逐函数对照基准
 - [Filament 色调映射参考](光照与材质/Filament%20色调映射参考.md)——完整 ACES 成像链与常量的逐处对照
 - [Unity PBR 调研](光照与材质/Unity%20PBR%20调研.md)——URP 材质、BRDF 与 IBL 的落地清单
+- [IBL 与无限远环境](光照与材质/IBL与无限远环境.md)——IBL 的判据在光源；图像是唯一通用表示，遮挡/位置/多跳才是 GI 的门槛
 - [SH 与光照探针](光照与材质/SH与光照探针.md)——一个探针=一个点的全方向展开；多探针采样位置；16 槽是类别槽不是方向冗余
 - [Unity SCGI 调研](光照与材质/Unity%20SCGI%20调研.md)——Surface Cache GI 与三大灵感来源
 - [Unity SCGI 实现](光照与材质/Unity%20SCGI%20实现.md)——从场景变更到屏幕辐照度纹理的源码级数据流
