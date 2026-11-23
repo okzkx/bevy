@@ -83,6 +83,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         &mut uploader,
         ctx.queue_family_index,
         TABLE_CAPACITY,
+        ctx.max_sampler_anisotropy(),
     )?;
     let instance_tables =
         InstanceTables::new(&ctx.device, ctx.memory_contract(), &ctx.sharing_families())?;

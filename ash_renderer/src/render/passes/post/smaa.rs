@@ -237,7 +237,7 @@ impl SmaaTargets {
             extent,
         };
         // 失败路径：已建对象都已落字段，由 Drop 回收
-        unsafe { this.build_static() }?;
+        unsafe { this.build_static(ctx) }?;
         this.build_targets(ctx, extent)?;
         let sharing = ctx.sharing_families();
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
@@ -294,7 +294,7 @@ impl SmaaTargets {
     ///
     /// # Safety
     /// 只在 new 调一次；每个对象建成即落字段，失败路径由 Drop 回收。
-    unsafe fn build_static(&mut self) -> Result<()> {
+    unsafe fn build_static(&mut self, ctx: &Context) -> Result<()> {
         unsafe {
             let device = &self.device;
             self.set_layout_a = SMAA_A_SET_DESC.create(device)?;
@@ -303,7 +303,7 @@ impl SmaaTargets {
             self.sampler = crate::render::resident::sampler::sampler_key(
                 &bevy::image::ImageSamplerDescriptor::linear(),
             )
-            .create_sampler(device)?;
+            .create_sampler(device, ctx.max_sampler_anisotropy())?;
             // 池容量从布局声明推导：每槽 edge/blend 两张 L_a + nb 一张 L_b
             let pool_sizes = merged_pool_sizes(&[
                 (&SMAA_A_SET_DESC, 2 * slots as u32),

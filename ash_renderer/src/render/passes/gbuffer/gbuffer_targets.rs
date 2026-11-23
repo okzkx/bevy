@@ -28,6 +28,7 @@ use crate::render::core::binding::set_layout::{
     BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc,
 };
 use crate::render::core::target::color::{ColorTarget, HDR_FORMAT};
+use crate::render::resident::sampler::anisotropy_settings;
 use crate::render::Context;
 
 /// albedo 附件格式：存采样时已解码的线性反照率；sRGB 编码只在最终写 swapchain 时做一次。
@@ -317,7 +318,12 @@ unsafe fn build_sampling_inner(
                 return Err(VulkanError::Vk(e));
             }
         };
-        // mipmap 不参与，NEAREST 即可
+        // mipmap 不参与，NEAREST 即可；各向异性与其他采样器走同一策略（设备上限 + 双线性）
+        let (anisotropy_enable, max_anisotropy) = anisotropy_settings(
+            ctx.max_sampler_anisotropy(),
+            vk::Filter::LINEAR,
+            vk::Filter::LINEAR,
+        );
         let sampler = device.create_sampler(
             &vk::SamplerCreateInfo::default()
                 .mag_filter(vk::Filter::LINEAR)
@@ -325,7 +331,9 @@ unsafe fn build_sampling_inner(
                 .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
                 .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                 .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .anisotropy_enable(anisotropy_enable)
+                .max_anisotropy(max_anisotropy),
             None,
         );
         let sampler = match sampler {

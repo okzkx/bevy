@@ -221,7 +221,7 @@ impl BloomTargets {
             sampler: vk::Sampler::null(),
         };
         // 失败路径：已建对象都已落字段，由 Drop 回收
-        unsafe { this.build_static() }?;
+        unsafe { this.build_static(ctx) }?;
         this.build_targets(ctx, extent)?;
         let sharing = ctx.sharing_families();
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
@@ -310,7 +310,7 @@ impl BloomTargets {
     ///
     /// # Safety
     /// 只在 new 调一次；每个对象建成即落字段，失败路径由 Drop 回收。
-    unsafe fn build_static(&mut self) -> Result<()> {
+    unsafe fn build_static(&mut self, ctx: &Context) -> Result<()> {
         unsafe {
             let device = &self.device;
             self.set_layout_tex = BLOOM_TEX_SET_DESC.create(device)?;
@@ -319,7 +319,7 @@ impl BloomTargets {
             self.sampler = crate::render::resident::sampler::sampler_key(
                 &bevy::image::ImageSamplerDescriptor::linear(),
             )
-            .create_sampler(device)?;
+            .create_sampler(device, ctx.max_sampler_anisotropy())?;
             // 池容量从布局声明推导（分配即按全 binding 扣，与是否写入无关）：
             // down 集 (N-1)×slots 张 L_tex，up 集 (N-1)×slots + tonemap 集 slots 张 L_up
             let n = BLOOM_LEVELS as u32;

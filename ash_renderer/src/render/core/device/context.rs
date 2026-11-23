@@ -127,6 +127,9 @@ pub struct Context {
     debug_device: debug_utils::Device,
     /// 是否启用了 VK_EXT_memory_budget（设备支持才启用）。
     budget_enabled: bool,
+    /// 各向异性过滤的生效上限：设备支持时取 `maxSamplerAnisotropy`，不支持时 1.0（关闭）。
+    /// 采样器创建统一从这里取值，避免各调用点重复查 properties/feature 状态。
+    max_sampler_anisotropy: f32,
 }
 
 impl Context {
@@ -340,6 +343,7 @@ impl Context {
         let multi_draw_indirect_supported = features2.features.multi_draw_indirect != 0;
         let draw_indirect_first_instance_supported =
             features2.features.draw_indirect_first_instance != 0;
+        let sampler_anisotropy_supported = features2.features.sampler_anisotropy != 0;
         // 要用的 feature 不支持就报错退出，不建缺能力的设备
         if vk12_query.timeline_semaphore == 0 || vk13_query.dynamic_rendering == 0 {
             return Err(VulkanError::Init(format!(
@@ -485,11 +489,13 @@ impl Context {
             .descriptor_binding_partially_bound(true);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
         // multi_draw_indirect + draw_indirect_first_instance + texture_compression_bc
-        // (BCn 显存纹理采样的特性位) 在 base features 里
+        // (BCn 显存纹理采样的特性位) + sampler_anisotropy（材质采样器开各向异性）在 base features 里。
+        // sampler_anisotropy 是可选 feature：不支持就不开，采样器侧按上限 1.0 自动关闭
         let base_features = vk::PhysicalDeviceFeatures::default()
             .multi_draw_indirect(true)
             .draw_indirect_first_instance(true)
-            .texture_compression_bc(true);
+            .texture_compression_bc(true)
+            .sampler_anisotropy(sampler_anisotropy_supported);
         let queue_priority = [1.0f32];
         let mut queue_infos = vec![vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
@@ -552,6 +558,13 @@ impl Context {
         };
 
         let dev_props = unsafe { instance.get_physical_device_properties(physical_device) };
+        // 各向异性生效上限：feature 不支持时按 1.0（关闭）记，采样器创建统一从这里取，
+        // 不各自去读 limits 再猜 feature 状态
+        let max_sampler_anisotropy = if sampler_anisotropy_supported {
+            dev_props.limits.max_sampler_anisotropy.max(1.0)
+        } else {
+            1.0
+        };
         let dev_name =
             unsafe { std::ffi::CStr::from_ptr(dev_props.device_name.as_ptr()).to_string_lossy() };
         let transfer_note = if transfer_queue_family_index == queue_family_index {
@@ -574,6 +587,10 @@ impl Context {
             dev_props.limits.max_draw_indirect_count,
             if validation { "on" } else { "未找到" },
         );
+        info!(
+            "采样器各向异性: feature 支持 {} → 生效上限 {}×（材质采样器目标 8×，最近邻过滤保持关闭）",
+            sampler_anisotropy_supported, max_sampler_anisotropy,
+        );
 
         let debug_device = debug_utils::Device::new(&instance, &device);
         let context = Self {
@@ -590,6 +607,7 @@ impl Context {
             transfer_queue,
             memory_contract,
             budget_enabled,
+            max_sampler_anisotropy,
             debug_device,
         };
         guard.committed = true;
@@ -639,6 +657,12 @@ impl Context {
                 })
                 .collect(),
         )
+    }
+
+    /// 各向异性过滤的生效上限（1.0 = 设备不支持，采样器保持关闭）。设备存活期内不变。
+    #[must_use]
+    pub fn max_sampler_anisotropy(&self) -> f32 {
+        self.max_sampler_anisotropy
     }
 
     /// 物理设备 limits，设备存活期内不变。

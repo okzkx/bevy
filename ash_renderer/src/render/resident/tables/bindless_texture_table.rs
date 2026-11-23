@@ -11,6 +11,8 @@
 //! - **只往新槽写**：UPDATE_AFTER_BIND 允许绑定后更新描述符，但不允许覆盖在飞 draw 还在读的
 //!   描述符。所以贴图换内容是"发布到新槽 + 旧槽交回"，旧槽等 GPU 用完才回到空闲栈。
 //! - **采样器按参数去重并计引用**：同参数的贴图共用一个采样器槽，最后一次发布交回时才回收。
+//!   采样器统一按设备上限开各向异性（双线性过滤才开，见
+//!   [`crate::render::resident::sampler::anisotropy_settings`]）。
 //!
 //! 坑：`ImageSampler::Default` 解析成线性采样器，和槽 0 同参数，所以普通贴图、fallback、
 //! egui 图集会共用采样器槽 0。采样器能不能回收只能由本表的引用数判断，调用方看不全用户。
@@ -91,6 +93,9 @@ pub struct BindlessTextureTable {
     retired_samplers: Vec<vk::Sampler>,
     /// 槽 0 引用的白图，随表同寿。
     fallback: GpuImage,
+    /// 设备各向异性上限（`Context::max_sampler_anisotropy`，1.0 = 不支持）。
+    /// 表内新建采样器统一按它收缩倍数。
+    max_anisotropy: f32,
 }
 
 impl BindlessTextureTable {
@@ -98,10 +103,15 @@ impl BindlessTextureTable {
     /// 任一步失败，已建的对象由表的 Drop 回收。
     ///
     /// `capacity` 是槽位预算，只有测试耗尽路径时才小于 [`TABLE_CAPACITY`]；限额和 pool
-    /// 一律按布局声明的长度算。
+    /// 一律按布局声明的长度算。`max_anisotropy` 取设备的各向异性上限（1.0 = 不支持），
+    /// 由 [`crate::render::Context::max_sampler_anisotropy`] 给出，表内采样器都按它创建。
     ///
     /// # Errors
     /// 预算超过布局长度、设备限额不够、Vulkan 创建失败、fallback 上传失败。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "建表逐个传入设备/物理设备/上传器/槽位预算/各向异性上限，便于调用点自查"
+    )]
     pub fn new(
         device: &Device,
         instance: &Instance,
@@ -110,6 +120,7 @@ impl BindlessTextureTable {
         uploader: &mut Uploader,
         graphics_family: u32,
         capacity: u32,
+        max_anisotropy: f32,
     ) -> Result<Self> {
         if capacity > TABLE_CAPACITY {
             return Err(VulkanError::Init(format!(
@@ -136,6 +147,7 @@ impl BindlessTextureTable {
             samplers: HashMap::new(),
             retired_samplers: Vec::new(),
             fallback,
+            max_anisotropy,
         };
         let pool_flags = if BINDLESS_TEXTURE_SET_DESC.needs_uab_pool() {
             vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND
@@ -287,7 +299,7 @@ impl BindlessTextureTable {
             .alloc()
             .ok_or_else(|| capacity_error("采样器", &self.sampler_slots))?;
         let handle = key
-            .create_sampler(&self.device)
+            .create_sampler(&self.device, self.max_anisotropy)
             .inspect_err(|_| self.sampler_slots.release(slot))?;
         self.sampler_slot_by_key.insert(*key, slot);
         self.samplers.insert(
