@@ -51,11 +51,24 @@ const CLEAR_COLOR: vec3f = vec3f(0.02, 0.06, 0.14);
 // 一级，四级都出盒才判无影。深度比较 reverse-Z：更近太阳 = 值更大。
 // bias / 法线抬升 / 半影都按米计算（texel_world、inv_span 换算），换级联
 // 世界尺度一致。UBO map_size.y < 0.5 表示阴影关闭。
+// 采样核是逐像素旋转的螺旋盘（不是规则网格）：近级联 texel 世界尺寸约 1cm，
+// 屏幕上一个 texel 不足一像素，固定网格会把阴影图 texel 网格叠成可见交叉网纹。
+// 级间按视深在分割带前一段带宽内混合相邻两级（见 shadow_visibility）。
 
 // 半影宽度 / 遮挡体到接收面距离（米/米），约等于把太阳当成有面积的光源
 const SHADOW_PENUMBRA_SCALE: f32 = 0.02;
 // 半影半径上限（texel）；同时是出盒判定的采样核余量
 const SHADOW_MAX_RADIUS: f32 = 4.0;
+// 采样盘 tap 数（黄金角螺旋，半径按 sqrt((i+0.5)/N) 分布 → 盘内面积均匀）
+const SHADOW_TAPS: u32 = 16u;
+// 黄金角（弧度）：相邻 tap 的角步长，使螺旋在盘内无可见径向条带
+const SHADOW_GOLDEN_ANGLE: f32 = 2.3999632;
+// blocker 搜索盘半径（texel）：与原 3×3 步长 2（覆盖 ±2 texel）同域
+const SHADOW_BLOCKER_RADIUS: f32 = 2.0;
+// 级联淡出带宽占本级覆盖范围的比例：末段与下一级线性混合，消除分割带硬切
+const SHADOW_FADE_FRACTION: f32 = 0.10;
+// 级联覆盖近端（米），镜像 cascades.rs 的 SHADOW_NEAR_DISTANCE
+const SHADOW_NEAR_DISTANCE: f32 = 0.5;
 
 fn shadow_map_load(ci: u32, px: vec2<i32>) -> f32 {
     let last = i32(shadow.map_size.x) - 1;
@@ -68,28 +81,45 @@ fn shadow_map_load(ci: u32, px: vec2<i32>) -> f32 {
     }
 }
 
+// 逐像素旋转相位（弧度）：哈希钉在世界坐标上——相机移动时采样相位不随屏幕漂移
+// （无 TAA，逐像素抖动若随屏幕变化会让半影像素"沸腾"）；相邻像素世界点相差 ~1cm
+// 就完全去相关，足够把规则网格打散成高频噪点。
+fn shadow_rotation(world_pos: vec3f) -> f32 {
+    let p = world_pos.xz * 733.0 + vec2f(world_pos.y * 317.0, world_pos.y * 419.0);
+    return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+}
+
 // 单级联 PCSS：px = 接收点 texel 坐标，own = 接收点 reverse-Z 光深度。
 // 斜面上采样点离中心越远，表面自身在图里越"高"，bias 按 tap 距离 × 坡度加。
-fn shadow_pcss(ci: u32, px: vec2f, own: f32, no_l: f32) -> f32 {
+fn shadow_pcss(ci: u32, px: vec2f, own: f32, no_l: f32, rot: f32) -> f32 {
     let texel_world = shadow.texel_world[ci];
     let inv_span = shadow.inv_span[ci];
     let tan_t = sqrt(max(1.0 - no_l * no_l, 0.0)) / max(no_l, 0.25);
     let bias_m = texel_world * (1.0 + tan_t) + 0.01;
     let slope_m = texel_world * tan_t;
     let center = vec2<i32>(px);
-    // —— blocker search（3×3，步长 2 texel）
+    // 旋转盘：黄金角步进（复数旋转）代替逐 tap 三角函数；blocker 与 PCF 同一相位。
+    let step_c = cos(SHADOW_GOLDEN_ANGLE);
+    let step_s = sin(SHADOW_GOLDEN_ANGLE);
+    let rot_c = cos(rot);
+    let rot_s = sin(rot);
+    // —— blocker search（16 tap 旋转盘，外圈 2 texel）
     var blocker_sum = 0.0;
     var blocker_count = 0.0;
-    for (var dy = -1i; dy <= 1i; dy = dy + 1i) {
-        for (var dx = -1i; dx <= 1i; dx = dx + 1i) {
-            let o = vec2<i32>(dx, dy) * 2i;
-            let d = shadow_map_load(ci, center + o);
-            let tap_bias = (bias_m + slope_m * length(vec2f(o))) * inv_span;
-            if (d > own + tap_bias) {
-                blocker_sum = blocker_sum + d;
-                blocker_count = blocker_count + 1.0;
-            }
+    var rc = rot_c;
+    var rs = rot_s;
+    for (var i = 0u; i < SHADOW_TAPS; i = i + 1u) {
+        let r = sqrt((f32(i) + 0.5) * (1.0 / f32(SHADOW_TAPS))) * SHADOW_BLOCKER_RADIUS;
+        let off = vec2f(rc, rs) * r;
+        let d = shadow_map_load(ci, center + vec2<i32>(round(off)));
+        let tap_bias = (bias_m + slope_m * length(off)) * inv_span;
+        if (d > own + tap_bias) {
+            blocker_sum = blocker_sum + d;
+            blocker_count = blocker_count + 1.0;
         }
+        let next_c = rc * step_c - rs * step_s;
+        rs = rc * step_s + rs * step_c;
+        rc = next_c;
     }
     if (blocker_count == 0.0) {
         return 1.0;
@@ -97,17 +127,38 @@ fn shadow_pcss(ci: u32, px: vec2f, own: f32, no_l: f32) -> f32 {
     // —— 半影半径：遮挡体到接收面的米距离 × 光源尺度 → texel
     let blocker_m = (blocker_sum / blocker_count - own) / inv_span;
     let radius = clamp(blocker_m * SHADOW_PENUMBRA_SCALE / texel_world, 1.0, SHADOW_MAX_RADIUS);
-    // —— PCF 5×5，覆盖 ±radius texel
+    // —— PCF（16 tap 旋转盘，外圈 = 半影半径）
     var lit = 0.0;
-    for (var dy = -2i; dy <= 2i; dy = dy + 1i) {
-        for (var dx = -2i; dx <= 2i; dx = dx + 1i) {
-            let off = vec2f(f32(dx), f32(dy)) * (radius * 0.5);
-            let d = shadow_map_load(ci, vec2<i32>(px + off));
-            let tap_bias = (bias_m + slope_m * length(off)) * inv_span;
-            lit = lit + select(1.0, 0.0, d > own + tap_bias);
-        }
+    rc = rot_c;
+    rs = rot_s;
+    for (var i = 0u; i < SHADOW_TAPS; i = i + 1u) {
+        let r = sqrt((f32(i) + 0.5) * (1.0 / f32(SHADOW_TAPS))) * radius;
+        let off = vec2f(rc, rs) * r;
+        let d = shadow_map_load(ci, center + vec2<i32>(round(off)));
+        let tap_bias = (bias_m + slope_m * length(off)) * inv_span;
+        lit = lit + select(1.0, 0.0, d > own + tap_bias);
+        let next_c = rc * step_c - rs * step_s;
+        rs = rc * step_s + rs * step_c;
+        rc = next_c;
     }
-    return lit / 25.0;
+    return lit / f32(SHADOW_TAPS);
+}
+
+// 单级采样：投影点（法线抬升后）落出本级盒返回 -1——调用方按原语义退到下一级。
+fn shadow_cascade(ci: u32, world_pos: vec3f, n: vec3f, no_l: f32, rot: f32) -> f32 {
+    let size = shadow.map_size.x;
+    let margin = SHADOW_MAX_RADIUS + 3.0;
+    // 法线抬升（防自遮蔽）：1~3 texel，掠射面抬得多
+    let lifted = world_pos + n * (shadow.texel_world[ci] * (1.0 + 2.0 * (1.0 - no_l)));
+    let cs = shadow.cascade_view_proj[ci] * vec4f(lifted, 1.0);
+    let ndc = cs.xyz / cs.w;
+    let px = vec2f(ndc.x * 0.5 + 0.5, 0.5 - 0.5 * ndc.y) * size;
+    let inside = all(px >= vec2f(margin)) && all(px <= vec2f(size - margin))
+        && ndc.z >= 0.0 && ndc.z <= 1.0;
+    if (!inside) {
+        return -1.0;
+    }
+    return shadow_pcss(ci, px, ndc.z, no_l, rot);
 }
 
 fn shadow_visibility(world_pos: vec3f, n: vec3f) -> f32 {
@@ -124,21 +175,38 @@ fn shadow_visibility(world_pos: vec3f, n: vec3f) -> f32 {
     }
     let l = safe_light_dir(frame.dir_to_light.xyz);
     let no_l = saturate(dot(n, l));
-    let size = shadow.map_size.x;
-    let margin = SHADOW_MAX_RADIUS + 3.0;
+    let rot = shadow_rotation(world_pos);
+    // 选级 + 出盒退级：本级不可采样就试更粗一级，四级都出盒才判无影
+    var used = 4u;
+    var vis = 1.0;
     for (var c = start; c < 4u; c = c + 1u) {
-        // 法线抬升（防自遮蔽）：1~3 texel，掠射面抬得多
-        let lifted = world_pos + n * (shadow.texel_world[c] * (1.0 + 2.0 * (1.0 - no_l)));
-        let cs = shadow.cascade_view_proj[c] * vec4f(lifted, 1.0);
-        let ndc = cs.xyz / cs.w;
-        let px = vec2f(ndc.x * 0.5 + 0.5, 0.5 - 0.5 * ndc.y) * size;
-        let inside = all(px >= vec2f(margin)) && all(px <= vec2f(size - margin))
-            && ndc.z >= 0.0 && ndc.z <= 1.0;
-        if (inside) {
-            return shadow_pcss(c, px, ndc.z, no_l);
+        let v = shadow_cascade(c, world_pos, n, no_l, rot);
+        if (v >= 0.0) {
+            vis = v;
+            used = c;
+            break;
         }
     }
-    return 1.0;
+    if (used >= 4u) {
+        return 1.0;
+    }
+    // 级联淡出：只在本级覆盖范围末段（10% 带宽）与下一级混合。视深在淡出带内时
+    // 两级各采一次，smoothstep 权重从 0 到 1；投影点在本级盒内才走到这里，出盒
+    // fallback（used > start）的视深不落在本级末段，天然不参与淡出。
+    if (used + 1u < 4u) {
+        let prev = max(used, 1u) - 1u;
+        let near = select(SHADOW_NEAR_DISTANCE, shadow.splits[prev], used > 0u);
+        let far = shadow.splits[used];
+        let band = max((far - near) * SHADOW_FADE_FRACTION, 1e-3);
+        let fade = smoothstep(far - band, far, view_depth);
+        if (fade > 0.0) {
+            let next = shadow_cascade(used + 1u, world_pos, n, no_l, rot);
+            if (next >= 0.0) {
+                vis = mix(vis, next, fade);
+            }
+        }
+    }
+    return vis;
 }
 
 // 深度反投影：uv → shader-NDC（uv.y = 0.5 - 0.5·ndc.y 的逆变换）→ clip → world
