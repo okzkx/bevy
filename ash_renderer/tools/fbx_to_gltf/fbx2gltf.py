@@ -1,7 +1,7 @@
-"""FBX -> glTF 转换 CLI（Blender 转换 + ORCA 材质接线修复）。
+"""FBX -> glTF 转换 CLI（Blender 转换 + ORCA 材质接线修复 + 观感修正）。
 
 子命令:
-  convert  <in.fbx> <out.gltf>  调 Blender 转换，随后跑 ORM 接线与 alpha 语义修复
+  convert  <in.fbx> <out.gltf>  调 Blender 转换，随后跑 ORM 接线、alpha 语义与观感修正
   fix-orm  <a.gltf> [...]       只做 ORM 接线修复（已有资产可单独补跑）
 
 示例（仓库根目录）:
@@ -20,6 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import fix_gltf_look
 import fix_gltf_orm
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -61,6 +62,13 @@ def run_alpha_fix(gltf_path):
     ).returncode
 
 
+def run_look_fix(gltf_path):
+    """占位地面删除 + 玻璃半透明；任一动作失败都会抛错中止转换。"""
+    dropped = fix_gltf_look.run("drop-placeholders", [str(gltf_path)])
+    blended = fix_gltf_look.run("glass-blend", [str(gltf_path)])
+    print(f"[cli] 观感修正：删除占位 primitive {dropped} 处，改 BLEND 材质 {blended} 个")
+
+
 def cmd_convert(args):
     in_fbx = Path(args.input).resolve()
     out_gltf = Path(args.output).resolve()
@@ -88,6 +96,11 @@ def cmd_convert(args):
         print("[cli] 跳过 alpha 语义修复")
     else:
         run_alpha_fix(out_gltf)
+    if args.no_look_fix:
+        print("[cli] 跳过观感修正（占位地面删除 + 玻璃半透明）")
+    else:
+        # 必须排在 alpha 语义修复之后：alpha 修正会把 BLEND 翻回 OPAQUE，顺序反了玻璃会失效
+        run_look_fix(out_gltf)
     return 0
 
 
@@ -97,7 +110,7 @@ def cmd_fix_orm(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="FBX -> glTF 转换与 ORCA ORM 接线修复")
+    parser = argparse.ArgumentParser(description="FBX -> glTF 转换与资产修正（ORM/alpha/观感）")
     sub = parser.add_subparsers(dest="command", required=True)
 
     convert = sub.add_parser("convert", help="FBX 转 glTF 并跑后处理")
@@ -106,6 +119,9 @@ def main():
     convert.add_argument("--blender", help="Blender 可执行文件路径（默认自动查找）")
     convert.add_argument("--no-orm-fix", action="store_true", help="跳过 ORM 接线修复")
     convert.add_argument("--no-alpha-fix", action="store_true", help="跳过 alpha 语义修复")
+    convert.add_argument(
+        "--no-look-fix", action="store_true", help="跳过观感修正（占位地面删除 + 玻璃半透明）"
+    )
     convert.set_defaults(func=cmd_convert)
 
     fix_orm = sub.add_parser("fix-orm", help="只修 ORM 接线")

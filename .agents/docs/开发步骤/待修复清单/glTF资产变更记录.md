@@ -42,11 +42,32 @@ Day 命中 9 个材质，Dusk 命中 9 个（同名）；两场景的 `Emissive_
 
 ## 验证记录
 
-（施工后回填）
+施工脚本 `fix_gltf_look.py` 两个子命令各跑一遍，随后二次运行确认幂等。
 
-- JSON 记账：占位 primitive 0 处、玻璃 BLEND 材质数。
-- 运行期：`ash_renderer/ring_census` 的 alpha 模式分布、`ash_renderer/transparent_sort_check` 透明行数、日志 VUID 计数。
-- 截图（临时证据，不入库）：`.temp/` 下前后对比图路径与读图结论。
+### JSON 记账
+
+| 文件 | 删除占位 primitive | 二次运行 | 玻璃改 BLEND | 二次运行 | 材质总数 |
+|---|---|---|---|---|---|
+| EmeraldSquare_Day.gltf | 3 | 0 | 9 | 0（已是 BLEND 9） | 220 |
+| EmeraldSquare_Dusk.gltf | 3 | 0 | 9 | 0（已是 BLEND 9） | 222 |
+
+- 两文件 `WorldGrid*` primitive 均为 0；材质表 `WorldGridMaterial*` 条目各 3 个保留。
+- 9 个玻璃材质均为 `alphaMode=BLEND`、`baseColorFactor=[1,1,1,A]`（A 见上表）；`Emissive_Window*` 未改。
+- 与备份逐字段对照：除上述 primitive 与玻璃材质字段外无差异；写回保持原 LF 行尾、无 BOM。
+- 备份：`.temp/gltf_look_backup/EmeraldSquare_Day.gltf`（原 md5 `7c9946b67ad4cbbbad76298e48ef875c`）、`.temp/gltf_look_backup/EmeraldSquare_Dusk.gltf`（原 md5 `1cca71189c1e88aacc55a2660edfef31`）。
+
+### 运行期（Emerald Day）
+
+- `ash_renderer/ring_census`：2476 条实例行、217 个被引用材质槽；材质级 `alpha_mode` 分布 `OPAQUE/0=179`、`MASK/1=29`、`BLEND/2=9`；实例行分布 `0=1492`、`1=964`、`2=20`。9 个玻璃材质名全部命中 `alpha_mode=2`，`material_all_match=true`。
+- `ash_renderer/transparent_sort_check`：`transparent_rows_cpu=20`、`sorted=true`、`issues=[]`。
+- 日志（`.temp/taskA_run.log` / `.temp/taskA_run_err.log`）：`VUID` 0、`Validation Error` 0、panic 0。
+- 启动耗时：进场资产加载约 1 分 45 秒后 BRP 才应答，长于 60 秒等待窗口。
+
+### 截图与读图
+
+- 机位 1（原视角，看墙根）：改前同机位取证图 `.temp/restored.png`，改后 `.temp/taskA_cam1.png`；局部对照 `.temp/taskA_cam1_before_crop.png` / `.temp/taskA_cam1_after_crop.png`。墙根暗棋盘条带消失，同位置由 `Floor` 灰面兜底；右侧店面玻璃可透见室内阴影与框线，不再是纯黑面。
+- 机位 2（公交/窗户视角）：`.temp/taskA_cam2.png`。公交窗内仍是既有的近级阴影网纹（F29/F30，本批不处理），未见占位棋盘残留或蓝洞/黑洞。
+- 机位 3（侧面）：`.temp/taskA_cam3.png`。整体几何无破洞，透明层无排序错乱。
 
 ## 回滚
 
