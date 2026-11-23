@@ -5,7 +5,7 @@
 //! |---|---|
 //! | `core` | `device`：context、swapchain、内存与 buffer、诊断回读、队列传输与 timeline ticket；`target`：颜色/深度附件；`binding`：set 布局声明、shader ABI 表、管线布局配方；`pipeline`：图形/compute/全屏管线骨架；`record`：绑定、屏障、dispatch、全屏 pass 的录制助手 |
 //! | `resident` | 常驻 GPU 数据：mesh 大池、贴图缓存、bindless 描述符表、每帧 UBO、实例表、光源表 |
-//! | `passes` | 渲染功能，一个功能一个模块：visibility（剔除/Hi-Z/遮挡/LOD/indirect）、gbuffer、shadow、lighting、transparent、post、overlay |
+//! | `passes` | 渲染功能，一个功能一个模块：visibility（剔除/Hi-Z/遮挡/LOD/indirect）、gbuffer、shadow、lighting、transparent、post、sky、overlay |
 //! | `frame` | 帧槽与同步、整帧录制编排、帧率同步设置、着色调试模式 |
 //! | `stats` | GPU 计时、帧样本账、监控历史、egui pass 计时 |
 //!
@@ -125,6 +125,7 @@ pub use passes::shadow::cascades::{
 pub use passes::shadow::shadow_build::ShadowBuildPass;
 pub use passes::shadow::shadow_frame::{ShadowFrameDraw, ShadowPasses};
 pub use passes::shadow::shadow_map::{ShadowPipeline, ShadowTargets, ShadowWriteDraw};
+pub use passes::sky::SkySettings;
 pub use passes::transparent::{
     TransparentFrame, TransparentPasses, TransparentPipeline, TransparentTargets,
     TRANSPARENT_CAPACITY,

@@ -18,6 +18,7 @@
 //! | [`features::cluster`] | cluster 光照与透明层：灯表增删改读、cluster/透明排序对照 |
 //! | [`features::shadow`] | 阴影：开关 + 逐 cascade 标记对照 |
 //! | [`features::render_settings`] | 画面设置：Bloom/tonemap、SMAA、着色调试模式 |
+//! | [`features::sky`] | 程序化天空：参数读写（`sky_set`/`sky_stats`） |
 //! | [`features::draw`] | indirect 闭环读数与组装对照开关 |
 //! | [`features::residency`] | 驻留管理器读数与设置 |
 //! | [`features::gap`] | GPU 缺口请求读数与模式 |
@@ -80,6 +81,7 @@ use self::{
         render_settings::{bloom_set, set_render_mode, smaa_set},
         residency::{residency_set, residency_stats},
         shadow::{shadow_set, shadow_stats},
+        sky::{sky_set, sky_stats},
     },
 };
 
@@ -150,6 +152,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/bloom_set", bloom_set)
                 .with_method_main("ash_renderer/smaa_set", smaa_set)
                 .with_method_main("ash_renderer/shadow_stats", shadow_stats)
+                .with_method_main("ash_renderer/sky_set", sky_set)
+                .with_method_main("ash_renderer/sky_stats", sky_stats)
                 .with_method_main("ash_renderer/layout_contract", layout_contract),
             RemoteHttpPlugin::default().with_port(port),
         ));

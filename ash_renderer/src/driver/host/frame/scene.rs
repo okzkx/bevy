@@ -14,7 +14,7 @@ use crate::{
     common::syntax::ResultTierExt,
     render::{
         conservative_world_aabb, pack_frame_uniforms, FrameUniformTable, FrameUniformsData,
-        ImageCache, InstanceTables, MeshPool, RenderMode,
+        ImageCache, InstanceTables, MeshPool, RenderMode, SkySettings,
     },
     scene::{DrawListVerify, InstanceLedger, LodGroups, ResidencySettings},
 };
@@ -55,6 +55,8 @@ pub(super) struct SceneInput<'w, 's> {
     pub(super) ambient: Option<Res<'w, GlobalAmbientLight>>,
     /// 着色模式（AshHostPlugin 恒插入；overlay 单选钮与 BRP 写）。
     pub(super) render_mode: Res<'w, RenderMode>,
+    /// 程序化天空参数（AshHostPlugin 恒插入；天空面板与 BRP sky_set 写）。
+    pub(super) sky: Res<'w, SkySettings>,
 }
 
 /// 非透视投影的 near 兜底：级联的 near/d 视深换算只对透视投影成立，正交下
@@ -131,7 +133,8 @@ impl<'a> FrameView<'a> {
     }
 }
 
-/// 本帧槽主 UBO：相机矩阵 + 灯光 + 材质模式 + 相机世界位置（光照累积 V 向量）。
+/// 本帧槽主 UBO：相机矩阵 + 灯光 + 材质模式 + 相机世界位置（光照累积 V 向量）+
+/// 天空参数（vec3 各占一个 16B 槽，w 塞配套标量，见 `frame.wgsl`）。
 impl FrameUniformTable {
     /// impl 留在 driver 层而非 frame_uniform_table.rs：方法消费帧侧私有的
     /// FrameView/FrameLight（scene/lighting 两文件），放 render 侧会反向依赖
@@ -142,6 +145,7 @@ impl FrameUniformTable {
         view: &FrameView,
         light: &FrameLight,
         render_mode: RenderMode,
+        sky: &SkySettings,
     ) -> Result<(), BevyError> {
         self.ubo(slot)
             .write(
@@ -153,7 +157,23 @@ impl FrameUniformTable {
                     ambient_color: light.ambient_color,
                     light_color: light.light_color,
                     mode: render_mode.as_u32(),
+                    sky_enabled: u32::from(sky.enabled),
+                    sky_intensity: sky.intensity,
                     camera_pos: view.camera_pos4(),
+                    sky_zenith: [
+                        sky.zenith[0],
+                        sky.zenith[1],
+                        sky.zenith[2],
+                        sky.horizon_exponent,
+                    ],
+                    sky_horizon: [
+                        sky.horizon[0],
+                        sky.horizon[1],
+                        sky.horizon[2],
+                        sky.ground_exponent,
+                    ],
+                    sky_ground: [sky.ground[0], sky.ground[1], sky.ground[2], sky.sun_radius],
+                    sky_sun: [sky.sun_gain, sky.glow_intensity, sky.glow_falloff, 0.0],
                 }),
             )
             .or_fatal("帧 UBO 写失败，渲染链无法继续")

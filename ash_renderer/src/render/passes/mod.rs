@@ -10,6 +10,7 @@
 //! | `lighting` | 光源分簇与延迟光照合成 |
 //! | `transparent` | 透明层：挑选、排序、命令组装与前向绘制 |
 //! | `post` | 后处理：Bloom、tonemap、SMAA |
+//! | `sky` | 程序化天空参数（天空函数在 `shaders/common/sky.wgsl`） |
 //! | `overlay` | UI：overlay 管线、字体图集、UI 顶点环 |
 
 pub(crate) mod gbuffer;
@@ -17,5 +18,6 @@ pub(crate) mod lighting;
 pub(crate) mod overlay;
 pub(crate) mod post;
 pub(crate) mod shadow;
+pub(crate) mod sky;
 pub(crate) mod transparent;
 pub(crate) mod visibility;

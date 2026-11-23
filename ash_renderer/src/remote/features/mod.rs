@@ -10,3 +10,4 @@ pub(crate) mod lod;
 pub(crate) mod render_settings;
 pub(crate) mod residency;
 pub(crate) mod shadow;
+pub(crate) mod sky;
