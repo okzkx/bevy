@@ -2,7 +2,7 @@
 
 > 2026-11-20 立案（纯文档，重规划）；**2026-11-23 按 9.1 物理天空落地同步修订**（渐变天空已被物理天空替换，本段捕获源、UBO 尺寸、自检口径随之更新，见 §0.0）。对应[步骤 9 README](../README.md)、[八段拆解 §2 9.2](../施工计划：天空盒、IBL 与表面缓存全局光照八段拆解.md)与[路线图步骤 9 表](../../学习目标实现步骤.md)。本文管 9.2 段做什么、按什么顺序、验收什么；"实际做了什么"开工后另立施工记录，不回写本文。
 >
-> **当前状态：📝 施工计划已立案，未开工（2026-11-20 立案；2026-11-23 同步修订）**。
+> **当前状态：✅ 收官（2026-11-23）。八任务 9.2.0～9.2.7 全部落地，判定线 12 条全过——[施工记录](README.md#任务面板随段施工计划-1-同步)与[天空盒IBL流程](天空盒IBL流程.md)；判定线证据见 [9.2.7](9.2.7-判定线与计量.md)。本文只保留计划口径，实现取舍与实测不回写。**
 
 **一句话说明**：把 9.1 的物理天空捕获为环境 cubemap，投影 SH-L2 漫反射并预滤波高光，替换不透明与透明的常量环境项；本段不产生世界空间缓存、射线或 SCGI。
 
@@ -198,14 +198,14 @@ shaded       = light_sum + albedo · ambient_color
 
 | 任务 | 交付 | 落点 | 状态 |
 |---|---|---|---|
-| 9.2.0 常量天空开关与 UBO 扩列 | 帧 UBO **304→336**：`ibl_enabled`(304)/`ibl_mode`(308)/`ibl_intensity`(312)/pad + `sky_uniform`(320..336)；`sky_radiance` 常量分支；`SkySettings` 加 `uniform_enabled`/`uniform_radiance`；BRP `sky_uniform`；布局断言、`pack_frame_uniforms`、`identity_frame_uniforms`、`write_frame_ubo`、`frame.wgsl` 头注同步 | `frame_uniform_table.rs`、`frame.wgsl`、`sky.wgsl`、`passes/sky/mod.rs`、`remote/features/sky.rs`、`driver/host/frame/scene.rs` | ⬜ |
-| 9.2.1 环境 cubemap 捕获 | `EnvironmentCube` 资源（cube 兼容、256²×6、RGBA16F、9 mip；cube/2D-array/每 mip 视图；格式能力查询）；`sky_capture.wgsl` 从 `sky_radiance(dir, false)` 写 mip0；`sky_hash` + 0.1s 节流 + `ibl_enabled` 门控；② 段录制与全子资源屏障 | `src/render/passes/ibl/`（新）、`shaders/scene/ibl/sky_capture.wgsl`、`shaders/common/ibl.wgsl`、`core/record/barrier.rs`（子资源范围） | ⬜ |
-| 9.2.2 SH-L2 投影 | `sh_project.wgsl`：1024 Hammersley 方向、9 系数投影、`A_l` 折叠、workgroup 归约；写 9×vec4 storage buffer；两条自检写 stats buffer | `shaders/scene/ibl/sh_project.wgsl`、`src/render/passes/ibl/`、`shaders/common/ibl.wgsl` | ⬜ |
-| 9.2.3 漫反射注入 | composite + transparent 环境项替换为 `diffuseColor/π·E(n)·intensity`；IBL set 建集并绑进两条管线；IBL 关逐位回退 | `gbuffer_composite.wgsl`、`transparent_forward.wgsl`、`composite_pipeline.rs`、`transparent_pipeline.rs`、`driver/host/init.rs`（布局登记）、`render/frame/record.rs`（⑤ 段绑定） | ⬜ |
-| 9.2.4 高光预滤波与 DFG LUT | `prefilter.wgsl`（GGX mip 1..8）+ `brdf_lut.wgsl`（128²，一次性）；粗糙度→mip；mip 视图 | `shaders/scene/ibl/prefilter.wgsl`、`brdf_lut.wgsl`、`src/render/passes/ibl/` | ⬜ |
-| 9.2.5 高光注入 | split-sum：`prefiltered(R) · (F0·A + B)`；composite + transparent；太阳高光仍走直接光；`energyCompensation` 裁决 | `shaders/common/ibl.wgsl`、两个着色 pass | ⬜ |
-| 9.2.6 调试/BRP/管线收口 | `ibl_set`/`ibl_stats`（新 `src/remote/features/ibl.rs` + `remote/mod.rs` 登记）；mode 9/10；`RenderMode::ALL` 9→11；`RenderFeatures` 新增 IBL 束字段 | `src/remote/features/ibl.rs`、`render/frame/render_features.rs`、`render_mode.rs` | ⬜ |
-| 9.2.7 判定线与计量 | IBL 关基线、`sky_uniform` 均匀天空自检、太阳排除负例、金属/透明/室内对照、捕获耗时、回归矩阵、施工记录 | 记录文件随施工产出 | ⬜ |
+| 9.2.0 常量天空开关与 UBO 扩列 | 帧 UBO **304→336**：`ibl_enabled`(304)/`ibl_mode`(308)/`ibl_intensity`(312)/pad + `sky_uniform`(320..336)；`sky_radiance` 常量分支；`SkySettings` 加 `uniform_enabled`/`uniform_radiance`；BRP `sky_uniform`；布局断言、`pack_frame_uniforms`、`identity_frame_uniforms`、`write_frame_ubo`、`frame.wgsl` 头注同步 | `frame_uniform_table.rs`、`frame.wgsl`、`sky.wgsl`、`passes/sky/mod.rs`、`remote/features/sky.rs`、`driver/host/frame/scene.rs` | ✅ |
+| 9.2.1 环境 cubemap 捕获 | `EnvironmentCube` 资源（cube 兼容、256²×6、RGBA16F、9 mip；cube/2D-array/每 mip 视图；格式能力查询）；`sky_capture.wgsl` 从 `sky_radiance(dir, false)` 写 mip0；`sky_hash` + 0.1s 节流 + `ibl_enabled` 门控；② 段录制与全子资源屏障 | `src/render/passes/ibl/`（新）、`shaders/scene/ibl/sky_capture.wgsl`、`shaders/common/ibl.wgsl`、`core/record/barrier.rs`（子资源范围） | ✅ |
+| 9.2.2 SH-L2 投影 | `sh_project.wgsl`：1024 Hammersley 方向、9 系数投影、`A_l` 折叠、workgroup 归约；写 9×vec4 storage buffer；两条自检写 stats buffer | `shaders/scene/ibl/sh_project.wgsl`、`src/render/passes/ibl/`、`shaders/common/ibl.wgsl` | ✅ |
+| 9.2.3 漫反射注入 | composite + transparent 环境项替换为 `diffuseColor/π·E(n)·intensity`；IBL set 建集并绑进两条管线；IBL 关逐位回退 | `gbuffer_composite.wgsl`、`transparent_forward.wgsl`、`composite_pipeline.rs`、`transparent_pipeline.rs`、`driver/host/init.rs`（布局登记）、`render/frame/record.rs`（⑤ 段绑定） | ✅ |
+| 9.2.4 高光预滤波与 DFG LUT | `prefilter.wgsl`（GGX mip 1..8）+ `brdf_lut.wgsl`（128²，一次性）；粗糙度→mip；mip 视图 | `shaders/scene/ibl/prefilter.wgsl`、`brdf_lut.wgsl`、`src/render/passes/ibl/` | ✅ |
+| 9.2.5 高光注入 | split-sum：`prefiltered(R) · (F0·A + B)`；composite + transparent；太阳高光仍走直接光；`energyCompensation` 裁决 | `shaders/common/ibl.wgsl`、两个着色 pass | ✅ |
+| 9.2.6 调试/BRP/管线收口 | `ibl_set`/`ibl_stats`（新 `src/remote/features/ibl.rs` + `remote/mod.rs` 登记）；mode 9/10；`RenderMode::ALL` 9→11；`RenderFeatures` 新增 IBL 束字段 | `src/remote/features/ibl.rs`、`render/frame/render_features.rs`、`render_mode.rs` | ✅ |
+| 9.2.7 判定线与计量 | IBL 关基线、`sky_uniform` 均匀天空自检、太阳排除负例、金属/透明/室内对照、捕获耗时、回归矩阵、施工记录 | 记录文件随施工产出 | ✅ [9.2.7](9.2.7-判定线与计量.md) |
 
 ### 任务间依赖
 

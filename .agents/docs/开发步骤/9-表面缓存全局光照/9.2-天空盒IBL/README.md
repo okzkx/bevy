@@ -6,7 +6,7 @@
 
 **一句话说明**：把 9.1 的物理天空捕获为环境 cubemap，投影 SH-L2 漫反射并预滤波高光，替换不透明与透明的常量环境项；本段不产生世界空间缓存、射线或 SCGI。
 
-**当前状态：📝 施工计划已立案，未开工（2026-11-20 立案；2026-11-23 按物理天空落地同步修订，[施工计划：天空盒IBL](施工计划：天空盒IBL.md)）**。
+**当前状态：✅ 收官（2026-11-23）。八任务 9.2.0～9.2.7 全部落地，判定线 12 条全过；施工记录见下表，功能流程走读见[天空盒IBL流程](天空盒IBL流程.md)。**
 
 ## 代码落点（提案）
 
@@ -26,14 +26,14 @@
 
 | 任务 | 交付（详见段施工计划） | 状态 |
 |---|---|---|
-| 9.2.0 常量天空开关与 UBO 扩列 | 帧 UBO 304→336；`sky_radiance` 常量分支；`sky_uniform` BRP；布局/打包/头注四处同步 | ⬜ |
-| 9.2.1 环境 cubemap 捕获 | 256²×6 RGBA16F、cube 兼容、9 级 mip；从 `sky_radiance(dir, false)` 捕获（只排圆盘，米氏峰保留）；`sky_hash`（含 100 m 量化海拔）+ 0.1s 节流 + `ibl_enabled` 门控；cube/2D-array/每 mip 视图；全子资源屏障 | ⬜ |
-| 9.2.2 SH-L2 投影 | cubemap → 9 系数 × RGB（折叠余弦卷积）；storage buffer；两条自检（l=0 归一化、`E_sh` 对暴力积分） | ⬜ |
-| 9.2.3 漫反射注入 | 不透明/透明环境项替换为 `diffuseColor/π · E(n) · ibl_intensity`；IBL 关时逐位回退；IBL set 建集并绑进两条管线 | ⬜ |
-| 9.2.4 高光预滤波与 DFG LUT | GGX 预滤波 mip 1..8（mip 0 保留锐利源）+ 128² DFG LUT（或解析近似）；粗糙度→mip | ⬜ |
-| 9.2.5 高光注入 | split-sum：`prefiltered(R) · (F0·A + B)`；太阳高光仍走直接光 | ⬜ |
-| 9.2.6 调试/BRP/管线收口 | `ibl_set`/`ibl_stats`；mode 9/10 调试视图；`RenderMode::ALL` 9→11 | ⬜ |
-| 9.2.7 判定线与计量 | IBL 关基线、`sky_uniform` 均匀天空自检、太阳排除负例、金属/透明/室内对照、捕获成本读数、回归矩阵 | ⬜ |
+| 9.2.0 常量天空开关与 UBO 扩列 | 帧 UBO 304→336；`sky_radiance` 常量分支；`sky_uniform` BRP；布局/打包/头注四处同步 | ✅ [记录](9.2.0-常量天空开关与帧UBO扩列.md) |
+| 9.2.1 环境 cubemap 捕获 | 256²×6 RGBA16F、cube 兼容、9 级 mip；从 `sky_radiance(dir, false)` 捕获（只排圆盘，米氏峰保留）；`sky_hash`（含 100 m 量化海拔）+ 0.1s 节流 + `ibl_enabled` 门控；cube/2D-array/每 mip 视图；全子资源屏障 | ✅ [记录](9.2.1-环境cubemap捕获.md) |
+| 9.2.2 SH-L2 投影 | cubemap → 9 系数 × RGB（折叠余弦卷积）；storage buffer；两条自检（l=0 归一化、`E_sh` 对暴力积分） | ✅ [记录](9.2.2-SH-L2投影与自检.md) |
+| 9.2.3 漫反射注入 | 不透明/透明环境项替换为 `diffuseColor/π · E(n) · ibl_intensity`；IBL 关时逐位回退；IBL set 建集并绑进两条管线 | ✅ [记录](9.2.3-漫反射注入与IBL描述符集.md) |
+| 9.2.4 高光预滤波与 DFG LUT | GGX 预滤波 mip 1..8（mip 0 保留锐利源）+ 128² DFG LUT（或解析近似）；粗糙度→mip | ✅ [记录](9.2.4-高光预滤波与DFG-LUT.md) |
+| 9.2.5 高光注入 | split-sum：`prefiltered(R) · (F0·A + B)`；太阳高光仍走直接光 | ✅ [记录](9.2.5-高光注入.md) |
+| 9.2.6 调试/BRP/管线收口 | `ibl_set`/`ibl_stats`；mode 9/10 调试视图；`RenderMode::ALL` 9→11 | ✅ [记录](9.2.6-调试视图与BRP.md) |
+| 9.2.7 判定线与计量 | IBL 关基线、`sky_uniform` 均匀天空自检、太阳排除负例、金属/透明/室内对照、捕获成本读数、回归矩阵 | ✅ [记录](9.2.7-判定线与计量.md) |
 
 ## 材料清单
 
