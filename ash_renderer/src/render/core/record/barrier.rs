@@ -125,7 +125,10 @@ impl ImageBarrier {
         }
     }
 
-    /// 深度附件写完，转成片元着色器可采样（SHADER_READ_ONLY）。
+    /// 深度附件写完，转成"着色器可采样"（SHADER_READ_ONLY）。
+    ///
+    /// 下游消费侧含 compute：9.6 的 estimation 在 compute 里采样 CSM 级联（低档 PCF），
+    /// 所以 dst_stage 是 FRAGMENT｜COMPUTE（只放宽，不多做屏障）。
     pub(crate) fn depth_attachment_to_sampled(image: vk::Image) -> Self {
         Self {
             image,
@@ -134,7 +137,8 @@ impl ImageBarrier {
             new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             src_stage: vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
             src_access: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER,
+            dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER
+                | vk::PipelineStageFlags::COMPUTE_SHADER,
             dst_access: vk::AccessFlags::SHADER_READ,
             base_mip: 0,
             level_count: 1,

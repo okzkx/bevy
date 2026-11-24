@@ -8,7 +8,7 @@
 //! 内存口径（起步档 Res 32 / 4 级 / 池 65536）：
 //! - cell 双表：2,097,152 × 4B × 2 = 16 MiB
 //! - patch 表：几何 2 MiB + 辐照度两份 8 MiB + 统计 3 MiB + 反向指针 256 KiB
-//! - ring 48B + 计数 64B × 2 槽 + GI UBO 256B × 2 槽
+//! - ring 48B + 计数 64B × 2 槽 + GI UBO 288B × 2 槽
 //!
 //! 与计划 §0.2 的差异（施工记录里钉明）：PatchStatistics 是 48B 而不是 32B——两份 vec4
 //! 之后还有 4 个 u32（state/request/update_count/heartbeat），32B 只够放两个；
@@ -60,7 +60,10 @@ pub(crate) static GI_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
 );
 
 /// 每帧 GI UBO 字节数（字段偏移见 [`SurfaceCacheUniformsLayout`] 的静态断言）。
-pub const GI_UBO_SIZE: u64 = 256;
+///
+/// 9.5 是 256B（`prev_view_proj 64 + target_pos 16 + volume 16 + 级联 128 + ring 16 +
+/// frame 16`）已排满；9.6 追加两个 vec4（估计参数 u32 组与 f32 组）→ 288B。
+pub const GI_UBO_SIZE: u64 = 288;
 /// patch 几何记录：位置 vec4 + 法线 vec4。
 pub const PATCH_GEOMETRY_SIZE: u64 = 32;
 /// patch 辐照度记录：l0 / l1x / l1y / l1z 各一个 vec4。
@@ -90,6 +93,16 @@ pub const COUNTER_DEFRAG_MOVED: usize = 3;
 pub const COUNTER_VIEW_HOLES: usize = 4;
 pub const COUNTER_VIEW_DEVIATION: usize = 5;
 pub const COUNTER_VIEW_COVERED: usize = 6;
+/// 9.6 估计计数（8 号留空，9 号起）：发出的射线数。
+pub const COUNTER_EST_RAYS: usize = 9;
+/// 9.6：命中射线条数。
+pub const COUNTER_EST_HITS: usize = 10;
+/// 9.6：bounce 分配请求条数。
+pub const COUNTER_EST_BOUNCE_REQUESTS: usize = 11;
+/// 9.6：本帧参与估计的 patch 数。
+pub const COUNTER_EST_PATCHES: usize = 12;
+/// 9.6：本帧样本总数（含预热倍率），用于读数换算平均样本档。
+pub const COUNTER_EST_SAMPLES: usize = 13;
 
 /// 每帧 GI UBO 的宿主侧数据（`draw_frame` 组装，[`pack_surface_cache_uniforms`] 打包）。
 pub struct SurfaceCacheUniformsData {
@@ -114,6 +127,18 @@ pub struct SurfaceCacheUniformsData {
     pub evict_age: u32,
     pub bounce_enabled: u32,
     pub update_max: u32,
+    /// 9.6：每 patch 每帧样本档（预算换算后的实际值，宿主写）。
+    pub samples: u32,
+    /// 9.6：预热倍率（`update_count == 0 && rank == 0` 的 patch 用 `samples × warmup` 条）。
+    pub warmup: u32,
+    /// 9.6：多跳开关（命中点查缓存读上一帧）。
+    pub multi_bounce: u32,
+    /// 9.6：光源侧采样清单长度（每帧条数）。
+    pub light_samples: u32,
+    /// 9.6：方差引导时域混合的短时滞后（0.75～0.95）。
+    pub short_hysteresis: f32,
+    /// 9.6：自发光三角形强度倍数。
+    pub emissive_intensity: f32,
 }
 
 /// [`SurfaceCacheUniformsData`] 的 WGSL uniform 布局镜像：静态断言钉偏移。
@@ -125,6 +150,8 @@ struct SurfaceCacheUniformsLayout {
     cascade_offsets: [[i32; 4]; MAX_CASCADES],
     ring: [u32; 4],
     frame: [u32; 4],
+    estimation: [u32; 4],
+    estimation_f: [f32; 4],
 }
 
 const _: () = {
@@ -134,6 +161,8 @@ const _: () = {
     assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, cascade_offsets) == 96);
     assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, ring) == 224);
     assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, frame) == 240);
+    assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, estimation) == 256);
+    assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, estimation_f) == 272);
     assert!(std::mem::size_of::<SurfaceCacheUniformsLayout>() == GI_UBO_SIZE as usize);
 };
 
@@ -171,6 +200,14 @@ pub fn pack_surface_cache_uniforms(d: &SurfaceCacheUniformsData) -> [u8; GI_UBO_
     put_u32(&mut out, 244, d.evict_age);
     put_u32(&mut out, 248, d.bounce_enabled);
     put_u32(&mut out, 252, d.update_max);
+    put_u32(&mut out, 256, d.samples);
+    put_u32(&mut out, 260, d.warmup);
+    put_u32(&mut out, 264, d.multi_bounce);
+    put_u32(&mut out, 268, d.light_samples);
+    put_f32(&mut out, 272, d.short_hysteresis);
+    put_f32(&mut out, 276, d.emissive_intensity);
+    put_f32(&mut out, 280, 0.0);
+    put_f32(&mut out, 284, 0.0);
     out
 }
 
@@ -191,6 +228,12 @@ fn identity_uniforms() -> SurfaceCacheUniformsData {
         evict_age: 240,
         bounce_enabled: 0,
         update_max: 32,
+        samples: 2,
+        warmup: 4,
+        multi_bounce: 1,
+        light_samples: 128,
+        short_hysteresis: 0.85,
+        emissive_intensity: 1.0,
     }
 }
 
@@ -506,6 +549,16 @@ impl SurfaceCacheTables {
     /// patch 统计表。
     pub fn patch_statistics(&mut self) -> &mut GpuBuffer {
         &mut self.patch_statistics
+    }
+
+    /// 辐照度第 0 份（ping-pong 的 A；9.6 的估计写 `frame&1` 选中的那一份）。
+    pub fn patch_irradiance0(&mut self) -> &mut GpuBuffer {
+        &mut self.patch_irradiance0
+    }
+
+    /// 辐照度第 1 份（ping-pong 的 B）。
+    pub fn patch_irradiance1(&mut self) -> &mut GpuBuffer {
+        &mut self.patch_irradiance1
     }
 }
 

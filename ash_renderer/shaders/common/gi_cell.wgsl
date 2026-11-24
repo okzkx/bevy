@@ -53,7 +53,7 @@ struct PatchStatistics {
     heartbeat: u32,
 }
 
-// 每帧 GI 参数（宿主每帧整份写；256B，偏移见 surface_cache.rs 的静态断言表）。
+// 每帧 GI 参数（宿主每帧整份写；288B，偏移见 surface_cache.rs 的静态断言表）。
 struct GiUniforms {
     // 上一帧 view_proj（9.6 的种子重投影用；9.5 只写入不使用）。
     prev_view_proj: mat4x4f,
@@ -65,8 +65,12 @@ struct GiUniforms {
     cascade_offsets: array<vec4i, MAX_CASCADES>,
     // x = 本帧整理的波数；y = 法线来源（0 平面 / 1 着色）；z = 播种开关；w = 保留。
     ring: vec4u,
-    // x = 帧号；y = 淘汰年龄门限（帧）；z = bounce 开关（9.5 恒 0）；w = updateMax（9.6 用）。
+    // x = 帧号；y = 淘汰年龄门限（帧）；z = bounce 开关；w = updateMax（9.6 用）。
     frame: vec4u,
+    // 9.6 估计参数（u32 组）：x = 样本档；y = 预热倍率；z = 多跳开关；w = 光源清单长度。
+    estimation: vec4u,
+    // 9.6 估计参数（f32 组）：x = 短时滞后；y = 自发光强度倍数；zw 保留。
+    estimation_f: vec4f,
 }
 
 // ---- 整数与体素算术 ----

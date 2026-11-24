@@ -13,9 +13,10 @@ use bevy::prelude::*;
 
 use crate::common::syntax::ResultTierExt;
 use crate::render::{
-    alloc_grid, eviction_groups, gi_cascade_offsets, pack_alloc_push, pack_view_push,
-    scrolling_groups, DescSet, GiAllocDraw, GiFrameDraw, GiPipelines, GiSettings, GiViewDraw,
-    SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE, MAX_CASCADES, UPDATE_MAX,
+    alloc_grid, estimation_groups, eviction_groups, gi_cascade_offsets, pack_alloc_push,
+    pack_view_push, scrolling_groups, DescSet, GiAllocDraw, GiEstimationDraw, GiFrameDraw,
+    GiPipelines, GiSettings, GiViewDraw, SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE,
+    MAX_CASCADES, UPDATE_MAX,
 };
 
 use super::scene::FrameView;
@@ -68,6 +69,11 @@ pub(super) fn prepare_gi(
     gbuffer_set: DescSet,
     ibl_set: DescSet,
     ldr: (vk::ImageView, vk::Image, vk::Extent2D),
+    instance_set: DescSet,
+    shadow_set: DescSet,
+    texture_set: DescSet,
+    ray_set: Option<DescSet>,
+    instance_count: u32,
 ) -> Result<Option<GiFrameDraw>, BevyError> {
     let settings = &*gi.settings;
     if !settings.enabled {
@@ -100,8 +106,16 @@ pub(super) fn prepare_gi(
         seed_enabled: u32::from(settings.seed),
         frame_index,
         evict_age: EVICT_AGE,
-        bounce_enabled: 0,
+        // bounce 分配开关（frame.z）：只有估计真的在跑时才算"多跳"，否则 9.5 的淘汰
+        // 分支（rank 0→1、本轮不淘汰）会因为 multi_bounce 默认开而被误触发。
+        bounce_enabled: u32::from(settings.estimation && settings.multi_bounce),
         update_max: UPDATE_MAX,
+        samples: settings.samples.max(1),
+        warmup: settings.warmup.max(1),
+        multi_bounce: u32::from(settings.estimation && settings.multi_bounce),
+        light_samples: settings.light_samples,
+        short_hysteresis: settings.short_hysteresis,
+        emissive_intensity: settings.emissive_intensity,
     };
     gi.tables
         .write_uniforms(slot, &data)
@@ -130,6 +144,25 @@ pub(super) fn prepare_gi(
         }
     });
     let cover = settings.cover_enabled().then(|| pipelines.cover());
+    // 9.6 estimation：估计开关 + 有实例（0 实例时 TLAS 从未构建，绝不能打射线）+
+    // 光线求交开着（关闭时求交集不存在，管线也不建）。
+    let estimation = if settings.estimation && instance_count > 0 {
+        match (ray_set, pipelines.estimation()) {
+            (Some(ray_set), Some(pass)) => Some(GiEstimationDraw {
+                pass,
+                groups: estimation_groups(config.capacity),
+                frame_set,
+                gi_set,
+                instance_set,
+                ray_set,
+                shadow_set,
+                texture_set,
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let marker = settings.markers_enabled().then(|| pipelines.marker());
     let view_draw = (cover.is_some() || marker.is_some()).then(|| GiViewDraw {
         cover,
@@ -151,6 +184,7 @@ pub(super) fn prepare_gi(
         defrag: pipelines.defrag(),
         defrag_waves: waves,
         alloc,
+        estimation,
         gi_set,
         view: view_draw,
     }))

@@ -194,6 +194,14 @@ pub(crate) fn draw_frame(
         post.smaa.ldr_image(slot),
         post.smaa.ldr_extent(),
     );
+    // 9.6 estimation 的六集之一：光线求交集（复用 9.4 的 per-slot 集；光线求交关时没有集）。
+    let gi_ray_set = ray_tracing
+        .settings
+        .as_ref()
+        .filter(|s| s.enabled)
+        .and_then(|_| ray_tracing.targets.as_ref().map(|targets| targets.set(slot)));
+    // 在场实例行数（= TLAS 实例数）：0 实例帧不录 estimation（未构建的 TLAS 不能打射线）
+    let indirect_count = assembly.slots.len() as u32;
     let gi_draw = prepare_gi(
         gi,
         gi_local,
@@ -204,6 +212,11 @@ pub(crate) fn draw_frame(
         gbuffer_sampled_set,
         scene.ibl_env.frame_set(),
         ldr_target,
+        scene.instance_tables.frame_set(slot),
+        shadow.targets.frame_set(slot),
+        gpu.tables.descriptor_set(),
+        gi_ray_set,
+        indirect_count,
     )?;
 
     // 四环写入：模型增量 + 材质全量 + 在场全量 + LOD 表增量，都落本帧槽的环
@@ -275,7 +288,6 @@ pub(crate) fn draw_frame(
     )?;
 
     // indirect 命令组装：在场行数 = GPU 命令条数；空场 = None（场景绘制整段跳过）。
-    let indirect_count = assembly.slots.len() as u32;
     let indirect_dispatch = create_indirect_draw(
         indirect,
         indirect_count,

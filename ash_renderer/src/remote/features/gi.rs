@@ -14,10 +14,12 @@ use crate::remote::common::{
 use crate::render::{
     gi_cell_bucket, gi_cell_cascade, gi_cell_storage, gi_direction_bucket, gi_storage_to_volume,
     gi_volume_world_center, gi_voxel_size, Context, FramePool, GiSetLayout, GiSettings, GpuTimer,
-    SurfaceCacheConfig, SurfaceCacheTables, COUNTER_ALLOC, COUNTER_DEFRAG_MOVED, COUNTER_FAILED,
-    COUNTER_FREED, COUNTER_VIEW_COVERED, COUNTER_VIEW_DEVIATION, COUNTER_VIEW_HOLES,
-    GI_COUNTER_WORDS, GI_UBO_SIZE, INVALID_PATCH, RING_ACTIVE, RING_CONFIGS, RING_CONFIG_WORDS,
-    RING_FLIP, RING_WATERMARK,
+    SurfaceCacheConfig, SurfaceCacheTables, COUNTER_ALLOC, COUNTER_DEFRAG_MOVED,
+    COUNTER_EST_BOUNCE_REQUESTS, COUNTER_EST_HITS, COUNTER_EST_PATCHES, COUNTER_EST_RAYS,
+    COUNTER_EST_SAMPLES, COUNTER_FAILED, COUNTER_FREED, COUNTER_VIEW_COVERED,
+    COUNTER_VIEW_DEVIATION, COUNTER_VIEW_HOLES, GI_COUNTER_WORDS, GI_UBO_SIZE, INVALID_PATCH,
+    PATCH_GEOMETRY_SIZE, PATCH_IRRADIANCE_SIZE, PATCH_STATISTICS_SIZE, RING_ACTIVE, RING_CONFIGS,
+    RING_CONFIG_WORDS, RING_FLIP, RING_WATERMARK,
 };
 
 /// `gi_set` 参数：所有字段可省（缺省不动）；规格四件只允许在关态改。
@@ -35,6 +37,30 @@ struct GiSetParams {
     seed: Option<bool>,
     #[serde(default)]
     defrag_waves: Option<u32>,
+    /// 9.6 估计开关。
+    #[serde(default)]
+    estimation: Option<bool>,
+    /// 9.6 每 patch 每帧样本档（1/2/4/8）。
+    #[serde(default)]
+    samples: Option<u32>,
+    /// 9.6 预热倍率（1/2/4/8）。
+    #[serde(default)]
+    warmup: Option<u32>,
+    /// 9.6 方差引导时域混合的短时滞后（0.5～0.99）。
+    #[serde(default)]
+    short_hysteresis: Option<f32>,
+    /// 9.6 多跳开关。
+    #[serde(default)]
+    multi_bounce: Option<bool>,
+    /// 9.6 每帧射线预算。
+    #[serde(default)]
+    budget: Option<u32>,
+    /// 9.6 自发光强度倍数。
+    #[serde(default)]
+    emissive_intensity: Option<f32>,
+    /// 9.6 光源侧采样清单长度。
+    #[serde(default)]
+    light_samples: Option<u32>,
     /// 最粗级立方外沿（米）。
     #[serde(default)]
     size: Option<f32>,
@@ -54,6 +80,15 @@ fn settings_json(s: &GiSettings) -> Value {
         "normal_source": s.normal_source,
         "seed": s.seed,
         "defrag_waves": s.defrag_waves,
+        // 9.6 估计参数（面板与 BRP 同源）
+        "estimation": s.estimation,
+        "samples": s.samples,
+        "warmup": s.warmup,
+        "short_hysteresis": s.short_hysteresis,
+        "multi_bounce": s.multi_bounce,
+        "budget": s.budget,
+        "emissive_intensity": s.emissive_intensity,
+        "light_samples": s.light_samples,
         "config": {
             "voxel_min": s.config.voxel_min,
             "res": s.config.res,
@@ -86,6 +121,24 @@ pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRes
     }
     if p.defrag_waves.is_some_and(|w| w > 16) {
         return Err(invalid_params("defrag_waves 越界（0..=16）"));
+    }
+    if p.samples.is_some_and(|v| !matches!(v, 1 | 2 | 4 | 8)) {
+        return Err(invalid_params("samples 只取 1/2/4/8"));
+    }
+    if p.warmup.is_some_and(|v| !matches!(v, 1 | 2 | 4 | 8)) {
+        return Err(invalid_params("warmup 只取 1/2/4/8"));
+    }
+    if p.short_hysteresis.is_some_and(|v| !(0.5..=0.99).contains(&v)) {
+        return Err(invalid_params("short_hysteresis 越界（0.5..=0.99）"));
+    }
+    if p.budget.is_some_and(|v| v == 0) {
+        return Err(invalid_params("budget 必须 > 0"));
+    }
+    if p.light_samples.is_some_and(|v| v == 0 || v > 1024) {
+        return Err(invalid_params("light_samples 越界（1..=1024）"));
+    }
+    if p.emissive_intensity.is_some_and(|v| v < 0.0) {
+        return Err(invalid_params("emissive_intensity 必须 ≥ 0"));
     }
     let current = *res::<GiSettings>(world)?;
     let config_change =
@@ -149,6 +202,30 @@ pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRes
     if let Some(waves) = p.defrag_waves {
         settings.defrag_waves = waves;
     }
+    if let Some(estimation) = p.estimation {
+        settings.estimation = estimation;
+    }
+    if let Some(samples) = p.samples {
+        settings.samples = samples;
+    }
+    if let Some(warmup) = p.warmup {
+        settings.warmup = warmup;
+    }
+    if let Some(hysteresis) = p.short_hysteresis {
+        settings.short_hysteresis = hysteresis;
+    }
+    if let Some(multi_bounce) = p.multi_bounce {
+        settings.multi_bounce = multi_bounce;
+    }
+    if let Some(budget) = p.budget {
+        settings.budget = budget;
+    }
+    if let Some(intensity) = p.emissive_intensity {
+        settings.emissive_intensity = intensity;
+    }
+    if let Some(light_samples) = p.light_samples {
+        settings.light_samples = light_samples;
+    }
     let effective = *settings;
     Ok(settings_json(&effective))
 }
@@ -208,6 +285,14 @@ pub(crate) fn gi_stats(In(_params): In<Option<Value>>, world: &mut World) -> Brp
             "view_holes": counters[COUNTER_VIEW_HOLES],
             "view_deviation": counters[COUNTER_VIEW_DEVIATION],
             "view_covered": counters[COUNTER_VIEW_COVERED],
+        },
+        // 9.6 估计读数（估计关的帧全 0）：判定线要"射线数 / 命中数 / 参与 patch 数"
+        "estimation": {
+            "rays": counters[COUNTER_EST_RAYS],
+            "hits": counters[COUNTER_EST_HITS],
+            "bounce_requests": counters[COUNTER_EST_BOUNCE_REQUESTS],
+            "patches": counters[COUNTER_EST_PATCHES],
+            "samples": counters[COUNTER_EST_SAMPLES],
         },
         "patches": active,
         "cells": config.cell_count(),
@@ -403,5 +488,140 @@ pub(crate) fn gi_census(In(params): In<Option<Value>>, world: &mut World) -> Brp
             "bucket_ok": bucket_ok,
         },
         "rows": rows,
+    }))
+}
+
+/// `gi_estimate_probe` 参数：`patch`（池槽号，缺省 0）或 `ring`（ring 内序号，缺省不用）。
+#[derive(serde::Deserialize, Default)]
+struct GiEstimateProbeParams {
+    #[serde(default)]
+    patch: Option<u32>,
+    #[serde(default)]
+    ring: Option<u32>,
+}
+
+/// `ash_renderer/gi_estimate_probe`（9.6）：单条 patch 的几何/统计/两份辐照度对账。
+///
+/// 判定线要"单点对账"（多跳色渗、自发光 A/B、收敛），靠视图只能看颜色，所以这里回读数。
+/// 诊断路径：先 `device_wait_idle` 取一致快照（人工低频调用，不在每帧链上）。
+/// 两份辐照度都给出 + `parity`：本帧写的是 `patch_irradiance{parity}`，另一份是上一帧。
+///
+/// # Errors
+/// GI 关 / 资源缺席 / 参数越界 / 读回失败。
+#[system]
+pub(crate) fn gi_estimate_probe(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let p: GiEstimateProbeParams = parse_params_or_default(params)?;
+    let settings = world
+        .get_resource::<GiSettings>()
+        .map_or_else(GiSettings::default, |s| *s);
+    if !settings.enabled {
+        return Ok(json!({ "enabled": false }));
+    }
+    {
+        let ctx = res::<Context>(world)?;
+        unsafe { ctx.device.device_wait_idle() }.map_err(internal_err("估计对账前排空失败"))?;
+    }
+    let slot = res::<FramePool>(world)?.current_index();
+    let config = res::<SurfaceCacheTables>(world)?.config();
+    let patch = if let Some(ring_index) = p.ring {
+        let (flip, count) = {
+            let mut tables = res_mut::<SurfaceCacheTables>(world)?;
+            let ring = words(&read_buffer(
+                tables.ring(),
+                RING_CONFIG_WORDS * 4,
+                "GI ring 配置读失败",
+            )?);
+            (ring[RING_FLIP] as usize, 0u32.max(ring[RING_CONFIGS + 1]))
+        };
+        let _ = count;
+        let start = {
+            let mut tables = res_mut::<SurfaceCacheTables>(world)?;
+            let ring = words(&read_buffer(
+                tables.ring(),
+                RING_CONFIG_WORDS * 4,
+                "GI ring 配置读失败",
+            )?);
+            ring[RING_CONFIGS + flip * 4]
+        };
+        (start + ring_index) % config.capacity.max(1)
+    } else {
+        p.patch.unwrap_or(0)
+    };
+    if patch >= config.capacity {
+        return Err(invalid_params(format!(
+            "patch 越界（池容量 {}）",
+            config.capacity
+        )));
+    }
+    let (cell, geometry, statistics, irradiance0, irradiance1, parity) = {
+        let mut tables = res_mut::<SurfaceCacheTables>(world)?;
+        let mut raw_cell = [0u8; 4];
+        tables
+            .patch_cell()
+            .read(u64::from(patch) * 4, &mut raw_cell)
+            .map_err(internal_err("patch→cell 读失败"))?;
+        let mut geometry = [0u8; PATCH_GEOMETRY_SIZE as usize];
+        tables
+            .patch_geometry()
+            .read(u64::from(patch) * PATCH_GEOMETRY_SIZE, &mut geometry)
+            .map_err(internal_err("patch 几何读失败"))?;
+        let mut statistics = [0u8; PATCH_STATISTICS_SIZE as usize];
+        tables
+            .patch_statistics()
+            .read(u64::from(patch) * PATCH_STATISTICS_SIZE, &mut statistics)
+            .map_err(internal_err("patch 统计读失败"))?;
+        let mut irradiance0 = [0u8; PATCH_IRRADIANCE_SIZE as usize];
+        tables
+            .patch_irradiance0()
+            .read(u64::from(patch) * PATCH_IRRADIANCE_SIZE, &mut irradiance0)
+            .map_err(internal_err("patch 辐照度 0 读失败"))?;
+        let mut irradiance1 = [0u8; PATCH_IRRADIANCE_SIZE as usize];
+        tables
+            .patch_irradiance1()
+            .read(u64::from(patch) * PATCH_IRRADIANCE_SIZE, &mut irradiance1)
+            .map_err(internal_err("patch 辐照度 1 读失败"))?;
+        let ubo = read_buffer(tables.ubo(slot), GI_UBO_SIZE as usize, "GI UBO 读失败")?;
+        (
+            u32::from_le_bytes(raw_cell),
+            geometry,
+            statistics,
+            irradiance0,
+            irradiance1,
+            u32_at(&ubo, 240)? & 1,
+        )
+    };
+    let irradiance_json = |raw: &[u8; PATCH_IRRADIANCE_SIZE as usize]| -> BrpResult {
+        Ok(json!({
+            "l0": [f32_at(raw, 0)?, f32_at(raw, 4)?, f32_at(raw, 8)?],
+            "l1x": [f32_at(raw, 16)?, f32_at(raw, 20)?, f32_at(raw, 24)?],
+            "l1y": [f32_at(raw, 32)?, f32_at(raw, 36)?, f32_at(raw, 40)?],
+            "l1z": [f32_at(raw, 48)?, f32_at(raw, 52)?, f32_at(raw, 56)?],
+        }))
+    };
+    Ok(json!({
+        "enabled": true,
+        "patch": patch,
+        "alive": cell != INVALID_PATCH,
+        "cell": if cell == INVALID_PATCH { json!(null) } else { json!(cell) },
+        "geometry": {
+            "position": [f32_at(&geometry, 0)?, f32_at(&geometry, 4)?, f32_at(&geometry, 8)?],
+            "normal": [f32_at(&geometry, 16)?, f32_at(&geometry, 20)?, f32_at(&geometry, 24)?],
+        },
+        "statistics": {
+            "mean": [f32_at(&statistics, 0)?, f32_at(&statistics, 4)?, f32_at(&statistics, 8)?],
+            "variance": [f32_at(&statistics, 16)?, f32_at(&statistics, 20)?, f32_at(&statistics, 24)?],
+            "state": u32_at(&statistics, 32)?,
+            "rank": u32_at(&statistics, 32)? & 0xFF,
+            "request": u32_at(&statistics, 36)?,
+            "update_count": u32_at(&statistics, 40)?,
+            "heartbeat": u32_at(&statistics, 44)?,
+        },
+        // 两份都给出：a = 第 0 份、b = 第 1 份。估计每帧只写其中一份（`frame&1`），
+        // 所以**必有一份与 `statistics.mean` 逐位相等**（那是最后一帧写入的 l0），
+        // 另一份是更早一帧的结果。`parity` 是 UBO 里的提示值，可能比最后一帧早一拍
+        //（UBO 按帧槽写、读的是当前槽），对账请以"与 mean 相等的那一份"为准。
+        "parity_hint": parity,
+        "irradiance_a": irradiance_json(&irradiance0)?,
+        "irradiance_b": irradiance_json(&irradiance1)?,
     }))
 }

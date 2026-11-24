@@ -9,8 +9,8 @@ use crate::render::core::binding::set_layout::SetLayoutDesc;
 use crate::render::passes::gbuffer::gbuffer_pipeline::GBUFFER_WRITE_PIPELINE;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
 use crate::render::passes::gi::{
-    DEFRAG_PIPELINE, EVICTION_PIPELINE, PATCH_ALLOC_PIPELINE, PATCH_MARKER_PIPELINE,
-    PATCH_VIEW_PIPELINE, SCROLLING_PIPELINE,
+    DEFRAG_PIPELINE, ESTIMATION_PIPELINE, EVICTION_PIPELINE, PATCH_ALLOC_PIPELINE,
+    PATCH_MARKER_PIPELINE, PATCH_VIEW_PIPELINE, SCROLLING_PIPELINE,
 };
 use crate::render::passes::ibl::{
     BRDF_LUT_PIPELINE, GLOBAL_PROBE_PIPELINE, IBL_CAPTURE_SET_DESC, IBL_DFG_SET_DESC,
@@ -95,6 +95,8 @@ pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
     &PATCH_ALLOC_PIPELINE,
     &PATCH_VIEW_PIPELINE,
     &PATCH_MARKER_PIPELINE,
+    // 9.6 估计：只在光线求交支持的机器上建（登记表恒列，契约测试按清单核对）
+    &ESTIMATION_PIPELINE,
 ];
 
 /// 宿主声明并建出的全部 set 布局。

@@ -204,8 +204,9 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     let lod_pass = LodPass::new(&ctx, &layouts)?;
     let cluster_build_pass = ClusterBuildPass::new(&ctx, &layouts)?;
     let transparent_passes = TransparentPasses::new(&ctx, &layouts)?;
-    // 表面缓存六条管线（回收三件 + 播种 + 调试视图两形态）
-    let gi_pipelines = GiPipelines::new(&ctx, &layouts)?;
+    // 表面缓存七条管线（回收三件 + 播种 + 估计 + 调试视图两形态）；estimation 含
+    // RayQueryKHR，只在光线求交支持的机器上建
+    let gi_pipelines = GiPipelines::new(&ctx, &layouts, ray_scene.is_some())?;
     // 光线求交管线：只在设备支持时创建（光线求交集布局已登记）
     let ray_tracing_pipelines = match &ray_scene {
         Some(_) => Some(RayTracingPipelines::new(&ctx, &layouts)?),
