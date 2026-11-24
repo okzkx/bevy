@@ -32,12 +32,22 @@ struct FrameDumpParams {
 #[system]
 pub(crate) fn frame_dump(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: FrameDumpParams = parse_params(params, "params 缺失：需要 path（写 .ppm）")?;
-    let slot = p.slot.unwrap_or(0) as usize;
+    let slot = check_slot(p.slot.unwrap_or(0) as usize)?;
+    dump_ldr_frame(world, &p.path, slot)
+}
+
+/// 槽号越界检查（`frame_dump` 与 `gi_dump` 共用）。
+pub(crate) fn check_slot(slot: usize) -> Result<usize, bevy::remote::BrpError> {
     if slot >= MAX_FRAMES_IN_FLIGHT {
         return Err(invalid_params(format!(
             "slot {slot} 越界（帧槽 0..{MAX_FRAMES_IN_FLIGHT}）"
         )));
     }
+    Ok(slot)
+}
+
+/// 读回 LDR 后链目标并写 PPM（`frame_dump` 与 `gi_dump` 共用同一条读回通道）。
+pub(crate) fn dump_ldr_frame(world: &mut World, path: &str, slot: usize) -> BrpResult {
     let (Some(ctx), Some(smaa)) = (
         world.get_resource::<Context>(),
         world.get_resource::<SmaaTargets>(),
@@ -55,9 +65,9 @@ pub(crate) fn frame_dump(In(params): In<Option<Value>>, world: &mut World) -> Br
     for texel in rgba.as_chunks::<4>().0 {
         ppm.extend_from_slice(&texel[..3]);
     }
-    std::fs::write(&p.path, &ppm).map_err(|e| internal_err("写 PPM 失败")(e))?;
+    std::fs::write(path, &ppm).map_err(|e| internal_err("写 PPM 失败")(e))?;
     Ok(json!({
-        "path": p.path,
+        "path": path,
         "width": width,
         "height": height,
         "slot": slot,
