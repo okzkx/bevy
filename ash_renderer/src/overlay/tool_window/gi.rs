@@ -149,6 +149,12 @@ impl GiPage<'_> {
                 .fixed_decimals(0),
         );
         ui.add(
+            egui::Slider::new(&mut gi.denoise_passes, 0..=4)
+                .text("去噪遍数（3×3，步长 1/2/2/3）")
+                .fixed_decimals(0),
+        );
+        ui.checkbox(&mut gi.upsample_bilinear, "上采样退回纯双线性（A/B）");
+        ui.add(
             egui::Slider::new(&mut gi.temporal_smoothing, 0.0..=1.0)
                 .text("时域平滑度")
                 .fixed_decimals(2),

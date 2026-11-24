@@ -14,14 +14,15 @@ use bevy::prelude::*;
 use crate::common::syntax::ResultTierExt;
 use crate::render::{
     alloc_grid, bounce_alloc_groups, emissive_build_groups, estimation_groups, eviction_groups,
-    gi_cascade_offsets, light_sampling_groups, pack_alloc_push, pack_emissive_build_push,
-    pack_light_sampling_push, pack_screen_gather_push, pack_spatial_filter_push,
-    pack_temporal_filter_push, pack_view_push, plan_estimation_budget, scrolling_groups,
-    spatial_filter_groups, DescSet, GiAllocDraw, GiBounceAllocDraw, GiEmissiveBuildDraw,
-    GiEstimationDraw, GiFrameDraw, GiLightSampleDraw, GiPipelines, GiScreenGatherDraw, GiSettings,
-    GiSpatialFilterDraw, GiTemporalFilterDraw, GiViewDraw, LightRecord, LightTable, ScgiTargets,
-    SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE, GI_BOUNCE_REQUEST_CAPACITY,
-    MAX_CASCADES, UPDATE_MAX,
+    gi_cascade_offsets, light_sampling_groups, pack_alloc_push, pack_denoise_push,
+    pack_emissive_build_push, pack_light_sampling_push, pack_screen_gather_push,
+    pack_spatial_filter_push, pack_temporal_filter_push, pack_upsample_push, pack_view_push,
+    plan_estimation_budget, scrolling_groups, spatial_filter_groups, upsample_groups, DescSet,
+    GiAllocDraw, GiBounceAllocDraw, GiDenoiseDraw, GiEmissiveBuildDraw, GiEstimationDraw,
+    GiFrameDraw, GiLightSampleDraw, GiPipelines, GiScreenGatherDraw, GiSettings,
+    GiSpatialFilterDraw, GiTemporalFilterDraw, GiUpsampleDraw, GiViewDraw, LightRecord, LightTable,
+    ScgiTargets, SurfaceCacheTables, SurfaceCacheUniformsData, DENOISE_STEPS, EVICT_AGE,
+    GI_BOUNCE_REQUEST_CAPACITY, MAX_CASCADES, UPDATE_MAX,
 };
 
 use super::scene::FrameView;
@@ -317,6 +318,46 @@ pub(super) fn prepare_gi(
     if screen_gather.is_some() {
         gi.scgi.mark_written();
     }
+    // 9.7.5 去噪与上采样：跟着查表走。去噪每遍换一次描述符集（P0→P1、P1→P0 交替），
+    // 遍数 0 时上采样直接读 P0。
+    let denoise = screen_gather.as_ref().map_or_else(Vec::new, |_| {
+        let low = gi.scgi.low_extent();
+        (0..settings.denoise_passes)
+            .map(|k| GiDenoiseDraw {
+                pass: pipelines.denoise(),
+                push: pack_denoise_push(
+                    low,
+                    extent,
+                    DENOISE_STEPS[k as usize % DENOISE_STEPS.len()],
+                ),
+                groups: alloc_grid(extent).1,
+                frame_set,
+                gbuffer_set,
+                target_set: if k % 2 == 0 {
+                    gi.scgi.set()
+                } else {
+                    gi.scgi.set_reverse()
+                },
+            })
+            .collect()
+    });
+    let upsample = screen_gather.as_ref().map(|_| {
+        let low = gi.scgi.low_extent();
+        // 去噪遍数为奇数时最终结果在 P1（反方向集），偶数时在 P0（主方向集）
+        let target_set = if settings.denoise_passes % 2 == 1 {
+            gi.scgi.set_reverse()
+        } else {
+            gi.scgi.set()
+        };
+        GiUpsampleDraw {
+            pass: pipelines.upsample(),
+            push: pack_upsample_push(low, extent, u32::from(settings.upsample_bilinear)),
+            groups: upsample_groups(extent),
+            frame_set,
+            gbuffer_set,
+            target_set,
+        }
+    });
     let marker = settings.markers_enabled().then(|| pipelines.marker());
     let view_draw = (cover.is_some() || marker.is_some()).then(|| GiViewDraw {
         cover,
@@ -345,6 +386,8 @@ pub(super) fn prepare_gi(
         spatial_filter,
         temporal_filter,
         screen_gather,
+        denoise,
+        upsample,
         gi_set,
         view: view_draw,
     }))

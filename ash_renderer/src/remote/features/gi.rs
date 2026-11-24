@@ -71,6 +71,12 @@ struct GiSetParams {
     /// 9.7.4 每 1/4 像素的查表样本数（1..3）。
     #[serde(default)]
     lookup_samples: Option<u32>,
+    /// 9.7.5 1/4 目标去噪遍数（0..=4）。
+    #[serde(default)]
+    denoise_passes: Option<u32>,
+    /// 9.7.5 上采样退回纯双线性（A/B）。
+    #[serde(default)]
+    upsample_bilinear: Option<bool>,
     /// 9.7.3 patch 级时域后滤波开关。
     #[serde(default)]
     temporal_filter: Option<bool>,
@@ -108,6 +114,8 @@ fn settings_json(s: &GiSettings) -> Value {
         "spatial_filter": s.spatial_filter,
         "spatial_radius": s.spatial_radius,
         "lookup_samples": s.lookup_samples,
+        "denoise_passes": s.denoise_passes,
+        "upsample_bilinear": s.upsample_bilinear,
         "temporal_filter": s.temporal_filter,
         "temporal_smoothing": s.temporal_smoothing,
         "config": {
@@ -173,6 +181,9 @@ pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRes
     }
     if p.lookup_samples.is_some_and(|v| !(1..=3).contains(&v)) {
         return Err(invalid_params("lookup_samples 越界（1..=3）"));
+    }
+    if p.denoise_passes.is_some_and(|v| v > 4) {
+        return Err(invalid_params("denoise_passes 越界（0..=4）"));
     }
     let current = *res::<GiSettings>(world)?;
     let config_change =
@@ -274,6 +285,12 @@ pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRes
     }
     if let Some(lookup_samples) = p.lookup_samples {
         settings.lookup_samples = lookup_samples;
+    }
+    if let Some(denoise_passes) = p.denoise_passes {
+        settings.denoise_passes = denoise_passes;
+    }
+    if let Some(upsample_bilinear) = p.upsample_bilinear {
+        settings.upsample_bilinear = upsample_bilinear;
     }
     let effective = *settings;
     Ok(settings_json(&effective))

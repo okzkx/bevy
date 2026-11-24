@@ -120,8 +120,10 @@ pub use passes::gi::filtering::{
     GI_TEMPORAL_FILTER_PUSH_SIZE,
 };
 pub use passes::gi::screen_gather::{
-    low_extent as scgi_low_extent, pack_screen_gather_push, GiScreenGatherDraw, ScgiTargets,
-    GI_SCREEN_GATHER_PUSH_SIZE, SCGI_L0_FORMAT, SCGI_L1_FORMAT,
+    low_extent as scgi_low_extent, pack_denoise_push, pack_screen_gather_push, pack_upsample_push,
+    upsample_groups, GiDenoiseDraw, GiScreenGatherDraw, GiUpsampleDraw, ScgiTargets, DENOISE_STEPS,
+    GI_DENOISE_PUSH_SIZE, GI_SCREEN_GATHER_PUSH_SIZE, GI_UPSAMPLE_PUSH_SIZE,
+    SCGI_IRRADIANCE_FORMAT, SCGI_L0_FORMAT, SCGI_L1_FORMAT,
 };
 pub use passes::gi::view::{pack_view_push, GiViewDraw, GI_VIEW_PUSH_SIZE};
 pub use passes::gi::volume::{
