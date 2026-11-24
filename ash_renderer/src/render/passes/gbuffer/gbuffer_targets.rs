@@ -90,6 +90,11 @@ pub struct GBufferTargets {
     extent: vk::Extent2D,
     slots: Vec<GBufferSlot>,
     /// 采样集布局（合成、Bloom prefilter 与 present tonemap 管线的 layout 素材）。
+    ///
+    /// **生命周期不变量：进程级，只建一次，resize 不重建。** 管线只在 init 建一次，
+    /// pipeline layout 里存的是这个句柄；若 resize 时销毁重建，已建管线就悬空
+    /// （`VUID-vkCmdBindPipeline-pipeline-parameter`，2026-11-24 现场踩到）。
+    /// 尺寸相关的是 pool/sets/附件与采样器，它们随 resize 重建。
     set_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     /// 采样集，与帧槽一一对应。
@@ -211,8 +216,14 @@ impl GBufferTargets {
             return Ok(());
         }
         unsafe { ctx.device.device_wait_idle() }?;
+        let layout_before = self.set_layout;
         self.drop_resources();
         self.build(ctx, extent, depth_views)?;
+        // 不变量：resize 只换 pool/sets/附件与采样器，布局必须还是同一句柄
+        debug_assert_eq!(
+            layout_before, self.set_layout,
+            "resize 不得重建 G-buffer 采样集布局（已建管线的 pipeline layout 会悬空）"
+        );
         info!(
             "G-buffer 附件随 swapchain 重建: {}x{} × {} 帧槽",
             extent.width,
@@ -251,7 +262,8 @@ impl GBufferTargets {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let (set_layout, pool, sets, sampler) = build_sampling(ctx, extent, &slots, depth_views)?;
+        let (set_layout, pool, sets, sampler) =
+            build_sampling(ctx, extent, &slots, depth_views, self.set_layout)?;
         self.extent = extent;
         self.slots = slots;
         self.set_layout = set_layout;
@@ -261,19 +273,14 @@ impl GBufferTargets {
         Ok(())
     }
 
+    /// 拆掉尺寸相关资源（附件、描述符池与集、采样器）。**布局不在这里销毁**——
+    /// 它是进程级的形状，管线引用它（见 `set_layout` 字段的不变量）。
     fn drop_resources(&mut self) {
         self.slots.clear();
         self.sets.clear();
         if self.pool != vk::DescriptorPool::null() {
             unsafe { self.device.destroy_descriptor_pool(self.pool, None) };
             self.pool = vk::DescriptorPool::null();
-        }
-        if self.set_layout != vk::DescriptorSetLayout::null() {
-            unsafe {
-                self.device
-                    .destroy_descriptor_set_layout(self.set_layout, None)
-            };
-            self.set_layout = vk::DescriptorSetLayout::null();
         }
         if self.sampler != vk::Sampler::null() {
             unsafe { self.device.destroy_sampler(self.sampler, None) };
@@ -286,15 +293,25 @@ impl Drop for GBufferTargets {
     fn drop(&mut self) {
         // 不等 GPU：重建路径的等待在 rebuild，退出排空在 teardown
         self.drop_resources();
+        if self.set_layout != vk::DescriptorSetLayout::null() {
+            unsafe {
+                self.device
+                    .destroy_descriptor_set_layout(self.set_layout, None)
+            };
+            self.set_layout = vk::DescriptorSetLayout::null();
+        }
     }
 }
 
-/// 采样集建链：布局 + pool + 每帧槽一集 + 共享线性采样器。半建失败逐层回收（全有或全无）。
+/// 采样集建链：pool + 每帧槽一集 + 共享线性采样器；布局**只在首次创建**，
+/// `existing` 非空（resize 路径）时直接复用——布局是进程级的形状，管线引用它。
+/// 半建失败逐层回收（全有或全无），且只回收本次真正创建的东西。
 fn build_sampling(
     ctx: &Context,
     extent: vk::Extent2D,
     slots: &[GBufferSlot],
     depth_views: &[vk::ImageView],
+    existing: vk::DescriptorSetLayout,
 ) -> Result<(
     vk::DescriptorSetLayout,
     vk::DescriptorPool,
@@ -302,9 +319,14 @@ fn build_sampling(
     vk::Sampler,
 )> {
     let device = &ctx.device;
-    let set_layout = GBUFFER_SAMPLED_SET_DESC.create(device)?;
+    let created = existing == vk::DescriptorSetLayout::null();
+    let set_layout = if created {
+        GBUFFER_SAMPLED_SET_DESC.create(device)?
+    } else {
+        existing
+    };
     let result = unsafe { build_sampling_inner(ctx, extent, slots, depth_views, set_layout) };
-    if result.is_err() {
+    if result.is_err() && created {
         unsafe { device.destroy_descriptor_set_layout(set_layout, None) };
     }
     result
@@ -313,7 +335,7 @@ fn build_sampling(
 /// 采样集建链后半段（布局已建）：失败路径回收 pool/sets/sampler。
 ///
 /// # Safety
-/// `set_layout` 须刚创建成功且未销毁。
+/// `set_layout` 须是有效布局（本次新建或从上一轮复用），且调用期间不被销毁。
 unsafe fn build_sampling_inner(
     ctx: &Context,
     extent: vk::Extent2D,
