@@ -8,9 +8,11 @@
 // - 4..8 调试显示：matparam 单通道灰度直出（metallic/roughness/AO/reflectance）
 //   + reverse-Z 深度线性化灰度
 // - 9/10 IBL 漫反射/高光贡献直出（IBL 关时黑）
+// - 11 GlobalProbe 桶可视化：法线选桶 → 桶中心方向着色（9.3 的映射取证）
 //
-// 环境项：IBL 开 = SH-L2 漫反射 + split-sum 高光（**替换**旧常量项，不叠加）；
-// IBL 关 = 步骤 8 原文 `albedo · ambient_color`，逐位一致（回归硬线）。
+// 环境项：IBL 开 = 漫反射（SH-L2 或 GlobalProbe 16 桶，按 frame.ibl_mode）+ split-sum
+// 高光（**替换**旧常量项，不叠加）；IBL 关 = 步骤 8 原文 `albedo · ambient_color`，
+// 逐位一致（回归硬线）。
 //
 // 背景判定：reverse-Z 深度清 0 = 远平面 → 程序化天空（sky_enabled 关时回清屏色）。
 enable wgpu_binding_array;
@@ -39,11 +41,13 @@ enable wgpu_binding_array;
 @group(3) @binding(3) var shadow_map2: texture_2d<f32>;
 @group(3) @binding(4) var shadow_map3: texture_2d<f32>;
 // set4 环境光照：b0 预滤波 cube（全 mip）、b1 采样器（cube 与 LUT 共用）、b2 DFG LUT、
-// b3 SH-L2 系数（9×vec4，已折叠余弦卷积的 A_l）
+// b3 SH-L2 系数（9×vec4，已折叠余弦卷积的 A_l）、b4 GlobalProbe 16 桶（16×4 vec4，
+// 已折叠基函数常数；求值式只剩 l0 + l1·n）
 @group(4) @binding(0) var env_cube: texture_cube<f32>;
 @group(4) @binding(1) var ibl_sampler: sampler;
 @group(4) @binding(2) var dfg_lut: texture_2d<f32>;
 @group(4) @binding(3) var<storage, read> sh_coeffs: array<vec4f, 9>;
+@group(4) @binding(4) var<storage, read> probe_buckets: array<vec4f, 64>;
 
 const MODE_SHADING: u32 = 0u;   // 宿主侧名为 FRAME_MODE_LAMBERT
 const MODE_UNLIT: u32 = 1u;
@@ -56,6 +60,7 @@ const MODE_REFLECTANCE: u32 = 7u;
 const MODE_DEPTH: u32 = 8u;
 const MODE_IBL_DIFFUSE: u32 = 9u;
 const MODE_IBL_SPECULAR: u32 = 10u;
+const MODE_PROBE_BUCKETS: u32 = 11u;
 
 // 清屏色（线性域），须与宿主侧 CLEAR_COLOR 同值
 const CLEAR_COLOR: vec3f = vec3f(0.02, 0.06, 0.14);
@@ -253,8 +258,20 @@ fn ibl_environmental(
     let n = ibl_normal(n_in, v);
     let no_v = clampNoV(saturate(dot(n, v)));
     let p_ibl = ibl_roughness(n, perceptual_roughness);
-    // E(n) 已含余弦卷积（A_l 折叠在系数里），Lambert BRDF 只再乘 1/π
-    terms.diffuse = pixel.diffuseColor * Fd_Lambert() * sh_irradiance(n, sh_coeffs)
+    // 漫反射编码二选一（9.3）：0 = SH-L2、1 = GlobalProbe 16 桶。两条都吃同一个
+    // 翻转后的法线（9.2.8 口径），否则双面几何上 A/B 比的是两条法线。
+    var irradiance = sh_irradiance(n, sh_coeffs);
+    if (frame.ibl_mode == 1u) {
+        let base = direction_to_bucket_index(n, 4u) * 4u;
+        irradiance = probe16_eval(
+            n,
+            probe_buckets[base].xyz,
+            probe_buckets[base + 1u].xyz,
+            probe_buckets[base + 2u].xyz,
+            probe_buckets[base + 3u].xyz);
+    }
+    // E(n) 已含余弦卷积与基函数常数，Lambert BRDF 只再乘 1/π
+    terms.diffuse = pixel.diffuseColor * Fd_Lambert() * irradiance
         * frame.ibl_intensity;
     // 坑：粗糙度必须用 perceptualRoughness（matparam.b），pixel.roughness 是 α = p²，
     // 直接喂 mip 会把粗糙面算得过锐
@@ -348,6 +365,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     }
     if frame.mode == MODE_IBL_SPECULAR {
         return vec4f(ibl.specular * EXPOSURE, 1.0);
+    }
+    if frame.mode == MODE_PROBE_BUCKETS {
+        // 桶可视化（9.3）：法线选桶 → 桶中心方向 RGB 编码，用来肉眼核对映射/接缝
+        let center = bucket_index_to_direction(direction_to_bucket_index(n, 4u), 4u);
+        return vec4f(center * 0.5 + vec3f(0.5), 1.0);
     }
     let ambient = albedo.rgb * frame.ambient_color.rgb;
     let environment = select(ambient, ibl.diffuse + ibl.specular, frame.ibl_enabled != 0u);

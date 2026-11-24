@@ -11,8 +11,8 @@
 //!
 //! 烘焙链（脏帧才录，`ibl_enabled=false` 整段不录）：
 //! `sky_capture`（mip0）→ `sh_project`（1024 方向）→ `sh_reduce`（9 系数）→
-//! `sh_check`（两条自检）→ `prefilter`（mip1..8，逐级 dispatch）；`brdf_lut` 只在
-//! 首次生成一次。
+//! `sh_check`（两条自检）→ `global_probe`（16 桶 L1）→ `prefilter`（mip1..8，逐级
+//! dispatch）；`brdf_lut` 只在首次生成一次。
 
 use std::time::Instant;
 
@@ -66,6 +66,13 @@ pub const IBL_SH_BUFFER_SIZE: u64 = 9 * 16;
 pub const IBL_STATS_FLOATS: usize = 16;
 pub const IBL_STATS_BUFFER_SIZE: u64 = IBL_STATS_FLOATS as u64 * 4;
 
+/// GlobalProbe 桶网格边长：4×4 = 16 桶（与 shader 的 `BUCKET_RESOLUTION` 同值）。
+pub const IBL_PROBE_RESOLUTION: u32 = 4;
+/// GlobalProbe 桶数（= resolution²）。
+pub const IBL_PROBE_BUCKETS: u32 = IBL_PROBE_RESOLUTION * IBL_PROBE_RESOLUTION;
+/// 桶缓冲：每桶 4 个 vec4（l0 / l1x / l1y / l1z，w 未用）= 16×64B = 1KB。
+pub const IBL_PROBE_BUFFER_SIZE: u64 = IBL_PROBE_BUCKETS as u64 * 4 * 16;
+
 /// 两次捕获的最小间隔（秒）：TOD 连续变化时 IBL 允许滞后这个窗口。
 const MIN_CAPTURE_INTERVAL_SECS: f32 = 0.1;
 /// 捕获 hash 里相机海拔的量化步长（米）：地面漫游永不触发重烘，飞行按需。
@@ -117,6 +124,16 @@ pub(crate) static IBL_SH_CHECK_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     ],
 );
 
+/// GlobalProbe 投影：b0 = mip0 cube 采样、b1 = 采样器、b2 = 16 桶 buffer。
+pub(crate) static IBL_GLOBAL_PROBE_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
+    "ibl_global_probe",
+    &[
+        BindingDesc::new(0, DescKind::SampledImage, CS),
+        BindingDesc::new(1, DescKind::Sampler, CS),
+        BindingDesc::new(2, DescKind::StorageBuffer, CS),
+    ],
+);
+
 /// 预滤波：b0 = mip0 cube 采样、b1 = 采样器、b2 = 目标 mip 的 2D-array storage 视图。
 pub(crate) static IBL_PREFILTER_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "ibl_prefilter",
@@ -134,7 +151,8 @@ pub(crate) static IBL_DFG_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
 );
 
 /// 合成/透明前向读的 IBL 集（两条管线的 group 4）：b0 = 预滤波 cube（全 mip）、
-/// b1 = 采样器（cube 与 LUT 共用）、b2 = DFG LUT、b3 = SH 系数（9×vec4）。
+/// b1 = 采样器（cube 与 LUT 共用）、b2 = DFG LUT、b3 = SH 系数（9×vec4）、
+/// b4 = GlobalProbe 16 桶（16×4 vec4 = 1KB，§9.3）。
 pub(crate) static IBL_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "ibl",
     &[
@@ -142,6 +160,7 @@ pub(crate) static IBL_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
         BindingDesc::new(1, DescKind::Sampler, FS),
         BindingDesc::new(2, DescKind::SampledImage, FS),
         BindingDesc::new(3, DescKind::StorageBuffer, FS),
+        BindingDesc::new(4, DescKind::StorageBuffer, FS),
     ],
 );
 
@@ -182,6 +201,16 @@ pub(crate) static SH_CHECK_PIPELINE: PipelineDesc = PipelineDesc {
     shader: &shader_abi::SH_CHECK,
     entries: &[c"cs_main"],
     sets: &[&IBL_SH_CHECK_SET_DESC],
+    push: None,
+    color_formats: &[],
+    depth_format: None,
+};
+
+pub(crate) static GLOBAL_PROBE_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "ibl_global_probe",
+    shader: &shader_abi::GLOBAL_PROBE,
+    entries: &[c"cs_main"],
+    sets: &[&IBL_GLOBAL_PROBE_SET_DESC],
     push: None,
     color_formats: &[],
     depth_format: None,
@@ -330,6 +359,8 @@ pub struct IblEnvironment {
     sampler: vk::Sampler,
     sh: GpuBuffer,
     stats: GpuBuffer,
+    /// GlobalProbe 16 桶（1KB；投影写、合成/透明与 BRP 读）。
+    probe: GpuBuffer,
     /// 捕获链的中间缓冲（只被 SH 投影/归约/自检读写；持有即保活）。
     #[expect(
         dead_code,
@@ -346,6 +377,7 @@ pub struct IblEnvironment {
     sh_project: Option<ComputePipeline>,
     sh_reduce: Option<ComputePipeline>,
     sh_check: Option<ComputePipeline>,
+    global_probe: Option<ComputePipeline>,
     prefilter: Option<ComputePipeline>,
     brdf_lut: Option<ComputePipeline>,
     /// 各内部 set 的布局（管线的素材，也是 Drop 时要销毁的句柄）。
@@ -353,6 +385,7 @@ pub struct IblEnvironment {
     project_layout: vk::DescriptorSetLayout,
     reduce_layout: vk::DescriptorSetLayout,
     check_layout: vk::DescriptorSetLayout,
+    probe_layout: vk::DescriptorSetLayout,
     prefilter_layout: vk::DescriptorSetLayout,
     dfg_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
@@ -360,6 +393,7 @@ pub struct IblEnvironment {
     project_set: vk::DescriptorSet,
     reduce_set: vk::DescriptorSet,
     check_set: vk::DescriptorSet,
+    probe_set: vk::DescriptorSet,
     prefilter_sets: Vec<vk::DescriptorSet>,
     dfg_set: vk::DescriptorSet,
     frame_layout: vk::DescriptorSetLayout,
@@ -369,7 +403,7 @@ pub struct IblEnvironment {
 }
 
 impl IblEnvironment {
-    /// 建环境 cubemap、DFG LUT、SH 缓冲、六条 compute 管线与全部描述符集。
+    /// 建环境 cubemap、DFG LUT、SH/stats/probe 缓冲、七条 compute 管线与全部描述符集。
     ///
     /// # Errors
     /// 格式能力不足（缺 `STORAGE_IMAGE`/`SAMPLED_IMAGE`/线性过滤）、设备装不下 5 个
@@ -484,6 +518,13 @@ impl IblEnvironment {
             IBL_STATS_BUFFER_SIZE,
             BufferRole::DeviceStorage,
         )?;
+        // GlobalProbe 16 桶：投影写、帧集/BRP 读（DeviceStorage 带 TRANSFER_SRC）
+        let probe = GpuBuffer::create(
+            &device,
+            contract,
+            IBL_PROBE_BUFFER_SIZE,
+            BufferRole::DeviceStorage,
+        )?;
         let partial = GpuBuffer::create(
             &device,
             contract,
@@ -502,6 +543,7 @@ impl IblEnvironment {
         let project_layout = IBL_SH_PROJECT_SET_DESC.create(&device)?;
         let reduce_layout = IBL_SH_REDUCE_SET_DESC.create(&device)?;
         let check_layout = IBL_SH_CHECK_SET_DESC.create(&device)?;
+        let probe_layout = IBL_GLOBAL_PROBE_SET_DESC.create(&device)?;
         let prefilter_layout = IBL_PREFILTER_SET_DESC.create(&device)?;
         let dfg_layout = IBL_DFG_SET_DESC.create(&device)?;
         let internal = SetLayouts::new([
@@ -509,6 +551,7 @@ impl IblEnvironment {
             SetLayout::new(&IBL_SH_PROJECT_SET_DESC, project_layout),
             SetLayout::new(&IBL_SH_REDUCE_SET_DESC, reduce_layout),
             SetLayout::new(&IBL_SH_CHECK_SET_DESC, check_layout),
+            SetLayout::new(&IBL_GLOBAL_PROBE_SET_DESC, probe_layout),
             SetLayout::new(&IBL_PREFILTER_SET_DESC, prefilter_layout),
             SetLayout::new(&IBL_DFG_SET_DESC, dfg_layout),
         ])?;
@@ -516,6 +559,7 @@ impl IblEnvironment {
         let sh_project = ComputePipeline::new(ctx, &SH_PROJECT_PIPELINE, &internal)?;
         let sh_reduce = ComputePipeline::new(ctx, &SH_REDUCE_PIPELINE, &internal)?;
         let sh_check = ComputePipeline::new(ctx, &SH_CHECK_PIPELINE, &internal)?;
+        let global_probe = ComputePipeline::new(ctx, &GLOBAL_PROBE_PIPELINE, &internal)?;
         let prefilter = ComputePipeline::new(ctx, &PREFILTER_PIPELINE, &internal)?;
         let brdf_lut = ComputePipeline::new(ctx, &BRDF_LUT_PIPELINE, &internal)?;
 
@@ -526,13 +570,14 @@ impl IblEnvironment {
             (&IBL_SH_PROJECT_SET_DESC, 1),
             (&IBL_SH_REDUCE_SET_DESC, 1),
             (&IBL_SH_CHECK_SET_DESC, 1),
+            (&IBL_GLOBAL_PROBE_SET_DESC, 1),
             (&IBL_PREFILTER_SET_DESC, prefilter_count),
             (&IBL_DFG_SET_DESC, 1),
         ]);
         let pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
-                    .max_sets(MAX_FRAMES_IN_FLIGHT as u32 + 4 + prefilter_count)
+                    .max_sets(MAX_FRAMES_IN_FLIGHT as u32 + 5 + prefilter_count)
                     .pool_sizes(&pool_sizes),
                 None,
             )
@@ -554,6 +599,7 @@ impl IblEnvironment {
         let project_set = allocate(project_layout, 1)?[0];
         let reduce_set = allocate(reduce_layout, 1)?[0];
         let check_set = allocate(check_layout, 1)?[0];
+        let probe_set = allocate(probe_layout, 1)?[0];
         let prefilter_sets = allocate(prefilter_layout, prefilter_count as usize)?;
         let dfg_set = allocate(dfg_layout, 1)?[0];
 
@@ -589,6 +635,15 @@ impl IblEnvironment {
                 .buffer(0, radiance.buffer(), 0, RADIANCE_BUFFER_SIZE)
                 .buffer(1, sh.buffer(), 0, IBL_SH_BUFFER_SIZE)
                 .buffer(2, stats.buffer(), 0, IBL_STATS_BUFFER_SIZE);
+            writer.submit(&device)?;
+        }
+        {
+            // GlobalProbe 投影：只读 mip0（GENERAL，与 SH 投影同源），写 16 桶 buffer
+            let mut writer = DescriptorWriter::new(&IBL_GLOBAL_PROBE_SET_DESC, probe_set);
+            writer
+                .image(0, views.mip0, vk::ImageLayout::GENERAL)
+                .sampler(1, sampler)
+                .buffer(2, probe.buffer(), 0, IBL_PROBE_BUFFER_SIZE);
             writer.submit(&device)?;
         }
         for (index, set) in prefilter_sets.iter().enumerate() {
@@ -633,15 +688,17 @@ impl IblEnvironment {
                 .image(0, views.full, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .sampler(1, sampler)
                 .image(2, dfg.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .buffer(3, sh.buffer(), 0, IBL_SH_BUFFER_SIZE);
+                .buffer(3, sh.buffer(), 0, IBL_SH_BUFFER_SIZE)
+                .buffer(4, probe.buffer(), 0, IBL_PROBE_BUFFER_SIZE);
             writer.submit(&device)?;
         }
 
         info!(
             "环境光照资源就绪: cube {IBL_CUBE_SIZE}²×{CUBE_LAYERS} 面 ×{IBL_CUBE_MIPS} 级（mip0 锐利源，\
-             1..8 预滤波）、DFG LUT {DFG_LUT_SIZE}²、SH {IBL_SH_BUFFER_SIZE}B；六条 compute 管线 \
-             （capture/project/reduce/check/prefilter/brdf_lut）；捕获节流 {MIN_CAPTURE_INTERVAL_SECS}s；\
-             设备 maxBoundDescriptorSets = {max_sets}（合成/透明前向用到 5 组）"
+             1..8 预滤波）、DFG LUT {DFG_LUT_SIZE}²、SH {IBL_SH_BUFFER_SIZE}B、GlobalProbe \
+             {IBL_PROBE_BUCKETS} 桶 {IBL_PROBE_BUFFER_SIZE}B；七条 compute 管线 \
+             （capture/project/reduce/check/global_probe/prefilter/brdf_lut）；捕获节流 \
+             {MIN_CAPTURE_INTERVAL_SECS}s；设备 maxBoundDescriptorSets = {max_sets}（合成/透明前向用到 5 组）"
         );
         Ok(Self {
             device,
@@ -651,18 +708,21 @@ impl IblEnvironment {
             sampler,
             sh,
             stats,
+            probe,
             partial,
             radiance,
             capture: Some(capture),
             sh_project: Some(sh_project),
             sh_reduce: Some(sh_reduce),
             sh_check: Some(sh_check),
+            global_probe: Some(global_probe),
             prefilter: Some(prefilter),
             brdf_lut: Some(brdf_lut),
             capture_layout,
             project_layout,
             reduce_layout,
             check_layout,
+            probe_layout,
             prefilter_layout,
             dfg_layout,
             pool,
@@ -670,6 +730,7 @@ impl IblEnvironment {
             project_set,
             reduce_set,
             check_set,
+            probe_set,
             prefilter_sets,
             dfg_set,
             frame_layout,
@@ -701,6 +762,12 @@ impl IblEnvironment {
     #[must_use]
     pub fn stats_buffer(&self) -> vk::Buffer {
         self.stats.buffer()
+    }
+
+    /// GlobalProbe 16 桶缓冲的裸句柄（BRP 读数拷贝源）。
+    #[must_use]
+    pub fn probe_buffer(&self) -> vk::Buffer {
+        self.probe.buffer()
     }
 
     /// 捕获计数与最近一次的 hash（`ibl_stats` 回显）。
@@ -790,9 +857,11 @@ impl IblEnvironment {
                     (vk::AccessFlags::empty(), vk::AccessFlags::SHADER_READ),
                 )
                 .record(device, cb);
-                // SH 与 stats 清零：首帧捕获之前被读到也是确定值（0 = 无环境光/未捕获）
+                // SH / stats / GlobalProbe 清零：首帧捕获之前被读到也是确定值
+                //（0 = 无环境光/未捕获）
                 device.cmd_fill_buffer(cb, self.sh.buffer(), 0, vk::WHOLE_SIZE, 0);
                 device.cmd_fill_buffer(cb, self.stats.buffer(), 0, vk::WHOLE_SIZE, 0);
+                device.cmd_fill_buffer(cb, self.probe.buffer(), 0, vk::WHOLE_SIZE, 0);
                 MemoryBarrierDesc {
                     src_stage: vk::PipelineStageFlags::TRANSFER,
                     src_access: vk::AccessFlags::TRANSFER_WRITE,
@@ -912,6 +981,16 @@ impl IblEnvironment {
                 &[],
                 1,
                 Handoff::ComputeFragmentRead,
+            );
+            // 3b) GlobalProbe 16 桶：只读 mip0、写 probe buffer；与 SH 同批重算。
+            //     16 个线程各认领一个桶（workgroup 16、一次 dispatch）。
+            self.handles(&self.global_probe).record(
+                device,
+                cb,
+                &[DescSet::new(&IBL_GLOBAL_PROBE_SET_DESC, self.probe_set)],
+                &[],
+                1,
+                Handoff::ComputeRead,
             );
 
             // 4) GGX 预滤波 mip1..8（每级一个 dispatch；源只读 mip0，级间不同子资源）
@@ -1129,6 +1208,7 @@ impl Drop for IblEnvironment {
         self.sh_project = None;
         self.sh_reduce = None;
         self.sh_check = None;
+        self.global_probe = None;
         self.prefilter = None;
         self.brdf_lut = None;
         unsafe {
@@ -1139,6 +1219,7 @@ impl Drop for IblEnvironment {
                 self.project_layout,
                 self.reduce_layout,
                 self.check_layout,
+                self.probe_layout,
                 self.prefilter_layout,
                 self.dfg_layout,
                 self.frame_layout,

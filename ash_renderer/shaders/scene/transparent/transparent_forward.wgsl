@@ -25,11 +25,13 @@ enable wgpu_binding_array;
 @group(3) @binding(0) var<storage, read> params: ClusterParams;
 @group(3) @binding(1) var<storage, read> lights: array<LightRecord>;
 @group(3) @binding(2) var<storage, read> clusters: array<ClusterRecord>;
-// set4 环境光照：b0 预滤波 cube、b1 采样器、b2 DFG LUT、b3 SH-L2 系数
+// set4 环境光照：b0 预滤波 cube、b1 采样器、b2 DFG LUT、b3 SH-L2 系数、
+// b4 GlobalProbe 16 桶（9.3；与不透明同源，透明层只换漫反射编码）
 @group(4) @binding(0) var env_cube: texture_cube<f32>;
 @group(4) @binding(1) var ibl_sampler: sampler;
 @group(4) @binding(2) var dfg_lut: texture_2d<f32>;
 @group(4) @binding(3) var<storage, read> sh_coeffs: array<vec4f, 9>;
+@group(4) @binding(4) var<storage, read> probe_buckets: array<vec4f, 64>;
 
 @vertex
 fn vs_main(
@@ -77,7 +79,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
         let n_ibl = ibl_normal(n, V);
         let no_v = clampNoV(saturate(dot(n_ibl, V)));
         let p_ibl = ibl_roughness(n_ibl, surf.perceptual_roughness);
-        let e = sh_irradiance(n_ibl, sh_coeffs);
+        // 漫反射编码二选一（9.3）：0 = SH-L2、1 = GlobalProbe 16 桶；法线口径同不透明
+        var e = sh_irradiance(n_ibl, sh_coeffs);
+        if (frame.ibl_mode == 1u) {
+            let base = direction_to_bucket_index(n_ibl, 4u) * 4u;
+            e = probe16_eval(
+                n_ibl,
+                probe_buckets[base].xyz,
+                probe_buckets[base + 1u].xyz,
+                probe_buckets[base + 2u].xyz,
+                probe_buckets[base + 3u].xyz);
+        }
         let diffuse = pixel.diffuseColor * Fd_Lambert() * e * frame.ibl_intensity;
         let specular = ibl_specular(
             env_cube, ibl_sampler, dfg_lut, n_ibl, V, no_v, pixel.f0, p_ibl,

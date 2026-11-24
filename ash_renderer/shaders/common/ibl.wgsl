@@ -11,6 +11,7 @@
 // - 高光走 split-sum：预滤波 cubemap（mip = perceptualRoughness × (mip 数−1)）× DFG LUT。
 //   粗糙度必须用 **perceptualRoughness**（α = p² 直接喂 mip 会把粗糙面算得过锐）。
 // #import brdf
+// #import octahedral
 
 // 预滤波 mip 上界 = 级数 − 1（与 `environment.rs` 的 IBL_MAX_MIP 同源；改级数两边一起改）
 const IBL_MAX_MIP: f32 = 8.0;
@@ -68,6 +69,15 @@ fn sh_irradiance(n: vec3f, coeffs: array<vec4f, 9>) -> vec3f {
         e = e + coeffs[i].rgb * basis[i];
     }
     return e;
+}
+
+// ---- GlobalProbe 16 桶（9.3）----
+
+// 一个桶的 RGBL1 求值：存储系数已折 Y00/Y1 基常数（见 `global_probe.wgsl`），
+// 求值式只剩 l0 + l1·n。桶索引由调用方算：`direction_to_bucket_index(n, 4u) * 4u`
+//——storage 数组不能按值传参，这里只收该桶的 4 个 vec4（第 4 个分量 w 不用）。
+fn probe16_eval(n: vec3f, l0: vec3f, l1x: vec3f, l1y: vec3f, l1z: vec3f) -> vec3f {
+    return l0 + l1x * n.x + l1y * n.y + l1z * n.z;
 }
 
 // ---- 采样与预滤波 ----

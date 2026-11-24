@@ -65,7 +65,10 @@ impl ColorTarget {
             ctx,
             extent,
             format,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            // TRANSFER_SRC：BRP `frame_dump` 的帧取证读回（只加用途旗标，不改绘制行为）
+            vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC,
             vk::ImageAspectFlags::COLOR,
         )?;
         Ok(Self {

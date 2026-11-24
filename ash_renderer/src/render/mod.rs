@@ -72,7 +72,7 @@ pub use resident::tables::frame_uniform_table::{
 pub(crate) use resident::tables::frame_uniform_table::{
     FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_IBL_DIFFUSE, FRAME_MODE_IBL_SPECULAR,
     FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC, FRAME_MODE_NORMAL, FRAME_MODE_POSITION,
-    FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
+    FRAME_MODE_PROBE_BUCKETS, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
 };
 pub use resident::tables::instance_table::{
     conservative_world_aabb, material_alpha_fields, material_is_transparent, pack_lod_entry,
@@ -101,10 +101,15 @@ pub use passes::gbuffer::gbuffer_pipeline::GBufferPipeline;
 pub use passes::gbuffer::gbuffer_targets::{
     GBufferTargets, ALBEDO_FORMAT, EMISSIVE_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
 };
+pub(crate) use passes::ibl::octahedral::{
+    bucket_to_direction, direction_to_bucket, eval_probe_bucket,
+};
+pub use passes::ibl::IBL_MODE_PROBE16;
+pub use passes::ibl::IBL_MODE_SH_L2;
 pub use passes::ibl::{
     half_to_f32, IblBakeDraw, IblBakeInput, IblBakePlan, IblEnvironment, IblFrameDraw, IblSettings,
-    IBL_CUBE_MIPS, IBL_CUBE_SIZE, IBL_MAX_MIP, IBL_SH_BUFFER_SIZE, IBL_STATS_BUFFER_SIZE,
-    IBL_STATS_FLOATS,
+    IBL_CUBE_MIPS, IBL_CUBE_SIZE, IBL_MAX_MIP, IBL_PROBE_BUCKETS, IBL_PROBE_BUFFER_SIZE,
+    IBL_PROBE_RESOLUTION, IBL_SH_BUFFER_SIZE, IBL_STATS_BUFFER_SIZE, IBL_STATS_FLOATS,
 };
 pub use passes::lighting::cluster::{
     cluster_reference, pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, ClusterFrameDraw,
