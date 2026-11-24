@@ -36,7 +36,9 @@ use crate::render::resident::tables::surface_cache::GI_SET_DESC;
 use crate::render::Context;
 
 pub use self::allocation::GiAllocDraw;
-pub use self::estimation::{GiEmissiveBuildDraw, GiEstimationDraw, GiLightSampleDraw};
+pub use self::estimation::{
+    GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiLightSampleDraw,
+};
 pub use self::view::GiViewDraw;
 pub use self::volume::SurfaceCacheConfig;
 
@@ -239,6 +241,19 @@ pub(crate) static EMISSIVE_BUILD_PIPELINE: PipelineDesc = PipelineDesc {
     depth_format: None,
 };
 
+/// 9.6.3 bounce 分配（set0 = GI 集；线程 = 请求上限，实际条数取 `counters[11]`）。
+///
+/// 录在 estimation 之后：同帧消费它写下的请求，新 patch 下一帧起参与估计。
+pub(crate) static BOUNCE_ALLOC_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_bounce_alloc",
+    shader: &shader_abi::BOUNCE_ALLOC,
+    entries: &[c"cs_main"],
+    sets: &[&GI_SET_DESC],
+    push: None,
+    color_formats: &[],
+    depth_format: None,
+};
+
 /// 覆盖图（形态 A）：全屏三角形，颜色附件 = LDR 目标；16B push（视图/法线来源/宽高）。
 pub(crate) static PATCH_VIEW_PIPELINE: PipelineDesc = PipelineDesc {
     label: "gi_patch_view",
@@ -291,6 +306,7 @@ pub struct GiPipelines {
     estimation: Option<ComputePipeline>,
     light_sampling: Option<ComputePipeline>,
     emissive_build: Option<ComputePipeline>,
+    bounce_alloc: Option<ComputePipeline>,
     cover: FullscreenPipeline,
     marker: FullscreenPipeline,
 }
@@ -311,6 +327,9 @@ impl GiPipelines {
         let emissive_build = ray_tracing
             .then(|| ComputePipeline::new(ctx, &EMISSIVE_BUILD_PIPELINE, layouts))
             .transpose()?;
+        let bounce_alloc = ray_tracing
+            .then(|| ComputePipeline::new(ctx, &BOUNCE_ALLOC_PIPELINE, layouts))
+            .transpose()?;
         Ok(Self {
             scrolling: ComputePipeline::new(ctx, &SCROLLING_PIPELINE, layouts)?,
             eviction: ComputePipeline::new(ctx, &EVICTION_PIPELINE, layouts)?,
@@ -319,6 +338,7 @@ impl GiPipelines {
             estimation,
             light_sampling,
             emissive_build,
+            bounce_alloc,
             cover: FullscreenPipeline::new(ctx, &PATCH_VIEW_PIPELINE, layouts)?,
             marker: FullscreenPipeline::new(ctx, &PATCH_MARKER_PIPELINE, layouts)?,
         })
@@ -362,6 +382,12 @@ impl GiPipelines {
         self.emissive_build.as_ref().map(ComputePipeline::handles)
     }
 
+    /// 9.6.3 bounce 分配的录制句柄（None = 本机不支持光线求交）。
+    #[must_use]
+    pub fn bounce_alloc(&self) -> Option<ComputeHandles> {
+        self.bounce_alloc.as_ref().map(ComputePipeline::handles)
+    }
+
     #[must_use]
     pub fn cover(&self) -> crate::render::core::record::graphics::PipelineRef {
         self.cover.rec()
@@ -393,6 +419,8 @@ pub struct GiFrameDraw {
     pub light_sampling: Option<GiLightSampleDraw>,
     /// 9.6 estimation（估计关 / 无光线求交 / 无实例的帧为 None）。
     pub estimation: Option<GiEstimationDraw>,
+    /// 9.6.3 bounce 分配（估计关 / 多跳关 / 无光线求交的帧为 None）。
+    pub bounce_alloc: Option<GiBounceAllocDraw>,
     /// 本帧槽 GI 集（回收三件与播种共绑）。
     pub gi_set: DescSet,
     /// ⑧ 段调试视图（关 / 视图 0 为 None）。
@@ -443,6 +471,10 @@ impl GiFrameDraw {
         // 9.6：播种之后、段末屏障之前——estimation 读本帧刚刷新/分配的 patch 几何
         if let Some(estimation) = &self.estimation {
             estimation.record(device, cb);
+        }
+        // 9.6.3：同帧消费 estimation 写下的分配请求（新 patch 下一帧起参与估计）
+        if let Some(bounce_alloc) = &self.bounce_alloc {
+            bounce_alloc.record(device, cb);
         }
         // 缓存表 compute 写 → ⑧ 段片元读（视图）与 9.7 的片元查表
         unsafe { Handoff::ComputeFragmentRead.barrier().record(device, cb) };

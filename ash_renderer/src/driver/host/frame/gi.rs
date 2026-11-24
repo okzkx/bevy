@@ -13,10 +13,11 @@ use bevy::prelude::*;
 
 use crate::common::syntax::ResultTierExt;
 use crate::render::{
-    alloc_grid, emissive_build_groups, estimation_groups, eviction_groups, gi_cascade_offsets,
-    light_sampling_groups, pack_alloc_push, pack_emissive_build_push, pack_light_sampling_push,
-    pack_view_push, scrolling_groups, DescSet, GiAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw,
-    GiFrameDraw, GiLightSampleDraw, GiPipelines, GiSettings, GiViewDraw, LightRecord, LightTable,
+    alloc_grid, bounce_alloc_groups, emissive_build_groups, estimation_groups, eviction_groups,
+    gi_cascade_offsets, light_sampling_groups, pack_alloc_push, pack_emissive_build_push,
+    pack_light_sampling_push, pack_view_push, scrolling_groups, DescSet, GiAllocDraw,
+    GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiFrameDraw, GiLightSampleDraw,
+    GiPipelines, GiSettings, GiViewDraw, GI_BOUNCE_REQUEST_CAPACITY, LightRecord, LightTable,
     SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE, MAX_CASCADES, UPDATE_MAX,
 };
 
@@ -202,6 +203,16 @@ pub(super) fn prepare_gi(
     } else {
         None
     };
+    // 9.6.3 bounce 分配：只在估计 + 多跳都开着时录（关掉时请求表无人写）
+    let bounce_alloc = if settings.estimation && settings.multi_bounce {
+        pipelines.bounce_alloc().map(|pass| GiBounceAllocDraw {
+            pass,
+            groups: bounce_alloc_groups(GI_BOUNCE_REQUEST_CAPACITY),
+            gi_set,
+        })
+    } else {
+        None
+    };
     let cover = settings.cover_enabled().then(|| pipelines.cover());
     // 9.6 estimation：估计开关 + 有实例（0 实例时 TLAS 从未构建，绝不能打射线）+
     // 光线求交开着（关闭时求交集不存在，管线也不建）。
@@ -246,6 +257,7 @@ pub(super) fn prepare_gi(
         emissive_build,
         light_sampling,
         estimation,
+        bounce_alloc,
         gi_set,
         view: view_draw,
     }))

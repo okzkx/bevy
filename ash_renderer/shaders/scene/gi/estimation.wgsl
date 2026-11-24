@@ -27,6 +27,7 @@ enable wgpu_binding_array;
 // #import gi_sampling
 // #import gi_light_sample
 // #import gi_emissive
+// #import gi_bounce
 // #import cluster
 // #import instance
 // #import raytracing
@@ -35,6 +36,7 @@ enable wgpu_binding_array;
 // #import shadow
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
+@group(1) @binding(0) var<storage, read> cell_patch: array<u32>;
 @group(1) @binding(2) var<storage, read> patch_geometry: array<PatchGeometry>;
 @group(1) @binding(3) var<storage, read_write> patch_irradiance0: array<PatchIrradiance>;
 @group(1) @binding(4) var<storage, read_write> patch_irradiance1: array<PatchIrradiance>;
@@ -45,6 +47,7 @@ enable wgpu_binding_array;
 @group(1) @binding(10) var<storage, read> gi_lights: array<LightRecord>;
 @group(1) @binding(11) var<storage, read> light_samples: array<LightSample>;
 @group(1) @binding(12) var<storage, read> emissive_triangles: array<EmissiveTriangle>;
+@group(1) @binding(13) var<storage, read_write> bounce_requests: array<BounceRequest>;
 @group(2) @binding(0) var<storage, read> objects: array<ObjectRecord>;
 @group(2) @binding(2) var<storage, read> materials: array<MaterialRecord>;
 @group(3) @binding(0) var scene_tlas: acceleration_structure;
@@ -76,9 +79,62 @@ fn environment_radiance(dir: vec3f) -> vec3f {
     return sky_radiance(dir, false) * frame.ibl_intensity;
 }
 
-// 命中点朝入射方向反射出去的辐亮度：albedo/π · 方向光 · NoL · 阴影（9.6.1 首版只有
-// 这一路；点光清单与自发光在 9.6.2 加，多跳在 9.6.3 加）。
-fn hit_radiance(hit: SceneHit, light_dir: vec3f) -> vec3f {
+// 多跳自查询（9.6.3）：命中点 → 级联/桶/cell → patch，读**上一帧**那份辐照度
+// （本帧写 A 就读 B，写 B 就读 A），求值成 E(n) 后由调用方乘命中点 albedo/π。
+//
+// 同时承担 bounce 分配：cell 里没有 patch、且本 patch 有分配权（`frame.z != 0` 且
+// rank 0）时，往请求表追加一条（位置/法线取命中点），同帧末尾的 bounce_alloc 消费。
+// 桶归属只能用命中重建的插值法线（`hit_world_normal`），而播种用的是深度差分平面法线
+// ——光滑曲面上两者不同源，这里会有桶错位（9.5 §0.5 的已知例外），错位率用
+// `counters[8]`（命中）/`counters[15]`（落空）两个读数估。
+fn cache_evaluate(p: vec3f, n: vec3f, write_second: bool, can_allocate: bool) -> vec3f {
+    let center = gi.target_pos.xyz;
+    let res = u32(gi.volume.y);
+    let cascades = u32(gi.volume.z);
+    let voxel_min = gi.volume.x;
+    let cascade = resolve_cascade(center, p, voxel_min, res, cascades);
+    if (cascade == INVALID_PATCH) {
+        return vec3f(0.0);
+    }
+    let voxel = voxel_size(voxel_min, cascade);
+    let offset = gi.cascade_offsets[cascade].xyz;
+    let pv = volume_position(p, voxel, offset, i32(res));
+    let storage = volume_to_storage(pv, offset, i32(res));
+    let bucket = direction_to_bucket_index(n, BUCKET_RESOLUTION);
+    let cell = cell_index(cascade, storage, bucket, res);
+    // 名字不用 patch：WGSL 把 patch 列为保留关键字
+    let patch_index = cell_patch[cell];
+    if (patch_index == INVALID_PATCH) {
+        atomicAdd(&counters[GI_COUNTER_BOUNCE_MISSES], 1u);
+        if (can_allocate) {
+            let request_slot = atomicAdd(&counters[GI_COUNTER_BOUNCE_REQUESTS], 1u);
+            // 超限截断：计数照加（读数能看出超了多少），不越界写
+            if (request_slot < GI_BOUNCE_REQUEST_CAPACITY) {
+                var request: BounceRequest;
+                request.cell = vec4u(cell, 0u, 0u, 0u);
+                request.position = vec4f(p, 1.0);
+                request.normal = vec4f(n, 0.0);
+                bounce_requests[request_slot] = request;
+            }
+        }
+        return vec3f(0.0);
+    }
+    atomicAdd(&counters[GI_COUNTER_BOUNCE_HITS], 1u);
+    // 读另一份 = 读上一帧（写 A 读 B，写 B 读 A）
+    var previous: PatchIrradiance;
+    if (write_second) {
+        previous = patch_irradiance0[patch_index];
+    } else {
+        previous = patch_irradiance1[patch_index];
+    }
+    return previous.l0.xyz
+        + previous.l1x.xyz * n.x
+        + previous.l1y.xyz * n.y
+        + previous.l1z.xyz * n.z;
+}
+
+// 命中点朝入射方向反射出去的辐亮度：albedo/π ·（方向光 · NoL · 阴影 + 多跳缓存 E）。
+fn hit_radiance(hit: SceneHit, light_dir: vec3f, write_second: bool, can_allocate: bool) -> vec3f {
     let geo = hit_geometry(hit.instance_slot, hit.primitive, hit.bary);
     let world_pos = (hit.object_to_world * vec4f(geo.position, 1.0)).xyz;
     var world_normal = (hit.object_to_world * vec4f(geo.normal, 0.0)).xyz;
@@ -99,12 +155,18 @@ fn hit_radiance(hit: SceneHit, light_dir: vec3f) -> vec3f {
     }
     let l = normalize(light_dir);
     let no_l = max(dot(world_normal, l), 0.0);
-    if (no_l <= 0.0) {
-        return vec3f(0.0);
+    var radiance = vec3f(0.0);
+    if (no_l > 0.0) {
+        let visibility = shadow_visibility_low(world_pos, world_normal, l);
+        // light_color.rgb 已含强度（见 frame.wgsl 的字段注释），这里只差 BRDF 的 1/π
+        radiance = albedo * (1.0 / PI) * frame.light_color.rgb * no_l * visibility;
     }
-    let visibility = shadow_visibility_low(world_pos, world_normal, l);
-    // light_color.rgb 已含强度（见 frame.wgsl 的字段注释），这里只差 BRDF 的 1/π
-    return albedo * (1.0 / PI) * frame.light_color.rgb * no_l * visibility;
+    // 多跳：命中点自己也要有"被环境照亮"的那一份，否则墙角的间接光到不了下一跳
+    if (gi.estimation.z != 0u) {
+        let cached = cache_evaluate(world_pos, world_normal, write_second, can_allocate);
+        radiance = radiance + albedo * (1.0 / PI) * cached;
+    }
+    return radiance;
 }
 
 // 光源侧清单的重连接取样（照 Unity `SamplePunctualLightBounceRadiance`）：
@@ -236,6 +298,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     let origin = position + normal * (gi.volume.x * RAY_ORIGIN_OFFSET_RELATIVE
         + RAY_ORIGIN_OFFSET_ABSOLUTE);
     let light_dir = frame.dir_to_light.xyz;
+    // 本帧写哪一份、以及能否申请 bounce 分配（只有 rank 0 的 patch 可以，Unity 同款）
+    let write_second = (gi.frame.x & 1u) == 1u;
+    let can_allocate = gi.frame.z != 0u && rank == 0u;
 
     var accumulator = gi_rgbl1_zero();
     var valid = 0u;
@@ -245,7 +310,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
         gi_r2_next(&rng);
         let hit = trace_scene(origin, dir, 0.0, RAY_TMAX, RAY_MASK);
         if (hit.hit) {
-            let radiance = hit_radiance(hit, light_dir);
+            let radiance = hit_radiance(hit, light_dir, write_second, can_allocate);
             gi_project_accumulate(&accumulator, radiance, dir);
             atomicAdd(&counters[10], 1u);
         } else {
@@ -309,8 +374,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     // 余弦卷积折基常数 → 求值式辐照度
     let estimate = gi_cosine_convolve_fold(total);
 
-    // 本帧写哪一份、上一帧的结果在哪一份（ping-pong，读另一份 = 读上一帧）
-    let write_second = (gi.frame.x & 1u) == 1u;
+    // 上一帧的结果在哪一份（ping-pong，读另一份 = 读上一帧）
     var previous: PatchIrradiance;
     if (write_second) {
         previous = patch_irradiance0[patch_idx];

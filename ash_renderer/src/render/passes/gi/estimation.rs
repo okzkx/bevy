@@ -141,6 +141,36 @@ pub fn pack_emissive_build_push(object_capacity: u32) -> [u8; GI_EMISSIVE_BUILD_
     push
 }
 
+/// bounce 分配的录制输入（`prepare_gi` 组装，录在 estimation 之后）。
+#[derive(Clone, Copy)]
+pub struct GiBounceAllocDraw {
+    pub pass: ComputeHandles,
+    /// dispatch 组数 = ceil(请求上限 / 64)（固定值，实际条数由 GPU 计数决定）。
+    pub groups: u32,
+    /// GI 集（请求表 + patch 表 + ring + 计数都在这一集里）。
+    pub gi_set: DescSet,
+}
+
+impl GiBounceAllocDraw {
+    /// 录一次分配 dispatch（单集、无 push；下游是 ⑧ 段视图与下一帧的估计）。
+    pub(crate) fn record(&self, device: &Device, cb: vk::CommandBuffer) {
+        self.pass.record(
+            device,
+            cb,
+            &[self.gi_set],
+            &[],
+            self.groups,
+            Handoff::ComputeReadWrite,
+        );
+    }
+}
+
+/// bounce 分配的组数 = ceil(请求上限 / 64)。
+#[must_use]
+pub fn bounce_alloc_groups(capacity: u32) -> u32 {
+    u64::from(capacity).div_ceil(64) as u32
+}
+
 /// 自发光重建的组数 = ceil(对象表容量 / 64)。
 #[must_use]
 pub fn emissive_build_groups(object_capacity: u32) -> u32 {
@@ -171,6 +201,7 @@ mod tests {
         assert_eq!(light_sampling_groups(128), 2);
         assert_eq!(light_sampling_groups(1), 1);
         assert_eq!(emissive_build_groups(131_072), 2048);
+        assert_eq!(bounce_alloc_groups(4096), 64);
     }
 
     #[test]

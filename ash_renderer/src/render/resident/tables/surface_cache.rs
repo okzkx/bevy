@@ -45,7 +45,8 @@ const GI_STAGES: vk::ShaderStageFlags = stages(&[
 /// GI 描述符集：b0 cell→patch / b1 cell 分配标记 / b2 几何 / b3 辐照度 0 / b4 辐照度 1 /
 /// b5 统计 / b6 patch→cell / b7 ring 配置 / b8 计数 / b9 GI UBO /
 /// b10 光源紧凑表（9.6.2 光源侧清单的灯记录，**不是** cluster 的那份环形槽表）/
-/// b11 光源侧采样清单（9.6.2）/ b12 自发光三角形表（9.6.2，每帧重建）。
+/// b11 光源侧采样清单（9.6.2）/ b12 自发光三角形表（9.6.2，每帧重建）/
+/// b13 bounce 分配请求表（9.6.3，estimation 写、同帧 bounce_alloc 消费）。
 pub(crate) static GI_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "gi",
     &[
@@ -62,6 +63,7 @@ pub(crate) static GI_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
         BindingDesc::new(10, DescKind::StorageBuffer, GI_STAGES),
         BindingDesc::new(11, DescKind::StorageBuffer, GI_STAGES),
         BindingDesc::new(12, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(13, DescKind::StorageBuffer, GI_STAGES),
     ],
 );
 
@@ -100,6 +102,10 @@ const _: () = assert!(
 pub const GI_EMISSIVE_CAPACITY: u32 = 32768;
 /// 一条自发光三角形记录的字节数：p0(+面积) / e1 / e2 / 自发光辐亮度。
 pub const GI_EMISSIVE_TRIANGLE_SIZE: u64 = 64;
+/// 每帧 bounce 分配请求的上限（超限丢弃，`counters[11]` 仍记到超限值）。
+pub const GI_BOUNCE_REQUEST_CAPACITY: u32 = 4096;
+/// 一条 bounce 分配请求的字节数：cell / 命中点位置 / 命中点法线。
+pub const GI_BOUNCE_REQUEST_SIZE: u64 = 48;
 
 pub const GI_COUNTER_WORDS: usize = 16;
 pub const GI_COUNTERS_SIZE: u64 = GI_COUNTER_WORDS as u64 * 4;
@@ -132,6 +138,10 @@ pub const COUNTER_EST_PATCHES: usize = 12;
 pub const COUNTER_EST_SAMPLES: usize = 13;
 /// 9.6.2：本帧自发光三角形条数（超过 [`GI_EMISSIVE_CAPACITY`] 时是超限值）。
 pub const COUNTER_EMISSIVE_TRIANGLES: usize = 14;
+/// 9.6.3：多跳自查询命中缓存（找到 patch）的次数。
+pub const COUNTER_EST_BOUNCE_HITS: usize = 8;
+/// 9.6.3：多跳自查询落空（该 cell 无 patch）的次数——桶错位率的读数代理。
+pub const COUNTER_EST_BOUNCE_MISSES: usize = 15;
 
 /// 每帧 GI UBO 的宿主侧数据（`draw_frame` 组装，[`pack_surface_cache_uniforms`] 打包）。
 pub struct SurfaceCacheUniformsData {
@@ -355,6 +365,8 @@ pub struct SurfaceCacheTables {
     light_samples: Vec<GpuBuffer>,
     /// 9.6.2 自发光三角形表（每帧槽一份，每帧重建，`b12`）。
     emissive_triangles: Vec<GpuBuffer>,
+    /// 9.6.3 bounce 分配请求表（每帧槽一份，`b13`）。
+    bounce_requests: Vec<GpuBuffer>,
     memory: SurfaceCacheMemory,
 }
 
@@ -461,6 +473,15 @@ impl SurfaceCacheTables {
             buffer.write(0, &vec![0u8; emissive_bytes as usize])?;
             emissive_triangles.push(buffer);
         }
+        // 9.6.3：bounce 分配请求表（2 槽 × 4096 条 × 48B = 192 KiB/槽）
+        let request_bytes = u64::from(GI_BOUNCE_REQUEST_CAPACITY) * GI_BOUNCE_REQUEST_SIZE;
+        let mut bounce_requests = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let mut buffer =
+                GpuBuffer::create(device, contract, request_bytes, BufferRole::Storage)?;
+            buffer.write(0, &vec![0u8; request_bytes as usize])?;
+            bounce_requests.push(buffer);
+        }
         let init_millis = started.elapsed().as_secs_f32() * 1000.0;
 
         let mut this = Self {
@@ -482,6 +503,7 @@ impl SurfaceCacheTables {
             gi_lights,
             light_samples,
             emissive_triangles,
+            bounce_requests,
             memory: SurfaceCacheMemory {
                 cell_bytes: cell_bytes * 2,
                 patch_bytes,
@@ -489,7 +511,8 @@ impl SurfaceCacheTables {
                     + GI_COUNTERS_SIZE * MAX_FRAMES_IN_FLIGHT as u64
                     + GI_UBO_SIZE * MAX_FRAMES_IN_FLIGHT as u64
                     + light_bytes * 2 * MAX_FRAMES_IN_FLIGHT as u64
-                    + emissive_bytes * MAX_FRAMES_IN_FLIGHT as u64,
+                    + emissive_bytes * MAX_FRAMES_IN_FLIGHT as u64
+                    + request_bytes * MAX_FRAMES_IN_FLIGHT as u64,
             },
         };
         this.build_sets(ctx)?;
@@ -547,7 +570,8 @@ impl SurfaceCacheTables {
                 .buffer(9, self.ubos[frame].buffer(), 0, GI_UBO_SIZE)
                 .buffer(10, self.gi_lights[frame].buffer(), 0, vk::WHOLE_SIZE)
                 .buffer(11, self.light_samples[frame].buffer(), 0, vk::WHOLE_SIZE)
-                .buffer(12, self.emissive_triangles[frame].buffer(), 0, vk::WHOLE_SIZE);
+                .buffer(12, self.emissive_triangles[frame].buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(13, self.bounce_requests[frame].buffer(), 0, vk::WHOLE_SIZE);
             writer.submit(device)?;
         }
         Ok(())
@@ -670,6 +694,11 @@ impl SurfaceCacheTables {
     /// 9.6.2：第 `slot` 帧槽的自发光三角形表（诊断读数用）。
     pub fn emissive_triangles(&mut self, slot: usize) -> &mut GpuBuffer {
         &mut self.emissive_triangles[slot]
+    }
+
+    /// 9.6.3：第 `slot` 帧槽的 bounce 分配请求表（诊断读数用）。
+    pub fn bounce_requests(&mut self, slot: usize) -> &mut GpuBuffer {
+        &mut self.bounce_requests[slot]
     }
 }
 
