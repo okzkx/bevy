@@ -258,6 +258,32 @@ fn emissive_area_sample(triangle_index: u32, u_primary: vec2f, u_secondary: vec2
     return record.emissive.rgb * (cos_triangle / distance_squared);
 }
 
+// 方差引导的滞后（Unity `FilterTemporallyVarianceGuided`）：
+// - 稳定后权重 = lerp(0.995, short_hysteresis, driftWeight)，drift 越小越靠近长滞后（更稳），
+//   越大越靠近短滞后（更快跟手）；drift = |短期均值 − 旧 l0| / 标准差，权重再 smoothstep。
+// - `old_sample_count != updateMax` 时是**精确累计平均**（old/(old+new)），不是指数混合：
+//   样本少时指数平均有偏，到 updateMax 之后才转指数。
+fn filter_temporally_variance_guided(
+    short_hysteresis: f32,
+    new_sample_count: u32,
+    old_sample_count: u32,
+    short_variance: vec3f,
+    short_mean: vec3f,
+    new_estimate: GiRgbl1,
+    old_estimate: GiRgbl1,
+    update_max: u32,
+) -> GiRgbl1 {
+    let std_dev = sqrt(max(short_variance, vec3f(0.0)));
+    let drift = abs(short_mean - old_estimate.l0) / max(std_dev, vec3f(1e-9));
+    // 经验系数 1/4：稳定度与反应速度的折中（Unity 同值）
+    let drift_weight = smoothstep(vec3f(0.0), vec3f(1.0), drift * 0.25);
+    var update_weight = mix(vec3f(0.995), vec3f(short_hysteresis), drift_weight);
+    if (old_sample_count != update_max) {
+        update_weight = vec3f(f32(old_sample_count) / f32(old_sample_count + new_sample_count));
+    }
+    return gi_rgbl1_lerp(new_estimate, old_estimate, update_weight);
+}
+
 @compute @workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     let patch_idx = gid.x;
@@ -381,20 +407,42 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     } else {
         previous = patch_irradiance1[patch_idx];
     }
+    var old_estimate = gi_rgbl1_zero();
+    old_estimate.l0 = previous.l0.xyz;
+    old_estimate.l1x = previous.l1x.xyz;
+    old_estimate.l1y = previous.l1y.xyz;
+    old_estimate.l1z = previous.l1z.xyz;
 
-    // 时域：样本少时是精确累计平均（不是指数平均）；`old_count == 0` 时整体替换种子。
-    var blended: GiRgbl1;
-    if (old_count == 0u) {
-        blended = estimate;
-    } else {
-        var old = gi_rgbl1_zero();
-        old.l0 = previous.l0.xyz;
-        old.l1x = previous.l1x.xyz;
-        old.l1y = previous.l1y.xyz;
-        old.l1z = previous.l1z.xyz;
-        let weight = f32(old_count) / f32(old_count + 1u);
-        blended = gi_rgbl1_lerp(estimate, old, vec3f(weight));
+    // —— 时域（Unity `ProcessAndStoreRadianceSample` 的等价实现）——
+    let short_hysteresis = gi.estimation_f.x;
+    let update_max = gi.frame.w;
+    // 预热那一趟按"相当于几帧的更新"记账：warmup 倍样本一次算 warmup 次更新
+    let new_estimate_update_count = max(sample_count / samples, 1u);
+    let new_count = min(old_count + new_estimate_update_count, update_max);
+    let old_mean = stats.mean.xyz;
+    let old_variance = stats.variance.xyz;
+    // 短期滞后权重：样本少时按 old/(old+new) 收敛，不越过 short_hysteresis
+    var short_weight = 0.0;
+    if (old_count != 0u) {
+        short_weight = min(
+            f32(old_count) / f32(old_count + new_estimate_update_count),
+            short_hysteresis,
+        );
     }
+    let new_l0_short = mix(estimate.l0, old_mean, vec3f(short_weight));
+    let variance_sample = (estimate.l0 - new_l0_short) * (estimate.l0 - old_mean);
+    let new_variance = mix(variance_sample, old_variance, vec3f(short_hysteresis));
+
+    let blended = filter_temporally_variance_guided(
+        short_hysteresis,
+        new_estimate_update_count,
+        old_count,
+        new_variance,
+        new_l0_short,
+        estimate,
+        old_estimate,
+        update_max,
+    );
 
     var out: PatchIrradiance;
     out.l0 = vec4f(blended.l0, 0.0);
@@ -407,10 +455,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
         patch_irradiance0[patch_idx] = out;
     }
 
-    let new_count = min(old_count + 1u, gi.frame.w);
     var updated = stats;
-    updated.mean = vec4f(blended.l0, 0.0);
-    updated.variance = vec4f(0.0);
+    updated.mean = vec4f(new_l0_short, 0.0);
+    updated.variance = vec4f(new_variance, 0.0);
     updated.update_count = new_count;
     patch_statistics[patch_idx] = updated;
 }

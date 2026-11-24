@@ -204,6 +204,42 @@ mod tests {
         assert_eq!(bounce_alloc_groups(4096), 64);
     }
 
+    /// 常量天空的解析自检（9.6.4 的锚点）：半球均匀采样 + 投影 + 余弦卷积折叠后，
+    /// 求值式 `l0 + l1·n` 在法线方向必须等于 `πL`。
+    ///
+    /// 这里用与 `shaders/common/gi_sampling.wgsl` 同值的两个折叠乘数做纯算术验证——
+    /// 它们是把 `(A0=π, A1=2π/3)` 与基常数 `(Y00, Y1)` 合并的结果，写错一个数量级
+    /// 就会让整段估计偏亮/偏暗，而 GPU 侧只能靠读图看"像不像"。
+    #[test]
+    fn constant_sky_folds_to_pi_times_radiance() {
+        use std::f32::consts::{PI, TAU};
+        const SH_Y0: f32 = 0.282_094_791_773_878_1;
+        const SH_Y1: f32 = 0.488_602_511_902_919_9;
+        const FOLD_L0: f32 = 0.886_226_925_452_758_1;
+        const FOLD_L1: f32 = 1.023_326_707_946_488_5;
+
+        // 折叠乘数 = 余弦卷积系数 × 基常数
+        assert!((FOLD_L0 - PI * SH_Y0).abs() < 1e-6);
+        assert!((FOLD_L1 - (TAU / 3.0) * SH_Y1).abs() < 1e-6);
+
+        // 上半个球面常量 L（下半球无光）：均匀半球采样的 1/pdf = 2π
+        let radiance = 1.0f32;
+        let acc_l0 = radiance * SH_Y0 * TAU;
+        // 均匀半球上 ω_z 的均值是 1/2，所以 l1z 的累加量是这个的一半系数
+        let acc_l1z = radiance * SH_Y1 * 0.5 * TAU;
+        let stored_l0 = acc_l0 * FOLD_L0;
+        let stored_l1z = acc_l1z * FOLD_L1;
+        // 沿法线（n = +z）求值
+        let evaluated = stored_l0 + stored_l1z;
+        assert!(
+            (evaluated - PI * radiance).abs() < 1e-4,
+            "常量天空应求值成 πL，实际 {evaluated}"
+        );
+        // 两个分量各占一半：l0 与 l1·n 对称
+        assert!((stored_l0 - PI * radiance * 0.5).abs() < 1e-4);
+        assert!((stored_l1z - PI * radiance * 0.5).abs() < 1e-4);
+    }
+
     #[test]
     fn light_sampling_push_layout() {
         let push = pack_light_sampling_push(128, 3);
