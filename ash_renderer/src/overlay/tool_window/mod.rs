@@ -14,6 +14,7 @@
 pub(super) mod culling;
 pub(super) mod entity_tree;
 pub(super) mod frame_stats;
+pub(super) mod ibl;
 pub(super) mod monitor;
 pub(super) mod pipeline;
 pub(super) mod shading;
@@ -22,9 +23,10 @@ pub(super) mod sky;
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::render::{
-    BloomSettings, Context, CullDiagnostics, CullSettings, FrameSyncSettings, ImageCache,
-    IndirectStats, LodDiagnostics, LodSettings, MeshPool, MonitorHistory, OcclusionDiagnostics,
-    OcclusionSettings, PerfLedger, RenderMode, ShadowSettings, SkySettings, SmaaSettings,
+    BloomSettings, Context, CullDiagnostics, CullSettings, FrameSyncSettings, IblSettings,
+    ImageCache, IndirectStats, LodDiagnostics, LodSettings, MeshPool, MonitorHistory,
+    OcclusionDiagnostics, OcclusionSettings, PerfLedger, RenderMode, ShadowSettings, SkySettings,
+    SmaaSettings,
 };
 use crate::scene::{TransformEditQueue, WorkloadSettings};
 use culling::CullingPage;
@@ -33,6 +35,7 @@ use entity_tree::{
     TextureThumbnails, TransformDragCache,
 };
 use frame_stats::{ChunkRows, FpsMeter, FrameStatsPage, PerfPanelCache, RendererStats};
+use ibl::IblPage;
 use monitor::MonitorPage;
 use pipeline::PipelinePage;
 use shading::ShadingPage;
@@ -45,6 +48,7 @@ enum ToolPage {
     Culling,
     Pipeline,
     Sky,
+    Ibl,
     FrameStats,
     Monitor,
     EntityTree,
@@ -57,6 +61,7 @@ impl ToolPage {
             Self::Culling => "剔除与 LOD",
             Self::Pipeline => "管线控制",
             Self::Sky => "程序化天空盒",
+            Self::Ibl => "环境光照 IBL",
             Self::FrameStats => "帧统计",
             Self::Monitor => "持续监控",
             Self::EntityTree => "实体层级树",
@@ -73,6 +78,7 @@ const GROUPS: &[(&str, &[ToolPage])] = &[
             ToolPage::Culling,
             ToolPage::Pipeline,
             ToolPage::Sky,
+            ToolPage::Ibl,
         ],
     ),
     ("性能", &[ToolPage::FrameStats, ToolPage::Monitor]),
@@ -245,6 +251,7 @@ pub(in crate::overlay) struct ToolWindowParams<'w, 's> {
     bloom_settings: ResMut<'w, BloomSettings>,
     smaa_settings: ResMut<'w, SmaaSettings>,
     sky_settings: ResMut<'w, SkySettings>,
+    ibl_settings: ResMut<'w, IblSettings>,
 }
 
 impl ToolWindowParams<'_, '_> {
@@ -299,6 +306,10 @@ impl ToolWindowParams<'_, '_> {
             .show(body),
             ToolPage::Sky => SkyPage {
                 sky: &mut self.sky_settings,
+            }
+            .show(body),
+            ToolPage::Ibl => IblPage {
+                ibl: &mut self.ibl_settings,
             }
             .show(body),
             ToolPage::FrameStats => FrameStatsPage {
