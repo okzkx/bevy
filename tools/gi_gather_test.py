@@ -187,6 +187,43 @@ def anchor():
     rpc("ash_renderer/sun_set", {"azimuth_deg": 45.0, "elevation_deg": 55.0})
 
 
+def off_matrix():
+    """⑤ 关态矩阵：`scgi = 0` 的稳定性、回退精确性，以及 `ibl_mode` × `ibl_enabled` 四组。
+
+    跨构建逐字节对比做不到（没有存档的 9.6 收官帧），所以钉同构建内的三条不变量：
+    A 关态两帧逐字节一致；B 开→关后与关态首帧逐字节一致；C 四组组合产出 3 种画面
+    （IBL 开时 sh_l2 / probe16 不同；IBL 关时两者都走 ambient，必然相同）。
+    """
+    rpc("ash_renderer/ibl_set", {"enabled": True, "diffuse_mode": "sh_l2"})
+    rpc("ash_renderer/gi_set", {"scgi": False})
+    time.sleep(3.0)
+    a1 = dump("matrix_off_a1")
+    time.sleep(3.0)
+    a2 = dump("matrix_off_a2")
+    check("⑤A 关态两帧逐字节一致", open(a1, "rb").read() == open(a2, "rb").read())
+
+    rpc("ash_renderer/gi_set", {"scgi": True})
+    time.sleep(3.0)
+    dump("matrix_on")
+    rpc("ash_renderer/gi_set", {"scgi": False})
+    time.sleep(3.0)
+    b = dump("matrix_off_b")
+    check("⑤B 开→关后与关态首帧逐字节一致", open(a1, "rb").read() == open(b, "rb").read())
+
+    frames = {}
+    for mode in ("sh_l2", "probe16"):
+        for ibl_on in (True, False):
+            rpc("ash_renderer/ibl_set", {"enabled": ibl_on, "diffuse_mode": mode})
+            time.sleep(2.0)
+            frames[(mode, ibl_on)] = dump(f"matrix_{mode}_i{int(ibl_on)}")
+    shots = {k: open(v, "rb").read() for k, v in frames.items()}
+    check("⑤C 四组组合产出 3 种画面", len(set(shots.values())) == 3,
+          f"{len(set(shots.values()))} 种")
+    check("⑤C ibl_enabled=0 时编码无关",
+          shots[("sh_l2", False)] == shots[("probe16", False)])
+    rpc("ash_renderer/ibl_set", {"enabled": True, "diffuse_mode": "sh_l2"})
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-close", action="store_true")
@@ -265,6 +302,8 @@ def main():
                   f"{name}: IBL {m_ibl:.1f} → SCGI {m_scgi:.1f}")
         else:
             check("② 墙背面：SCGI 比 IBL 暗（缓存如实反映遮挡）", False, "缺该组读数")
+
+        off_matrix()
 
         errors = [ln for ln in open(HOST_LOG, "rb").read().decode("utf-8", "replace").splitlines()
                   if "VK-ERROR" in ln or "VUID" in ln] if os.path.isfile(HOST_LOG) else []
