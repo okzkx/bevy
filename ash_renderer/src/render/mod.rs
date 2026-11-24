@@ -114,6 +114,10 @@ pub use passes::gi::estimation::{
     GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiLightSampleDraw,
     GI_EMISSIVE_BUILD_PUSH_SIZE, GI_LIGHT_SAMPLING_PUSH_SIZE, RAYS_PER_SAMPLE_WORST,
 };
+pub use passes::gi::filtering::{
+    pack_spatial_filter_push, spatial_filter_groups, GiSpatialFilterDraw,
+    GI_SPATIAL_FILTER_PUSH_SIZE,
+};
 pub use passes::gi::view::{pack_view_push, GiViewDraw, GI_VIEW_PUSH_SIZE};
 pub use passes::gi::volume::{
     cascade_offsets as gi_cascade_offsets, cell_bucket as gi_cell_bucket,

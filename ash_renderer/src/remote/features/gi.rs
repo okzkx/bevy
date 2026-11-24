@@ -62,6 +62,12 @@ struct GiSetParams {
     /// 9.6 光源侧采样清单长度。
     #[serde(default)]
     light_samples: Option<u32>,
+    /// 9.7.2 patch 级空间滤波开关。
+    #[serde(default)]
+    spatial_filter: Option<bool>,
+    /// 9.7.2 切平面采样半径（体素倍数）。
+    #[serde(default)]
+    spatial_radius: Option<f32>,
     /// 最粗级立方外沿（米）。
     #[serde(default)]
     size: Option<f32>,
@@ -90,6 +96,8 @@ fn settings_json(s: &GiSettings) -> Value {
         "budget": s.budget,
         "emissive_intensity": s.emissive_intensity,
         "light_samples": s.light_samples,
+        "spatial_filter": s.spatial_filter,
+        "spatial_radius": s.spatial_radius,
         "config": {
             "voxel_min": s.config.voxel_min,
             "res": s.config.res,
@@ -142,6 +150,9 @@ pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRes
     }
     if p.emissive_intensity.is_some_and(|v| v < 0.0) {
         return Err(invalid_params("emissive_intensity 必须 ≥ 0"));
+    }
+    if p.spatial_radius.is_some_and(|v| !(0.0..=8.0).contains(&v)) {
+        return Err(invalid_params("spatial_radius 越界（0..=8，体素倍数）"));
     }
     let current = *res::<GiSettings>(world)?;
     let config_change =
@@ -228,6 +239,12 @@ pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRes
     }
     if let Some(light_samples) = p.light_samples {
         settings.light_samples = light_samples;
+    }
+    if let Some(spatial_filter) = p.spatial_filter {
+        settings.spatial_filter = spatial_filter;
+    }
+    if let Some(spatial_radius) = p.spatial_radius {
+        settings.spatial_radius = spatial_radius;
     }
     let effective = *settings;
     Ok(settings_json(&effective))

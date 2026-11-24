@@ -64,6 +64,9 @@ pub(crate) static GI_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
         BindingDesc::new(11, DescKind::StorageBuffer, GI_STAGES),
         BindingDesc::new(12, DescKind::StorageBuffer, GI_STAGES),
         BindingDesc::new(13, DescKind::StorageBuffer, GI_STAGES),
+        // 9.7.2 滤波后的 patch 辐照度 A/B（空间滤波写 A、时域滤波写 B，屏幕侧读 B）
+        BindingDesc::new(14, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(15, DescKind::StorageBuffer, GI_STAGES),
     ],
 );
 
@@ -362,6 +365,10 @@ pub struct SurfaceCacheTables {
     patch_geometry: GpuBuffer,
     patch_irradiance0: GpuBuffer,
     patch_irradiance1: GpuBuffer,
+    /// 9.7.2 空间滤波输出（`b14`）：每帧 estimation 之后写，供 9.7.3 时域滤波与屏幕查表读。
+    filtered_irradiance0: GpuBuffer,
+    /// 9.7.3 时域滤波输出（`b15`）：屏幕查表读这一份。
+    filtered_irradiance1: GpuBuffer,
     patch_statistics: GpuBuffer,
     patch_cell: GpuBuffer,
     ring: GpuBuffer,
@@ -423,6 +430,19 @@ impl SurfaceCacheTables {
             capacity * PATCH_IRRADIANCE_SIZE,
             BufferRole::Storage,
         )?;
+        // 9.7.2/9.7.3 滤波表：与 patch 辐照度同尺寸各一份（65536 × 64B = 4 MiB ×2）
+        let mut filtered_irradiance0 = GpuBuffer::create(
+            device,
+            contract,
+            capacity * PATCH_IRRADIANCE_SIZE,
+            BufferRole::Storage,
+        )?;
+        let mut filtered_irradiance1 = GpuBuffer::create(
+            device,
+            contract,
+            capacity * PATCH_IRRADIANCE_SIZE,
+            BufferRole::Storage,
+        )?;
         let mut patch_statistics = GpuBuffer::create(
             device,
             contract,
@@ -440,6 +460,8 @@ impl SurfaceCacheTables {
         patch_geometry.write(0, &vec![0u8; (capacity * PATCH_GEOMETRY_SIZE) as usize])?;
         patch_irradiance0.write(0, &vec![0u8; (capacity * PATCH_IRRADIANCE_SIZE) as usize])?;
         patch_irradiance1.write(0, &vec![0u8; (capacity * PATCH_IRRADIANCE_SIZE) as usize])?;
+        filtered_irradiance0.write(0, &vec![0u8; (capacity * PATCH_IRRADIANCE_SIZE) as usize])?;
+        filtered_irradiance1.write(0, &vec![0u8; (capacity * PATCH_IRRADIANCE_SIZE) as usize])?;
         patch_statistics.write(0, &vec![0u8; (capacity * PATCH_STATISTICS_SIZE) as usize])?;
         patch_cell.write(0, &vec![0xFFu8; (capacity * 4) as usize])?;
         ring.write(0, &[0u8; RING_CONFIG_SIZE as usize])?;
@@ -503,6 +525,8 @@ impl SurfaceCacheTables {
             patch_geometry,
             patch_irradiance0,
             patch_irradiance1,
+            filtered_irradiance0,
+            filtered_irradiance1,
             patch_statistics,
             patch_cell,
             ring,
@@ -519,7 +543,8 @@ impl SurfaceCacheTables {
                     + GI_UBO_SIZE * MAX_FRAMES_IN_FLIGHT as u64
                     + light_bytes * 2 * MAX_FRAMES_IN_FLIGHT as u64
                     + emissive_bytes * MAX_FRAMES_IN_FLIGHT as u64
-                    + request_bytes * MAX_FRAMES_IN_FLIGHT as u64,
+                    + request_bytes * MAX_FRAMES_IN_FLIGHT as u64
+                    + capacity * PATCH_IRRADIANCE_SIZE * 2,
             },
         };
         this.build_sets(ctx)?;
@@ -583,7 +608,9 @@ impl SurfaceCacheTables {
                     0,
                     vk::WHOLE_SIZE,
                 )
-                .buffer(13, self.bounce_requests[frame].buffer(), 0, vk::WHOLE_SIZE);
+                .buffer(13, self.bounce_requests[frame].buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(14, self.filtered_irradiance0.buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(15, self.filtered_irradiance1.buffer(), 0, vk::WHOLE_SIZE);
             writer.submit(device)?;
         }
         Ok(())
@@ -671,6 +698,18 @@ impl SurfaceCacheTables {
     /// 辐照度第 1 份（ping-pong 的 B）。
     pub fn patch_irradiance1(&mut self) -> &mut GpuBuffer {
         &mut self.patch_irradiance1
+    }
+
+    /// 9.7.2 空间滤波输出表（只读访问，宿主不写）。
+    #[must_use]
+    pub fn filtered_irradiance0(&self) -> &GpuBuffer {
+        &self.filtered_irradiance0
+    }
+
+    /// 9.7.3 时域滤波输出表（只读访问，宿主不写）。
+    #[must_use]
+    pub fn filtered_irradiance1(&self) -> &GpuBuffer {
+        &self.filtered_irradiance1
     }
 
     /// 9.6.2：第 `slot` 帧槽的光源紧凑表。

@@ -15,14 +15,17 @@ use crate::common::syntax::ResultTierExt;
 use crate::render::{
     alloc_grid, bounce_alloc_groups, emissive_build_groups, estimation_groups, eviction_groups,
     gi_cascade_offsets, light_sampling_groups, pack_alloc_push, pack_emissive_build_push,
-    pack_light_sampling_push, pack_view_push, plan_estimation_budget, scrolling_groups, DescSet,
-    GiAllocDraw, GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiFrameDraw,
-    GiLightSampleDraw, GiPipelines, GiSettings, GiViewDraw, LightRecord, LightTable,
-    SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE, GI_BOUNCE_REQUEST_CAPACITY,
-    MAX_CASCADES, UPDATE_MAX,
+    pack_light_sampling_push, pack_spatial_filter_push, pack_view_push, plan_estimation_budget,
+    scrolling_groups, spatial_filter_groups, DescSet, GiAllocDraw, GiBounceAllocDraw,
+    GiEmissiveBuildDraw, GiEstimationDraw, GiFrameDraw, GiLightSampleDraw, GiPipelines, GiSettings,
+    GiSpatialFilterDraw, GiViewDraw, LightRecord, LightTable, SurfaceCacheTables,
+    SurfaceCacheUniformsData, EVICT_AGE, GI_BOUNCE_REQUEST_CAPACITY, MAX_CASCADES, UPDATE_MAX,
 };
 
 use super::scene::FrameView;
+
+/// 9.7.2 空间滤波的抖动样本数（Unity `SpatialFiltering` 同款默认 4；9.7.7 若要 A/B 再抬成参数）。
+const SPATIAL_FILTER_TAPS: u32 = 4;
 
 /// draw_frame 的表面缓存取用束。
 #[derive(SystemParam)]
@@ -251,6 +254,22 @@ pub(super) fn prepare_gi(
     } else {
         None
     };
+    // 9.7.2 空间滤波：estimation 录了才录（没有本帧输出可滤）。开关关闭时**仍然录**，
+    // push 里 enabled=0 → shader 直拷，`filtered` 表因此永远是"本帧可消费的完整一份"，
+    // 9.7.3/9.7.4 不必再判断读哪张表。9.7.6 接上 `scgi` 后整条屏幕链改由它把关。
+    let spatial_filter = estimation.as_ref().map(|_| GiSpatialFilterDraw {
+        pass: pipelines.spatial_filter(),
+        push: pack_spatial_filter_push(
+            settings.spatial_filter,
+            SPATIAL_FILTER_TAPS,
+            frame_index,
+            config.capacity,
+            settings.spatial_radius,
+        ),
+        groups: spatial_filter_groups(config.capacity),
+        frame_set,
+        gi_set,
+    });
     let marker = settings.markers_enabled().then(|| pipelines.marker());
     let view_draw = (cover.is_some() || marker.is_some()).then(|| GiViewDraw {
         cover,
@@ -276,6 +295,7 @@ pub(super) fn prepare_gi(
         light_sampling,
         estimation,
         bounce_alloc,
+        spatial_filter,
         gi_set,
         view: view_draw,
     }))

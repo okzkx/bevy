@@ -133,6 +133,12 @@ impl GiPage<'_> {
                 .fixed_decimals(0),
         );
         ui.small("样本档会被射线预算自动降档（视图 9 看本帧实际档位与稀释）。");
+        ui.checkbox(&mut gi.spatial_filter, "空间滤波（切平面抖动 taps）");
+        ui.add(
+            egui::Slider::new(&mut gi.spatial_radius, 0.0..=8.0)
+                .text("空间滤波半径（体素倍数）")
+                .fixed_decimals(2),
+        );
         ui.add(
             egui::Slider::new(&mut gi.defrag_waves, 0..=16)
                 .text("每帧整理波数（每波 512 条）")

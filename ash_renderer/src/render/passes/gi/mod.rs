@@ -12,6 +12,7 @@
 
 pub mod allocation;
 pub mod estimation;
+pub mod filtering;
 pub mod view;
 pub mod volume;
 
@@ -39,6 +40,7 @@ pub use self::allocation::GiAllocDraw;
 pub use self::estimation::{
     GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiLightSampleDraw,
 };
+pub use self::filtering::GiSpatialFilterDraw;
 pub use self::view::GiViewDraw;
 pub use self::volume::SurfaceCacheConfig;
 
@@ -82,6 +84,10 @@ pub struct GiSettings {
     pub emissive_intensity: f32,
     /// 9.6 光源侧采样清单长度（每帧从灯位向锥内采样的条数）。
     pub light_samples: u32,
+    /// 9.7.2 patch 级空间滤波开关（关 = 直拷 estimation 输出，A 与源逐位一致）。
+    pub spatial_filter: bool,
+    /// 9.7.2 切平面采样半径（该 patch 所在级联的体素边长倍数）。
+    pub spatial_radius: f32,
     /// Volume/池规格（只在关态改；改后重建表）。
     pub config: SurfaceCacheConfig,
 }
@@ -103,6 +109,9 @@ impl Default for GiSettings {
             budget: 262_144,
             emissive_intensity: 1.0,
             light_samples: 128,
+            // 9.7 的开关默认关：与 `ibl_enabled` / `estimation` 同纪律，A/B 时由 BRP 或面板开
+            spatial_filter: false,
+            spatial_radius: 1.5,
             config: SurfaceCacheConfig::default(),
         }
     }
@@ -151,6 +160,22 @@ pub(crate) static DEFRAG_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"cs_main"],
     sets: &[&GI_SET_DESC],
     push: None,
+    color_formats: &[],
+    depth_format: None,
+};
+
+/// 9.7.2 空间滤波（set0 帧 UBO / set1 GI + 24B push；线程 = 池容量）。
+///
+/// 与 9.6 那四条不同，它**不受光线求交门控**：只用 buffer 与 GI UBO，任何设备都能建。
+pub(crate) static SPATIAL_FILTER_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_spatial_filter",
+    shader: &shader_abi::SPATIAL_FILTER,
+    entries: &[c"cs_main"],
+    sets: &[&FRAME_UNIFORM_SET_DESC, &GI_SET_DESC],
+    push: Some(PushRange {
+        stages: COMPUTE,
+        size: filtering::GI_SPATIAL_FILTER_PUSH_SIZE,
+    }),
     color_formats: &[],
     depth_format: None,
 };
@@ -307,6 +332,7 @@ pub struct GiPipelines {
     light_sampling: Option<ComputePipeline>,
     emissive_build: Option<ComputePipeline>,
     bounce_alloc: Option<ComputePipeline>,
+    spatial_filter: ComputePipeline,
     cover: FullscreenPipeline,
     marker: FullscreenPipeline,
 }
@@ -330,6 +356,7 @@ impl GiPipelines {
         let bounce_alloc = ray_tracing
             .then(|| ComputePipeline::new(ctx, &BOUNCE_ALLOC_PIPELINE, layouts))
             .transpose()?;
+        let spatial_filter = ComputePipeline::new(ctx, &SPATIAL_FILTER_PIPELINE, layouts)?;
         Ok(Self {
             scrolling: ComputePipeline::new(ctx, &SCROLLING_PIPELINE, layouts)?,
             eviction: ComputePipeline::new(ctx, &EVICTION_PIPELINE, layouts)?,
@@ -339,6 +366,7 @@ impl GiPipelines {
             light_sampling,
             emissive_build,
             bounce_alloc,
+            spatial_filter,
             cover: FullscreenPipeline::new(ctx, &PATCH_VIEW_PIPELINE, layouts)?,
             marker: FullscreenPipeline::new(ctx, &PATCH_MARKER_PIPELINE, layouts)?,
         })
@@ -368,6 +396,12 @@ impl GiPipelines {
     #[must_use]
     pub fn estimation(&self) -> Option<ComputeHandles> {
         self.estimation.as_ref().map(ComputePipeline::handles)
+    }
+
+    /// 9.7.2 空间滤波的录制句柄（恒有：不依赖光线求交）。
+    #[must_use]
+    pub fn spatial_filter(&self) -> ComputeHandles {
+        self.spatial_filter.handles()
     }
 
     /// 9.6.2 光源侧采样清单的录制句柄（None = 本机不支持光线求交）。
@@ -421,6 +455,8 @@ pub struct GiFrameDraw {
     pub estimation: Option<GiEstimationDraw>,
     /// 9.6.3 bounce 分配（估计关 / 多跳关 / 无光线求交的帧为 None）。
     pub bounce_alloc: Option<GiBounceAllocDraw>,
+    /// 9.7.2 空间滤波（估计关的帧为 None；开关关时仍在，push 置 0 做直拷）。
+    pub spatial_filter: Option<GiSpatialFilterDraw>,
     /// 本帧槽 GI 集（回收三件与播种共绑）。
     pub gi_set: DescSet,
     /// ⑧ 段调试视图（关 / 视图 0 为 None）。
@@ -475,6 +511,10 @@ impl GiFrameDraw {
         // 9.6.3：同帧消费 estimation 写下的分配请求（新 patch 下一帧起参与估计）
         if let Some(bounce_alloc) = &self.bounce_alloc {
             bounce_alloc.record(device, cb);
+        }
+        // 9.7.2：空间滤波读本帧 estimation 的输出，写独立的 filtered 表（不原地改）
+        if let Some(spatial_filter) = &self.spatial_filter {
+            spatial_filter.record(device, cb);
         }
         // 缓存表 compute 写 → ⑧ 段片元读（视图）与 9.7 的片元查表
         unsafe { Handoff::ComputeFragmentRead.barrier().record(device, cb) };
