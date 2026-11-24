@@ -66,7 +66,9 @@ impl GiViewDraw {
             )
             .record(device, cb);
 
-            let sets = [self.frame_set, self.gbuffer_set, self.gi_set, self.scgi_set];
+            // 覆盖图（视图 14/15）读第 4 集；方片管线仍是 3 集——两个管线分开绑
+            let cover_sets = [self.frame_set, self.gbuffer_set, self.gi_set, self.scgi_set];
+            let marker_sets = [self.frame_set, self.gbuffer_set, self.gi_set];
             if let Some(cover) = &self.cover {
                 // 形态 A 写满每个像素：DONT_CARE 进场
                 let attachment = color_attachment(self.ldr_view, None);
@@ -77,7 +79,7 @@ impl GiViewDraw {
                         .layer_count(1)
                         .color_attachments(std::slice::from_ref(&attachment)),
                 );
-                bind_graphics(device, cb, cover, &sets);
+                bind_graphics(device, cb, cover, &cover_sets);
                 set_viewport_scissor(device, cb, self.extent);
                 device.cmd_push_constants(
                     cb,
@@ -98,7 +100,7 @@ impl GiViewDraw {
                         .layer_count(1)
                         .color_attachments(std::slice::from_ref(&attachment)),
                 );
-                bind_graphics(device, cb, marker, &sets);
+                bind_graphics(device, cb, marker, &marker_sets);
                 set_viewport_scissor(device, cb, self.extent);
                 device.cmd_push_constants(
                     cb,
