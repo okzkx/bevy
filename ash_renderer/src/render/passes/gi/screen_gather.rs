@@ -510,6 +510,91 @@ impl ScgiTargets {
         self.initialized.store(true, Ordering::Relaxed);
     }
 
+    /// 全分辨率辐照度图（BRP 读回用）。
+    #[must_use]
+    pub fn irradiance_image(&self) -> vk::Image {
+        self.irradiance[0].image
+    }
+
+    /// 读回 `scgi_irradiance`（RGBA16F；读回后把布局迁回 GENERAL，不影响后续采样）。
+    ///
+    /// # Errors
+    /// 一次性回读资源创建/提交/等待失败。
+    pub fn readback_irradiance(&self, ctx: &Context) -> Result<Vec<u8>> {
+        use crate::render::core::device::readback::OneShotReadback;
+        use crate::render::core::record::barrier::{ImageBarrier, MemoryBarrierDesc};
+
+        let extent = self.full_extent;
+        let byte_size = u64::from(extent.width) * u64::from(extent.height) * SCGI_IRRADIANCE_BYTES;
+        let mut out = vec![0u8; byte_size as usize];
+        let device = &ctx.device;
+        let image = self.irradiance_image();
+        unsafe {
+            let readback = OneShotReadback::begin(ctx, byte_size)?;
+            MemoryBarrierDesc {
+                src_stage: vk::PipelineStageFlags::ALL_COMMANDS,
+                src_access: vk::AccessFlags::MEMORY_WRITE,
+                dst_stage: vk::PipelineStageFlags::TRANSFER,
+                dst_access: vk::AccessFlags::TRANSFER_READ,
+            }
+            .record(device, readback.cb);
+            ImageBarrier::transition(
+                image,
+                vk::ImageAspectFlags::COLOR,
+                (
+                    vk::ImageLayout::GENERAL,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                ),
+                (
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::TRANSFER,
+                ),
+                (
+                    vk::AccessFlags::SHADER_WRITE,
+                    vk::AccessFlags::TRANSFER_READ,
+                ),
+            )
+            .record(device, readback.cb);
+            let region = vk::BufferImageCopy::default()
+                .image_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .mip_level(0)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                )
+                .image_extent(vk::Extent3D {
+                    width: extent.width,
+                    height: extent.height,
+                    depth: 1,
+                });
+            device.cmd_copy_image_to_buffer(
+                readback.cb,
+                image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                readback.staging,
+                std::slice::from_ref(&region),
+            );
+            // 读回后迁回 GENERAL：合成 pass 每帧都要按 GENERAL 采样这张图
+            ImageBarrier::transition(
+                image,
+                vk::ImageAspectFlags::COLOR,
+                (
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::ImageLayout::GENERAL,
+                ),
+                (
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::ALL_COMMANDS,
+                ),
+                (vk::AccessFlags::TRANSFER_READ, vk::AccessFlags::SHADER_READ),
+            )
+            .record(device, readback.cb);
+            readback.finish_and_read(ctx, &mut out)?;
+        }
+        Ok(out)
+    }
+
     /// 采样集布局（登记进 `SetLayouts` 给合成管线对账）。
     #[must_use]
     pub fn sample_layout(&self) -> SetLayout {

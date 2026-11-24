@@ -495,6 +495,116 @@ pub(crate) fn gi_dump(In(params): In<Option<Value>>, world: &mut World) -> BrpRe
     crate::remote::census::frame_dump::dump_ldr_frame(world, &p.path, slot)
 }
 
+/// `scgi_stats` 参数：`stride` 可选（缺省 8 = 每 8×8 像素取一个样本）。
+#[derive(serde::Deserialize, Default)]
+struct ScgiStatsParams {
+    #[serde(default)]
+    stride: Option<u32>,
+}
+
+/// `ash_renderer/scgi_stats`：读回 9.7 的全分辨率辐照度，报覆盖率与 L0 量级。
+///
+/// 判定线②（常量天空下 `E = πL` 的精确锚）与"注入是不是把画面压暗了"的归因都靠它：
+/// 读的是 `scgi_irradiance` 的原始 RGBA16F 值（**物理单位**，不是 LDR），`a` 是覆盖率。
+/// 按 `stride` 稀疏采样（缺省 8），一次读回的 CPU 代价与上报体积都可控。
+///
+/// # Errors
+/// GI 关、目标未建或读回失败。
+#[system]
+pub(crate) fn scgi_stats(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let p: ScgiStatsParams = crate::remote::common::params::parse_params_or_default(params)?;
+    let stride = p.stride.unwrap_or(8).clamp(1, 64);
+    let settings = world
+        .get_resource::<GiSettings>()
+        .map_or_else(GiSettings::default, |s| *s);
+    if !settings.enabled {
+        return Ok(json!({ "enabled": false }));
+    }
+    let Some(ctx) = world.get_resource::<Context>() else {
+        return Err(internal_err("Context 缺席——初始化链未插入")(
+            "scgi_stats 需要 Context",
+        ));
+    };
+    let Some(scgi) = world.get_resource::<crate::render::ScgiTargets>() else {
+        return Err(invalid_params("SCGI 目标资源缺席——初始化链未插入"));
+    };
+    let extent = scgi.full_extent();
+    if extent.width == 0 || extent.height == 0 {
+        return Err(invalid_params("SCGI 目标还没建（尺寸 0）"));
+    }
+    let bytes = scgi
+        .readback_irradiance(ctx)
+        .map_err(internal_err("SCGI 辐照度读回失败"))?;
+
+    let width = extent.width as usize;
+    let height = extent.height as usize;
+    let mut covered = 0u64;
+    let mut sampled = 0u64;
+    let mut sum_l0 = [0.0f64; 3];
+    let mut sum_covered_l0 = [0.0f64; 3];
+    let mut max_l0 = 0.0f32;
+    let mut max_alpha = 0.0f32;
+    let mut sum_alpha = 0.0f64;
+    let step = stride as usize;
+    for y in (0..height).step_by(step) {
+        for x in (0..width).step_by(step) {
+            let base = (y * width + x) * 8;
+            if base + 8 > bytes.len() {
+                continue;
+            }
+            let channel = |i: usize| {
+                crate::render::half_to_f32(u16::from_le_bytes([
+                    bytes[base + i * 2],
+                    bytes[base + i * 2 + 1],
+                ]))
+            };
+            let rgb = [channel(0), channel(1), channel(2)];
+            let alpha = channel(3);
+            sampled += 1;
+            sum_alpha += f64::from(alpha);
+            max_alpha = max_alpha.max(alpha);
+            for (c, v) in rgb.iter().enumerate() {
+                sum_l0[c] += f64::from(*v);
+            }
+            if alpha > 0.001 {
+                covered += 1;
+                for (c, v) in rgb.iter().enumerate() {
+                    sum_covered_l0[c] += f64::from(*v);
+                }
+                max_l0 = max_l0.max(rgb[0].max(rgb[1]).max(rgb[2]));
+            }
+        }
+    }
+    if sampled == 0 {
+        return Err(internal_err("SCGI 辐照度读回为空")(
+            "scgi_stats 采样数为 0",
+        ));
+    }
+    let n = sampled as f64;
+    let covered_f = covered.max(1) as f64;
+    Ok(json!({
+        "enabled": true,
+        "extent": { "width": extent.width, "height": extent.height },
+        "stride": stride,
+        "sampled": sampled,
+        "coverage": covered as f64 / n,
+        "alpha": { "mean": sum_alpha / n, "max": max_alpha },
+        "l0_all_mean": [
+            sum_l0[0] / n,
+            sum_l0[1] / n,
+            sum_l0[2] / n,
+        ],
+        "l0_covered_mean": [
+            sum_covered_l0[0] / covered_f,
+            sum_covered_l0[1] / covered_f,
+            sum_covered_l0[2] / covered_f,
+        ],
+        "l0_covered_max": max_l0,
+        "scgi": settings.scgi,
+        "ibl_intensity_note": "l0_* 是物理单位辐照度；常量天空 L=1 时理论值应 ≈ π",
+    }))
+}
+
 /// `gi_census` 参数：抽检前 N 条 ring 槽（缺省 8，上限 64）。
 #[derive(serde::Deserialize, Default)]
 struct GiCensusParams {
