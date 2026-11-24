@@ -219,7 +219,7 @@ struct UploadData<'w> {
     image_cache: ResMut<'w, ImageCache>,
     tables: ResMut<'w, BindlessTextureTable>,
     uploader: ResMut<'w, Uploader>,
-    /// 求交器（RT 支持时存在）：BLAS 排建/排销毁/停尸房排空。
+    /// 求交器（光线求交支持时存在）：BLAS 排建/排销毁/停尸房排空。
     ray: Option<ResMut<'w, RayScene>>,
 }
 

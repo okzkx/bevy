@@ -248,7 +248,7 @@ impl DescriptorWriter {
     ///
     /// 加速结构写入需要 `VkWriteDescriptorSetAccelerationStructureKHR` 挂在 pNext 上，且该
     /// 结构体要活到 `vkUpdateDescriptorSets` 返回——与批量写入的借用形状不兼容，所以
-    /// AS 写入逐条单独提交（RT 集只在重建/换绑时写，频次低）。
+    /// AS 写入逐条单独提交（光线求交集只在重建/换绑时写，频次低）。
     ///
     /// # Errors
     /// 任一写入不合法，或完备性不满足。

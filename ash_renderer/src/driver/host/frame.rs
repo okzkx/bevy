@@ -45,9 +45,9 @@ mod lighting;
 mod lod;
 mod overlay;
 mod post;
+mod ray_tracing;
 mod resize_gate;
 mod ring;
-mod rt;
 mod scene;
 mod shadow;
 mod stopwatch;
@@ -62,8 +62,8 @@ use self::lighting::FrameLight;
 use self::lod::create_lod_draw;
 use self::overlay::create_overlay_draw;
 use self::post::{bloom_draw, smaa_draws};
+use self::ray_tracing::prepare_ray_tracing;
 use self::resize_gate::rebuild_size_dependent;
-use self::rt::prepare_rt;
 use self::scene::{scene_world_aabb, FrameView};
 use self::shadow::shadow_frame_draw;
 use self::stopwatch::FrameStopwatch;
@@ -98,8 +98,8 @@ pub(crate) fn draw_frame(
         gate,
         logs,
         occlusion_gate,
-        rt,
-        rt_local,
+        ray_tracing,
+        ray_tracing_local,
     } = &mut input;
 
     // —— 帧首：最小化让路 + 挂起重建（尺寸相关资源随新 extent 重建，幂等；pending
@@ -108,7 +108,7 @@ pub(crate) fn draw_frame(
         return Ok(());
     }
     gate.rebuild_if_pending(gpu.swapchain.pending_rebuild(), || {
-        rebuild_size_dependent(gpu, &mut occlusion.hiz, post, cluster, rt)
+        rebuild_size_dependent(gpu, &mut occlusion.hiz, post, cluster, ray_tracing)
     })?;
 
     // —— 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在提交前一刻）。
@@ -260,11 +260,11 @@ pub(crate) fn draw_frame(
         &mut logs.indirect_first_submit,
     )?;
 
-    // —— 求交器（9.4）：TLAS 容量 → RT 集换绑 → 地址表 → ② 段录制束。RT 关/未就绪
+    // —— 求交器（9.4）：TLAS 容量 → 光线求交集换绑 → 地址表 → ② 段录制束。光线求交关/未就绪
     // 为 None（整段跳过，画面与 9.3 逐位一致）。容量增长会等全部在飞帧（低频）。
-    let rt_draw = prepare_rt(
-        rt,
-        rt_local,
+    let ray_tracing_draw = prepare_ray_tracing(
+        ray_tracing,
+        ray_tracing_local,
         &gpu.ctx,
         &mut gpu.frames,
         &mut scene.instance_tables,
@@ -350,7 +350,7 @@ pub(crate) fn draw_frame(
             set: scene.ibl_env.frame_set(),
         },
         // —— ② compute 前置：求交器（BLAS 待建 / TLAS / 调试图）
-        rt: rt_draw,
+        ray_tracing: ray_tracing_draw,
         // —— ⑦⑧ 后链 + UI
         post: PostChainDraw {
             tonemap: post.tonemap.rec(),

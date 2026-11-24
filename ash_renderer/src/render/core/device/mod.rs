@@ -2,7 +2,7 @@
 
 pub(in crate::render) mod context;
 pub(in crate::render) mod memory;
+pub(in crate::render) mod ray_tracing;
 pub(in crate::render) mod readback;
-pub(in crate::render) mod rt;
 pub(in crate::render) mod swapchain;
 pub(in crate::render) mod transfer;

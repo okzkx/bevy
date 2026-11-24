@@ -20,10 +20,10 @@ use crate::{
         CompositePipeline, Context, CullPass, FramePool, FrameUniformTable, GBufferPipeline,
         GBufferTargets, GpuTimer, HizPyramid, IblEnvironment, ImageCache, IndirectPass,
         InstanceTables, LightClusters, LightTable, LodPass, MeshPool, OcclusionPass,
-        OverlayPipeline, PresentTonemapPipeline, RayScene, RtPipelines, RtSettings, RtTargets,
-        SetLayouts, ShadowBuildPass, ShadowPipeline, ShadowTargets, SmaaPipelines, SmaaTargets,
-        Swapchain, TransparentPasses, TransparentPipeline, TransparentTargets, UiVertexRing,
-        Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
+        OverlayPipeline, PresentTonemapPipeline, RayScene, RayTracingPipelines, RayTracingSettings,
+        RayTracingTargets, SetLayouts, ShadowBuildPass, ShadowPipeline, ShadowTargets,
+        SmaaPipelines, SmaaTargets, Swapchain, TransparentPasses, TransparentPipeline,
+        TransparentTargets, UiVertexRing, Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
 
@@ -40,15 +40,15 @@ pub(super) fn init_vulkan(
         "PrimaryWindow 上取不到唯一的 RawHandleWrapper：窗口未在 Startup 前建好，时序假设被打破",
     )?;
     let bundle = try_init_vulkan(wrapper).or_fatal("Vulkan 初始化失败，资源束一个都不插入")?;
-    let VulkanBundle { chain, rt } = bundle;
+    let VulkanBundle { chain, ray_tracing } = bundle;
     let mut names = chain.insert_all(&mut commands);
-    // RT 资源族只在设备支持时存在（RayScene::new 返回 None）：不支持就没有这三个资源，
-    // draw_frame 的 RtInput 全缺席、整段跳过。
-    if let Some(extras) = rt {
+    // 光线求交资源族只在设备支持时存在（RayScene::new 返回 None）：不支持就没有这三个资源，
+    // draw_frame 的 RayTracingInput 全缺席、整段跳过。
+    if let Some(extras) = ray_tracing {
         commands.insert_resource(extras.ray);
         commands.insert_resource(extras.targets);
         commands.insert_resource(extras.pipelines);
-        names.extend(["RayScene", "RtTargets", "RtPipelines"]);
+        names.extend(["RayScene", "RayTracingTargets", "RayTracingPipelines"]);
     }
     info!(
         "Vulkan 全链就绪（{MAX_FRAMES_IN_FLIGHT} 帧在飞，常驻表容量 {TABLE_CAPACITY}）：{}；清屏+剔除+遮挡+选档+组装+绘制自下一帧（Last）起",
@@ -57,18 +57,18 @@ pub(super) fn init_vulkan(
     Ok(())
 }
 
-/// 初始化链的产物：必选项进 [`InitChain`]（按表拆除），RT 资源族可选。
+/// 初始化链的产物：必选项进 [`InitChain`]（按表拆除），光线求交资源族可选。
 struct VulkanBundle {
     chain: InitChain,
-    rt: Option<RtExtras>,
+    ray_tracing: Option<RayTracingExtras>,
 }
 
-/// RT 资源族三件（设备支持才建）：求交器、调试图/统计/RT 集、两条 compute 管线。
+/// 光线求交资源族三件（设备支持才建）：求交器、调试图/统计/光线求交集、两条 compute 管线。
 /// 拆除顺序 pipelines → targets → ray（后者被前者引用）。
-struct RtExtras {
+struct RayTracingExtras {
     ray: RayScene,
-    targets: RtTargets,
-    pipelines: RtPipelines,
+    targets: RayTracingTargets,
+    pipelines: RayTracingPipelines,
 }
 
 /// 创建链按构造依赖分段：设备根 → 帧级执行件 → 常驻数据 → 渲染目标 → 管线。
@@ -96,12 +96,12 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     let gpu_timer = GpuTimer::new(&ctx)?;
 
     // ---- GPU 常驻资源：先建池/缓存，再建 GPU 表；FrameUniformTable 已在帧级阶段创建 ----
-    let rt_enabled = ctx.rt_support().enabled();
+    let ray_tracing_enabled = ctx.ray_tracing_support().enabled();
     let pool = MeshPool::new(
         &ctx.device,
         ctx.memory_contract(),
         &ctx.sharing_families(),
-        rt_enabled,
+        ray_tracing_enabled,
     );
     let image_cache = ImageCache::default();
     // 会提交上传（构造内当场等完）：0 号槽的白色兜底贴图
@@ -119,13 +119,13 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
         &ctx.device,
         ctx.memory_contract(),
         &ctx.sharing_families(),
-        rt_enabled,
+        ray_tracing_enabled,
     )?;
     let light_table = LightTable::new(&ctx, ctx.memory_contract())?;
-    // RT 资源族：不支持时 None（视图中一切 RT 资源缺席，帧路径整段跳过）
+    // 光线求交资源族：不支持时 None（视图中一切 光线求交资源缺席，帧路径整段跳过）
     let ray_scene = RayScene::new(&ctx)?;
-    let rt_targets = match &ray_scene {
-        Some(_) => Some(RtTargets::new(&ctx, swapchain.extent)?),
+    let ray_tracing_targets = match &ray_scene {
+        Some(_) => Some(RayTracingTargets::new(&ctx, swapchain.extent)?),
         None => None,
     };
 
@@ -170,8 +170,8 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             hiz.occlusion_layout(),
             ibl.set_layout(),
         ];
-        // RT 集布局只在 RT 支持时存在（RT 关没有可登记的句柄）
-        if let Some(targets) = &rt_targets {
+        // 光线求交集布局只在 光线求交支持时存在（光线求交关没有可登记的句柄）
+        if let Some(targets) = &ray_tracing_targets {
             list.push(targets.set_layout());
         }
         SetLayouts::new(list)?
@@ -197,14 +197,14 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     let lod_pass = LodPass::new(&ctx, &layouts)?;
     let cluster_build_pass = ClusterBuildPass::new(&ctx, &layouts)?;
     let transparent_passes = TransparentPasses::new(&ctx, &layouts)?;
-    // RT 管线：只在设备支持时创建（RT 集布局已登记）
-    let rt_pipelines = match &ray_scene {
-        Some(_) => Some(RtPipelines::new(&ctx, &layouts)?),
+    // 光线求交管线：只在设备支持时创建（光线求交集布局已登记）
+    let ray_tracing_pipelines = match &ray_scene {
+        Some(_) => Some(RayTracingPipelines::new(&ctx, &layouts)?),
         None => None,
     };
-    // RT 三件成组：要么全有（ray 在某一方面非空），要么全无
-    let rt = match (ray_scene, rt_targets, rt_pipelines) {
-        (Some(ray), Some(targets), Some(pipelines)) => Some(RtExtras {
+    // 光线求交三件成组：要么全有（ray 在某一方面非空），要么全无
+    let ray_tracing = match (ray_scene, ray_tracing_targets, ray_tracing_pipelines) {
+        (Some(ray), Some(targets), Some(pipelines)) => Some(RayTracingExtras {
             ray,
             targets,
             pipelines,
@@ -249,13 +249,13 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             lod_pass,
             cluster_build_pass,
             transparent_passes,
-            // RT 总开关恒插入（BRP rt_set/rt_stats 在 RT 关时也要回读数）
-            rt_settings: RtSettings {
-                enabled: rt.is_some(),
+            // 光线求交总开关恒插入（BRP ray_tracing_set/ray_tracing_stats 在 光线求交关时也要回读数）
+            ray_tracing_settings: RayTracingSettings {
+                enabled: ray_tracing.is_some(),
                 view: 0,
             },
         },
-        rt,
+        ray_tracing,
     })
 }
 
@@ -272,10 +272,10 @@ pub(super) fn teardown_vulkan(world: &mut World) {
             Err(e) => warn!("退出排空失败（设备丢失？），继续按反序拆除: {e}"),
         }
     }
-    // RT 三件不在 InitChain 表里（设备不支持时不存在）：按依赖反序显式拆除，
+    // 光线求交三件不在 InitChain 表里（设备不支持时不存在）：按依赖反序显式拆除，
     // 且必须早于 Context（三者都持 Context 的 Device 句柄）。
-    world.remove_resource::<RtPipelines>();
-    world.remove_resource::<RtTargets>();
+    world.remove_resource::<RayTracingPipelines>();
+    world.remove_resource::<RayTracingTargets>();
     world.remove_resource::<RayScene>();
     // 初始化失败时资源从未插入，这里的移除都是空操作
     InitChain::remove_all(world);
@@ -338,7 +338,7 @@ init_chain! {
     ShadowPipeline => shadow_pipeline,
     ShadowTargets => shadow_targets,
     InstanceTables => instance_tables,
-    RtSettings => rt_settings,
+    RayTracingSettings => ray_tracing_settings,
     Uploader => uploader,
     MeshPool => pool,
     FrameUniformTable => frame_uniform_table,

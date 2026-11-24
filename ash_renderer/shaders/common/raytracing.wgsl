@@ -1,5 +1,5 @@
 // 射线求交公共片段（9.4 求交器）：所有 ray query 调用收在这一份片段里，换后端只换它 +
-// render/rt/ 的宿主模块。入口文件须自带 `enable wgpu_ray_query;`（#import 是文本展开，
+// render/ray_tracing/ 的宿主模块。入口文件须自带 `enable wgpu_ray_query;`（#import 是文本展开，
 // enable 不能进片段），并声明本片段引用的全局名（名字即契约）：
 //   scene_tlas: acceleration_structure —— 本帧槽 TLAS
 //   objects: array<ObjectRecord>       —— 对象表（记录定义在 common/instance.wgsl）

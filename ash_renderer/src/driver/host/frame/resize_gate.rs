@@ -9,7 +9,7 @@ use crate::{
     render::{Context, HizPyramid, MAX_FRAMES_IN_FLIGHT},
 };
 
-use super::{cluster::ClusterInput, input::FrameGpuInput, input::RtInput, post::PostInput};
+use super::{cluster::ClusterInput, input::FrameGpuInput, input::RayTracingInput, post::PostInput};
 
 /// 坑：Windows 最小化即发 `Resized(0,0)`，此后对旧 swapchain 的 `acquire` 无限阻塞，
 /// 而阻塞点在 runner 的 `app.update()` 里——消息泵冻死，任务栏"还原"永远点不到。
@@ -70,18 +70,18 @@ pub(super) fn rebuild_size_dependent(
     hiz: &mut HizPyramid,
     post: &mut PostInput,
     cluster: &mut ClusterInput,
-    rt: &mut RtInput<'_>,
+    ray_tracing: &mut RayTracingInput<'_>,
 ) -> Result<(), BevyError> {
     let ctx: &Context = &gpu.ctx;
     gpu.swapchain
         .rebuild(ctx)
         .or_warn("resize 后重建失败，下帧重试")?;
     let extent = gpu.swapchain.extent;
-    // 求交调试图随尺寸重建（RT 关/未建时无资源，空操作）
-    if let Some(targets) = rt.targets.as_mut() {
+    // 求交调试图随尺寸重建（光线求交关/未建时无资源，空操作）
+    if let Some(targets) = ray_tracing.targets.as_mut() {
         targets
             .rebuild(ctx, extent)
-            .or_fatal("RT 调试图重建失败，渲染链无法继续")?;
+            .or_fatal("光线求交调试图重建失败，渲染链无法继续")?;
     }
     gpu.frames
         .rebuild_depth(ctx, extent)

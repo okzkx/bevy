@@ -7,7 +7,7 @@ use bevy::{ecs::system::SystemParam, prelude::*, window::WindowResized};
 use crate::{
     render::{
         BindlessTextureTable, Context, FramePool, FrameUniformTable, GpuTimer, PerfLedger,
-        RayScene, RtPipelines, RtSettings, RtTargets, Swapchain, Uploader,
+        RayScene, RayTracingPipelines, RayTracingSettings, RayTracingTargets, Swapchain, Uploader,
     },
     scene::GapSnapshot,
 };
@@ -19,8 +19,8 @@ use super::indirect::IndirectInput;
 use super::lod::LodInput;
 use super::overlay::OverlayInput;
 use super::post::PostInput;
+use super::ray_tracing::RayTracingFrameLocal;
 use super::resize_gate::ResizeGate;
-use super::rt::RtFrameLocal;
 use super::scene::SceneInput;
 use super::shadow::ShadowInput;
 use super::transparent::TransparentInput;
@@ -46,22 +46,22 @@ pub(crate) struct FrameInput<'w, 's> {
     pub(super) gate: Local<'s, ResizeGate>,
     pub(super) logs: Local<'s, FrameLogs>,
     pub(super) occlusion_gate: Local<'s, OcclusionGate>,
-    /// 求交器（9.4）：RT 资源族 + 总开关；设备不支持时 ray/targets/pipelines 全缺席。
-    pub(super) rt: RtInput<'w>,
-    pub(super) rt_local: Local<'s, RtFrameLocal>,
+    /// 求交器（9.4）：光线求交资源族 + 总开关；设备不支持时 ray/targets/pipelines 全缺席。
+    pub(super) ray_tracing: RayTracingInput<'w>,
+    pub(super) ray_tracing_local: Local<'s, RayTracingFrameLocal>,
 }
 
-/// 求交器取用束：资源只在 RT 支持且初始化链插入时存在，其余情况按 None 跳过整段。
+/// 求交器取用束：资源只在 光线求交支持且初始化链插入时存在，其余情况按 None 跳过整段。
 #[derive(SystemParam)]
-pub(super) struct RtInput<'w> {
+pub(super) struct RayTracingInput<'w> {
     /// 求交器宿主入口（BLAS 注册表 + 每帧 TLAS）。
     pub(super) ray: Option<ResMut<'w, RayScene>>,
-    /// RT 总开关（BRP rt_set 写；init 恒插入）。
-    pub(super) settings: Option<Res<'w, RtSettings>>,
-    /// 调试图 + 统计 + RT 描述符集（resize 级）。
-    pub(super) targets: Option<ResMut<'w, RtTargets>>,
-    /// 两条 RT compute 管线。
-    pub(super) pipelines: Option<Res<'w, RtPipelines>>,
+    /// 光线求交总开关（BRP ray_tracing_set 写；init 恒插入）。
+    pub(super) settings: Option<Res<'w, RayTracingSettings>>,
+    /// 调试图 + 统计 + 光线求交描述符集（resize 级）。
+    pub(super) targets: Option<ResMut<'w, RayTracingTargets>>,
+    /// 两条光线求交 compute 管线。
+    pub(super) pipelines: Option<Res<'w, RayTracingPipelines>>,
 }
 
 /// 帧共享的设备、帧槽、描述符表与上传通道取用束。

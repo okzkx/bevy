@@ -33,9 +33,9 @@ pub enum BufferRole {
     DeviceStorage,
     /// indirect 绘制命令环：compute 每帧全量重写，`cmd_draw_indexed_indirect` 读，宿主不碰。
     IndirectCommands,
-    /// RT 变体网格池：在 [`Self::DevicePool`] 基础上加 storage 读（命中重建）与 AS 构建输入
-    /// 位（VUID-03673）+ BDA。只在 RT 开启时创建（`SHADER_DEVICE_ADDRESS` 在 BDA 未启用时非法）。
-    RtPool,
+    /// 光线求交变体网格池：在 [`Self::DevicePool`] 基础上加 storage 读（命中重建）与 AS 构建输入
+    /// 位（VUID-03673）+ BDA。只在 光线求交开启时创建（`SHADER_DEVICE_ADDRESS` 在 BDA 未启用时非法）。
+    RayTracingPool,
     /// BLAS/TLAS 构建期 scratch：`SHADER_DEVICE_ADDRESS` + storage，DEVICE_LOCAL；构建完即可退场。
     AccelerationStructureScratch,
     /// 加速结构存储 buffer：`ACCELERATION_STRUCTURE_STORAGE_KHR`（VUID-09542 同时要求
@@ -89,7 +89,7 @@ impl BufferRole {
                 M::DEVICE_LOCAL,
                 M::empty(),
             ),
-            Self::RtPool => (
+            Self::RayTracingPool => (
                 U::VERTEX_BUFFER
                     | U::INDEX_BUFFER
                     | U::TRANSFER_DST

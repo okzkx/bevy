@@ -1,14 +1,14 @@
-//! RT 描述符集与调试图（9.4.6）：独立 compute 的求交调试视图。调试图不接任何绘制 pass
-//! ——含 `RayQueryKHR` 的 shader 在非 RT 设备上建不了管线，塞进后链会破坏"RT 关 = 9.3
+//! 光线求交描述符集与调试图（9.4.6）：独立 compute 的求交调试视图。调试图不接任何绘制 pass
+//! ——含 `RayQueryKHR` 的 shader 在非 光线求交设备上建不了管线，塞进后链会破坏"光线求交关 = 9.3
 //! 逐位一致"的降级路径。
 //!
 //! 本模块持有：
-//! - [`RtTargets`]：按帧槽各一张 RGBA16F 调试图 + 统计缓冲（原子计数）+ RT 描述符集；
+//! - [`RayTracingTargets`]：按帧槽各一张 RGBA16F 调试图 + 统计缓冲（原子计数）+ 光线求交描述符集；
 //!   随 swapchain 尺寸重建，TLAS/网格池句柄变化时重写描述符（`ensure_bindings`）。
-//! - [`RtPipelines`]：`tlas_build`（实例数组组装）与 `ray_debug`（主射线）两条 compute 管线。
-//! - [`RtFrameDraw`]：② 段录制束（BLAS 待建命令 + TLAS 构建 + 调试图 dispatch）。
+//! - [`RayTracingPipelines`]：`tlas_build`（实例数组组装）与 `ray_debug`（主射线）两条 compute 管线。
+//! - [`RayTracingFrameDraw`]：② 段录制束（BLAS 待建命令 + TLAS 构建 + 调试图 dispatch）。
 //!
-//! RT 描述符集布局：b0 TLAS / b1 顶点池 storage / b2 索引池 storage / b3 调试图 /
+//! 光线求交描述符集布局：b0 TLAS / b1 顶点池 storage / b2 索引池 storage / b3 调试图 /
 //! b4 统计（u32×2：射线数、命中数）。
 
 use ash::{vk, Device};
@@ -29,17 +29,17 @@ use crate::render::core::pipeline::compute::ComputePipeline;
 use crate::render::core::record::barrier::ImageBarrier;
 use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::core::target::color::ColorTarget;
+use crate::render::ray_tracing::{BlasRegistry, TlasFrame};
 use crate::render::resident::assets::pool::MeshPool;
 use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
 use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
-use crate::render::rt::{BlasRegistry, TlasFrame};
 use crate::render::{Context, HDR_FORMAT, MAX_FRAMES_IN_FLIGHT};
 
 const COMPUTE: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
 
-/// RT 描述符集：b0 TLAS / b1 顶点池 / b2 索引池 / b3 调试图 / b4 统计。
-pub(crate) static RT_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
-    "rt",
+/// 光线求交描述符集：b0 TLAS / b1 顶点池 / b2 索引池 / b3 调试图 / b4 统计。
+pub(crate) static RAY_TRACING_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
+    "ray_tracing",
     &[
         BindingDesc::new(0, DescKind::AccelerationStructure, COMPUTE),
         BindingDesc::new(1, DescKind::StorageBuffer, COMPUTE),
@@ -63,12 +63,16 @@ pub(crate) static TLAS_BUILD_PIPELINE: PipelineDesc = PipelineDesc {
     depth_format: None,
 };
 
-/// 调试图（set0 实例表 / set1 帧 UBO / set2 RT 集 + 16B push）。
+/// 调试图（set0 实例表 / set1 帧 UBO / set2 光线求交集 + 16B push）。
 pub(crate) static RAY_DEBUG_PIPELINE: PipelineDesc = PipelineDesc {
     label: "ray_debug",
     shader: &shader_abi::RAY_DEBUG,
     entries: &[c"cs_main"],
-    sets: &[&INSTANCE_SET_DESC, &FRAME_UNIFORM_SET_DESC, &RT_SET_DESC],
+    sets: &[
+        &INSTANCE_SET_DESC,
+        &FRAME_UNIFORM_SET_DESC,
+        &RAY_TRACING_SET_DESC,
+    ],
     push: Some(PushRange {
         stages: COMPUTE,
         size: RAY_DEBUG_PUSH_SIZE,
@@ -83,22 +87,22 @@ pub const TLAS_BUILD_PUSH_SIZE: u32 = 4;
 pub const RAY_DEBUG_PUSH_SIZE: u32 = 16;
 
 /// 统计缓冲字节数（两个 u32：射线数、命中数）。
-pub const RT_STATS_SIZE: u64 = 8;
+pub const RAY_TRACING_STATS_SIZE: u64 = 8;
 
-/// 两条 RT compute 管线的持有者（进程级）。
+/// 两条光线求交 compute 管线的持有者（进程级）。
 #[derive(bevy::prelude::Resource)]
-pub struct RtPipelines {
+pub struct RayTracingPipelines {
     tlas_build: ComputePipeline,
     ray_debug: ComputePipeline,
 }
 
-impl RtPipelines {
+impl RayTracingPipelines {
     /// # Errors
     /// 配方对账不过或管线创建失败。
     pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
         let tlas_build = ComputePipeline::new(ctx, &TLAS_BUILD_PIPELINE, layouts)?;
         let ray_debug = ComputePipeline::new(ctx, &RAY_DEBUG_PIPELINE, layouts)?;
-        info!("RT 管线就绪: tlas_build（set2 + 4B push）+ ray_debug（set0/set1/set2 + 16B push）");
+        info!("光线求交管线就绪: tlas_build（set2 + 4B push）+ ray_debug（set0/set1/set2 + 16B push）");
         Ok(Self {
             tlas_build,
             ray_debug,
@@ -116,9 +120,9 @@ impl RtPipelines {
     }
 }
 
-/// 调试图 + 统计缓冲 + RT 描述符集（resize 级；尺寸随 swapchain 重建）。
+/// 调试图 + 统计缓冲 + 光线求交描述符集（resize 级；尺寸随 swapchain 重建）。
 #[derive(bevy::prelude::Resource)]
-pub struct RtTargets {
+pub struct RayTracingTargets {
     device: Device,
     layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
@@ -133,18 +137,18 @@ pub struct RtTargets {
         vk::AccelerationStructureKHR,
         vk::AccelerationStructureKHR,
     )>,
-    /// 上一帧的实例数（TLAS 构建条数；BRP rt_stats 读数）。
+    /// 上一帧的实例数（TLAS 构建条数；BRP ray_tracing_stats 读数）。
     last_instances: u32,
 }
 
-impl RtTargets {
+impl RayTracingTargets {
     /// 建空壳（描述符集按布局分配，但先不写）：写集要等 TLAS 与网格池句柄齐备。
     ///
     /// # Errors
     /// 布局/池/集创建失败或调试图创建失败。
     pub fn new(ctx: &Context, extent: vk::Extent2D) -> Result<Self> {
-        let layout = RT_SET_DESC.create(&ctx.device)?;
-        let pool_sizes = RT_SET_DESC.pool_sizes_vec(MAX_FRAMES_IN_FLIGHT as u32);
+        let layout = RAY_TRACING_SET_DESC.create(&ctx.device)?;
+        let pool_sizes = RAY_TRACING_SET_DESC.pool_sizes_vec(MAX_FRAMES_IN_FLIGHT as u32);
         let pool = unsafe {
             ctx.device
                 .create_descriptor_pool(
@@ -208,27 +212,27 @@ impl RtTargets {
                 ctx,
                 extent,
                 HDR_FORMAT,
-                "RT 调试图",
+                "光线求交调试图",
             )?);
         }
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             self.stats.push(GpuBuffer::create(
                 &self.device,
                 ctx.memory_contract(),
-                RT_STATS_SIZE,
+                RAY_TRACING_STATS_SIZE,
                 BufferRole::Storage,
             )?);
         }
         self.extent = extent;
         info!(
-            "RT 调试图就绪: {}×{} RGBA16F storage ×{MAX_FRAMES_IN_FLIGHT} 帧槽 + 统计缓冲 {RT_STATS_SIZE}B/槽",
+            "光线求交调试图就绪: {}×{} RGBA16F storage ×{MAX_FRAMES_IN_FLIGHT} 帧槽 + 统计缓冲 {RAY_TRACING_STATS_SIZE}B/槽",
             extent.width, extent.height
         );
         Ok(())
     }
 
-    /// 句柄齐备时写 RT 描述符集（全部 binding 一次写完）；任一句柄变化才重写。
-    /// 返回是否已就绪（false = 网格池还没建，本帧跳过 RT 录制）。
+    /// 句柄齐备时写 光线求交描述符集（全部 binding 一次写完）；任一句柄变化才重写。
+    /// 返回是否已就绪（false = 网格池还没建，本帧跳过 光线求交录制）。
     ///
     /// # Errors
     /// 描述符写入校验失败（声明/覆盖不完备）。
@@ -246,36 +250,36 @@ impl RtTargets {
             return Ok(true);
         }
         for (frame, set) in self.sets.iter().enumerate() {
-            let mut writer = DescriptorWriter::new(&RT_SET_DESC, *set);
+            let mut writer = DescriptorWriter::new(&RAY_TRACING_SET_DESC, *set);
             writer
                 .acceleration_structure(0, tlas[frame])
                 .buffer(1, vertex.0, 0, vertex.1)
                 .buffer(2, index.0, 0, index.1)
                 .image(3, self.images[frame].view(), vk::ImageLayout::GENERAL)
-                .buffer(4, self.stats[frame].buffer(), 0, RT_STATS_SIZE);
+                .buffer(4, self.stats[frame].buffer(), 0, RAY_TRACING_STATS_SIZE);
             writer.submit(&self.device)?;
         }
         self.bound = Some(key);
         info!(
-            "RT 描述符集写入: TLAS×{MAX_FRAMES_IN_FLIGHT} + 顶点池 {}B + 索引池 {}B（网格池/TLAS 句柄变化后重写）",
+            "光线求交描述符集写入: TLAS×{MAX_FRAMES_IN_FLIGHT} + 顶点池 {}B + 索引池 {}B（网格池/TLAS 句柄变化后重写）",
             vertex.1, index.1
         );
         Ok(true)
     }
 
-    /// 第 `frame` 帧槽的 RT 集。
+    /// 第 `frame` 帧槽的 光线求交集。
     #[must_use]
     pub fn set(&self, frame: usize) -> DescSet {
-        DescSet::new(&RT_SET_DESC, self.sets[frame])
+        DescSet::new(&RAY_TRACING_SET_DESC, self.sets[frame])
     }
 
     /// set 布局（登记给管线组装）。
     #[must_use]
     pub fn set_layout(&self) -> SetLayout {
-        SetLayout::new(&RT_SET_DESC, self.layout)
+        SetLayout::new(&RAY_TRACING_SET_DESC, self.layout)
     }
 
-    /// 第 `frame` 帧槽的调试图（`rt_dump` 读回）。
+    /// 第 `frame` 帧槽的调试图（`ray_tracing_dump` 读回）。
     #[must_use]
     pub(crate) fn debug_image(&self, frame: usize) -> &ColorTarget {
         &self.images[frame]
@@ -306,11 +310,11 @@ impl RtTargets {
     /// # Errors
     /// 写失败。
     pub fn clear_stats(&mut self, frame: usize) -> Result<()> {
-        self.stats[frame].write(0, &[0u8; RT_STATS_SIZE as usize])
+        self.stats[frame].write(0, &[0u8; RAY_TRACING_STATS_SIZE as usize])
     }
 }
 
-impl Drop for RtTargets {
+impl Drop for RayTracingTargets {
     fn drop(&mut self) {
         // 不等 GPU：退出时 teardown_vulkan 已先 device_wait_idle
         unsafe {
@@ -341,14 +345,14 @@ pub struct RayDebugDraw {
     pub push: [u8; RAY_DEBUG_PUSH_SIZE as usize],
     /// dispatch 组数 = ceil(像素数 / 64)。
     pub groups: u32,
-    /// 本帧槽的 RT 描述符集。
-    pub rt_set: DescSet,
+    /// 本帧槽的 光线求交描述符集。
+    pub ray_tracing_set: DescSet,
     /// 本帧槽的调试图（写入前录 UNDEFINED→GENERAL 迁移）。
     pub image: vk::Image,
 }
 
-/// ② 段 RT 录制束：BLAS 待建命令 + TLAS 组装/构建 + 调试图 dispatch。
-pub struct RtFrameDraw<'a> {
+/// ② 段 光线求交录制束：BLAS 待建命令 + TLAS 组装/构建 + 调试图 dispatch。
+pub struct RayTracingFrameDraw<'a> {
     /// BLAS 注册表（录待建命令要 &mut：待建条目转正）。
     pub blas: &'a mut BlasRegistry,
     /// 本帧 TLAS（录构建命令）。
@@ -358,15 +362,15 @@ pub struct RtFrameDraw<'a> {
     pub blas_addresses: (vk::DeviceAddress, vk::DeviceAddress),
     /// TLAS 实例数组组装（在场行为 0 时 None：空场景不录）。
     pub tlas_build: Option<TlasBuildDraw>,
-    /// 调试图（RT 关/未就绪时 None）。
+    /// 调试图（光线求交关/未就绪时 None）。
     pub debug: Option<RayDebugDraw>,
 }
 
-impl<'a> RtFrameDraw<'a> {
+impl<'a> RayTracingFrameDraw<'a> {
     /// 从 [`RayScene`] 拆出录制所需的两个借：BLAS 表可变、TLAS 只读。
     #[must_use]
     pub fn new(
-        scene: &'a mut crate::render::rt::RayScene,
+        scene: &'a mut crate::render::ray_tracing::RayScene,
         blas_addresses: (vk::DeviceAddress, vk::DeviceAddress),
         tlas_build: Option<TlasBuildDraw>,
         debug: Option<RayDebugDraw>,
@@ -382,7 +386,7 @@ impl<'a> RtFrameDraw<'a> {
     }
 }
 
-impl RtFrameDraw<'_> {
+impl RayTracingFrameDraw<'_> {
     /// 录 TLAS 段：BLAS 待建命令 → 屏障 → TLAS 组装 compute → 屏障 → TLAS 构建 → 屏障。
     /// 所有命令都在本帧命令缓冲内，受帧 fence 约束。
     pub(crate) fn record_tlas(
@@ -440,7 +444,7 @@ impl RtFrameDraw<'_> {
         debug.pass.record(
             device,
             cb,
-            &[instance_set, frame_set, debug.rt_set],
+            &[instance_set, frame_set, debug.ray_tracing_set],
             &debug.push,
             debug.groups,
             Handoff::ComputeReadWrite,
@@ -473,7 +477,7 @@ pub fn tlas_build_draw(
 #[must_use]
 pub fn ray_debug_draw(
     pass: ComputeHandles,
-    rt_set: DescSet,
+    ray_tracing_set: DescSet,
     image: vk::Image,
     extent: vk::Extent2D,
     view: u32,
@@ -485,17 +489,21 @@ pub fn ray_debug_draw(
         pass,
         push,
         groups: pixels.div_ceil(64) as u32,
-        rt_set,
+        ray_tracing_set,
         image,
     }
 }
 
-/// 调试图 → RGBA16F 原始字节（BRP `rt_dump` 用）：一次性命令缓冲拷贝回宿主。
+/// 调试图 → RGBA16F 原始字节（BRP `ray_tracing_dump` 用）：一次性命令缓冲拷贝回宿主。
 /// 帧内容 = 该帧槽上一次提交的调试图（两帧内新鲜）。
 ///
 /// # Errors
 /// 一次性回读资源创建/提交/等待失败。
-pub fn readback_debug_image(ctx: &Context, targets: &RtTargets, slot: usize) -> Result<Vec<u8>> {
+pub fn readback_debug_image(
+    ctx: &Context,
+    targets: &RayTracingTargets,
+    slot: usize,
+) -> Result<Vec<u8>> {
     use crate::render::core::device::readback::OneShotReadback;
     use crate::render::core::record::barrier::MemoryBarrierDesc;
 

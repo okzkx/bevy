@@ -1,6 +1,6 @@
 // 求交调试视图（compute 单入口）：每像素一条主射线 → inline ray query → 命中重建，
 // 写 RGBA16F 调试图 + 原子计数。独立 compute，不接任何绘制 pass——含 RayQueryKHR 的
-// shader 在非 RT 设备上建不了管线，塞进后链会破坏"RT 关 = 9.3 逐位一致"。
+// shader 在非 光线求交设备上建不了管线，塞进后链会破坏"光线求交关 = 9.3 逐位一致"。
 //
 // 接口：
 // - set0 b0 对象表（命中重建读记录；48B ObjectRecord）

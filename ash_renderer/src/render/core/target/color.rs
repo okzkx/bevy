@@ -80,7 +80,7 @@ impl ColorTarget {
     }
 
     /// 建存储图像目标：compute 以 storage image 写、宿主以 TRANSFER_SRC 拷回，从不作附件。
-    /// RT 调试图（RGBA16F）用这条路径。
+    /// 光线求交调试图（RGBA16F）用这条路径。
     ///
     /// # Errors
     /// 格式不支持 STORAGE_IMAGE/TRANSFER_SRC，或 Vulkan 创建/分配/绑定失败。

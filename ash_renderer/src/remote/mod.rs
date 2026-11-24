@@ -20,7 +20,7 @@
 //! | [`features::render_settings`] | 画面设置：Bloom/tonemap、SMAA、着色调试模式 |
 //! | [`features::sky`] | 程序化天空：参数读写（`sky_set`/`sky_stats`）与常量天空自检开关（`sky_uniform`） |
 //! | [`features::ibl`] | 环境光照：开关/强度/漫反射编码（`ibl_set`）、SH-L2/自检/GlobalProbe 读数（`ibl_stats`）与 cubemap/DFG/桶全量读回（`ibl_census`） |
-//! | [`features::rt`] | 求交器：开关/调试图子视图（`rt_set`）、能力分位与 BLAS/TLAS/射线计数（`rt_stats`）、调试图 PPM 取证（`rt_dump`）、实例数组/地址表字节对照（`rt_census`） |
+//! | [`features::ray_tracing`] | 求交器：开关/调试图子视图（`ray_tracing_set`）、能力分位与 BLAS/TLAS/射线计数（`ray_tracing_stats`）、调试图 PPM 取证（`ray_tracing_dump`）、实例数组/地址表字节对照（`ray_tracing_census`） |
 //! | [`features::draw`] | indirect 闭环读数与组装对照开关 |
 //! | [`features::residency`] | 驻留管理器读数与设置 |
 //! | [`features::gap`] | GPU 缺口请求读数与模式 |
@@ -83,9 +83,9 @@ use self::{
         gap::{gap_census, gap_set, gap_stats},
         ibl::{ibl_census, ibl_set, ibl_stats},
         lod::{lod_census, lod_set_enabled, lod_set_params},
+        ray_tracing::{ray_tracing_census, ray_tracing_dump, ray_tracing_set, ray_tracing_stats},
         render_settings::{bloom_set, set_render_mode, smaa_set},
         residency::{residency_set, residency_stats},
-        rt::{rt_census, rt_dump, rt_set, rt_stats},
         shadow::{shadow_set, shadow_stats},
         sky::{sky_set, sky_stats, sky_uniform},
     },
@@ -164,10 +164,10 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/ibl_set", ibl_set)
                 .with_method_main("ash_renderer/ibl_stats", ibl_stats)
                 .with_method_main("ash_renderer/ibl_census", ibl_census)
-                .with_method_main("ash_renderer/rt_set", rt_set)
-                .with_method_main("ash_renderer/rt_stats", rt_stats)
-                .with_method_main("ash_renderer/rt_dump", rt_dump)
-                .with_method_main("ash_renderer/rt_census", rt_census)
+                .with_method_main("ash_renderer/ray_tracing_set", ray_tracing_set)
+                .with_method_main("ash_renderer/ray_tracing_stats", ray_tracing_stats)
+                .with_method_main("ash_renderer/ray_tracing_dump", ray_tracing_dump)
+                .with_method_main("ash_renderer/ray_tracing_census", ray_tracing_census)
                 .with_method_main("ash_renderer/frame_dump", frame_dump)
                 .with_method_main("ash_renderer/layout_contract", layout_contract),
             RemoteHttpPlugin::default().with_port(port),

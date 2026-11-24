@@ -358,7 +358,7 @@ impl InstanceTables {
     }
 
     /// 写本帧槽 BLAS 地址表（增量）：行的锚档资产地址；未建成/未驻留写 0（实例引用 0 合法）。
-    /// RT 关（或行不在 dirty 集）零写入。
+    /// 光线求交关（或行不在 dirty 集）零写入。
     pub(crate) fn write_blas_address_rows(
         &mut self,
         ledger: &InstanceLedger,
@@ -393,7 +393,7 @@ impl InstanceTables {
 
     /// 整表重写 BLAS 地址表（BLAS 集合变化时）：全部有槽行写两个帧槽——地址取决于
     /// (槽, 锚档资产) 而锚档会随 LOD 变体到货/退场切换，增量集追不上，整表最稳。
-    /// RT 关时零写入。
+    /// 光线求交关时零写入。
     pub(crate) fn write_blas_addresses_all(
         &mut self,
         ledger: &InstanceLedger,

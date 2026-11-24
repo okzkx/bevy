@@ -14,7 +14,7 @@ use crate::render::core::device::memory::role::BufferRole;
 use crate::render::core::record::barrier::MemoryBarrierDesc;
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
-/// 首建容量：即使空场景也要给 RT 描述符集一个合法 TLAS 句柄（0 实例的 AS 不合法）。
+/// 首建容量：即使空场景也要给 光线求交描述符集一个合法 TLAS 句柄（0 实例的 AS 不合法）。
 const INITIAL_CAPACITY: u32 = 1024;
 
 struct TlasSlot {
@@ -162,7 +162,7 @@ impl TlasFrame {
         Ok(())
     }
 
-    /// 第 `slot` 帧槽的 TLAS 句柄（RT 描述符集 b0）。
+    /// 第 `slot` 帧槽的 TLAS 句柄（光线求交描述符集 b0）。
     #[must_use]
     pub(crate) fn handle(&self, slot: usize) -> vk::AccelerationStructureKHR {
         self.slots[slot].as_

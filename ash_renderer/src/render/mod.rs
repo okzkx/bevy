@@ -23,8 +23,8 @@ mod core;
 mod frame;
 mod layout_registry;
 mod passes;
+mod ray_tracing;
 mod resident;
-mod rt;
 mod stats;
 
 #[cfg(test)]
@@ -32,9 +32,9 @@ mod layout_contract_tests;
 
 pub use self::core::binding::set_layout::{SetLayout, SetLayouts};
 pub use self::core::device::context::{Context, MAX_FRAMES_IN_FLIGHT};
-pub use self::core::device::rt::{RtCaps, RtSupport};
+pub use self::core::device::ray_tracing::{RayTracingCaps, RayTracingSupport};
 pub use self::core::target::color::HDR_FORMAT;
-pub use self::rt::{BlasRegistry, RayScene, RaySceneStats, RtSettings, TlasFrame};
+pub use self::ray_tracing::{BlasRegistry, RayScene, RaySceneStats, RayTracingSettings, TlasFrame};
 pub(crate) use layout_registry::{ALL_PIPELINES, ALL_SETS};
 pub use passes::visibility::cull::{
     aabb_visible, frustum_planes, CullDiagnostics, CullDraw, CullPass, CullSettings,
@@ -133,8 +133,9 @@ pub use passes::post::present_tonemap_pipeline::PresentTonemapPipeline;
 pub use passes::post::smaa::{
     SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
 };
-pub use passes::rt::{
-    ray_debug_draw, readback_debug_image, tlas_build_draw, RtFrameDraw, RtPipelines, RtTargets,
+pub use passes::ray_tracing::{
+    ray_debug_draw, readback_debug_image, tlas_build_draw, RayTracingFrameDraw,
+    RayTracingPipelines, RayTracingTargets,
 };
 pub use passes::shadow::cascades::{
     cascade_matrices, pack_shadow_uniforms, ShadowCascadeInput, ShadowCascades, ShadowSettings,

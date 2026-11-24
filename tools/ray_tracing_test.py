@@ -2,7 +2,7 @@
 """9.4 求交器判定线一键驱动（BRP + 帧取证）：起宿主 → 四条判定线逐项采证 → 收尾。
 
 判定口径（见 .agents/docs/开发步骤/9-表面缓存全局光照/9.4-求交器与射线基建/施工计划 §9.4.7）：
-  ① 求交正确：rt_stats rays 恒等于像素数、命中率 > 0 且 ≤1；rt_dump 三个子视图落 PPM；
+  ① 求交正确：ray_tracing_stats rays 恒等于像素数、命中率 > 0 且 ≤1；ray_tracing_dump 三个子视图落 PPM；
      "距离图与深度图结构一致/法线朝向正确"由 PPM 读图取证（脚本只负责落文件 + 结构自检）。
   ② 移动跟随：在相机前方 1.5m 造一面大墙（unique mesh → 独立 BLAS）→ view=2 槽 hash 图
      几乎单色（墙比场景任何面都近，全部射线命中它）；把墙移出视野 → 画面大面积变化
@@ -10,15 +10,15 @@
      最近命中永远不是它，测不到跟随。
   ③ 流送无悬空：despawn 该立方体 → 等驻留回收 → blas_count 回落且进程零 VUID/VK-ERROR；
      之后连续 60 帧（≥1.5s）无新增 VUID。
-  ④ 降级路径：RT 开时 frame_dump 两次（稳定性基线）+ rt_set enabled=false 后 frame_dump 一次
-     ——关档帧与开档帧逐字节一致（RT 关 = 9.3 收官态）；rt_stats 报 enabled:false；rt_dump 拒绝。
+  ④ 降级路径：光线求交开时 frame_dump 两次（稳定性基线）+ ray_tracing_set enabled=false 后 frame_dump 一次
+     ——关档帧与开档帧逐字节一致（光线求交关 = 9.3 收官态）；ray_tracing_stats 报 enabled:false；ray_tracing_dump 拒绝。
 ⑤ 回归五脚本（hiz_test / scene_lod / scene_stream / scene_fine / scene_sponza）由外部逐个跑，
    本脚本不重复。
 
 用法：
-  python tools/rt_test.py                  # 宿主没起就自启（默认 target/debug/ash_renderer.exe）
-  python tools/rt_test.py --no-close       # 测完不关自启的宿主
-  python tools/rt_test.py --skip-launch    # 只驱动已在跑的宿主
+  python tools/ray_tracing_test.py                  # 宿主没起就自启（默认 target/debug/ash_renderer.exe）
+  python tools/ray_tracing_test.py --no-close       # 测完不关自启的宿主
+  python tools/ray_tracing_test.py --skip-launch    # 只驱动已在跑的宿主
 环境变量（与 hiz_test 同款）：
   ASH_HOST_EXE       宿主 exe 全路径（缺省 target/debug/ash_renderer.exe；9.4 验证期指 ash_renderer_rt.exe）
   ASH_BRP_PORT       BRP 端口（缺省 15702；双实例并行时错开）
@@ -42,7 +42,7 @@ except AttributeError:
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE = os.environ.get("ASH_HOST_EXE", os.path.join(REPO, "target", "debug", "ash_renderer.exe"))
 HOST_NAME = os.path.basename(EXE)
-HOST_LOG = os.path.join(REPO, ".temp", "rt_test_host.log")
+HOST_LOG = os.path.join(REPO, ".temp", "ray_tracing_test_host.log")
 BRP_PORT = int(os.environ.get("ASH_BRP_PORT", "15702"))
 TMP = os.path.join(REPO, ".temp")
 DEBUG_VIEWS = {0: "距离", 1: "法线", 2: "槽 hash"}
@@ -75,7 +75,7 @@ def wait_brp(seconds=90):
     deadline = time.time() + seconds
     while time.time() < deadline:
         try:
-            rpc("ash_renderer/rt_stats")
+            rpc("ash_renderer/ray_tracing_stats")
             return True
         except Exception:
             time.sleep(1.0)
@@ -181,14 +181,14 @@ def unique_color_ratio(path):
     return max(counts.values(), default=0) / max(1, w * h)
 
 
-def rt_dump(path, view=None, expect_error=False):
+def ray_tracing_dump(path, view=None, expect_error=False):
     params = {"path": path}
     if view is not None:
         params["view"] = view
     try:
-        result = rpc("ash_renderer/rt_dump", params)
+        result = rpc("ash_renderer/ray_tracing_dump", params)
         if expect_error:
-            raise RuntimeError(f"rt_dump 期待被拒却成功: {result}")
+            raise RuntimeError(f"ray_tracing_dump 期待被拒却成功: {result}")
         return result
     except RuntimeError as e:
         if expect_error:
@@ -201,7 +201,7 @@ def frame_dump(path):
 
 
 def stats():
-    return rpc("ash_renderer/rt_stats")
+    return rpc("ash_renderer/ray_tracing_stats")
 
 
 def main():
@@ -229,7 +229,7 @@ def main():
         settle(4.0)
         s0 = stats()
         check(
-            "① RT 就绪（支持 + 总开关 + 能力分位全开）",
+            "① 光线求交就绪（支持 + 总开关 + 能力分位全开）",
             s0["supported"] and s0["enabled"] and s0["support"]["missing"] == "",
             f"enabled={s0['enabled']} missing='{s0['support']['missing']}'",
         )
@@ -247,10 +247,10 @@ def main():
         )
         dumps = {}
         for view in (0, 1, 2):
-            rpc("ash_renderer/rt_set", {"enabled": True, "view": view})
+            rpc("ash_renderer/ray_tracing_set", {"enabled": True, "view": view})
             settle(1.0)
-            path = os.path.join(TMP, f"rt_test_view{view}.ppm")
-            rt_dump(path, view=view)
+            path = os.path.join(TMP, f"ray_tracing_test_view{view}.ppm")
+            ray_tracing_dump(path, view=view)
             w, h, _ = read_ppm(path)
             dumps[view] = path
             check(f"① 调试图 view={view}（{DEBUG_VIEWS[view]}）落图", w > 0 and h > 0, f"{w}×{h}")
@@ -260,10 +260,10 @@ def main():
         check("① 法线图非单色（命中重建给出逐面朝向）", distinct > 8, f"{distinct} 种颜色")
 
         # ---- ② 移动跟随：巨型立方体罩住相机 → 移出视野 ----
-        rpc("ash_renderer/rt_set", {"enabled": True, "view": 2})
+        rpc("ash_renderer/ray_tracing_set", {"enabled": True, "view": 2})
         settle(1.0)
-        before = os.path.join(TMP, "rt_test_move_before.ppm")
-        rt_dump(before, view=2)
+        before = os.path.join(TMP, "ray_tracing_test_move_before.ppm")
+        ray_tracing_dump(before, view=2)
         spawn = rpc(
             "ash_renderer/spawn_shape",
             {
@@ -276,8 +276,8 @@ def main():
         )
         entity = spawn["entity"]
         settle(2.5)
-        inside = os.path.join(TMP, "rt_test_move_inside.ppm")
-        rt_dump(inside, view=2)
+        inside = os.path.join(TMP, "ray_tracing_test_move_inside.ppm")
+        ray_tracing_dump(inside, view=2)
         ratio_inside = unique_color_ratio(inside)
         check(
             "② 相机前的大墙独占画面（view=2 单色占比 > 95%）",
@@ -289,8 +289,8 @@ def main():
             {"entity": entity, "translation": [-200.0, 3.44, 0.0]},
         )
         settle(2.5)
-        moved = os.path.join(TMP, "rt_test_move_away.ppm")
-        rt_dump(moved, view=2)
+        moved = os.path.join(TMP, "ray_tracing_test_move_away.ppm")
+        ray_tracing_dump(moved, view=2)
         changed = diff_ratio(inside, moved)
         check(
             "② 移出视野后画面大面积变化（TLAS 跟随 transform）",
@@ -331,33 +331,33 @@ def main():
             f"基线 {vuid_base} → 现 {log_vuid_count()}",
         )
 
-        # ---- ④ 降级路径：RT 关与 9.3 收官态逐字节一致 ----
-        rpc("ash_renderer/rt_set", {"enabled": True})
+        # ---- ④ 降级路径：光线求交关与 9.3 收官态逐字节一致 ----
+        rpc("ash_renderer/ray_tracing_set", {"enabled": True})
         settle(1.0)
-        on1 = os.path.join(TMP, "rt_test_frame_on1.ppm")
+        on1 = os.path.join(TMP, "ray_tracing_test_frame_on1.ppm")
         frame_dump(on1)
         settle(1.0)
-        on2 = os.path.join(TMP, "rt_test_frame_on2.ppm")
+        on2 = os.path.join(TMP, "ray_tracing_test_frame_on2.ppm")
         frame_dump(on2)
         stable = read_ppm(on1)[2] == read_ppm(on2)[2]
-        rpc("ash_renderer/rt_set", {"enabled": False})
+        rpc("ash_renderer/ray_tracing_set", {"enabled": False})
         settle(1.0)
-        off = os.path.join(TMP, "rt_test_frame_off.ppm")
+        off = os.path.join(TMP, "ray_tracing_test_frame_off.ppm")
         frame_dump(off)
         check(
-            "④ RT 开→关：LDR 帧逐字节一致（降级不改画面）",
+            "④ 光线求交开→关：LDR 帧逐字节一致（降级不改画面）",
             read_ppm(on2)[2] == read_ppm(off)[2],
             "同帧态对比" + ("" if stable else "（警告：开档两帧也不一致，画面非静止）"),
         )
         s_off = stats()
         check(
-            "④ 关档 rt_stats 报 enabled:false（不报错）",
+            "④ 关档 ray_tracing_stats 报 enabled:false（不报错）",
             s_off["enabled"] is False and s_off["supported"] is True,
             f"enabled={s_off['enabled']} supported={s_off['supported']}",
         )
-        rejected = rt_dump(os.path.join(TMP, "rt_test_should_fail.ppm"), expect_error=True)
-        check("④ 关档 rt_dump 被拒（无调试图可读）", "rejected" in rejected)
-        rpc("ash_renderer/rt_set", {"enabled": True})
+        rejected = ray_tracing_dump(os.path.join(TMP, "ray_tracing_test_should_fail.ppm"), expect_error=True)
+        check("④ 关档 ray_tracing_dump 被拒（无调试图可读）", "rejected" in rejected)
+        rpc("ash_renderer/ray_tracing_set", {"enabled": True})
     finally:
         if proc is not None and not args.no_close:
             close_host(proc.pid)

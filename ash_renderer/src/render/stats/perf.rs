@@ -16,8 +16,8 @@
 //! | T6 | Hi-Z 归约后 | Hi-Z 构建 |
 //! | T7 | Bloom/tonemap/SMAA/neighborhood + UI 后 | 后处理 + UI |
 //! | T8 | end_command_buffer 前 | 尾段（不入账）；全帧取 T0→T8 |
-//! | T9 | ② 段 TLAS 组装/构建 + 屏障后 | RT TLAS（T9 单列，`fetch_rt` 取） |
-//! | T10 | ② 段调试图主射线后 | RT 射线（T10 单列，`fetch_rt` 取） |
+//! | T9 | ② 段 TLAS 组装/构建 + 屏障后 | 光线求交 TLAS（T9 单列，`fetch_ray_tracing` 取） |
+//! | T10 | ② 段调试图主射线后 | 光线求交射线（T10 单列，`fetch_ray_tracing` 取） |
 //!
 //! timestamp 只用于诊断：队列族 `timestamp_valid_bits == 0` 时降级停用（warn 一次），不阻断渲染。
 //!
@@ -63,10 +63,10 @@ pub enum TimestampPoint {
     PostUi = 7,
     /// 全帧结束（end_command_buffer 前，不入账；全帧取 FrameStart→FrameEnd）。
     FrameEnd = 8,
-    /// ② 段 RT：BLAS 待建 + TLAS 组装/构建 + 两条屏障结束（RT 关的帧 ≈ IblCapture）。
-    RtTlas = 9,
-    /// ② 段 RT：调试图主射线 dispatch 结束（RT 关的帧 ≈ RtTlas）。
-    RtRays = 10,
+    /// ② 段光线求交：BLAS 待建 + TLAS 组装/构建 + 两条屏障结束（光线求交关的帧 ≈ IblCapture）。
+    RayTracingTlas = 9,
+    /// ② 段光线求交：调试图主射线 dispatch 结束（光线求交关的帧 ≈ RayTracingTlas）。
+    RayTracingRays = 10,
 }
 
 /// 一帧的计量样本：CPU 分段 + GPU 区间 + 规模读数，全部毫秒。
@@ -98,10 +98,10 @@ pub struct FrameSample {
     pub gpu_hiz_ms: f32,
     /// IBL 烘焙（捕获 + SH 投影/归约/自检 + 预滤波）；不烘焙的帧 ≈ 0。
     pub gpu_ibl_capture_ms: f32,
-    /// ② 段 TLAS 组装/构建（含屏障）；RT 关的帧 ≈ 0。
-    pub gpu_rt_tlas_ms: f32,
-    /// ② 段调试图主射线；RT 关的帧 ≈ 0。
-    pub gpu_rt_rays_ms: f32,
+    /// ② 段 TLAS 组装/构建（含屏障）；光线求交关的帧 ≈ 0。
+    pub gpu_ray_tracing_tlas_ms: f32,
+    /// ② 段调试图主射线；光线求交关的帧 ≈ 0。
+    pub gpu_ray_tracing_rays_ms: f32,
     /// 后处理 + UI（Bloom/tonemap/SMAA/neighborhood + UI）。
     pub gpu_present_ms: f32,
     /// T0→T7 全帧。
@@ -369,12 +369,12 @@ impl GpuTimer {
         ]))
     }
 
-    /// 取本槽的 RT 两段毫秒（T1→T9 TLAS、T9→T10 调试图）。停用、该槽没录过或结果
+    /// 取本槽的 光线求交两段毫秒（T1→T9 TLAS、T9→T10 调试图）。停用、该槽没录过或结果
     /// 未就绪返回 None。与 [`Self::fetch`] 同一次 fence 证据，只多读两位查询。
     ///
     /// # Errors
     /// 取结果失败（如设备丢失）。
-    pub fn fetch_rt(&mut self, slot: usize) -> Result<Option<[f32; 2]>> {
+    pub fn fetch_ray_tracing(&mut self, slot: usize) -> Result<Option<[f32; 2]>> {
         if !self.enabled || !self.recorded[slot].load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -400,11 +400,11 @@ impl GpuTimer {
         Ok(Some([
             ticks_to_ms(
                 raw[TimestampPoint::IblCapture as usize],
-                raw[TimestampPoint::RtTlas as usize],
+                raw[TimestampPoint::RayTracingTlas as usize],
             ),
             ticks_to_ms(
-                raw[TimestampPoint::RtTlas as usize],
-                raw[TimestampPoint::RtRays as usize],
+                raw[TimestampPoint::RayTracingTlas as usize],
+                raw[TimestampPoint::RayTracingRays as usize],
             ),
         ]))
     }

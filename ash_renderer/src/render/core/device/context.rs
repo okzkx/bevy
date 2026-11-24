@@ -19,7 +19,7 @@ use raw_window_handle::RawWindowHandle;
 use crate::common::error::{Result, VulkanError};
 
 use super::memory::contract::MemoryContract;
-use super::rt::{RtCaps, RtSupport};
+use super::ray_tracing::{RayTracingCaps, RayTracingSupport};
 
 const VALIDATION_LAYER: &std::ffi::CStr = c"VK_LAYER_KHRONOS_validation";
 /// 同步验证的载体扩展：`VkValidationFeaturesEXT` 进了 pNext 就必须同时启用它
@@ -131,10 +131,10 @@ pub struct Context {
     /// 各向异性过滤的生效上限：设备支持时取 `maxSamplerAnisotropy`，不支持时 1.0（关闭）。
     /// 采样器创建统一从这里取值，避免各调用点重复查 properties/feature 状态。
     max_sampler_anisotropy: f32,
-    /// 硬件光线求交能力门（建设备时查定；RT 资源只在它开启时创建）。
-    rt_support: RtSupport,
-    /// 加速结构属性（scratch 对齐、实例/图元上界）：RT 支持时查一次。
-    rt_properties: Option<vk::PhysicalDeviceAccelerationStructurePropertiesKHR<'static>>,
+    /// 硬件光线求交能力门（建设备时查定；光线求交资源只在它开启时创建）。
+    ray_tracing_support: RayTracingSupport,
+    /// 加速结构属性（scratch 对齐、实例/图元上界）：光线求交支持时查一次。
+    ray_tracing_properties: Option<vk::PhysicalDeviceAccelerationStructurePropertiesKHR<'static>>,
 }
 
 impl Context {
@@ -340,7 +340,7 @@ impl Context {
         //（如 VUID-VkSemaphoreTypeCreateInfo-timelineSemaphore-03252）。1.3 设备的 timeline 启用位仍在 Vulkan12Features 里。
         let mut vk12_query = vk::PhysicalDeviceVulkan12Features::default();
         let mut vk13_query = vk::PhysicalDeviceVulkan13Features::default();
-        // RT 三项 feature 走 query 副本：先读出来再决定，不凭 vulkaninfo 写死
+        // 光线求交三项 feature 走 query 副本：先读出来再决定，不凭 vulkaninfo 写死
         let mut bda_query = vk::PhysicalDeviceBufferDeviceAddressFeatures::default();
         let mut as_query = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
         let mut rq_query = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
@@ -492,7 +492,7 @@ impl Context {
                 .join(" ")
         );
         // 逐位显式启用用到的 feature
-        // ---- RT 能力门：三项 feature + 三个扩展齐备才启用（缺任一记 info，RT 关）----
+        // ---- 光线求交能力门：三项 feature + 三个扩展齐备才启用（缺任一记 info，光线求交关）----
         // 坑：AS/RQ 的 feature 结构体只能在其扩展启用时进 pNext 链，所以先查扩展再决定。
         let device_ext_props =
             unsafe { instance.enumerate_device_extension_properties(physical_device) }
@@ -502,7 +502,7 @@ impl Context {
                 .iter()
                 .any(|p| unsafe { std::ffi::CStr::from_ptr(p.extension_name.as_ptr()) } == name)
         };
-        let rt_caps = RtCaps {
+        let ray_tracing_caps = RayTracingCaps {
             buffer_device_address: bda_query.buffer_device_address != 0,
             acceleration_structure: as_query.acceleration_structure != 0,
             ray_query: rq_query.ray_query != 0,
@@ -510,16 +510,16 @@ impl Context {
             ext_ray_query: has_device_ext(ash::khr::ray_query::NAME),
             ext_deferred_host_operations: has_device_ext(ash::khr::deferred_host_operations::NAME),
         };
-        let rt_support = RtSupport::resolve(rt_caps);
-        let rt_enabled = rt_support.enabled();
-        if rt_enabled {
+        let ray_tracing_support = RayTracingSupport::resolve(ray_tracing_caps);
+        let ray_tracing_enabled = ray_tracing_support.enabled();
+        if ray_tracing_enabled {
             info!(
                 "硬件光线求交门: 三项 feature(BDA/AS/rayQuery) + 三个扩展齐备 → 启用（VK_KHR_acceleration_structure / ray_query / deferred_host_operations）"
             );
         } else {
             info!(
-                "硬件光线求交门: 缺 {} → 不启用（RT 关：不建设备扩展、不创建加速结构，画面与 9.3 一致）",
-                rt_support.missing()
+                "硬件光线求交门: 缺 {} → 不启用（光线求交关：不建设备扩展、不创建加速结构，画面与 9.3 一致）",
+                ray_tracing_support.missing()
             );
         }
         let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default()
@@ -529,14 +529,14 @@ impl Context {
             .shader_sampled_image_array_non_uniform_indexing(true)
             .descriptor_binding_sampled_image_update_after_bind(true)
             .descriptor_binding_partially_bound(true)
-            // RT 开则 BDA 必须开（AS 构建全走 device address）；RT 关则与 9.3 同路径
-            .buffer_device_address(rt_enabled);
+            // 光线求交开则 BDA 必须开（AS 构建全走 device address）；光线求交关则与 9.3 同路径
+            .buffer_device_address(ray_tracing_enabled);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
-        // AS/RQ feature 只在扩展启用时才允许进 pNext；RT 关时保持空结构不进链
+        // AS/RQ feature 只在扩展启用时才允许进 pNext；光线求交关时保持空结构不进链
         let mut as_features = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
-            .acceleration_structure(rt_enabled);
+            .acceleration_structure(ray_tracing_enabled);
         let mut rq_features =
-            vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(rt_enabled);
+            vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(ray_tracing_enabled);
         // multi_draw_indirect + draw_indirect_first_instance + texture_compression_bc
         // (BCn 显存纹理采样的特性位) + sampler_anisotropy（材质采样器开各向异性）在 base features 里。
         // sampler_anisotropy 是可选 feature：不支持就不开，采样器侧按上限 1.0 自动关闭
@@ -577,7 +577,7 @@ impl Context {
                 "VK_EXT_memory_budget 设备不支持：显存 budget/usage 读数不可用（监控面板隐藏该行）"
             );
         }
-        if rt_enabled {
+        if ray_tracing_enabled {
             dev_exts.push(ash::khr::acceleration_structure::NAME.as_ptr());
             dev_exts.push(ash::khr::ray_query::NAME.as_ptr());
             // AS 扩展的 vk.xml depends 项：漏启用它 VK_KHR_acceleration_structure 不合法
@@ -589,7 +589,7 @@ impl Context {
             .enabled_features(&base_features)
             .push_next(&mut vulkan12)
             .push_next(&mut vulkan13);
-        if rt_enabled {
+        if ray_tracing_enabled {
             device_info = device_info
                 .push_next(&mut as_features)
                 .push_next(&mut rq_features);
@@ -605,8 +605,8 @@ impl Context {
         };
 
         let dev_props = unsafe { instance.get_physical_device_properties(physical_device) };
-        // RT 属性：scratch 对齐与实例/图元上界，建设备后查一次（RT 关时 None）
-        let rt_properties = if rt_enabled {
+        // 光线求交属性：scratch 对齐与实例/图元上界，建设备后查一次（光线求交关时 None）
+        let ray_tracing_properties = if ray_tracing_enabled {
             let mut props = vk::PhysicalDeviceAccelerationStructurePropertiesKHR::default();
             let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut props);
             unsafe { instance.get_physical_device_properties2(physical_device, &mut properties2) };
@@ -677,8 +677,8 @@ impl Context {
             memory_contract,
             budget_enabled,
             max_sampler_anisotropy,
-            rt_support,
-            rt_properties,
+            ray_tracing_support,
+            ray_tracing_properties,
             debug_device,
         };
         guard.committed = true;
@@ -736,21 +736,21 @@ impl Context {
         self.max_sampler_anisotropy
     }
 
-    /// 硬件光线求交能力门（建设备时查定；RT 关时下游一切 RT 资源不创建）。
+    /// 硬件光线求交能力门（建设备时查定；光线求交关时下游一切 光线求交资源不创建）。
     #[must_use]
-    pub fn rt_support(&self) -> RtSupport {
-        self.rt_support
+    pub fn ray_tracing_support(&self) -> RayTracingSupport {
+        self.ray_tracing_support
     }
 
-    /// 加速结构属性（RT 支持时 Some）：scratch 对齐与实例/图元上界。
+    /// 加速结构属性（光线求交支持时 Some）：scratch 对齐与实例/图元上界。
     #[must_use]
-    pub fn rt_properties(
+    pub fn ray_tracing_properties(
         &self,
     ) -> Option<vk::PhysicalDeviceAccelerationStructurePropertiesKHR<'static>> {
-        self.rt_properties
+        self.ray_tracing_properties
     }
 
-    /// 取 buffer 设备地址（BDA 未启用时是非法调用，调用方须先过 `rt_support`）。
+    /// 取 buffer 设备地址（BDA 未启用时是非法调用，调用方须先过 `ray_tracing_support`）。
     #[must_use]
     pub fn buffer_address(&self, buffer: vk::Buffer) -> vk::DeviceAddress {
         // Safety：buffer 由调用方保证存活且创建时带 SHADER_DEVICE_ADDRESS；BDA 启用由能力门保证

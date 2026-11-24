@@ -4,7 +4,7 @@
 //! `shaders/common/raytracing.wgsl`，换后端 = 换那份片段 + 换本目录的后端模块。
 //!
 //! 生命周期：BLAS 挂 mesh 资产身份（commit 排建 / replace 重建 / retire 排销毁，驻留事件
-//! 驱动，见 `blas.rs`）；TLAS 每帧从在场环全量重建（`tlas.rs`）。设备不支持 RT 时
+//! 驱动，见 `blas.rs`）；TLAS 每帧从在场环全量重建（`tlas.rs`）。设备不支持 光线求交时
 //! [`RayScene::new`] 返回 None，整个模块不实例化。
 
 mod blas;
@@ -17,20 +17,20 @@ use bevy::mesh::Mesh;
 use crate::common::error::Result;
 
 use crate::render::core::device::context::Context;
-use crate::render::core::device::rt::RtSupport;
+use crate::render::core::device::ray_tracing::RayTracingSupport;
 use crate::render::core::record::barrier::MemoryBarrierDesc;
 use crate::render::resident::assets::pool::MeshSlot;
 
 pub use blas::BlasRegistry;
 pub use tlas::TlasFrame;
 
-/// RT 总开关（BRP `rt_set`）：feature 门之上再一层，供 A/B 与降级验证。`false` 时
-/// 一切 RT 命令不录、调试图不写——画面与 9.3 收官态逐位一致。
+/// 光线求交总开关（BRP `ray_tracing_set`）：feature 门之上再一层，供 A/B 与降级验证。`false` 时
+/// 一切 光线求交命令不录、调试图不写——画面与 9.3 收官态逐位一致。
 #[derive(bevy::prelude::Resource, Clone, Copy, Debug, Default)]
-pub struct RtSettings {
-    /// 总开关（init 按能力门给初值；BRP rt_set 覆写）。
+pub struct RayTracingSettings {
+    /// 总开关（init 按能力门给初值；BRP ray_tracing_set 覆写）。
     pub enabled: bool,
-    /// 调试图子视图：0 = 命中距离 t，1 = 世界法线，2 = 实例槽 hash（`rt_dump` 按它解码）。
+    /// 调试图子视图：0 = 命中距离 t，1 = 世界法线，2 = 实例槽 hash（`ray_tracing_dump` 按它解码）。
     pub view: u32,
 }
 
@@ -40,12 +40,12 @@ pub struct RayScene {
     device: Device,
     accel: ash::khr::acceleration_structure::Device,
     properties: vk::PhysicalDeviceAccelerationStructurePropertiesKHR<'static>,
-    support: RtSupport,
+    support: RayTracingSupport,
     blas: BlasRegistry,
     tlas: TlasFrame,
 }
 
-/// BRP `rt_stats` 与施工记录同口径的读数。
+/// BRP `ray_tracing_stats` 与施工记录同口径的读数。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RaySceneStats {
     pub blas_count: usize,
@@ -58,18 +58,18 @@ pub struct RaySceneStats {
 }
 
 impl RayScene {
-    /// RT 支持则建设备侧容器（初始容量 TLAS + 空 BLAS 表），否则 None。
+    /// 光线求交支持则建设备侧容器（初始容量 TLAS + 空 BLAS 表），否则 None。
     ///
     /// # Errors
     /// 属性缺席（能力门通过但属性为空，状态矛盾）或 TLAS 初始创建失败。
     pub fn new(ctx: &Context) -> Result<Option<Self>> {
-        let support = ctx.rt_support();
+        let support = ctx.ray_tracing_support();
         if !support.enabled() {
             return Ok(None);
         }
-        let Some(properties) = ctx.rt_properties() else {
+        let Some(properties) = ctx.ray_tracing_properties() else {
             return Err(crate::common::error::VulkanError::Contract(
-                "RT 能力门已开但加速结构属性缺席——建设备时查询链断裂".into(),
+                "光线求交能力门已开但加速结构属性缺席——建设备时查询链断裂".into(),
             ));
         };
         let accel = ash::khr::acceleration_structure::Device::new(&ctx.instance, &ctx.device);
@@ -86,7 +86,7 @@ impl RayScene {
     }
 
     #[must_use]
-    pub fn support(&self) -> RtSupport {
+    pub fn support(&self) -> RayTracingSupport {
         self.support
     }
 
@@ -172,7 +172,7 @@ impl RayScene {
             .ensure_capacity(ctx, self.properties, needed, wait)
     }
 
-    /// 第 `slot` 帧槽 TLAS 句柄（RT 描述符集 b0 用）。
+    /// 第 `slot` 帧槽 TLAS 句柄（光线求交描述符集 b0 用）。
     #[must_use]
     pub fn tlas_handle(&self, slot: usize) -> vk::AccelerationStructureKHR {
         self.tlas.handle(slot)
@@ -190,7 +190,7 @@ impl RayScene {
             .record_build(cb, slot, instance_buffer_address, instance_count);
     }
 
-    /// ACCELERATION_STRUCTURE 描述符写入要走 ash 的 loader，这里借出（passes/rt 建集用）。
+    /// ACCELERATION_STRUCTURE 描述符写入要走 ash 的 loader，这里借出（passes/ray_tracing 建集用）。
     #[must_use]
     pub fn accel_loader(&self) -> &ash::khr::acceleration_structure::Device {
         &self.accel

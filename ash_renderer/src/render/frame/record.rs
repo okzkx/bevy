@@ -159,15 +159,15 @@ impl FramePool {
         mark.mark(TimestampPoint::IblCapture);
 
         // 求交器（9.4）：BLAS 待建 → TLAS 组装/构建 → 屏障 → 调试图主射线。整段在 ② 段最前，
-        // 不依赖后面的剔除/组装；RT 关/未就绪 = None，整段跳过（与 9.3 逐位一致）。
-        if let Some(rt) = feature.rt.as_mut() {
-            rt.record_tlas(device, cb, res.instance_set, slot);
+        // 不依赖后面的剔除/组装；光线求交关/未就绪 = None，整段跳过（与 9.3 逐位一致）。
+        if let Some(ray_tracing) = feature.ray_tracing.as_mut() {
+            ray_tracing.record_tlas(device, cb, res.instance_set, slot);
         }
-        mark.mark(TimestampPoint::RtTlas);
-        if let Some(rt) = feature.rt.as_mut() {
-            rt.record_debug(device, cb, res.instance_set, res.frame_set);
+        mark.mark(TimestampPoint::RayTracingTlas);
+        if let Some(ray_tracing) = feature.ray_tracing.as_mut() {
+            ray_tracing.record_debug(device, cb, res.instance_set, res.frame_set);
         }
-        mark.mark(TimestampPoint::RtRays);
+        mark.mark(TimestampPoint::RayTracingRays);
 
         if let Some(frustum_cull) = &feature.frustum_cull {
             frustum_cull.record(device, cb, res.instance_set, feature.shadow.set);
