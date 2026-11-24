@@ -301,16 +301,19 @@ fn estimate_sample_color(samples: u32, stride: u32, skipped: bool) -> vec3f {
     return select(base * dim * 0.35, base * dim, skipped);
 }
 
-// 辐照度色阶：对数映射到 0..1（GI 的量级跨越两个数量级，线性映射看不出层次）
+// 辐照度色阶：对数映射到 0..1。范围按 Sponza 档的实测定：场地里 patch 的 E 大致在
+// 4（拱廊深处）～100（正对天光的墙）之间，所以让 E ≈ 1.4 落到 0、E ≈ 128 落到 1——
+// 一开始用 `log2(E*4)/4`（E≈4 就饱和），整屏发白，什么层次都没有。
 fn irradiance_color(e: f32) -> vec3f {
-    let t = clamp(log2(max(e, 1e-4) * 4.0) / 4.0, 0.0, 1.0);
+    let t = clamp((log2(max(e, 1e-3)) - 0.5) / 7.0, 0.0, 1.0);
     return mix(vec3f(0.05, 0.05, 0.12), vec3f(0.95, 0.95, 0.85), t)
         + vec3f(0.15, 0.05, 0.0) * smoothstep(0.6, 1.0, t);
 }
 
-// 方差色阶：绿（稳）→ 红（抖）
+// 方差色阶：绿（稳）→ 红（抖）。同样按实测定范围：v 是 E² 的量级，Sponza 档的短期
+// 方差落在 1e2～1e5，所以 v ≈ 16 落到 0、v ≈ 65536 落到 1。
 fn variance_color(v: f32) -> vec3f {
-    let t = clamp(log2(max(v, 1e-4) * 8.0) / 8.0, 0.0, 1.0);
+    let t = clamp((log2(max(v, 1e-3)) - 4.0) / 12.0, 0.0, 1.0);
     return mix(vec3f(0.15, 0.85, 0.25), vec3f(0.95, 0.15, 0.10), t);
 }
 
