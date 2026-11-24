@@ -20,10 +20,10 @@ use crate::{
         CompositePipeline, Context, CullPass, FramePool, FrameUniformTable, GBufferPipeline,
         GBufferTargets, GpuTimer, HizPyramid, IblEnvironment, ImageCache, IndirectPass,
         InstanceTables, LightClusters, LightTable, LodPass, MeshPool, OcclusionPass,
-        OverlayPipeline, PresentTonemapPipeline, SetLayouts, ShadowBuildPass, ShadowPipeline,
-        ShadowTargets, SmaaPipelines, SmaaTargets, Swapchain, TransparentPasses,
-        TransparentPipeline, TransparentTargets, UiVertexRing, Uploader, MAX_FRAMES_IN_FLIGHT,
-        TABLE_CAPACITY,
+        OverlayPipeline, PresentTonemapPipeline, RayScene, RtPipelines, RtSettings, RtTargets,
+        SetLayouts, ShadowBuildPass, ShadowPipeline, ShadowTargets, SmaaPipelines, SmaaTargets,
+        Swapchain, TransparentPasses, TransparentPipeline, TransparentTargets, UiVertexRing,
+        Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
 
@@ -39,8 +39,17 @@ pub(super) fn init_vulkan(
     let wrapper = wrapper.single().or_fatal(
         "PrimaryWindow 上取不到唯一的 RawHandleWrapper：窗口未在 Startup 前建好，时序假设被打破",
     )?;
-    let chain = try_init_vulkan(wrapper).or_fatal("Vulkan 初始化失败，资源束一个都不插入")?;
-    let names = chain.insert_all(&mut commands);
+    let bundle = try_init_vulkan(wrapper).or_fatal("Vulkan 初始化失败，资源束一个都不插入")?;
+    let VulkanBundle { chain, rt } = bundle;
+    let mut names = chain.insert_all(&mut commands);
+    // RT 资源族只在设备支持时存在（RayScene::new 返回 None）：不支持就没有这三个资源，
+    // draw_frame 的 RtInput 全缺席、整段跳过。
+    if let Some(extras) = rt {
+        commands.insert_resource(extras.ray);
+        commands.insert_resource(extras.targets);
+        commands.insert_resource(extras.pipelines);
+        names.extend(["RayScene", "RtTargets", "RtPipelines"]);
+    }
     info!(
         "Vulkan 全链就绪（{MAX_FRAMES_IN_FLIGHT} 帧在飞，常驻表容量 {TABLE_CAPACITY}）：{}；清屏+剔除+遮挡+选档+组装+绘制自下一帧（Last）起",
         names.join(" + "),
@@ -48,9 +57,23 @@ pub(super) fn init_vulkan(
     Ok(())
 }
 
+/// 初始化链的产物：必选项进 [`InitChain`]（按表拆除），RT 资源族可选。
+struct VulkanBundle {
+    chain: InitChain,
+    rt: Option<RtExtras>,
+}
+
+/// RT 资源族三件（设备支持才建）：求交器、调试图/统计/RT 集、两条 compute 管线。
+/// 拆除顺序 pipelines → targets → ray（后者被前者引用）。
+struct RtExtras {
+    ray: RayScene,
+    targets: RtTargets,
+    pipelines: RtPipelines,
+}
+
 /// 创建链按构造依赖分段：设备根 → 帧级执行件 → 常驻数据 → 渲染目标 → 管线。
 /// 这不是资源职责分类：FrameUniformTable 在帧级阶段创建，但属于 GPU 表；被借用者必须先于管线创建。
-fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
+fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     // ---- 设备根：全局唯一，其余资源都向它借 Device ----
     let ctx = Context::new(wrapper)?;
     let swapchain = Swapchain::new(&ctx)?;
@@ -73,7 +96,13 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
     let gpu_timer = GpuTimer::new(&ctx)?;
 
     // ---- GPU 常驻资源：先建池/缓存，再建 GPU 表；FrameUniformTable 已在帧级阶段创建 ----
-    let pool = MeshPool::new(&ctx.device, ctx.memory_contract(), &ctx.sharing_families());
+    let rt_enabled = ctx.rt_support().enabled();
+    let pool = MeshPool::new(
+        &ctx.device,
+        ctx.memory_contract(),
+        &ctx.sharing_families(),
+        rt_enabled,
+    );
     let image_cache = ImageCache::default();
     // 会提交上传（构造内当场等完）：0 号槽的白色兜底贴图
     let tables = BindlessTextureTable::new(
@@ -86,9 +115,19 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
         TABLE_CAPACITY,
         ctx.max_sampler_anisotropy(),
     )?;
-    let instance_tables =
-        InstanceTables::new(&ctx.device, ctx.memory_contract(), &ctx.sharing_families())?;
+    let instance_tables = InstanceTables::new(
+        &ctx.device,
+        ctx.memory_contract(),
+        &ctx.sharing_families(),
+        rt_enabled,
+    )?;
     let light_table = LightTable::new(&ctx, ctx.memory_contract())?;
+    // RT 资源族：不支持时 None（视图中一切 RT 资源缺席，帧路径整段跳过）
+    let ray_scene = RayScene::new(&ctx)?;
+    let rt_targets = match &ray_scene {
+        Some(_) => Some(RtTargets::new(&ctx, swapchain.extent)?),
+        None => None,
+    };
 
     // ---- 渲染目标：各渲染效果自己的资源族，向后续管线出借采样/数据布局 ----
     let depth_views: Vec<vk::ImageView> = (0..MAX_FRAMES_IN_FLIGHT)
@@ -115,21 +154,28 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
     // ---- 管线：无状态，只借 GPU 表与渲染目标提供的描述符布局。各布局先登记进
     // SetLayouts，各管线按自己的布局配方取用并与 shader ABI 对账。声明的附件格式必须和实际
     // 渲染用的附件完全一致，否则验证层报 VUID-08914 ----
-    let layouts = SetLayouts::new([
-        tables.set_layout(),
-        frame_uniform_table.set_layout(),
-        instance_tables.set_layout(),
-        gbuffer.sampled_layout(),
-        light_clusters.set_layout(),
-        transparent_targets.set_layout(),
-        shadow_targets.set_layout(),
-        bloom_targets.tex_layout(),
-        bloom_targets.up_layout(),
-        smaa_targets.layout_a(),
-        smaa_targets.layout_b(),
-        hiz.occlusion_layout(),
-        ibl.set_layout(),
-    ])?;
+    let layouts = {
+        let mut list = vec![
+            tables.set_layout(),
+            frame_uniform_table.set_layout(),
+            instance_tables.set_layout(),
+            gbuffer.sampled_layout(),
+            light_clusters.set_layout(),
+            transparent_targets.set_layout(),
+            shadow_targets.set_layout(),
+            bloom_targets.tex_layout(),
+            bloom_targets.up_layout(),
+            smaa_targets.layout_a(),
+            smaa_targets.layout_b(),
+            hiz.occlusion_layout(),
+            ibl.set_layout(),
+        ];
+        // RT 集布局只在 RT 支持时存在（RT 关没有可登记的句柄）
+        if let Some(targets) = &rt_targets {
+            list.push(targets.set_layout());
+        }
+        SetLayouts::new(list)?
+    };
     layouts.name_all(&ctx);
     // 图形管线（PipelineHandle）：swapchain 输出格式已由 Swapchain::new 固定为常量
     let gbuffer_pipeline = GBufferPipeline::new(&ctx, &layouts)?;
@@ -151,43 +197,65 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<InitChain> {
     let lod_pass = LodPass::new(&ctx, &layouts)?;
     let cluster_build_pass = ClusterBuildPass::new(&ctx, &layouts)?;
     let transparent_passes = TransparentPasses::new(&ctx, &layouts)?;
+    // RT 管线：只在设备支持时创建（RT 集布局已登记）
+    let rt_pipelines = match &ray_scene {
+        Some(_) => Some(RtPipelines::new(&ctx, &layouts)?),
+        None => None,
+    };
+    // RT 三件成组：要么全有（ray 在某一方面非空），要么全无
+    let rt = match (ray_scene, rt_targets, rt_pipelines) {
+        (Some(ray), Some(targets), Some(pipelines)) => Some(RtExtras {
+            ray,
+            targets,
+            pipelines,
+        }),
+        _ => None,
+    };
 
-    Ok(InitChain {
-        ctx,
-        swapchain,
-        frames,
-        uploader,
-        ui_ring,
-        frame_uniform_table,
-        gpu_timer,
-        pool,
-        image_cache,
-        tables,
-        instance_tables,
-        light_table,
-        gbuffer,
-        light_clusters,
-        transparent_targets,
-        shadow_targets,
-        bloom_targets,
-        smaa_targets,
-        hiz,
-        ibl,
-        gbuffer_pipeline,
-        shadow_pipeline,
-        transparent_pipeline,
-        overlay_pipeline,
-        composite_pipeline,
-        bloom_pipelines,
-        smaa_pipelines,
-        tonemap_pipeline,
-        cull_pass,
-        indirect_pass,
-        shadow_build_pass,
-        occlusion_pass,
-        lod_pass,
-        cluster_build_pass,
-        transparent_passes,
+    Ok(VulkanBundle {
+        chain: InitChain {
+            ctx,
+            swapchain,
+            frames,
+            uploader,
+            ui_ring,
+            frame_uniform_table,
+            gpu_timer,
+            pool,
+            image_cache,
+            tables,
+            instance_tables,
+            light_table,
+            gbuffer,
+            light_clusters,
+            transparent_targets,
+            shadow_targets,
+            bloom_targets,
+            smaa_targets,
+            hiz,
+            ibl,
+            gbuffer_pipeline,
+            shadow_pipeline,
+            transparent_pipeline,
+            overlay_pipeline,
+            composite_pipeline,
+            bloom_pipelines,
+            smaa_pipelines,
+            tonemap_pipeline,
+            cull_pass,
+            indirect_pass,
+            shadow_build_pass,
+            occlusion_pass,
+            lod_pass,
+            cluster_build_pass,
+            transparent_passes,
+            // RT 总开关恒插入（BRP rt_set/rt_stats 在 RT 关时也要回读数）
+            rt_settings: RtSettings {
+                enabled: rt.is_some(),
+                view: 0,
+            },
+        },
+        rt,
     })
 }
 
@@ -204,13 +272,17 @@ pub(super) fn teardown_vulkan(world: &mut World) {
             Err(e) => warn!("退出排空失败（设备丢失？），继续按反序拆除: {e}"),
         }
     }
+    // RT 三件不在 InitChain 表里（设备不支持时不存在）：按依赖反序显式拆除，
+    // 且必须早于 Context（三者都持 Context 的 Device 句柄）。
+    world.remove_resource::<RtPipelines>();
+    world.remove_resource::<RtTargets>();
+    world.remove_resource::<RayScene>();
     // 初始化失败时资源从未插入，这里的移除都是空操作
     InitChain::remove_all(world);
     if had_vulkan {
         info!("退出拆除完成：排空 → 帧级(帧池/UI 顶点环) → resize 级 → 管线(场景/overlay) → 资产级(池/上传/每帧 UBO/描述符表/贴图缓存/图集 graveyard) → 进程级");
     }
 }
-
 /// 资源表：写成 `类型 => 字段` 的由创建链产出；只写类型的由别处插入，这里只负责拆除。
 /// 表中顺序就是拆除顺序。
 macro_rules! init_chain {
@@ -266,6 +338,7 @@ init_chain! {
     ShadowPipeline => shadow_pipeline,
     ShadowTargets => shadow_targets,
     InstanceTables => instance_tables,
+    RtSettings => rt_settings,
     Uploader => uploader,
     MeshPool => pool,
     FrameUniformTable => frame_uniform_table,

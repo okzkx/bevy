@@ -18,6 +18,8 @@ pub enum DescKind {
     Sampler,
     UniformBuffer,
     StorageBuffer,
+    /// 顶层加速结构（TLAS）：ray query 的求交入口。
+    AccelerationStructure,
 }
 
 impl DescKind {
@@ -28,6 +30,7 @@ impl DescKind {
             Self::Sampler => vk::DescriptorType::SAMPLER,
             Self::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
             Self::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
+            Self::AccelerationStructure => vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
         }
     }
 }

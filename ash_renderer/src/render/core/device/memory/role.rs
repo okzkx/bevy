@@ -33,6 +33,16 @@ pub enum BufferRole {
     DeviceStorage,
     /// indirect 绘制命令环：compute 每帧全量重写，`cmd_draw_indexed_indirect` 读，宿主不碰。
     IndirectCommands,
+    /// RT 变体网格池：在 [`Self::DevicePool`] 基础上加 storage 读（命中重建）与 AS 构建输入
+    /// 位（VUID-03673）+ BDA。只在 RT 开启时创建（`SHADER_DEVICE_ADDRESS` 在 BDA 未启用时非法）。
+    RtPool,
+    /// BLAS/TLAS 构建期 scratch：`SHADER_DEVICE_ADDRESS` + storage，DEVICE_LOCAL；构建完即可退场。
+    AccelerationStructureScratch,
+    /// 加速结构存储 buffer：`ACCELERATION_STRUCTURE_STORAGE_KHR`（VUID-09542 同时要求
+    /// `SHADER_DEVICE_ADDRESS`），DEVICE_LOCAL，offset 0（256 倍数天然满足 VUID-03734）。
+    AccelerationStructureStorage,
+    /// TLAS 实例数组：compute 写（storage）、TLAS 构建经设备地址读（BUILD_INPUT_READ_ONLY_KHR）。
+    TlasInstances,
 }
 
 impl BufferRole {
@@ -76,6 +86,37 @@ impl BufferRole {
             ),
             Self::IndirectCommands => (
                 U::STORAGE_BUFFER | U::INDIRECT_BUFFER | U::TRANSFER_SRC,
+                M::DEVICE_LOCAL,
+                M::empty(),
+            ),
+            Self::RtPool => (
+                U::VERTEX_BUFFER
+                    | U::INDEX_BUFFER
+                    | U::TRANSFER_DST
+                    | U::TRANSFER_SRC
+                    | U::STORAGE_BUFFER
+                    | U::SHADER_DEVICE_ADDRESS
+                    | U::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                M::DEVICE_LOCAL,
+                M::empty(),
+            ),
+            Self::AccelerationStructureScratch => (
+                U::STORAGE_BUFFER | U::SHADER_DEVICE_ADDRESS,
+                M::DEVICE_LOCAL,
+                M::empty(),
+            ),
+            Self::AccelerationStructureStorage => (
+                U::ACCELERATION_STRUCTURE_STORAGE_KHR
+                    | U::SHADER_DEVICE_ADDRESS
+                    | U::STORAGE_BUFFER,
+                M::DEVICE_LOCAL,
+                M::empty(),
+            ),
+            Self::TlasInstances => (
+                U::STORAGE_BUFFER
+                    | U::SHADER_DEVICE_ADDRESS
+                    | U::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+                    | U::TRANSFER_SRC,
                 M::DEVICE_LOCAL,
                 M::empty(),
             ),

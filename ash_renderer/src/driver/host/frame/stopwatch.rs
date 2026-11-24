@@ -25,6 +25,8 @@ pub(super) struct FrameStopwatch {
     present_ms: f32,
     /// GPU 各段毫秒（本槽两帧前的提交，稳态下与当前帧同构；停用时恒 0）。
     gpu_sections: [f32; 9],
+    /// RT 两段毫秒（T1→T9 TLAS、T9→T10 调试图；RT 关/未录恒 0）。
+    gpu_rt_sections: [f32; 2],
 }
 
 impl FrameStopwatch {
@@ -40,6 +42,7 @@ impl FrameStopwatch {
             record_submit_ms: 0.0,
             present_ms: 0.0,
             gpu_sections: [0.0; 9],
+            gpu_rt_sections: [0.0; 2],
         }
     }
 
@@ -54,6 +57,10 @@ impl FrameStopwatch {
             .fetch(slot)
             .or_fatal("GPU 帧计时取回失败，渲染链无法继续")?
             .unwrap_or([0.0; 9]);
+        self.gpu_rt_sections = timer
+            .fetch_rt(slot)
+            .or_fatal("GPU RT 段计时取回失败，渲染链无法继续")?
+            .unwrap_or([0.0; 2]);
         Ok(())
     }
 
@@ -106,6 +113,8 @@ impl FrameStopwatch {
             gpu_hiz_ms: self.gpu_sections[4],
             gpu_present_ms: self.gpu_sections[5],
             gpu_ibl_capture_ms: self.gpu_sections[8],
+            gpu_rt_tlas_ms: self.gpu_rt_sections[0],
+            gpu_rt_rays_ms: self.gpu_rt_sections[1],
             gpu_total_ms: self.gpu_sections[7], // [6] = 尾段，不入账
             instance_rows,
             visible_rows,

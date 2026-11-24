@@ -22,11 +22,32 @@ use crate::common::bytes::put_u32s;
 use crate::common::syntax::ResultTierExt;
 use crate::render::{
     material_alpha_fields, material_is_transparent, pack_lod_entry, pack_material_record,
-    pack_model, BindlessTextureTable, ImageCache, InstanceTables, MeshPool, LOD_ENTRY_SIZE,
-    LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS, MODEL_STRIDE,
-    NO_TEXTURE_INDEX,
+    pack_model, BindlessTextureTable, ImageCache, InstanceTables, MeshPool, RayScene,
+    BLAS_ADDRESS_SIZE, LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MATERIAL_RECORD_SIZE,
+    MAX_LOD_LEVELS, MODEL_STRIDE, NO_TEXTURE_INDEX,
 };
 use crate::scene::{anchor_level, DrawListVerify, InstanceLedger, InstanceRow, LodGroups};
+
+/// 一个 LOD 组里"最粗的已驻留变体"的身份（无组 = 自身）：BLAS 只给这一档建一份
+///（施工计划 §0.2 的几何档位规则；与 `anchor_level` 同源但不依赖 floor_anchor 开关）。
+pub(crate) fn blas_asset_id(
+    pool: &MeshPool,
+    lod_groups: &LodGroups,
+    mesh_id: AssetId<Mesh>,
+) -> AssetId<Mesh> {
+    let Some(levels) = lod_groups.levels_of(mesh_id) else {
+        return mesh_id;
+    };
+    // 从最粗档（MAX-1）往细找第一个已驻留的变体；都没有则基准 mesh 自为组
+    for level in (1..MAX_LOD_LEVELS).rev() {
+        if let Some(handle) = &levels[level as usize]
+            && pool.resident(handle.id()).is_some()
+        {
+            return handle.id();
+        }
+    }
+    mesh_id
+}
 
 /// 可绘判定的输入来源：增量组装、全量参照与环写入共用的一束引用。
 #[derive(Clone, Copy)]
@@ -332,6 +353,71 @@ impl InstanceTables {
             self.lod_level_ring(frame)
                 .write(u64::from(slot) * LOD_LEVEL_SIZE, &0u32.to_le_bytes())
                 .or_fatal("LOD 档位环清零失败，渲染链无法继续")?;
+        }
+        Ok(())
+    }
+
+    /// 写本帧槽 BLAS 地址表（增量）：行的锚档资产地址；未建成/未驻留写 0（实例引用 0 合法）。
+    /// RT 关（或行不在 dirty 集）零写入。
+    pub(crate) fn write_blas_address_rows(
+        &mut self,
+        ledger: &InstanceLedger,
+        pool: &MeshPool,
+        lod_groups: &LodGroups,
+        ray: &RayScene,
+        entities: &[Entity],
+        frame: usize,
+    ) -> Result<(), BevyError> {
+        if entities.is_empty() {
+            return Ok(());
+        }
+        // 先取槽号序列，避免与 ring 的可变借用同域
+        let rows: Vec<(u32, AssetId<Mesh>)> = entities
+            .iter()
+            .filter_map(|e| {
+                let (row, slot) = row_with_slot(ledger, *e)?;
+                Some((slot, row.mesh.id()))
+            })
+            .collect();
+        let Some(ring) = self.blas_address_ring(frame) else {
+            return Ok(());
+        };
+        for (slot, mesh_id) in rows {
+            let id = blas_asset_id(pool, lod_groups, mesh_id);
+            let address = ray.blas_address(id).unwrap_or(0);
+            ring.write(u64::from(slot) * BLAS_ADDRESS_SIZE, &address.to_le_bytes())
+                .or_fatal("BLAS 地址表写失败，渲染链无法继续")?;
+        }
+        Ok(())
+    }
+
+    /// 整表重写 BLAS 地址表（BLAS 集合变化时）：全部有槽行写两个帧槽——地址取决于
+    /// (槽, 锚档资产) 而锚档会随 LOD 变体到货/退场切换，增量集追不上，整表最稳。
+    /// RT 关时零写入。
+    pub(crate) fn write_blas_addresses_all(
+        &mut self,
+        ledger: &InstanceLedger,
+        pool: &MeshPool,
+        lod_groups: &LodGroups,
+        ray: &RayScene,
+    ) -> Result<(), BevyError> {
+        let rows: Vec<(u32, AssetId<Mesh>)> = ledger
+            .rows()
+            .filter_map(|(_, row)| Some((row.instance_slot?, row.mesh.id())))
+            .collect();
+        let mut addresses = Vec::with_capacity(rows.len());
+        for (slot, mesh_id) in rows {
+            let id = blas_asset_id(pool, lod_groups, mesh_id);
+            addresses.push((slot, ray.blas_address(id).unwrap_or(0)));
+        }
+        for frame in 0..crate::render::MAX_FRAMES_IN_FLIGHT {
+            let Some(ring) = self.blas_address_ring(frame) else {
+                continue;
+            };
+            for (slot, address) in &addresses {
+                ring.write(u64::from(*slot) * BLAS_ADDRESS_SIZE, &address.to_le_bytes())
+                    .or_fatal("BLAS 地址表整表重写失败，渲染链无法继续")?;
+            }
         }
         Ok(())
     }

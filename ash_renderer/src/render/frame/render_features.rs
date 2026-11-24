@@ -6,6 +6,7 @@ use crate::render::passes::ibl::IblFrameDraw;
 use crate::render::passes::lighting::cluster::ClusterFrameDraw;
 use crate::render::passes::overlay::overlay_pipeline::UiDraw;
 use crate::render::passes::post::post_chain::PostChainDraw;
+use crate::render::passes::rt::RtFrameDraw;
 use crate::render::passes::shadow::shadow_frame::ShadowFrameDraw;
 use crate::render::passes::transparent::TransparentFrame;
 use crate::render::passes::visibility::cull::CullDraw;
@@ -39,6 +40,9 @@ pub struct RenderFeatures<'a> {
     pub transparent: Option<TransparentFrame>,
     /// 环境光照：② 段烘焙（脏帧才录）与 ⑤ 段绑进合成/透明前向的 IBL 集。
     pub ibl: IblFrameDraw<'a>,
+    /// 求交器（9.4）：② 段 BLAS 待建命令 + TLAS 构建 + 调试图；RT 关/未就绪为 None，
+    /// 整段跳过（RT 关 = 与 9.3 逐位一致）。
+    pub rt: Option<RtFrameDraw<'a>>,
     // —— ⑦⑧ 后链 + UI ——
     /// ⑦⑧ 后链束：Bloom → tonemap → SMAA → neighborhood（全部来自 `post`）。
     pub post: PostChainDraw,

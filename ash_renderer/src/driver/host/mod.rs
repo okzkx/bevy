@@ -32,7 +32,8 @@ use crate::render::{
 use crate::scene::DrawListVerify;
 use ash_macros::system;
 
-mod drawlist;
+/// 上传编排要复用"锚档资产"判定（BLAS 归属与 BLAS 地址表同源）：driver 内可见。
+pub(in crate::driver) mod drawlist;
 mod frame;
 mod frame_sync;
 mod init;

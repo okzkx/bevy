@@ -26,6 +26,12 @@ enum Write {
         element: u32,
         info: vk::DescriptorImageInfo,
     },
+    /// 加速结构没有 Buffer/Image 视图信息，裸句柄进 WriteDescriptorSetAccelerationStructureKHR。
+    AccelerationStructure {
+        binding: u32,
+        element: u32,
+        handle: vk::AccelerationStructureKHR,
+    },
 }
 
 impl Write {
@@ -36,6 +42,9 @@ impl Write {
                 binding, element, ..
             }
             | Self::Image {
+                binding, element, ..
+            }
+            | Self::AccelerationStructure {
                 binding, element, ..
             } => (binding, element),
         }
@@ -135,6 +144,20 @@ impl DescriptorWriter {
         self
     }
 
+    /// 写一个加速结构（种类须是 [`DescKind::AccelerationStructure`]）。
+    pub(crate) fn acceleration_structure(
+        &mut self,
+        binding: u32,
+        handle: vk::AccelerationStructureKHR,
+    ) -> &mut Self {
+        self.writes.push(Write::AccelerationStructure {
+            binding,
+            element: 0,
+            handle,
+        });
+        self
+    }
+
     /// 校验每个写入：binding 存在、描述符种类匹配写入形状、元素在声明数量内。
     /// 返回全部问题，空 = 通过。
     fn write_problems(&self) -> Vec<String> {
@@ -145,6 +168,7 @@ impl DescriptorWriter {
                 Write::Buffer { .. } => "buffer",
                 Write::Image { info, .. } if info.sampler != vk::Sampler::null() => "sampler",
                 Write::Image { .. } => "image",
+                Write::AccelerationStructure { .. } => "acceleration_structure",
             };
             let Some(b) = self.desc.binding(binding) else {
                 out.push(format!("b{binding}：{} 里没有这个 binding", self.desc.name));
@@ -157,6 +181,7 @@ impl DescriptorWriter {
                     | ("image", DescKind::SampledImage)
                     | ("image", DescKind::StorageImage)
                     | ("sampler", DescKind::Sampler)
+                    | ("acceleration_structure", DescKind::AccelerationStructure)
             );
             if !kind_ok {
                 out.push(format!(
@@ -221,39 +246,79 @@ impl DescriptorWriter {
 
     /// 校验后整批提交。
     ///
+    /// 加速结构写入需要 `VkWriteDescriptorSetAccelerationStructureKHR` 挂在 pNext 上，且该
+    /// 结构体要活到 `vkUpdateDescriptorSets` 返回——与批量写入的借用形状不兼容，所以
+    /// AS 写入逐条单独提交（RT 集只在重建/换绑时写，频次低）。
+    ///
     /// # Errors
     /// 任一写入不合法，或完备性不满足。
     pub(crate) fn submit(self, device: &Device) -> Result<()> {
         self.check()?;
-        let writes = self
+        let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
+        let mut accel: Vec<vk::AccelerationStructureKHR> = Vec::new();
+        for w in &self.writes {
+            let (binding, element) = w.target();
+            // 描述符类型以声明为准（种类匹配已在 check 核对），不由写入形状猜
+            let ty = self
+                .desc
+                .binding(binding)
+                .ok_or_else(|| {
+                    VulkanError::Init(format!("b{binding}：{} 里没有这个 binding", self.desc.name))
+                })?
+                .kind
+                .vk();
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(self.set)
+                .dst_binding(binding)
+                .dst_array_element(element)
+                .descriptor_type(ty);
+            match w {
+                Write::Buffer { info, .. } => {
+                    writes.push(write.buffer_info(std::slice::from_ref(info)));
+                }
+                Write::Image { info, .. } => {
+                    writes.push(write.image_info(std::slice::from_ref(info)));
+                }
+                Write::AccelerationStructure { handle, .. } => {
+                    accel.push(*handle);
+                    // 占位：AS 写入在下面逐条提交，这里不推进普通写列表
+                    let _ = write;
+                }
+            }
+        }
+        if !writes.is_empty() {
+            unsafe { device.update_descriptor_sets(&writes, &[]) };
+        }
+        // AS 写入逐条提交：结构体与 WriteDescriptorSet 在同一迭代内配对活到调用结束
+        let accel_writes: Vec<(u32, u32)> = self
             .writes
             .iter()
-            .map(|w| {
-                let (binding, element) = w.target();
-                // 描述符类型以声明为准（种类匹配已在 check 核对），不由写入形状猜
-                let ty = self
-                    .desc
-                    .binding(binding)
-                    .ok_or_else(|| {
-                        VulkanError::Init(format!(
-                            "b{binding}：{} 里没有这个 binding",
-                            self.desc.name
-                        ))
-                    })?
-                    .kind
-                    .vk();
-                let write = vk::WriteDescriptorSet::default()
-                    .dst_set(self.set)
-                    .dst_binding(binding)
-                    .dst_array_element(element)
-                    .descriptor_type(ty);
-                Ok(match w {
-                    Write::Buffer { info, .. } => write.buffer_info(std::slice::from_ref(info)),
-                    Write::Image { info, .. } => write.image_info(std::slice::from_ref(info)),
-                })
+            .filter_map(|w| match w {
+                Write::AccelerationStructure {
+                    binding, element, ..
+                } => Some((*binding, *element)),
+                _ => None,
             })
-            .collect::<Result<Vec<_>>>()?;
-        unsafe { device.update_descriptor_sets(&writes, &[]) };
+            .collect();
+        for ((binding, element), handle) in accel_writes.into_iter().zip(accel) {
+            let ty = self
+                .desc
+                .binding(binding)
+                .map(|b| b.kind.vk())
+                .unwrap_or(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR);
+            let mut info = vk::WriteDescriptorSetAccelerationStructureKHR::default()
+                .acceleration_structures(std::slice::from_ref(&handle));
+            // 坑：AS 写入没有 buffer/image_info 那种"顺带写 count"的构造器，descriptorCount
+            // 必须显式给 1（默认 0 会撞 VUID-VkWriteDescriptorSet-descriptorCount-arraylength）
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(self.set)
+                .dst_binding(binding)
+                .dst_array_element(element)
+                .descriptor_count(1)
+                .descriptor_type(ty)
+                .push_next(&mut info);
+            unsafe { device.update_descriptor_sets(std::slice::from_ref(&write), &[]) };
+        }
         Ok(())
     }
 }
