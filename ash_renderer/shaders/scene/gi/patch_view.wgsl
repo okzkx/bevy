@@ -8,7 +8,8 @@
 //   半个体素避免与表面 z-fighting。
 //
 // 视图号（push.view）：0 关 / 1 覆盖 / 2 级联 / 3 桶 / 4 rank / 5 心跳 /
-// 6 池水位与失败计数（屏幕顶部 5% 条）/ 7 位置偏离（判定线 ① 的阈值视图）/ 8 cell 归属。
+// 6 池水位与失败计数（屏幕顶部 5% 条）/ 7 位置偏离（判定线 ① 的阈值视图）/ 8 cell 归属 /
+// 9 样本档与稀释 / 10 辐照度 E(n) / 11 方差 / 12 更新次数 / 13 rank 分布（9.6 的估计视图）。
 // 只读不写：调试件不得改变被测状态（不刷心跳、不分配）。
 //
 // 接口：set0 帧 UBO / set1 G-buffer（b1 normal、b3 depth）/ set2 GI 表 + UBO；
@@ -16,11 +17,14 @@
 // #import frame
 // #import fullscreen
 // #import gi_cell
+// #import gi_sampling
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(1) @binding(1) var normal_tex: texture_2d<f32>;
 @group(1) @binding(3) var depth_tex: texture_2d<f32>;
 @group(2) @binding(0) var<storage, read> cell_patch: array<u32>;
+@group(2) @binding(3) var<storage, read> patch_irradiance0: array<PatchIrradiance>;
+@group(2) @binding(4) var<storage, read> patch_irradiance1: array<PatchIrradiance>;
 @group(2) @binding(2) var<storage, read> patch_geometry: array<PatchGeometry>;
 @group(2) @binding(5) var<storage, read> patch_statistics: array<PatchStatistics>;
 @group(2) @binding(6) var<storage, read> patch_cell: array<u32>;
@@ -126,6 +130,42 @@ fn status_bar(pixel_xy: vec2f) -> vec3f {
     return select(vec3f(0.18, 0.20, 0.24), vec3f(0.95, 0.20, 0.15), fill);
 }
 
+// 9.6 估计视图的输入：按 patch 号取统计与"上一帧/本帧"的辐照度（按 UBO 奇偶取本帧写的那份）。
+// `patch_index == INVALID_PATCH` 就是"这一格没有 patch"（视图 9～13 画暗底）。
+fn estimate_view_input(patch_index: u32) -> EstimateViewInput {
+    var input: EstimateViewInput;
+    input.has_patch = patch_index != INVALID_PATCH;
+    input.rank = 0u;
+    input.update_count = 0u;
+    input.update_max = gi.frame.w;
+    input.variance = 0.0;
+    input.irradiance = 0.0;
+    input.samples = gi.estimation.x;
+    input.stride = max(gi.estimation_l.z, 1u);
+    input.skipped = false;
+    if (!input.has_patch) {
+        return input;
+    }
+    let stats = patch_statistics[patch_index];
+    input.rank = stats.state & 0xFFu;
+    input.update_count = stats.update_count;
+    input.variance = (stats.variance.x + stats.variance.y + stats.variance.z) / 3.0;
+    // 帧稀释：与 estimation 的跳过判据逐字对齐（否则视图会骗人）
+    if (input.stride > 1u) {
+        input.skipped = low_bias_hash_32(patch_index) % input.stride != gi.frame.x % input.stride;
+    }
+    // 本帧写的那一份 = 奇偶选中的 buffer；视图跟估计同源，不读"上一帧那份"
+    var irr: PatchIrradiance;
+    if ((gi.frame.x & 1u) == 1u) {
+        irr = patch_irradiance1[patch_index];
+    } else {
+        irr = patch_irradiance0[patch_index];
+    }
+    let n = normalize(patch_geometry[patch_index].normal.xyz);
+    input.irradiance = irr.l0.x + irr.l1x.x * n.x + irr.l1y.x * n.y + irr.l1z.x * n.z;
+    return input;
+}
+
 @fragment
 fn fs_cover(in: VsOut) -> @location(0) vec4f {
     let pixel_xy = in.clip.xy;
@@ -163,6 +203,7 @@ fn fs_cover(in: VsOut) -> @location(0) vec4f {
     let bucket = cell_bucket(hit.cell);
     let color = view_color(
         push.view, hit.cell, patch_index, hit.cascade, bucket, age, gi.frame.y, deviation,
+        estimate_view_input(patch_index),
     );
     return vec4f(display_encode(color), 1.0);
 }
@@ -224,7 +265,10 @@ fn vs_marker(
     let age = heartbeat_age(gi.frame.x, patch_statistics[instance_index].heartbeat);
     // 方片压在覆盖图上，若与 cell 同色就看不见了：混 65% 暖白，位置/朝向是这一形态的
     // 观察对象，子视图颜色只做淡背景。
-    let tint = view_color(push.view, cell, instance_index, cascade, bucket, age, gi.frame.y, 0.0);
+    let tint = view_color(
+        push.view, cell, instance_index, cascade, bucket, age, gi.frame.y, 0.0,
+        estimate_view_input(instance_index),
+    );
     out.color = mix(tint, vec3f(1.0, 0.94, 0.82), 0.8);
     return out;
 }

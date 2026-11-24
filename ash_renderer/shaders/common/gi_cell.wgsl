@@ -265,8 +265,93 @@ fn deviation_color(deviation: f32) -> vec3f {
     return vec3f(0.90, 0.12, 0.10);
 }
 
+// —— 9.6 估计子视图的输入（覆盖图与方片共用）——
+// 这些量按 patch 取，覆盖图在解析出 patch 之后填，方片直接按实例号填。
+struct EstimateViewInput {
+    // 本格是否有 patch（名字不用 active：WGSL 保留字）。
+    has_patch: bool,
+    // rank（state 低 8 位）：0 屏幕播种 / 1 bounce 分配。
+    rank: u32,
+    // 已更新次数与该模式的更新目标。
+    update_count: u32,
+    update_max: u32,
+    // 短期方差的 rgb 均值（E 的单位）。
+    variance: f32,
+    // 沿 patch 法线求值的辐照度 E(n)（l0 + l1·n）。
+    irradiance: f32,
+    // 本帧的样本档与本帧是否被帧稀释跳过。
+    samples: u32,
+    stride: u32,
+    skipped: bool,
+}
+
+// 样本档色阶：1 蓝 / 2 绿 / 4 黄 / 8 橙；被稀释跳过的 patch 压暗（同一屏里能看出"这一帧
+// 谁在算"）。
+fn estimate_sample_color(samples: u32, stride: u32, skipped: bool) -> vec3f {
+    var base = vec3f(0.15, 0.35, 0.95);
+    if (samples >= 8u) {
+        base = vec3f(0.98, 0.55, 0.10);
+    } else if (samples >= 4u) {
+        base = vec3f(0.95, 0.88, 0.20);
+    } else if (samples >= 2u) {
+        base = vec3f(0.20, 0.85, 0.35);
+    }
+    // 稀释越高整体越暗（stride = N 时亮度 1/N 的开方）
+    let dim = 1.0 / sqrt(f32(max(stride, 1u)));
+    return select(base * dim * 0.35, base * dim, skipped);
+}
+
+// 辐照度色阶：对数映射到 0..1（GI 的量级跨越两个数量级，线性映射看不出层次）
+fn irradiance_color(e: f32) -> vec3f {
+    let t = clamp(log2(max(e, 1e-4) * 4.0) / 4.0, 0.0, 1.0);
+    return mix(vec3f(0.05, 0.05, 0.12), vec3f(0.95, 0.95, 0.85), t)
+        + vec3f(0.15, 0.05, 0.0) * smoothstep(0.6, 1.0, t);
+}
+
+// 方差色阶：绿（稳）→ 红（抖）
+fn variance_color(v: f32) -> vec3f {
+    let t = clamp(log2(max(v, 1e-4) * 8.0) / 8.0, 0.0, 1.0);
+    return mix(vec3f(0.15, 0.85, 0.25), vec3f(0.95, 0.15, 0.10), t);
+}
+
+// 收敛色阶：update_count / update_max 越接近 1 越亮（黑 = 刚出生）
+fn convergence_color(update_count: u32, update_max: u32) -> vec3f {
+    let t = clamp(f32(update_count) / f32(max(update_max, 1u)), 0.0, 1.0);
+    return mix(vec3f(0.08, 0.08, 0.10), vec3f(0.30, 0.95, 0.45), t);
+}
+
+// rank 色阶：0 绿（屏幕播种）/ 1 黄（bounce 分配）/ 其它红
+fn rank_color(rank: u32) -> vec3f {
+    if (rank == 0u) {
+        return vec3f(0.15, 0.85, 0.25);
+    }
+    if (rank == 1u) {
+        return vec3f(0.95, 0.80, 0.20);
+    }
+    return vec3f(0.90, 0.15, 0.12);
+}
+
+fn estimate_view_color(view: u32, input: EstimateViewInput) -> vec3f {
+    switch view {
+        case 9u: {
+            if (!input.has_patch) {
+                return vec3f(0.08);
+            }
+            return estimate_sample_color(input.samples, input.stride, input.skipped);
+        }
+        case 10u: { return select(vec3f(0.08), irradiance_color(input.irradiance), input.has_patch); }
+        case 11u: { return select(vec3f(0.08), variance_color(input.variance), input.has_patch); }
+        case 12u: {
+            return select(vec3f(0.08), convergence_color(input.update_count, input.update_max), input.has_patch);
+        }
+        case 13u: { return select(vec3f(0.08), rank_color(input.rank), input.has_patch); }
+        default: { return vec3f(0.0); }
+    }
+}
+
 // 子视图统一调色（覆盖图与方片共用；视图 6 的顶部条只在覆盖图里另画）。
-// 编号：0 关 / 1 覆盖 / 2 级联 / 3 桶 / 4 rank / 5 心跳 / 6 池水位 / 7 位置偏离 / 8 cell 归属。
+// 编号：0 关 / 1 覆盖 / 2 级联 / 3 桶 / 4 rank / 5 心跳 / 6 池水位 / 7 位置偏离 /
+// 8 cell 归属 / 9 样本档与稀释 / 10 辐照度 / 11 方差 / 12 更新次数 / 13 rank 分布。
 fn view_color(
     view: u32,
     cell: u32,
@@ -276,16 +361,16 @@ fn view_color(
     age: u32,
     evict_age: u32,
     deviation: f32,
+    estimate: EstimateViewInput,
 ) -> vec3f {
+    if (view >= 9u) {
+        return estimate_view_color(view, estimate);
+    }
     switch view {
         case 1u: { return coverage_color(patch_index); }
         case 2u: { return cascade_color(cascade); }
         case 3u: { return bucket_color(bucket); }
-        case 4u: {
-            // rank 存 state 低 8 位；9.5 恒 0（全绿），9.6 的 bounce 请求会抬到 1（黄）。
-            let rank = 0u;
-            return select(vec3f(0.95, 0.80, 0.20), vec3f(0.15, 0.85, 0.25), rank == 0u);
-        }
+        case 4u: { return select(vec3f(0.95, 0.80, 0.20), vec3f(0.15, 0.85, 0.25), estimate.rank == 0u); }
         case 5u: { return age_color(age, evict_age); }
         case 7u: { return deviation_color(deviation); }
         case 8u: { return hash_color(cell / BUCKETS_PER_CELL); }
