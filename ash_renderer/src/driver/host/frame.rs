@@ -25,7 +25,7 @@ use bevy::{ecs::system::NonSendMarker, prelude::*};
 use ash_macros::system;
 
 use crate::{
-    common::syntax::fatal,
+    common::syntax::{fatal, ResultTierExt},
     render::{
         ClusterFrameDraw, HizFrameDraw, IblBakeDraw, IblBakeInput, IblFrameDraw, PostChainDraw,
         RenderFeatures, SceneResources, UiDraw, UploadWait,
@@ -207,6 +207,10 @@ pub(crate) fn draw_frame(
         });
     // 在场实例行数（= TLAS 实例数）：0 实例帧不录 estimation（未构建的 TLAS 不能打射线）
     let indirect_count = assembly.slots.len() as u32;
+    // 9.7.4：1/4 屏幕目标随 swapchain 尺寸懒重建（布局与描述符池只建一次）
+    gi.scgi
+        .ensure(&gpu.ctx, extent)
+        .or_fatal("SCGI 1/4 目标重建失败，渲染链无法继续")?;
     let gi_draw = prepare_gi(
         gi,
         gi_local,

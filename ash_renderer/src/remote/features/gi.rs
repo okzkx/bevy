@@ -68,6 +68,9 @@ struct GiSetParams {
     /// 9.7.2 切平面采样半径（体素倍数）。
     #[serde(default)]
     spatial_radius: Option<f32>,
+    /// 9.7.4 每 1/4 像素的查表样本数（1..3）。
+    #[serde(default)]
+    lookup_samples: Option<u32>,
     /// 9.7.3 patch 级时域后滤波开关。
     #[serde(default)]
     temporal_filter: Option<bool>,
@@ -104,6 +107,7 @@ fn settings_json(s: &GiSettings) -> Value {
         "light_samples": s.light_samples,
         "spatial_filter": s.spatial_filter,
         "spatial_radius": s.spatial_radius,
+        "lookup_samples": s.lookup_samples,
         "temporal_filter": s.temporal_filter,
         "temporal_smoothing": s.temporal_smoothing,
         "config": {
@@ -166,6 +170,9 @@ pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRes
         .is_some_and(|v| !(0.0..=1.0).contains(&v))
     {
         return Err(invalid_params("temporal_smoothing 越界（0..=1）"));
+    }
+    if p.lookup_samples.is_some_and(|v| !(1..=3).contains(&v)) {
+        return Err(invalid_params("lookup_samples 越界（1..=3）"));
     }
     let current = *res::<GiSettings>(world)?;
     let config_change =
@@ -264,6 +271,9 @@ pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRes
     }
     if let Some(temporal_smoothing) = p.temporal_smoothing {
         settings.temporal_smoothing = temporal_smoothing;
+    }
+    if let Some(lookup_samples) = p.lookup_samples {
+        settings.lookup_samples = lookup_samples;
     }
     let effective = *settings;
     Ok(settings_json(&effective))

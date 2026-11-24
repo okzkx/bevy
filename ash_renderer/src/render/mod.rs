@@ -119,6 +119,10 @@ pub use passes::gi::filtering::{
     GiSpatialFilterDraw, GiTemporalFilterDraw, GI_SPATIAL_FILTER_PUSH_SIZE,
     GI_TEMPORAL_FILTER_PUSH_SIZE,
 };
+pub use passes::gi::screen_gather::{
+    low_extent as scgi_low_extent, pack_screen_gather_push, GiScreenGatherDraw, ScgiTargets,
+    GI_SCREEN_GATHER_PUSH_SIZE, SCGI_L0_FORMAT, SCGI_L1_FORMAT,
+};
 pub use passes::gi::view::{pack_view_push, GiViewDraw, GI_VIEW_PUSH_SIZE};
 pub use passes::gi::volume::{
     cascade_offsets as gi_cascade_offsets, cell_bucket as gi_cell_bucket,

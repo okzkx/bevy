@@ -144,6 +144,11 @@ impl GiPage<'_> {
             "时域后滤波（上一帧权重 0.9～0.95）",
         );
         ui.add(
+            egui::Slider::new(&mut gi.lookup_samples, 1..=3)
+                .text("1/4 查表样本数")
+                .fixed_decimals(0),
+        );
+        ui.add(
             egui::Slider::new(&mut gi.temporal_smoothing, 0.0..=1.0)
                 .text("时域平滑度")
                 .fixed_decimals(2),

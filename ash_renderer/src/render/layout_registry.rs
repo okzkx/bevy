@@ -8,11 +8,14 @@ use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayoutDesc;
 use crate::render::passes::gbuffer::gbuffer_pipeline::GBUFFER_WRITE_PIPELINE;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
+use crate::render::passes::gi::screen_gather::SCGI_TARGET_SET_DESC;
 use crate::render::passes::gi::{
     BOUNCE_ALLOC_PIPELINE, DEFRAG_PIPELINE, EMISSIVE_BUILD_PIPELINE, ESTIMATION_PIPELINE,
     EVICTION_PIPELINE, LIGHT_SAMPLING_PIPELINE, PATCH_ALLOC_PIPELINE, PATCH_MARKER_PIPELINE,
-    PATCH_VIEW_PIPELINE, SCROLLING_PIPELINE, SPATIAL_FILTER_PIPELINE, TEMPORAL_FILTER_PIPELINE,
+    PATCH_VIEW_PIPELINE, SCREEN_GATHER_PIPELINE, SCROLLING_PIPELINE, SPATIAL_FILTER_PIPELINE,
+    TEMPORAL_FILTER_PIPELINE,
 };
+
 use crate::render::passes::ibl::{
     BRDF_LUT_PIPELINE, GLOBAL_PROBE_PIPELINE, IBL_CAPTURE_SET_DESC, IBL_DFG_SET_DESC,
     IBL_GLOBAL_PROBE_SET_DESC, IBL_PREFILTER_SET_DESC, IBL_SET_DESC, IBL_SH_CHECK_SET_DESC,
@@ -104,6 +107,7 @@ pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
     // 9.7 屏幕侧：空间/时域滤波（不受光线求交门控，恒建）
     &SPATIAL_FILTER_PIPELINE,
     &TEMPORAL_FILTER_PIPELINE,
+    &SCREEN_GATHER_PIPELINE,
 ];
 
 /// 宿主声明并建出的全部 set 布局。
@@ -131,4 +135,6 @@ pub(crate) const ALL_SETS: &[&SetLayoutDesc] = &[
     &IBL_SET_DESC,
     &RAY_TRACING_SET_DESC,
     &GI_SET_DESC,
+    // 9.7.4 1/4 屏幕目标（两张图各双缓冲的四个 storage image 绑定）
+    &SCGI_TARGET_SET_DESC,
 ];

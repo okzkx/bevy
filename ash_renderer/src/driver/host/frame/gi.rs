@@ -15,12 +15,13 @@ use crate::common::syntax::ResultTierExt;
 use crate::render::{
     alloc_grid, bounce_alloc_groups, emissive_build_groups, estimation_groups, eviction_groups,
     gi_cascade_offsets, light_sampling_groups, pack_alloc_push, pack_emissive_build_push,
-    pack_light_sampling_push, pack_spatial_filter_push, pack_temporal_filter_push, pack_view_push,
-    plan_estimation_budget, scrolling_groups, spatial_filter_groups, DescSet, GiAllocDraw,
-    GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiFrameDraw, GiLightSampleDraw,
-    GiPipelines, GiSettings, GiSpatialFilterDraw, GiTemporalFilterDraw, GiViewDraw, LightRecord,
-    LightTable, SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE,
-    GI_BOUNCE_REQUEST_CAPACITY, MAX_CASCADES, UPDATE_MAX,
+    pack_light_sampling_push, pack_screen_gather_push, pack_spatial_filter_push,
+    pack_temporal_filter_push, pack_view_push, plan_estimation_budget, scrolling_groups,
+    spatial_filter_groups, DescSet, GiAllocDraw, GiBounceAllocDraw, GiEmissiveBuildDraw,
+    GiEstimationDraw, GiFrameDraw, GiLightSampleDraw, GiPipelines, GiScreenGatherDraw, GiSettings,
+    GiSpatialFilterDraw, GiTemporalFilterDraw, GiViewDraw, LightRecord, LightTable, ScgiTargets,
+    SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE, GI_BOUNCE_REQUEST_CAPACITY,
+    MAX_CASCADES, UPDATE_MAX,
 };
 
 use super::scene::FrameView;
@@ -34,6 +35,8 @@ pub(super) struct GiInput<'w> {
     pub(super) settings: Res<'w, GiSettings>,
     pub(super) tables: ResMut<'w, SurfaceCacheTables>,
     pub(super) pipelines: Res<'w, GiPipelines>,
+    /// 9.7.4 的 1/4 屏幕目标（随 swapchain 尺寸懒重建）。
+    pub(super) scgi: ResMut<'w, ScgiTargets>,
 }
 
 /// draw_frame 的 GI 段跨帧状态。
@@ -285,6 +288,35 @@ pub(super) fn prepare_gi(
         frame_set,
         gi_set,
     });
+    // 9.7.4 1/4 屏幕查表：时域滤波之后跑（读 B）。目标图已在帧首 ensure 过，尺寸为 0 说明
+    // 还没建（首帧前）——此时不录，下帧补上。
+    let screen_gather = temporal_filter.as_ref().and_then(|_| {
+        let low = gi.scgi.low_extent();
+        if low.width == 0 || low.height == 0 {
+            return None;
+        }
+        let (acquire, acquire_count) = gi.scgi.take_acquire();
+        Some(GiScreenGatherDraw {
+            pass: pipelines.screen_gather(),
+            push: pack_screen_gather_push(
+                low,
+                extent,
+                frame_index,
+                settings.normal_source,
+                settings.lookup_samples,
+            ),
+            groups: alloc_grid(extent).1,
+            frame_set,
+            gi_set,
+            gbuffer_set,
+            target_set: gi.scgi.set(),
+            acquire,
+            acquire_count,
+        })
+    });
+    if screen_gather.is_some() {
+        gi.scgi.mark_written();
+    }
     let marker = settings.markers_enabled().then(|| pipelines.marker());
     let view_draw = (cover.is_some() || marker.is_some()).then(|| GiViewDraw {
         cover,
@@ -312,6 +344,7 @@ pub(super) fn prepare_gi(
         bounce_alloc,
         spatial_filter,
         temporal_filter,
+        screen_gather,
         gi_set,
         view: view_draw,
     }))

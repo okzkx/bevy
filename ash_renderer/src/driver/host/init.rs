@@ -21,10 +21,10 @@ use crate::{
         GBufferTargets, GiPipelines, GiSetLayout, GiSettings, GpuTimer, HizPyramid, IblEnvironment,
         ImageCache, IndirectPass, InstanceTables, LightClusters, LightTable, LodPass, MeshPool,
         OcclusionPass, OverlayPipeline, PresentTonemapPipeline, RayScene, RayTracingPipelines,
-        RayTracingSettings, RayTracingTargets, SetLayouts, ShadowBuildPass, ShadowPipeline,
-        ShadowTargets, SmaaPipelines, SmaaTargets, SurfaceCacheConfig, SurfaceCacheTables,
-        Swapchain, TransparentPasses, TransparentPipeline, TransparentTargets, UiVertexRing,
-        Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
+        RayTracingSettings, RayTracingTargets, ScgiTargets, SetLayouts, ShadowBuildPass,
+        ShadowPipeline, ShadowTargets, SmaaPipelines, SmaaTargets, SurfaceCacheConfig,
+        SurfaceCacheTables, Swapchain, TransparentPasses, TransparentPipeline, TransparentTargets,
+        UiVertexRing, Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
 
@@ -160,6 +160,9 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     // ---- 管线：无状态，只借 GPU 表与渲染目标提供的描述符布局。各布局先登记进
     // SetLayouts，各管线按自己的布局配方取用并与 shader ABI 对账。声明的附件格式必须和实际
     // 渲染用的附件完全一致，否则验证层报 VUID-08914 ----
+    // 9.7.4 的 1/4 屏幕目标：它的描述符布局在这里建（与 GiSetLayout 同形，管线按它取用），
+    // 目标图在首次 `ensure` 时按 swapchain 尺寸建
+    let scgi_targets = ScgiTargets::new(&ctx)?;
     let layouts = {
         let mut list = vec![
             tables.set_layout(),
@@ -176,6 +179,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             hiz.occlusion_layout(),
             ibl.set_layout(),
             gi_set_layout.set_layout(),
+            scgi_targets.set_layout(),
         ];
         // 光线求交集布局只在 光线求交支持时存在（光线求交关没有可登记的句柄）
         if let Some(targets) = &ray_tracing_targets {
@@ -262,6 +266,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             gi_pipelines,
             surface_cache,
             gi_set_layout,
+            scgi_targets,
             // 表面缓存总开关恒插入（BRP gi_set/gi_stats 在关态也要回读数）
             gi_settings: GiSettings::default(),
             // 光线求交总开关恒插入（BRP ray_tracing_set/ray_tracing_stats 在 光线求交关时也要回读数）
@@ -343,6 +348,7 @@ init_chain! {
     GiPipelines => gi_pipelines,
     SurfaceCacheTables => surface_cache,
     GiSetLayout => gi_set_layout,
+    ScgiTargets => scgi_targets,
     GiSettings => gi_settings,
     GBufferTargets => gbuffer,
     FramePool => frames,
