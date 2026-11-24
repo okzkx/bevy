@@ -14,12 +14,12 @@ use bevy::prelude::*;
 use crate::common::syntax::ResultTierExt;
 use crate::render::{
     alloc_grid, bounce_alloc_groups, emissive_build_groups, estimation_groups, eviction_groups,
-    plan_estimation_budget,
     gi_cascade_offsets, light_sampling_groups, pack_alloc_push, pack_emissive_build_push,
-    pack_light_sampling_push, pack_view_push, scrolling_groups, DescSet, GiAllocDraw,
-    GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiFrameDraw, GiLightSampleDraw,
-    GiPipelines, GiSettings, GiViewDraw, GI_BOUNCE_REQUEST_CAPACITY, LightRecord, LightTable,
-    SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE, MAX_CASCADES, UPDATE_MAX,
+    pack_light_sampling_push, pack_view_push, plan_estimation_budget, scrolling_groups, DescSet,
+    GiAllocDraw, GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiFrameDraw,
+    GiLightSampleDraw, GiPipelines, GiSettings, GiViewDraw, LightRecord, LightTable,
+    SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE, GI_BOUNCE_REQUEST_CAPACITY,
+    MAX_CASCADES, UPDATE_MAX,
 };
 
 use super::scene::FrameView;
@@ -129,7 +129,8 @@ pub(super) fn prepare_gi(
         ring_words[crate::render::RING_ACTIVE * 4 + 2],
         ring_words[crate::render::RING_ACTIVE * 4 + 3],
     ]);
-    let budget_plan = plan_estimation_budget(active_patches, settings.samples.max(1), settings.budget);
+    let budget_plan =
+        plan_estimation_budget(active_patches, settings.samples.max(1), settings.budget);
 
     let data = SurfaceCacheUniformsData {
         prev_view_proj: local.prev_view_proj,

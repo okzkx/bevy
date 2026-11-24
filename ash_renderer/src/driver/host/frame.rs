@@ -199,7 +199,12 @@ pub(crate) fn draw_frame(
         .settings
         .as_ref()
         .filter(|s| s.enabled)
-        .and_then(|_| ray_tracing.targets.as_ref().map(|targets| targets.set(slot)));
+        .and_then(|_| {
+            ray_tracing
+                .targets
+                .as_ref()
+                .map(|targets| targets.set(slot))
+        });
     // 在场实例行数（= TLAS 实例数）：0 实例帧不录 estimation（未构建的 TLAS 不能打射线）
     let indirect_count = assembly.slots.len() as u32;
     let gi_draw = prepare_gi(

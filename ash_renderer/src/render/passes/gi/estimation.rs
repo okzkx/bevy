@@ -82,7 +82,12 @@ impl GiLightSampleDraw {
         self.pass.record(
             device,
             cb,
-            &[self.gi_set, self.instance_set, self.ray_set, self.texture_set],
+            &[
+                self.gi_set,
+                self.instance_set,
+                self.ray_set,
+                self.texture_set,
+            ],
             &self.push,
             self.groups,
             Handoff::ComputeReadWrite,
@@ -92,7 +97,10 @@ impl GiLightSampleDraw {
 
 /// 清单 push：条数 + 活灯数。
 #[must_use]
-pub fn pack_light_sampling_push(sample_count: u32, light_count: u32) -> [u8; GI_LIGHT_SAMPLING_PUSH_SIZE as usize] {
+pub fn pack_light_sampling_push(
+    sample_count: u32,
+    light_count: u32,
+) -> [u8; GI_LIGHT_SAMPLING_PUSH_SIZE as usize] {
     let mut push = [0u8; GI_LIGHT_SAMPLING_PUSH_SIZE as usize];
     put_u32s(&mut push, 0, &[sample_count, light_count]);
     push
@@ -125,7 +133,12 @@ impl GiEmissiveBuildDraw {
         self.pass.record(
             device,
             cb,
-            &[self.gi_set, self.instance_set, self.ray_set, self.texture_set],
+            &[
+                self.gi_set,
+                self.instance_set,
+                self.ray_set,
+                self.texture_set,
+            ],
             &self.push,
             self.groups,
             Handoff::ComputeReadWrite,
@@ -135,7 +148,9 @@ impl GiEmissiveBuildDraw {
 
 /// 自发光重建 push：对象表容量。
 #[must_use]
-pub fn pack_emissive_build_push(object_capacity: u32) -> [u8; GI_EMISSIVE_BUILD_PUSH_SIZE as usize] {
+pub fn pack_emissive_build_push(
+    object_capacity: u32,
+) -> [u8; GI_EMISSIVE_BUILD_PUSH_SIZE as usize] {
     let mut push = [0u8; GI_EMISSIVE_BUILD_PUSH_SIZE as usize];
     put_u32s(&mut push, 0, &[object_capacity]);
     push
@@ -200,14 +215,19 @@ pub struct EstimationBudget {
 /// 优先级（计划 §0.6）：先保样本档（画面质量），档降到 1 还超才稀释帧率——因为降档是
 /// 全场的均匀降质，而稀释只让每个 patch 慢一帧收敛。
 #[must_use]
-pub fn plan_estimation_budget(active_patches: u32, requested_samples: u32, budget: u32) -> EstimationBudget {
+pub fn plan_estimation_budget(
+    active_patches: u32,
+    requested_samples: u32,
+    budget: u32,
+) -> EstimationBudget {
     let tiers = [8u32, 4, 2, 1];
     let mut samples = 1;
     for tier in tiers {
         if tier > requested_samples {
             continue;
         }
-        let rays = u64::from(active_patches.max(1)) * u64::from(tier) * u64::from(RAYS_PER_SAMPLE_WORST);
+        let rays =
+            u64::from(active_patches.max(1)) * u64::from(tier) * u64::from(RAYS_PER_SAMPLE_WORST);
         if rays <= u64::from(budget) {
             samples = tier;
             break;
@@ -248,13 +268,31 @@ mod tests {
     fn budget_prefers_sample_tier_before_dilution() {
         // 3320 条 patch、预算 262144：2 档要 19920 条射线，宽裕 → 用设置值
         let plan = plan_estimation_budget(3320, 2, 262_144);
-        assert_eq!(plan, EstimationBudget { samples: 2, stride: 1 });
+        assert_eq!(
+            plan,
+            EstimationBudget {
+                samples: 2,
+                stride: 1
+            }
+        );
         // 8 档要 79680，仍宽裕
         let plan = plan_estimation_budget(3320, 8, 262_144);
-        assert_eq!(plan, EstimationBudget { samples: 8, stride: 1 });
+        assert_eq!(
+            plan,
+            EstimationBudget {
+                samples: 8,
+                stride: 1
+            }
+        );
         // 活跃数压到预算下限：档位先降，不稀释
         let plan = plan_estimation_budget(50_000, 8, 262_144);
-        assert_eq!(plan, EstimationBudget { samples: 1, stride: 1 });
+        assert_eq!(
+            plan,
+            EstimationBudget {
+                samples: 1,
+                stride: 1
+            }
+        );
         // 档已到 1 仍超（5 万 × 3 > 预算的一半以下）→ 稀释
         let plan = plan_estimation_budget(200_000, 8, 262_144);
         assert_eq!(plan.samples, 1);
@@ -300,7 +338,10 @@ mod tests {
     #[test]
     fn light_sampling_push_layout() {
         let push = pack_light_sampling_push(128, 3);
-        assert_eq!(u32::from_le_bytes([push[0], push[1], push[2], push[3]]), 128);
+        assert_eq!(
+            u32::from_le_bytes([push[0], push[1], push[2], push[3]]),
+            128
+        );
         assert_eq!(u32::from_le_bytes([push[4], push[5], push[6], push[7]]), 3);
     }
 }

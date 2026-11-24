@@ -577,7 +577,12 @@ impl SurfaceCacheTables {
                 .buffer(9, self.ubos[frame].buffer(), 0, GI_UBO_SIZE)
                 .buffer(10, self.gi_lights[frame].buffer(), 0, vk::WHOLE_SIZE)
                 .buffer(11, self.light_samples[frame].buffer(), 0, vk::WHOLE_SIZE)
-                .buffer(12, self.emissive_triangles[frame].buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(
+                    12,
+                    self.emissive_triangles[frame].buffer(),
+                    0,
+                    vk::WHOLE_SIZE,
+                )
                 .buffer(13, self.bounce_requests[frame].buffer(), 0, vk::WHOLE_SIZE);
             writer.submit(device)?;
         }

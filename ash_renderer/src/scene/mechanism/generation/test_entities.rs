@@ -119,9 +119,7 @@ pub fn spawn_test_shape(
         color: color.map(f32::to_bits),
         metallic: metallic.unwrap_or(f32::NAN).to_bits(),
         perceptual_roughness: perceptual_roughness.unwrap_or(f32::NAN).to_bits(),
-        emissive: emissive
-            .unwrap_or([f32::NAN; 3])
-            .map(f32::to_bits),
+        emissive: emissive.unwrap_or([f32::NAN; 3]).map(f32::to_bits),
     };
     let material_handle = match world
         .get_resource::<TestShapeAssets>()

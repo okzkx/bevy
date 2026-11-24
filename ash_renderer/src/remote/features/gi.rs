@@ -15,13 +15,12 @@ use crate::render::{
     gi_cell_bucket, gi_cell_cascade, gi_cell_storage, gi_direction_bucket, gi_storage_to_volume,
     gi_volume_world_center, gi_voxel_size, Context, FramePool, GiSetLayout, GiSettings, GpuTimer,
     SurfaceCacheConfig, SurfaceCacheTables, COUNTER_ALLOC, COUNTER_DEFRAG_MOVED,
-    COUNTER_EST_BOUNCE_REQUESTS, COUNTER_EST_HITS, COUNTER_EST_PATCHES, COUNTER_EST_RAYS,
     COUNTER_EMISSIVE_TRIANGLES, COUNTER_EST_BOUNCE_HITS, COUNTER_EST_BOUNCE_MISSES,
+    COUNTER_EST_BOUNCE_REQUESTS, COUNTER_EST_HITS, COUNTER_EST_PATCHES, COUNTER_EST_RAYS,
     COUNTER_EST_SAMPLES, COUNTER_FAILED, COUNTER_FREED, COUNTER_VIEW_COVERED,
-    COUNTER_VIEW_DEVIATION, COUNTER_VIEW_HOLES, GI_COUNTER_WORDS, GI_UBO_SIZE, INVALID_PATCH,
-    GI_LIGHT_SAMPLE_CAPACITY, GI_LIGHT_SAMPLE_SIZE, PATCH_GEOMETRY_SIZE, PATCH_IRRADIANCE_SIZE,
-    PATCH_STATISTICS_SIZE, RING_ACTIVE, RING_CONFIGS,
-    RING_CONFIG_WORDS, RING_FLIP, RING_WATERMARK,
+    COUNTER_VIEW_DEVIATION, COUNTER_VIEW_HOLES, GI_COUNTER_WORDS, GI_LIGHT_SAMPLE_CAPACITY,
+    GI_LIGHT_SAMPLE_SIZE, GI_UBO_SIZE, INVALID_PATCH, PATCH_GEOMETRY_SIZE, PATCH_IRRADIANCE_SIZE,
+    PATCH_STATISTICS_SIZE, RING_ACTIVE, RING_CONFIGS, RING_CONFIG_WORDS, RING_FLIP, RING_WATERMARK,
 };
 
 /// `gi_set` 参数：所有字段可省（缺省不动）；规格四件只允许在关态改。
@@ -130,7 +129,9 @@ pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRes
     if p.warmup.is_some_and(|v| !matches!(v, 1 | 2 | 4 | 8)) {
         return Err(invalid_params("warmup 只取 1/2/4/8"));
     }
-    if p.short_hysteresis.is_some_and(|v| !(0.5..=0.99).contains(&v)) {
+    if p.short_hysteresis
+        .is_some_and(|v| !(0.5..=0.99).contains(&v))
+    {
         return Err(invalid_params("short_hysteresis 越界（0.5..=0.99）"));
     }
     if p.budget.is_some_and(|v| v == 0) {
@@ -313,8 +314,9 @@ pub(crate) fn gi_stats(In(_params): In<Option<Value>>, world: &mut World) -> Brp
                 converged += 1;
             }
             // 方差取 rgb 三通道均值
-            let v = (f32_at(&statistics, 16)? + f32_at(&statistics, 20)? + f32_at(&statistics, 24)?)
-                / 3.0;
+            let v =
+                (f32_at(&statistics, 16)? + f32_at(&statistics, 20)? + f32_at(&statistics, 24)?)
+                    / 3.0;
             variance_sum += f64::from(v);
         }
         let converged_ratio = if checked == 0 {
@@ -327,7 +329,13 @@ pub(crate) fn gi_stats(In(_params): In<Option<Value>>, world: &mut World) -> Brp
         } else {
             variance_sum / f64::from(checked)
         };
-        (samples_effective, stride, budget_active, converged_ratio, variance_mean)
+        (
+            samples_effective,
+            stride,
+            budget_active,
+            converged_ratio,
+            variance_mean,
+        )
     };
     let cell_count = config.cell_count().max(1);
     Ok(json!({
