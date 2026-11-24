@@ -110,6 +110,7 @@ pub use passes::gi::allocation::{
 };
 pub use passes::gi::estimation::{
     bounce_alloc_groups, emissive_build_groups, estimation_groups, light_sampling_groups,
+    plan_estimation_budget, EstimationBudget, RAYS_PER_SAMPLE_WORST,
     pack_emissive_build_push, pack_light_sampling_push, GiBounceAllocDraw, GiEmissiveBuildDraw,
     GiEstimationDraw, GiLightSampleDraw, GI_EMISSIVE_BUILD_PUSH_SIZE, GI_LIGHT_SAMPLING_PUSH_SIZE,
 };

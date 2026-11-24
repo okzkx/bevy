@@ -183,6 +183,46 @@ pub fn light_sampling_groups(sample_count: u32) -> u32 {
     u64::from(sample_count).div_ceil(64) as u32
 }
 
+/// 每条样本最坏要打几条射线：半球 1 + 重连接 0/1 + 自发光阴影 0/1。
+pub const RAYS_PER_SAMPLE_WORST: u32 = 3;
+
+/// 预算换算的结果（`prepare_gi` 每帧算一次，写进 GI UBO 交给 estimation）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EstimationBudget {
+    /// 本帧每 patch 的样本档（1/2/4/8 里不超过设置值的最大档，最低 1）。
+    pub samples: u32,
+    /// 帧稀释步长（1 = 不稀释；N > 1 时按 patch 哈希取模跳帧）。
+    pub stride: u32,
+}
+
+/// 按"活跃 patch 数 × 样本档 × 每样本最坏射线数 ≤ budget"换算样本档；仍超预算就转帧稀释。
+///
+/// 优先级（计划 §0.6）：先保样本档（画面质量），档降到 1 还超才稀释帧率——因为降档是
+/// 全场的均匀降质，而稀释只让每个 patch 慢一帧收敛。
+#[must_use]
+pub fn plan_estimation_budget(active_patches: u32, requested_samples: u32, budget: u32) -> EstimationBudget {
+    let tiers = [8u32, 4, 2, 1];
+    let mut samples = 1;
+    for tier in tiers {
+        if tier > requested_samples {
+            continue;
+        }
+        let rays = u64::from(active_patches.max(1)) * u64::from(tier) * u64::from(RAYS_PER_SAMPLE_WORST);
+        if rays <= u64::from(budget) {
+            samples = tier;
+            break;
+        }
+    }
+    // 档已到 1 仍超预算：按超出的倍数做帧稀释
+    let rays_at_one = u64::from(active_patches.max(1)) * u64::from(RAYS_PER_SAMPLE_WORST);
+    let stride = if rays_at_one <= u64::from(budget) {
+        1
+    } else {
+        (rays_at_one.div_ceil(u64::from(budget.max(1)))).min(64) as u32
+    };
+    EstimationBudget { samples, stride }
+}
+
 /// dispatch 组数 = ceil(池容量 / 64)（每线程一条 patch，非活跃线程直接返回）。
 #[must_use]
 pub fn estimation_groups(capacity: u32) -> u32 {
@@ -202,6 +242,23 @@ mod tests {
         assert_eq!(light_sampling_groups(1), 1);
         assert_eq!(emissive_build_groups(131_072), 2048);
         assert_eq!(bounce_alloc_groups(4096), 64);
+    }
+
+    #[test]
+    fn budget_prefers_sample_tier_before_dilution() {
+        // 3320 条 patch、预算 262144：2 档要 19920 条射线，宽裕 → 用设置值
+        let plan = plan_estimation_budget(3320, 2, 262_144);
+        assert_eq!(plan, EstimationBudget { samples: 2, stride: 1 });
+        // 8 档要 79680，仍宽裕
+        let plan = plan_estimation_budget(3320, 8, 262_144);
+        assert_eq!(plan, EstimationBudget { samples: 8, stride: 1 });
+        // 活跃数压到预算下限：档位先降，不稀释
+        let plan = plan_estimation_budget(50_000, 8, 262_144);
+        assert_eq!(plan, EstimationBudget { samples: 1, stride: 1 });
+        // 档已到 1 仍超（5 万 × 3 > 预算的一半以下）→ 稀释
+        let plan = plan_estimation_budget(200_000, 8, 262_144);
+        assert_eq!(plan.samples, 1);
+        assert!(plan.stride >= 3, "stride={}", plan.stride);
     }
 
     /// 常量天空的解析自检（9.6.4 的锚点）：半球均匀采样 + 投影 + 余弦卷积折叠后，

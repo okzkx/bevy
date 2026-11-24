@@ -189,6 +189,7 @@ fn punctual_bounce_radiance(sample_index: u32, position: vec3f, normal: vec3f, o
     let reconnection_distance = sqrt(max(distance_squared, 1e-8));
     let direction = to_hit / reconnection_distance;
     // 重连接射线：打近一点（留 2cm 余量）只判遮挡，不要求命中同一三角形
+    atomicAdd(&counters[9], 1u);
     let occluder = trace_scene(origin, direction, 0.0, reconnection_distance - 0.02, RAY_MASK);
     if (occluder.hit) {
         return vec3f(0.0);
@@ -241,6 +242,7 @@ fn emissive_area_sample(triangle_index: u32, u_primary: vec2f, u_secondary: vec2
     let distance = sqrt(distance_squared);
     let direction = to_point / distance;
     // 阴影射线：打近 2cm 留余量，命中即被挡
+    atomicAdd(&counters[9], 1u);
     let occluder = trace_scene(origin, direction, 0.0, distance - 0.02, RAY_MASK);
     if (occluder.hit) {
         return vec3f(0.0);
@@ -294,6 +296,14 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     // 活跃判据：patch→cell 反向指针为 INVALID = 空槽（与 ring 水位无关，整理留下洞也准）
     if (patch_cell[patch_idx] == INVALID_PATCH) {
         return;
+    }
+    // 帧稀释（9.6.5）：样本档降到 1 还超预算时按"patch 哈希取模"跳帧，让超出的部分
+    // 摊到后续帧——用哈希而不是池下标的取模，避免按池顺序成块跳档（那会看出条带）。
+    let stride = max(gi.estimation_l.z, 1u);
+    if (stride > 1u) {
+        if (low_bias_hash_32(patch_idx) % stride != gi.frame.x % stride) {
+            return;
+        }
     }
     let geometry = patch_geometry[patch_idx];
     let position = geometry.position.xyz;

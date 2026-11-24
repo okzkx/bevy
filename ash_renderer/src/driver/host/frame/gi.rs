@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use crate::common::syntax::ResultTierExt;
 use crate::render::{
     alloc_grid, bounce_alloc_groups, emissive_build_groups, estimation_groups, eviction_groups,
+    plan_estimation_budget,
     gi_cascade_offsets, light_sampling_groups, pack_alloc_push, pack_emissive_build_push,
     pack_light_sampling_push, pack_view_push, scrolling_groups, DescSet, GiAllocDraw,
     GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiFrameDraw, GiLightSampleDraw,
@@ -116,6 +117,20 @@ pub(super) fn prepare_gi(
             .min(crate::render::GI_LIGHT_SAMPLE_CAPACITY)
     };
 
+    // 9.6.5 预算：活跃 patch 数取 ring 水位（上一帧的计数，一次 48B 主机读，误差一帧）
+    let mut ring_words = [0u8; crate::render::RING_CONFIG_WORDS * 4];
+    gi.tables
+        .ring()
+        .read(0, &mut ring_words)
+        .or_fatal("GI ring 配置读失败，渲染链无法继续")?;
+    let active_patches = u32::from_le_bytes([
+        ring_words[crate::render::RING_ACTIVE * 4],
+        ring_words[crate::render::RING_ACTIVE * 4 + 1],
+        ring_words[crate::render::RING_ACTIVE * 4 + 2],
+        ring_words[crate::render::RING_ACTIVE * 4 + 3],
+    ]);
+    let budget_plan = plan_estimation_budget(active_patches, settings.samples.max(1), settings.budget);
+
     let data = SurfaceCacheUniformsData {
         prev_view_proj: local.prev_view_proj,
         target_pos: center,
@@ -133,7 +148,7 @@ pub(super) fn prepare_gi(
         // 分支（rank 0→1、本轮不淘汰）会因为 multi_bounce 默认开而被误触发。
         bounce_enabled: u32::from(settings.estimation && settings.multi_bounce),
         update_max: UPDATE_MAX,
-        samples: settings.samples.max(1),
+        samples: budget_plan.samples,
         warmup: settings.warmup.max(1),
         multi_bounce: u32::from(settings.estimation && settings.multi_bounce),
         light_samples: settings.light_samples,
@@ -141,6 +156,8 @@ pub(super) fn prepare_gi(
         emissive_intensity: settings.emissive_intensity,
         light_count,
         light_sample_count,
+        estimation_stride: budget_plan.stride,
+        estimation_active: active_patches,
     };
     gi.tables
         .write_uniforms(slot, &data)

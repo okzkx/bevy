@@ -287,6 +287,48 @@ pub(crate) fn gi_stats(In(_params): In<Option<Value>>, world: &mut World) -> Brp
         }
         (light_count, sample_total, valid)
     };
+    // 9.6.5 预算与收敛读数：有效样本档/稀释步长从 UBO 读，收敛占比与平均方差抽 64 条 patch
+    let (samples_effective, stride, budget_active, converged_ratio, variance_mean) = {
+        let mut tables = res_mut::<SurfaceCacheTables>(world)?;
+        let ubo = read_buffer(tables.ubo(slot), GI_UBO_SIZE as usize, "GI UBO 读失败")?;
+        let samples_effective = u32_at(&ubo, 256)?;
+        let stride = u32_at(&ubo, 296)?;
+        let budget_active = u32_at(&ubo, 300)?;
+        let update_max = u32_at(&ubo, 252)?;
+        let mut converged = 0u32;
+        let mut variance_sum = 0.0f64;
+        let mut checked = 0u32;
+        for i in 0..64u32 {
+            let mut statistics = [0u8; PATCH_STATISTICS_SIZE as usize];
+            tables
+                .patch_statistics()
+                .read(u64::from(i) * PATCH_STATISTICS_SIZE, &mut statistics)
+                .map_err(internal_err("patch 统计读失败"))?;
+            let update_count = u32_at(&statistics, 40)?;
+            if update_count == 0 {
+                continue;
+            }
+            checked += 1;
+            if update_count >= update_max {
+                converged += 1;
+            }
+            // 方差取 rgb 三通道均值
+            let v = (f32_at(&statistics, 16)? + f32_at(&statistics, 20)? + f32_at(&statistics, 24)?)
+                / 3.0;
+            variance_sum += f64::from(v);
+        }
+        let converged_ratio = if checked == 0 {
+            0.0
+        } else {
+            f64::from(converged) / f64::from(checked)
+        };
+        let variance_mean = if checked == 0 {
+            0.0
+        } else {
+            variance_sum / f64::from(checked)
+        };
+        (samples_effective, stride, budget_active, converged_ratio, variance_mean)
+    };
     let cell_count = config.cell_count().max(1);
     Ok(json!({
         "enabled": settings.enabled,
@@ -319,6 +361,12 @@ pub(crate) fn gi_stats(In(_params): In<Option<Value>>, world: &mut World) -> Brp
             // 9.6.3 多跳自查询：命中缓存 / 落空（落空率就是桶错位＋覆盖不足的读数代理）
             "bounce_hits": counters[COUNTER_EST_BOUNCE_HITS],
             "bounce_misses": counters[COUNTER_EST_BOUNCE_MISSES],
+            // 9.6.5 预算与收敛（样本档是预算换算后的实际值，不是设置值）
+            "samples_effective": samples_effective,
+            "stride": stride,
+            "budget_active": budget_active,
+            "converged_ratio": converged_ratio,
+            "variance_mean": variance_mean,
             "patches": counters[COUNTER_EST_PATCHES],
             "samples": counters[COUNTER_EST_SAMPLES],
         },

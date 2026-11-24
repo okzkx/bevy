@@ -182,6 +182,11 @@ pub struct SurfaceCacheUniformsData {
     pub light_count: u32,
     /// 9.6.2：本帧光源侧采样清单的条数（0 = 不做重连接取样）。
     pub light_sample_count: u32,
+    /// 9.6.5：帧稀释步长（1 = 不稀释；N > 1 时只有 `patch_hash % N == frame % N` 的 patch
+    /// 本帧参与估计）。
+    pub estimation_stride: u32,
+    /// 9.6.5：预算换算用的活跃 patch 数（读数对账用：与 ring 水位同源）。
+    pub estimation_active: u32,
 }
 
 /// [`SurfaceCacheUniformsData`] 的 WGSL uniform 布局镜像：静态断言钉偏移。
@@ -255,8 +260,8 @@ pub fn pack_surface_cache_uniforms(d: &SurfaceCacheUniformsData) -> [u8; GI_UBO_
     put_f32(&mut out, 284, 0.0);
     put_u32(&mut out, 288, d.light_count);
     put_u32(&mut out, 292, d.light_sample_count);
-    put_u32(&mut out, 296, 0);
-    put_u32(&mut out, 300, 0);
+    put_u32(&mut out, 296, d.estimation_stride);
+    put_u32(&mut out, 300, d.estimation_active);
     out
 }
 
@@ -285,6 +290,8 @@ fn identity_uniforms() -> SurfaceCacheUniformsData {
         emissive_intensity: 1.0,
         light_count: 0,
         light_sample_count: 0,
+        estimation_stride: 1,
+        estimation_active: 0,
     }
 }
 
