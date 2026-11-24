@@ -183,6 +183,34 @@ pub fn direction_bucket(normal: [f32; 3]) -> u32 {
     octahedral::direction_to_bucket(normal, BUCKET_RESOLUTION)
 }
 
+/// 播种与 9.7 屏幕 gather 共用的 1/4 网格口径：本帧在 4×4 块内被播种的子像素（列, 行）。
+///
+/// WGSL 同式见 `shaders/common/gi_lookup.wgsl` 的 `seed_subsample`：
+/// `sub = (frame·7) mod 16`，列 = `sub % 4`、行 = `sub / 4`。7 与 16 互质 → 16 帧走遍
+/// 整块且是双射（不是来回两点）。改动必须两边同步，否则 gather 的命中率读数不可信。
+#[allow(dead_code)] // 9.7.4 的 screen_gather 组装 push 时接入，本任务先落实现与单测
+pub fn seed_subsample(frame_index: u32) -> (u32, u32) {
+    let sub = frame_index.wrapping_mul(7) % 16;
+    (sub % 4, sub / 4)
+}
+
+/// 1/4 像素 + 块内偏移 → 全分辨率像素（与 `patch_alloc.wgsl` 的
+/// `full = low*4 + sub%4 / sub/4` 同式；两轴各自线性放大）。
+#[allow(dead_code)] // 同上：9.7.4 起被 screen_gather / 上采样口径复用
+pub fn low_to_full(low: (u32, u32), sub: (u32, u32)) -> (u32, u32) {
+    (low.0 * 4 + sub.0, low.1 * 4 + sub.1)
+}
+
+/// gather 的 3 个块内样本点：本帧播种点、它的对角、块心 `(1, 1)`。
+///
+/// 三点都落在同一个 4×4 块内（9.7 施工计划 §9.7.1）。块心取四个中心像素的左上那个，
+/// 与 `low_to_full` 的整数算术一致。
+#[allow(dead_code)] // 同上：9.7.4 的 3 点采样口径
+pub fn gather_sample_offsets(frame_index: u32) -> [(u32, u32); 3] {
+    let (sx, sy) = seed_subsample(frame_index);
+    [(sx, sy), (3 - sx, 3 - sy), (1, 1)]
+}
+
 /// 各级整数体素偏移：`offset_i = floor(focus / v_i + 0.5)`（按整个体素对齐；
 /// 相机在体素内部游移不改变偏移，跨过体素边界才变 1）。
 pub fn cascade_offsets(focus: Vec3, config: &SurfaceCacheConfig) -> [IVec3; MAX_CASCADES] {
@@ -349,6 +377,60 @@ mod tests {
             assert!(
                 (0..res).contains(&pv.x) && (0..res).contains(&pv.y) && (0..res).contains(&pv.z)
             );
+        }
+    }
+
+    /// 9.7.1 闸门 3：1/4 网格口径——16 帧内子像素走遍 4×4 整块且不重复（双射）。
+    ///
+    /// 这条钉的正是 gather 与播种"必须同格"的前提：若 7 与 16 不互质（如改成 8），
+    /// 子像素会在两点间来回，gather 有一半的块查到本帧根本没播种的位置。
+    #[test]
+    fn seed_subsample_walks_whole_block_once() {
+        let mut seen = std::collections::BTreeSet::new();
+        for frame in 0..16u32 {
+            let (sx, sy) = seed_subsample(frame);
+            assert!(
+                sx < 4 && sy < 4,
+                "frame={frame} sub=({sx},{sy}) 越出 4×4 块"
+            );
+            seen.insert((sx, sy));
+        }
+        assert_eq!(seen.len(), 16, "16 帧应覆盖整块 16 个子像素");
+        // 周期性：第 16 帧回到第 0 帧
+        assert_eq!(seed_subsample(16), seed_subsample(0));
+        assert_eq!(seed_subsample(17), seed_subsample(1));
+    }
+
+    /// 9.7.1 闸门 3：`low_to_full` 与播种的 `full = low*4 + sub%4 / sub/4` 逐点同式。
+    ///
+    /// 这里把播种侧公式独立重写一遍（不调用 `low_to_full`），两种写法给出同一坐标才算同源。
+    #[test]
+    fn low_to_full_matches_seeding_formula() {
+        for frame in [0u32, 1, 3, 7, 15, 31, 1234] {
+            let sub_index = (frame.wrapping_mul(7)) % 16;
+            for low in [(0u32, 0u32), (1, 2), (479, 269), (10_000, 3)] {
+                let expected = (low.0 * 4 + sub_index % 4, low.1 * 4 + sub_index / 4);
+                let actual = low_to_full(low, seed_subsample(frame));
+                assert_eq!(actual, expected, "frame={frame} low={low:?}");
+            }
+        }
+    }
+
+    /// 9.7.1：三个 gather 样本点都在同一 4×4 块内，第一个是播种点、第二个是对角。
+    #[test]
+    fn gather_samples_stay_inside_block() {
+        for frame in 0..20u32 {
+            let (sx, sy) = seed_subsample(frame);
+            let points = gather_sample_offsets(frame);
+            assert_eq!(points[0], (sx, sy), "第一个样本必须与播种同格");
+            assert_eq!(points[1], (3 - sx, 3 - sy), "第二个样本是对角");
+            assert_eq!(points[2], (1, 1), "块心固定 (1,1)");
+            for (px, py) in points {
+                assert!(
+                    px < 4 && py < 4,
+                    "frame={frame} 样本 ({px},{py}) 越出 4×4 块"
+                );
+            }
         }
     }
 }

@@ -24,6 +24,7 @@ enable wgpu_ray_query;
 enable wgpu_binding_array;
 // #import frame
 // #import gi_cell
+// #import gi_lookup
 // #import gi_sampling
 // #import gi_light_sample
 // #import gi_emissive
@@ -88,20 +89,21 @@ fn environment_radiance(dir: vec3f) -> vec3f {
 // ——光滑曲面上两者不同源，这里会有桶错位（9.5 §0.5 的已知例外），错位率用
 // `counters[8]`（命中）/`counters[15]`（落空）两个读数估。
 fn cache_evaluate(p: vec3f, n: vec3f, write_second: bool, can_allocate: bool) -> vec3f {
-    let center = gi.target_pos.xyz;
-    let res = u32(gi.volume.y);
-    let cascades = u32(gi.volume.z);
-    let voxel_min = gi.volume.x;
-    let cascade = resolve_cascade(center, p, voxel_min, res, cascades);
-    if (cascade == INVALID_PATCH) {
+    // 定位链走 common/gi_lookup.wgsl 的只读版（9.7.1 抽出）：这里只叠自己的两个副作用
+    // ——落空计数与 bounce 请求；算术与 9.6 逐位一致，别在本函数里另写一份取整。
+    let key = lookup_cell_key(
+        p,
+        n,
+        gi.target_pos.xyz,
+        gi.volume.x,
+        u32(gi.volume.y),
+        u32(gi.volume.z),
+        gi.cascade_offsets,
+    );
+    if (key.cascade == INVALID_PATCH) {
         return vec3f(0.0);
     }
-    let voxel = voxel_size(voxel_min, cascade);
-    let offset = gi.cascade_offsets[cascade].xyz;
-    let pv = volume_position(p, voxel, offset, i32(res));
-    let storage = volume_to_storage(pv, offset, i32(res));
-    let bucket = direction_to_bucket_index(n, BUCKET_RESOLUTION);
-    let cell = cell_index(cascade, storage, bucket, res);
+    let cell = key.cell;
     // 名字不用 patch：WGSL 把 patch 列为保留关键字
     let patch_index = cell_patch[cell];
     if (patch_index == INVALID_PATCH) {
@@ -127,10 +129,8 @@ fn cache_evaluate(p: vec3f, n: vec3f, write_second: bool, can_allocate: bool) ->
     } else {
         previous = patch_irradiance1[patch_index];
     }
-    return previous.l0.xyz
-        + previous.l1x.xyz * n.x
-        + previous.l1y.xyz * n.y
-        + previous.l1z.xyz * n.z;
+    // 求值也走公共片段（同一式：l0 + l1·n），免得屏幕侧另写一份
+    return lookup_eval(previous, n);
 }
 
 // 命中点朝入射方向反射出去的辐亮度：albedo/π ·（方向光 · NoL · 阴影 + 多跳缓存 E）。
