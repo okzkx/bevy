@@ -1,6 +1,6 @@
 # 施工计划：9.5 patch 池与分配回收
 
-> 2026-11-24 立案（纯文档）。对应[步骤 9 README](../README.md)、[八段拆解 §2 9.5](../施工计划：天空盒、IBL 与表面缓存全局光照八段拆解.md)与[路线图步骤 9 表](../../学习目标实现步骤.md)。本文管 9.5 段做什么、按什么顺序、验收什么；"实际做了什么"开工后另立施工记录，不回写本文。
+> 2026-11-24 立案（纯文档）。对应[步骤 9 README](../README.md)、[八段拆解 §2 9.5](../施工计划：天空盒、IBL 与表面缓存全局光照八段拆解.md)与[路线图步骤 9 表](../../学习目标实现步骤.md)。本文管 9.5 段做什么、按什么顺序、验收什么；"实际做了什么"开工后另立施工记录，不回写本文。格子系统与三个口径的推导（法线来源、播种网格、级联排列）见[patch 池与格子系统讲解](patch池与格子系统讲解：法线口径、播种网格与级联排列.md)。
 >
 > **当前状态：⬜ 已立案（2026-11-24），未开工。** 任务 9.5.1～9.5.7 与判定线六条草案见下；前置闸门开工首日按序关闭。
 
@@ -55,7 +55,6 @@
 | `RingConfig` | count/start/end × 2 份（读/写 flip-flop） | 32 | — | 256 B |
 | 计数与统计 | allocated / failed / freed / watermark / defrag 计数 | 64 | — | 256 B |
 | **小计** | | | | **≈28.5 MiB** |
-| 调试图（开 GI 才建） | RGBA16F 全分辨率 | 8/px | 1920×1080 | ≈7.9 MiB |
 
 - 与八段拆解 §1.3 的"12 MiB patch 池 + 8/16 MiB cell 双表"一致（12 MiB = 2+4+4+2，正好对上"65536 条 ≈ 12 MiB"）。6 GB 显存预算下仍属可忽略量级，但按八段拆解 §7 第 4 条**必须与贴图预算同场测**，不单独声称便宜。
 - `PatchStatistics` 用**本工程的显式对齐**（32B），不照抄 Unity 的 `float3` 紧凑打包：WGSL storage 里 vec4f 对齐 16，紧凑 float3 会逼出 stride 计算与读改写风险。
@@ -92,17 +91,19 @@
 - **Defrag**：把 ring 内容区间里的空洞项前移压缩，四张 patch 表同步搬、`cellPatch` 反向指针改写、读/写两份 ring 配置 flip-flop（奇偶切换）。每帧槽数可配（默认 2，档位 2/4/8/16）。
 - **不依赖 subgroup**：Unity 用 `Threading::Wave` 前缀和；本工程首版用 **workgroup 共享内存前缀和**（512 线程块）绕开 WGSL subgroup 扩展在有/无 `enable subgroups` 设备上的分裂（前置闸门 §3 第 5 项先跑通这个形状，subgroup 只作后置优化，不进判定线）。
 
-### 0.7 调试与计量：独立 compute 调试图 + BRP 四口，不改合成 shader
+### 0.7 调试视图：先把 patch 本身看见（两种形态，不接着色）
 
-- **不往 `gbuffer_composite.wgsl` 里塞 GI 逻辑**：本段没有辐照度可显示，任何注入都是"为了看而改画面"，会把"GI 关 = 9.3 逐位一致"的降级路径弄脏。调试图走独立 compute（`passes/gi/`），输出 RGBA16F 的图 + 统计缓冲。
-- 子视图（push 选）：0 = patch 分布（按级联/桶着色，把 patch 位置投到屏幕上画点）、1 = cell 占用热图、2 = rank/heartbeat 分布、3 = 池水位条。
-- BRP 四口：`gi_set`（开关 + Volume/池/播种参数 + 调试图子视图）、`gi_stats`（patch 数、分配失败、回收计数、池水位/峰值、cell 占用率、rank 分布、`gi_ms`）、`gi_dump`（调试图 → PPM，复用 `frame_dump` 的 P6 写法）、`gi_census`（cell 表与 patch 表前 N 条对照：`cell↔patch` 双向一致、位置落在所属体素内、法线在对应桶内）。
+- **本段不接任何着色**（9.6/9.7 之前没有辐照度可看），所以视图只读缓存表与 G-buffer，专门回答四个问题：可见表面有没有"该有 patch 却没有"的空洞；patch 存的位置贴不贴表面；同一平面有没有被拆成多条（桶条纹）；池水位与分配失败随游历是否收敛。
+- **形态 A（主）表面覆盖图——直接把 patch 画在网格表面上**：全屏 pass，每个像素按自己的深度与平面法线算 `级联 → 体素 → 桶 → cell → patch`（与 9.7 的查表是同一个函数，视图相当于查询端的提前实现），再按子视图上色：0 = cell 归属（随机色看分区）、1 = 覆盖状态（有 patch 绿 / 无 patch 红 / 出 Volume 蓝）、2 = 级联（4 色）、3 = 桶（16 色）、4 = rank、5 = 心跳年龄（越旧越暗）、6 = 池水位与失败计数（屏幕顶部条）。每个像素都会被写上颜色，所以这一档就是"只画 patch"的视图——场景物体只以 patch 分区的边界形式可见。Unity 的 `Debug.compute` 就是这个形态（含 5% 顶部状态条与"离 patch 位置不到 0.1 体素就涂亮"的样本位置高亮）。
+- **形态 B 几何标记看位置与朝向**：一次实例化 draw，每个 patch 一个小方片（位置取 patch、朝向取法线、边长取该级联体素的 1/10～1/4）；ring 未使用或 `patchCell == INVALID` 的槽输出退化三角形，不需要回读活跃数。深度用人工测试——采样场景深度与片段自身深度比较（reverse-Z 下更大 = 更近），沿法线朝相机一侧偏移半个体素，避免与表面深度冲突（z-fighting）；不重绑深度附件。Kajiya 的 `raster_origins_vs.hlsl` 是同一形状（每条目一个 2 厘米立方体）。
+- 位置：⑧ 段 LDR 写完、UI 之前（不经过 ACES，调试色不被 tonemap 改）；视图关 = 零命令、零屏障、零绑定。**不塞进合成 shader**：任何往 `gbuffer_composite.wgsl` 里加的分支都会破坏"GI 关 = 9.3 逐位一致"的降级路径。
+- BRP 四口：`gi_set`（开关 + Volume/池/播种参数 + 视图号）、`gi_stats`（patch 数、分配失败、回收计数、池水位/峰值、cell 占用率、rank 分布、当前视图号、`gi_ms`）、`gi_dump`（复用 `frame_dump` 的 LDR→PPM 通道，不新增读回）、`gi_census`（cell 表与 patch 表前 N 条对照：`cell↔patch` 双向一致、位置落在所属体素内、法线在对应桶内）。
 - 帧计时新增 `SurfaceCache` 段：`QUERIES_PER_FRAME` 11 → 12、`TimestampPoint::SurfaceCache = 11`、`fetch_gi`（照 9.4 `fetch_ray_tracing` 先例单列）。
 - G-buffer 采样集的阶段位：首选**把 `GBUFFER_SAMPLED_SET_DESC` 的 binding stage 扩到 `FRAGMENT|COMPUTE`**（一份布局、一份采样集，compute 与合成共用；扩 stage 只放宽不改语义，管线在 init 一次性重建）。备选是另立 `gi_screen` 集，但要复制七条 binding——两案在 9.5.1 首日各验一条零 VUID 后取改动小的那条。
 
 ### 0.8 边界（本段不主张什么）
 
-- **不改画面**：`gi_enabled = false`（默认）= 与 9.3 收官态逐位一致；开也只多几条 compute 与一张调试图，不接合成与透明。
+- **不改画面**：`gi_enabled = false`（默认）= 与 9.3 收官态逐位一致；开了也只多几条 compute；开视图才多两次绘制，且只画在 LDR 上，不接合成与透明。
 - **不出辐照度**：patch 表里两份 RGBL1 存在，但只有 IBL 种子值；射线半球采样、直接光、多跳、时域混合全归 9.6。
 - **不接屏幕**：屏幕查表、空间/时域滤波、双边上采样、Volume 内替换 IBL 漫反射全归 9.7。
 - **不做**：bounce 分配请求列表（9.6）、多相机/多 Volume（一份缓存服务一个主相机）、Focus Target、Unity 的 quasi-periodic 体素 warping（先记 §5，出现地板/墙面对齐闪烁再引）、alpha 裁切、AS defrag 式的 GPU 排序替代、cell 表压缩/稀疏化（SVO/hash 化）——这些要么是 9.8 的局限对照项，要么是外置条目。
@@ -121,7 +122,9 @@
   ② eviction.wgsl    容量线程：心跳超 240 帧淘汰（首版无 bounce）
   ③ defrag.wgsl      workgroup 前缀和压缩；读 ring 配置 A 写 B
   ④ patch_alloc.wgsl 1/4 播种：深度 → 平面法线 → 级联/桶/cell → 分配或刷新
-  ⑤ gi_debug.wgsl    调试图（子视图 0..3）
+
+录像（⑧ 段 LDR 写完、UI 之前，视图开关门控）：
+  ⑤ patch_view.wgsl  fs_cover（形态 A：把 patch 画在网格表面）/ vs+fs_marker（形态 B：方片看位置与朝向）
 
 BRP：gi_set / gi_stats / gi_dump / gi_census
 ```
@@ -153,7 +156,7 @@ BRP：gi_set / gi_stats / gi_dump / gi_census
 - `SurfaceCacheTables`：§0.2 的九类 buffer + 计数；建表时一次写初值（`cellPatch = INVALID`、`patchCell = INVALID`、marks/counters = 0、ring config = 0），之后只由 GPU 读写。
 - `GI_SET_DESC`（全 `COMPUTE`）：b0 cellPatchIndices / b1 cellMarks / b2 patchGeometry / b3 patchIrradiance0 / b4 patchIrradiance1 / b5 patchStatistics / b6 patchCellIndices / b7 ringConfig / b8 counters / b9 GI UBO；按帧槽各一套集（ring config 双份索引在 UBO 里给偏移，不必两套 buffer）。
 - 登记：`layout_registry` 的 `ALL_SETS` 与新管线的 `ALL_PIPELINES` 各加条目；`layout_contract` BRP 自检覆盖。
-- 显存读数：表字节进 `perf_stats` 的显存组（新分组 `gi`：cell 表 / patch 表 / 调试图）。
+- 显存读数：表字节进 `perf_stats` 的显存组（新分组 `gi`：cell 表 / patch 表 / 统计缓冲）。
 
 **落点**：`src/render/resident/tables/surface_cache.rs`、`src/render/layout_registry.rs`、`src/render/stats/perf.rs`。
 
@@ -178,7 +181,7 @@ BRP：gi_set / gi_stats / gi_dump / gi_census
 **坑 / 钉子**
 
 - **必须 `textureLoad`（整数坐标），不要 `textureSampleLevel`**：D32 的线性过滤不可依赖，而且平均后的深度反投影出来是错的几何。
-- 播种的每条写入都要"同帧可见"给后面的调试图与 9.6：段末补 compute→compute 屏障（`MemoryBarrierDesc`，参 9.4 的 TLAS 两条屏障写法）。
+- 播种的每条写入都要"同帧可见"给 ⑧ 段的视图与 9.6：段末补 compute→compute 屏障（`MemoryBarrierDesc`，参 9.4 的 TLAS 两条屏障写法）。
 - 1/4 网格的像素中心要按 `(x+0.5)/lowres_w` 再乘回全分辨率，别把 1/4 坐标直接当 uv（Unity 用 `PixelPosToUvPos` 明确 +0.5）。
 - 平面法线差分在深度不连续（前景/背景交界）处会算出荒谬法线：用 4 邻域里深度差超过阈值的 tap 剔除，全剔除则跳过该像素（不播种）。
 - 池满的失败计数用原子加；BRP 读它判断"预算是否够"，判定线 ④ 依赖它。
@@ -208,49 +211,51 @@ BRP：gi_set / gi_stats / gi_dump / gi_census
 
 - `RenderFeatures` 新增 `gi: Option<GiFrameDraw>`；`record.rs` 在 ④ G-buffer 的只读屏障之后、合成之前插入 ④.5 段（GI 关 = 整段不录、零命令、零屏障），段界新时间戳点。
 - `driver/host/frame.rs` 新增 `prepare_gi(...)`：读 `GiSettings`、算 Volume 跟随与偏移、写 GI UBO、按需建/换描述符集、组装 `GiFrameDraw`。
-- `GiSettings` 资源（默认 `enabled: false`）+ BRP `gi_set`：开关、Size/Res/级联/池容量（只允许在关态改，改后重建表）、播种开关、调试图子视图。
-- 调试图与统计缓冲（每帧槽）：随 swapchain 重建；关闭时不建（懒建，首次开 GI 时建）。
+- `GiSettings` 资源（默认 `enabled: false`）+ BRP `gi_set`：开关、Size/Res/级联/池容量（只允许在关态改，改后重建表）、播种开关、视图号。
+- 统计缓冲（每帧槽，装覆盖空洞与位置偏离的原子计数）：随 swapchain 重建；关闭时不建（懒建，首次开 GI 时建）。视图本身不占离屏资源——两种形态都直接画到当前帧的 LDR 目标上。
 
 **落点**：`src/render/frame/render_features.rs`、`src/render/frame/record.rs`、`src/driver/host/frame.rs`、`src/render/passes/gi/mod.rs`、`src/remote/features/gi.rs`、`src/remote/mod.rs`、`src/driver/host/init.rs`。
 
 **坑**
 
 - 段的插入位置是**硬约束**：② 段读不到本帧 G-buffer；⑤ 之后注入才轮到 9.7。本段录在 ④.5 只是"取数正确"，不是为了显示。
-- 关闭态必须与 9.3 逐位一致：不建调试图、不绑集、不录 dispatch；时间戳点照录（两个相邻 mark 之间 ≈ 0），既有读数口径不变。
+- 关闭态必须与 9.3 逐位一致：不建视图与统计缓冲、不绑集、不录 dispatch；时间戳点照录（两个相邻 mark 之间 ≈ 0），既有读数口径不变。
 - 新段会让 `QUERIES_PER_FRAME` 从 11 变 12：`GpuTimer::fetch` 的 9 项分段口径不变，新增 `fetch_gi` 单读一位（照 9.4 双段先例）。
-- 关闭后重开（BRP 切）要幂等：表不重建、ring 配置保留；只有容量/分辨率变更才重建（重建前 `device_wait_idle`，与调试图重建同款）。
+- 关闭后重开（BRP 切）要幂等：表不重建、ring 配置保留；只有容量/分辨率变更才重建（重建前 `device_wait_idle`，与 9.4 的调试图重建同款）。
 
-### 9.5.6 调试视图与 BRP 四口
+### 9.5.6 patch 调试视图与 BRP 四口
 
 **做什么**
 
-- `shaders/scene/gi/gi_debug.wgsl`：读几张表（cell 表 / patch 表 / counters / ring 配置）+ 帧 UBO 的 `view_proj`（把 patch 位置投到屏幕），写调试图：
-  - 0 = patch 分布（级联基色 × 桶微调；点画在 patch 屏幕位置）；
-  - 1 = cell 占用热图（按 `cellPatch != INVALID` 的密度显示，1/4 栅格）；
-  - 2 = rank / heartbeat 分布；
-  - 3 = 池水位条 + 失败计数条（屏幕左上角画条）。
-- BRP：`gi_set` / `gi_stats` / `gi_dump` / `gi_census`（语义见 §0.7）；`gi_stats` 里除读数还要给"本帧 dispatch 组数"与各段 `gi_ms`。
-- `tools/brp.py` 加四个子命令，`discover` 自动可见。
+- `shaders/scene/gi/patch_view.wgsl` 两支入口：`fs_cover`（形态 A，全屏三角形；读 G-buffer 集、GI 集、GI UBO；push 带视图号、屏幕尺寸）、`vs_marker` + `fs_marker`（形态 B，vertex pulling 读 `PatchGeometry` / `PatchStatistics` / ring 配置；实例数 = 池容量，每实例 6 顶点方片）。
+- 形态 A 的像素路径与 9.5.3 的播种、9.7 的查表共用 `gi_cell.wgsl` 里的同一组函数；唯一差别是输出：这里写到屏幕颜色，不写缓存表。
+- 录制：⑧ 段 LDR 写完、UI 之前，一次动态渲染（颜色 LOAD）；形态 B 另起一次同位置渲染；两者都只采样场景深度/法线，不动已有 pass 的布局。
+- 覆盖空洞与"位置偏离"用 GPU 原子计数写进统计缓冲，`gi_stats` 直接报数（读回走现成通道）。
+- 子视图 0..6 经 `gi_set {"view": N}` 切换；`tools/brp.py` 加四个子命令。
 
-**落点**：`shaders/scene/gi/gi_debug.wgsl`、`src/render/passes/gi/debug.rs`、`src/remote/features/gi.rs`、`src/remote/mod.rs`、`tools/brp.py`。
+**落点**：`shaders/scene/gi/patch_view.wgsl`、`src/render/passes/gi/{mod,view}.rs`、`src/render/frame/render_features.rs`、`src/remote/features/gi.rs`、`src/remote/mod.rs`、`tools/brp.py`。
 
 **坑**
 
-- `gi_dump` 读的是"该帧槽上一次提交"的调试图（两帧内新鲜），与 `ray_tracing_dump` 同一时序契约。
-- 调试图是 storage image，写前 UNDEFINED→GENERAL；`gi_census` 读的是存储 buffer，走 `readback_buffer` + 一次性命令，别混两条路径。
-- `gi_stats` 在关态回 `enabled:false` + 全零，而不是报错（BRP 客户端脚本靠这个判分支）。
+- 形态 B 的顶点数 = 池容量 × 6（65536 × 6 ≈ 39 万），一次 draw 可接受；不为调试视图引入 GPU 压缩或 indirect，池提到 2^18 时再议。
+- 人工深度测试必须**同一张深度图、同一像素**比较：片段深度取 `@builtin(position).z`（窗口空间，reverse-Z 下与深度附件同域），场景深度用 `textureLoad` 取整像素；不要用线性化深度比较（多一次换算，还容易把 far 弄错）。
+- patch 位置与表面深度本来就相等：必须沿法线偏移，偏移方向取朝相机一侧（`dot(法线, 相机−位置) > 0` 时为正），否则整片方片与表面交替闪烁。
+- 视图门是双重的：`gi_enabled && view > 0`，任一条不满足就整段不录；关态逐位一致由判定线 ⑥ 兜住。
+- `gi_stats` 在关态回 `enabled:false` + 全零，而不是报错（BRP 客户端脚本靠这个判分支）；`gi_dump` 在视图关时按 `ray_tracing_dump` 的同一口径拒绝。
+- 不照抄 Unity 的一个副作用：它的调试视图会顺手刷新被观察 patch 的心跳（`Debug.compute:193` 的 `UpdateHeartbeat`），等于让看得到的 patch 不被淘汰；我们的视图只读不写，调试件不得改变被测状态（否则淘汰逻辑的问题会被视图本身掩盖）。
+- 帧计时不新增时间戳位：视图是调试件，不参与正式读数，`gi_ms` 仍只覆盖 ④.5 段。
 
 ### 9.5.7 判定线与计量
 
 **做什么**
 
 - `tools/gi_test.py`（照 `ray_tracing_test.py` 骨架：自启宿主、等 BRP、逐项采证、退出码 0/1），六条判定线：
-  1. **分布吻合**：Sponza 中庭机位，`gi_set enabled=true` → `gi_dump view=0` 落 PPM，与 `frame_dump` 的着色帧、normal 调试帧对照（读图：墙/地/柱分面落到对应 patch，无漂浮点、无整屏空白）；`gi_stats.patches > 0`、`cell 占用数 ≤ 16×活跃 patch`。
+  1. **分布与覆盖吻合（读视图）**：Sponza 中庭机位 → `gi_set {"view":1}` 的覆盖图无红色空洞（可见表面都被覆盖）、无大片蓝色出界；`view:5` 下无"位置偏离 > 0.1 体素"的异常色像素，形态 B 的方片贴在表面上（交叉验证）；`view:3` 的桶着色下同一平面不出现整片条纹；`view:0` 的 cell 归属色块边界与场景几何边界对齐。读数：`gi_stats.patches > 0`、cell 占用 ≤ 16×活跃 patch、空洞像素数 ≈ 0。
   2. **显存恒定**：连跑 ≥120 帧，`gi_stats` 的表字节读数与 `perf_stats` 的显存组不增；`pool_watermark ≤ capacity`。
-  3. **跟随无残留**：`set_transform` 把一组实例推近/移开、`chunk_despawn` 删一块后，分布图对应区域变化、旧位置的点消失；`gi_census` 的 `cell↔patch` 双向一致（无悬空、无菱形指针）。
-  4. **稳态平衡**：静止游历 ≥60 帧后 `allocs − frees ≈ 0`、`failed ≈ 0`、池水位稳定；defrag 前后 `gi_census` 的 patch 集合只搬家不丢失。
+  3. **跟随无残留**：`set_transform` 把一组实例推近/移开、`chunk_despawn` 删一块后，分布图对应区域变化、旧位置的覆盖色与方片消失；`gi_census` 的 `cell↔patch` 双向一致（无悬空、无环路）。
+  4. **稳态平衡**：静止游历 ≥60 帧后 `allocs − frees ≈ 0`、`failed ≈ 0`、池水位稳定；defrag 前后 `gi_census` 的 patch 集合只前移不丢失。
   5. **大世界档可游历**：`generate_chunks` 铺开 + 相机轨迹（Size 512 / 6 级联 / 池 2^18 档），滚动后旧 cell 释放、池不涨、`failed` 有界；读数成组记录（活跃 patch、cell 占用、失败、水位、`gi_ms`、显存）。
-  6. **不破底座**：`gi_set enabled=false` 帧与 9.3 收官态 `frame_dump` 逐字节一致；五脚本回归（`hiz_test` / `scene_lod` / `scene_stream` / `scene_fine` / `scene_sponza`）零回退；`cargo test`、`clippy`、`fmt`、零 VUID、`WM_CLOSE` exit 0。
+  6. **不破底座**：`gi_set enabled=false` 或 `view:0` 的帧与 9.3 收官态 `frame_dump` 逐字节一致；五脚本回归（`hiz_test` / `scene_lod` / `scene_stream` / `scene_fine` / `scene_sponza`）零回退；`cargo test`、`clippy`、`fmt`、零 VUID、`WM_CLOSE` exit 0。
 - 计量：`gi_ms`（④.5 段整段）、分配失败、池水位峰值、cell 占用率、每帧 dispatch 组数；与 9.8 压测同口径。
 
 **落点**：`tools/gi_test.py`、`src/render/stats/perf.rs`、施工记录。
@@ -262,11 +267,12 @@ BRP：gi_set / gi_stats / gi_dump / gi_census
 3. **空场景与无相机**：不 panic、不录 dispatch、`gi_stats` 返回 0。
 4. **契约测试**：`every_shader_entry_has_a_pipeline`、`layout_contract` 通过（新 set / 新管线 / 新 shader 入口已登记）。
 5. **defrag 前缀和形状**：workgroup 版先跑通（不依赖 subgroup 扩展），在 256/512 线程两种块大小下与 CPU 参照逐个 idx 对账。
+6. **视图两条形态各跑一次**：形态 A 全屏 pass 能读深度/平面法线并上色（无 VUID）；形态 B 一次实例化 draw 画出 65536 槽、未激活槽退化（无 VUID）；`view:0` 帧与 9.3 逐位一致。
 
 ## 4. 显存与性能口径
 
-- 静态显存：§0.2 的 ≈28.5 MiB（起步档）+ 调试图 7.9 MiB；大世界档 cell 表 12 MiB/张、池 2^18 时 patch 表 48 MiB。**逐项进 BRP 显存组**，并与贴图预算同场测（八段拆解 §7 第 4 条）。
-- 每帧成本：scrolling（仅偏移变化帧，Res³×C ≈ 13 万线程）+ eviction（65536 线程）+ defrag（2×512 线程）+ alloc（1/4 像素数，1080p 下 ≈13 万线程）+ 调试图（开子视图才有）。量级估 0.1～0.3 ms，**实测为准**，`gi_ms` 单列进帧计时账。
+- 静态显存：§0.2 的 ≈28.5 MiB（起步档，不含任何离屏调试资源——视图直接画到 LDR 目标）；大世界档 cell 表 12 MiB/张、池 2^18 时 patch 表 48 MiB。**逐项进 BRP 显存组**，并与贴图预算同场测（八段拆解 §7 第 4 条）。
+- 每帧成本：scrolling（仅偏移变化帧，Res³×C ≈ 13 万线程）+ eviction（65536 线程）+ defrag（2×512 线程）+ alloc（1/4 像素数，1080p 下 ≈13 万线程）+ 视图（开视图才录：形态 A 一次全屏、形态 B 一次 39 万顶点 draw）。量级估 0.1～0.3 ms，**实测为准**，`gi_ms` 单列进帧计时账。
 - 分配失败的读数比毫秒更重要：失败率 > 0.1% 说明池/分辨率配比不对，先调参数再谈性能。
 
 ## 5. 待决项（施工时钉明，不预设结论）
@@ -280,7 +286,9 @@ BRP：gi_set / gi_stats / gi_dump / gi_census
 | 池容量 | 65536 / 2^18 | 大世界档失败率 > 0.1% 才提 |
 | cell 表内存角色 | DEVICE_LOCAL（一次性 compute 填初值）/ HOST_VISIBLE | 初值写耗时实测；决定 9.5.2 |
 | 时间戳扩展 | 扩 `QUERIES_PER_FRAME` 加 `SurfaceCache` 点位 / 复用 GBuffer→Lighting 区间 | 施工时按读数需要定（倾向新点位） |
-| 调试图分辨率 | 全分辨率 / 1/2 | 判定线 ① 读图精度是下限 |
+| 视图形态默认 | 表面覆盖图（A）/ 几何标记（B） | 两种都做；判定线 ① 以 A 为主、B 交叉验证 |
+| 标记形态与尺寸 | 方片 / 十字；边长 = 体素 1/10 或 1/4 | 9.5.6 读图后定，默认方片 × 1/4 体素 |
+| 形态 A 分辨率 | 全屏 / 1/2 | 默认全屏（读图精度优先）；成本超预期再降 |
 
 ## 6. 与后续段的接口
 
