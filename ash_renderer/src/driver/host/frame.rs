@@ -47,6 +47,7 @@ mod overlay;
 mod post;
 mod resize_gate;
 mod ring;
+mod rt;
 mod scene;
 mod shadow;
 mod stopwatch;
@@ -62,6 +63,7 @@ use self::lod::create_lod_draw;
 use self::overlay::create_overlay_draw;
 use self::post::{bloom_draw, smaa_draws};
 use self::resize_gate::rebuild_size_dependent;
+use self::rt::prepare_rt;
 use self::scene::{scene_world_aabb, FrameView};
 use self::shadow::shadow_frame_draw;
 use self::stopwatch::FrameStopwatch;
@@ -96,6 +98,8 @@ pub(crate) fn draw_frame(
         gate,
         logs,
         occlusion_gate,
+        rt,
+        rt_local,
     } = &mut input;
 
     // —— 帧首：最小化让路 + 挂起重建（尺寸相关资源随新 extent 重建，幂等；pending
@@ -104,7 +108,7 @@ pub(crate) fn draw_frame(
         return Ok(());
     }
     gate.rebuild_if_pending(gpu.swapchain.pending_rebuild(), || {
-        rebuild_size_dependent(gpu, &mut occlusion.hiz, post, cluster)
+        rebuild_size_dependent(gpu, &mut occlusion.hiz, post, cluster, rt)
     })?;
 
     // —— 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在提交前一刻）。
@@ -256,6 +260,23 @@ pub(crate) fn draw_frame(
         &mut logs.indirect_first_submit,
     )?;
 
+    // —— 求交器（9.4）：TLAS 容量 → RT 集换绑 → 地址表 → ② 段录制束。RT 关/未就绪
+    // 为 None（整段跳过，画面与 9.3 逐位一致）。容量增长会等全部在飞帧（低频）。
+    let rt_draw = prepare_rt(
+        rt,
+        rt_local,
+        &gpu.ctx,
+        &mut gpu.frames,
+        &mut scene.instance_tables,
+        ledger,
+        &scene.pool,
+        &scene.lod_groups,
+        &dirty.model,
+        slot,
+        indirect_count,
+        extent,
+    )?;
+
     // —— overlay 绘制：图集整传（可能多一张 transfer 票据，本帧 upload_wait 快照必须在此后取，
     // 见 UploadWait::snapshot）→ 镶嵌 → 顶点环写入。UI 数据缺席 = None（record_frame 的
     // UI 段整段跳过）。
@@ -302,7 +323,7 @@ pub(crate) fn draw_frame(
         gbuffer: &post.gbuffer.targets,
         composite: post.composite.rec(),
     };
-    let feature = RenderFeatures {
+    let mut feature = RenderFeatures {
         // —— ① 帧首
         timer: timing.timer.enabled.then_some(&*timing.timer),
         // —— ② compute 前置
@@ -328,6 +349,8 @@ pub(crate) fn draw_frame(
                 }),
             set: scene.ibl_env.frame_set(),
         },
+        // —— ② compute 前置：求交器（BLAS 待建 / TLAS / 调试图）
+        rt: rt_draw,
         // —— ⑦⑧ 后链 + UI
         post: PostChainDraw {
             tonemap: post.tonemap.rec(),
@@ -345,7 +368,7 @@ pub(crate) fn draw_frame(
         // —— ⑨ 提交
         upload_wait: UploadWait::snapshot(&gpu.uploader),
     };
-    gpu.frames.record_frame(&target, &feature, &res)?;
+    gpu.frames.record_frame(&target, &mut feature, &res)?;
     watch.record_done();
 
     // —— present：OUT_OF_DATE 已在 present_digest 内标过时（下个帧首重建）；真失败

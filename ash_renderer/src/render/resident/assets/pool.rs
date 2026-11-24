@@ -123,12 +123,21 @@ pub struct MeshPool {
     free_index: Vec<PoolRange>,
     ledger: MaintenanceLedger,
     recycled: RecycleLedger,
+    /// RT 开启时池按 [`BufferRole::RtPool`] 建（多 storage 读 + AS 构建输入 + BDA 位）；
+    /// 关时与 9.3 逐位一致的 [`BufferRole::DevicePool`]。
+    rt: bool,
 }
 
 impl MeshPool {
     /// 空池：第一次 [`Self::ensure_capacity`] 才按当时的需求分配。`sharing_families`
-    /// 有 ≥2 个不同族时池按 CONCURRENT 创建，同族设备传空。
-    pub fn new(device: &Device, contract: &MemoryContract, sharing_families: &[u32]) -> Self {
+    /// 有 ≥2 个不同族时池按 CONCURRENT 创建，同族设备传空。`rt` 决定池的多用途位
+    ///（RT 开才带 storage/AS 构建输入/BDA；BDA 未启用时带 `SHADER_DEVICE_ADDRESS` 非法）。
+    pub fn new(
+        device: &Device,
+        contract: &MemoryContract,
+        sharing_families: &[u32],
+        rt: bool,
+    ) -> Self {
         Self {
             device: device.clone(),
             contract: contract.clone(),
@@ -145,6 +154,7 @@ impl MeshPool {
             free_index: Vec::new(),
             ledger: MaintenanceLedger::default(),
             recycled: RecycleLedger::default(),
+            rt,
         }
     }
 
@@ -158,6 +168,44 @@ impl MeshPool {
     #[must_use]
     pub fn index_buffer(&self) -> Option<vk::Buffer> {
         self.index.as_ref().map(GpuBuffer::buffer)
+    }
+
+    /// 顶点池 (句柄, 分配字节)：RT 描述符集按整池绑定 storage（命中重建读顶点）。
+    #[must_use]
+    pub fn vertex_buffer_info(&self) -> Option<(vk::Buffer, u64)> {
+        self.vertex
+            .as_ref()
+            .map(|b| (b.buffer(), b.allocation_size()))
+    }
+
+    /// 索引池 (句柄, 分配字节)。
+    #[must_use]
+    pub fn index_buffer_info(&self) -> Option<(vk::Buffer, u64)> {
+        self.index
+            .as_ref()
+            .map(|b| (b.buffer(), b.allocation_size()))
+    }
+
+    /// 顶点池设备地址（每次现取：扩容迁移后地址会变，不缓存）。RT 关返回 None。
+    #[must_use]
+    pub fn vertex_address(&self) -> Option<vk::DeviceAddress> {
+        let buffer = self.vertex.as_ref()?.buffer();
+        self.rt.then(|| self.buffer_address(buffer))
+    }
+
+    /// 索引池设备地址（同 [`Self::vertex_address`] 的时效约定）。
+    #[must_use]
+    pub fn index_address(&self) -> Option<vk::DeviceAddress> {
+        let buffer = self.index.as_ref()?.buffer();
+        self.rt.then(|| self.buffer_address(buffer))
+    }
+
+    /// BDA 查询（池持有 Device；BDA 未启用时调用非法，调用点已由 `rt` 守卫）。
+    fn buffer_address(&self, buffer: vk::Buffer) -> vk::DeviceAddress {
+        unsafe {
+            self.device
+                .get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
+        }
     }
 
     /// 已驻留则返回其账本行（去重判定的唯一入口）。
@@ -239,14 +287,14 @@ impl MeshPool {
             &self.device,
             &self.contract,
             new_vertex_cap,
-            BufferRole::DevicePool,
+            self.pool_role(),
             &self.sharing_families,
         )?;
         let new_index = GpuBuffer::create_with_families(
             &self.device,
             &self.contract,
             new_index_cap,
-            BufferRole::DevicePool,
+            self.pool_role(),
             &self.sharing_families,
         )?;
         if let Some((old_vertex, old_index)) = old_pools {
@@ -300,6 +348,16 @@ impl MeshPool {
             self.ledger.pause_ms_total += pause_ms;
         }
         Ok(())
+    }
+
+    /// 本池的 buffer 角色：RT 开时多带 storage 读（命中重建）与 AS 构建输入位 + BDA，
+    /// 关时保持 [`BufferRole::DevicePool`]（与 9.3 逐位一致）。
+    fn pool_role(&self) -> BufferRole {
+        if self.rt {
+            BufferRole::RtPool
+        } else {
+            BufferRole::DevicePool
+        }
     }
 
     /// 扩容容量：需量 ×4/3 与现有 ×2 取大（至少 1MiB），再对齐 1MiB。

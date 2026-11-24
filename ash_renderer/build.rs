@@ -190,9 +190,12 @@ fn compile(source: &str, expanded: &Path, stem: &str) -> (Vec<u32>, String) {
     };
     assert_host_layout(&module, stem);
     // 能力面与 bindless 探针同款显式声明：binding 数组、非一致索引、var<immediate>。
+    // RAY_QUERY 给 inline ray query（ray_query/acceleration_structure/RayDesc/RayIntersection）；
+    // 不含它的模块多要一位也不报错（naga 的能力是上限，不是必用项）。
     let caps = Capabilities::IMMEDIATES
         | Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY
-        | Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING;
+        | Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING
+        | Capabilities::RAY_QUERY;
     let mut validator = Validator::new(ValidationFlags::all(), caps);
     let info = match validator.validate(&module) {
         Ok(i) => i,
@@ -294,6 +297,8 @@ fn resource_kind(
                 naga::ImageClass::External => panic!("[{stem}] external texture 未接入 ABI 表"),
             },
             naga::TypeInner::Sampler { .. } => "Sampler",
+            // inline ray query 的求交入口：宿主侧对应 VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
+            naga::TypeInner::AccelerationStructure { .. } => "AccelerationStructure",
             other => panic!("[{stem}] handle 空间的全局量类型 {other:?} 未接入 ABI 表"),
         },
         other => panic!("[{stem}] 带 @binding 的全局量地址空间 {other:?} 未接入 ABI 表"),
@@ -316,6 +321,8 @@ const HOST_LAYOUT_GATE: &[(&str, u32)] = &[
     ("LightRecord", 64),
     ("LodEntry", 12),
     ("IndirectCommand", 20),
+    // VkAccelerationStructureInstanceKHR 的字节镜像（48B 变换 + 两个 Packed24_8 + u64 拆两 u32）
+    ("TlasInstance", 64),
 ];
 
 fn assert_host_layout(module: &naga::Module, stem: &str) {

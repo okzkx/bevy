@@ -61,6 +61,7 @@ const COMPUTE: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
 
 /// set2 实例表（binding 含义见模块注释）：b0/b1/b2 图形与 compute 共读，b3..b9 compute 专属
 /// （b5 命令环另被 `cmd_draw_indexed_indirect` 读，那是命令参数，不算描述符 stage）。
+/// b10 = 每槽 BLAS 地址表（RT，宿主增量写），b11 = TLAS 实例数组（RT，tlas_build compute 写）。
 pub(crate) static INSTANCE_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "instance",
     &[
@@ -74,6 +75,12 @@ pub(crate) static INSTANCE_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
         BindingDesc::new(7, DescKind::StorageBuffer, COMPUTE),
         BindingDesc::new(8, DescKind::StorageBuffer, COMPUTE),
         BindingDesc::new(9, DescKind::StorageBuffer, COMPUTE),
+        // b10/b11 只在 RT 开启时写入（RT 关没有地址表/实例数组 buffer）；PARTIALLY_BOUND
+        // 让"不写"合法，RT 关时这两条永远不会被任何管线用到
+        BindingDesc::new(10, DescKind::StorageBuffer, COMPUTE)
+            .array(1, vk::DescriptorBindingFlags::PARTIALLY_BOUND),
+        BindingDesc::new(11, DescKind::StorageBuffer, COMPUTE)
+            .array(1, vk::DescriptorBindingFlags::PARTIALLY_BOUND),
     ],
 );
 
@@ -161,6 +168,11 @@ pub const LOD_TABLE_STRIDE: u64 = LOD_ENTRY_SIZE * MAX_LOD_LEVELS as u64;
 pub const LOD_LEVEL_SIZE: u64 = 4;
 /// 缺口标记环字节数（u32/实例槽位图：bit L = 该槽选中档 L 未驻留）。
 pub const GAP_MARK_SIZE: u64 = 4;
+/// 每实例槽的 BLAS 地址条目字节数（u64：锚档资产的 BLAS 设备地址；0 = 未就绪）。
+/// WGSL 侧按 `vec2<u32>`（lo/hi）读，避免 shaderInt64 feature。
+pub const BLAS_ADDRESS_SIZE: u64 = 8;
+/// TLAS 实例数组条目字节数（`VkAccelerationStructureInstanceKHR` 的字节镜像）。
+pub const TLAS_INSTANCE_SIZE: u64 = 64;
 
 /// 对象记录的布局镜像：不参与运行时，只用静态断言核对 [`pack_object_record`] 的偏移。
 #[repr(C)]
@@ -337,6 +349,10 @@ pub struct InstanceTables {
     lod_table_rings: Vec<GpuBuffer>,
     lod_level_rings: Vec<GpuBuffer>,
     gap_mark_rings: Vec<GpuBuffer>,
+    /// RT：每帧槽的 BLAS 地址表（u64/槽，宿主增量写；未就绪写 0）。
+    blas_address_rings: Vec<GpuBuffer>,
+    /// RT：每帧槽的 TLAS 实例数组（64B/条，tlas_build compute 全量写）。
+    tlas_instance_rings: Vec<GpuBuffer>,
     /// 实例槽。删行/换绑换下的旧槽延迟归还：在飞 draw 可能还在读，等全部帧槽 fence 后才复用。
     object_slots: SlotAllocator,
     /// 材质槽（只增不回收）。
@@ -353,7 +369,8 @@ pub struct InstanceTables {
 impl InstanceTables {
     /// 建表：对象表（CONCURRENT 双族：transfer 写、graphics 读）+ 九种环各
     /// `MAX_FRAMES_IN_FLIGHT` 份 → set2 layout/pool/每帧槽 set → 描述符写一次 → 档位环
-    /// 零填充。任一步失败，已建对象全部回收。
+    /// 零填充。`rt` 开启时另建 b10 地址表与 b11 TLAS 实例数组（BDA 位只在 RT 开时合法）。
+    /// 任一步失败，已建对象全部回收。
     ///
     /// # Errors
     /// buffer/描述符创建失败、档位环写入失败。
@@ -361,6 +378,7 @@ impl InstanceTables {
         device: &Device,
         contract: &MemoryContract,
         sharing_families: &[u32],
+        rt: bool,
     ) -> Result<Self> {
         const MIB: u64 = 1024 * 1024;
         // 每实例槽 `stride` 字节的整表大小，向上对齐到 1MiB
@@ -378,6 +396,8 @@ impl InstanceTables {
         let lod_table_bytes = per_object(LOD_TABLE_STRIDE);
         let lod_level_bytes = per_object(LOD_LEVEL_SIZE);
         let gap_mark_bytes = per_object(GAP_MARK_SIZE);
+        let blas_address_bytes = per_object(BLAS_ADDRESS_SIZE);
+        let tlas_instance_bytes = per_object(TLAS_INSTANCE_SIZE);
         // 与顶点/索引池同样 CONCURRENT 共享，不做所有权转移；跨队列可见性由图形提交等
         // 上传票据保证
         let object_buffer = GpuBuffer::create_with_families(
@@ -402,6 +422,17 @@ impl InstanceTables {
         let lod_table_rings = ring(lod_table_bytes, BufferRole::Storage)?;
         let lod_level_rings = ring(lod_level_bytes, BufferRole::Storage)?;
         let gap_mark_rings = ring(gap_mark_bytes, BufferRole::Storage)?;
+        // RT 两环只在 RT 开启时创建（`SHADER_DEVICE_ADDRESS` 在 BDA 未启用时非法）
+        let blas_address_rings = if rt {
+            ring(blas_address_bytes, BufferRole::Storage)?
+        } else {
+            Vec::new()
+        };
+        let tlas_instance_rings = if rt {
+            ring(tlas_instance_bytes, BufferRole::TlasInstances)?
+        } else {
+            Vec::new()
+        };
         let (set2_layout, frame_sets, pool) = unsafe {
             Self::create_descriptor_objects(
                 device,
@@ -415,6 +446,8 @@ impl InstanceTables {
                 &lod_table_rings,
                 &lod_level_rings,
                 &gap_mark_rings,
+                &blas_address_rings,
+                &tlas_instance_rings,
             )
         }?;
         // 先组装 Self 再写档位环：写失败时 Self 的 Drop 回收 pool/layout
@@ -430,6 +463,8 @@ impl InstanceTables {
             lod_table_rings,
             lod_level_rings,
             gap_mark_rings,
+            blas_address_rings,
+            tlas_instance_rings,
             object_slots: SlotAllocator::new(OBJECT_TABLE_CAPACITY),
             material_slots: HashMap::new(),
             used_materials: 0,
@@ -458,7 +493,18 @@ impl InstanceTables {
              槽→各档绘制引脚,{MAX_LOD_LEVELS} 档)\
              + LOD 档位环 {LOD_LEVEL_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({lod_level_bytes}B/槽,选档状态,零填充)\
              + 缺口标记环 {GAP_MARK_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT}({gap_mark_bytes}B/槽,逐槽缺口位图,cull 清零+build_indirect 置位);\
-             set2 三条只读 storage + compute 专属 b3/b4/b5/b6/b7/b8/b9 ×{MAX_FRAMES_IN_FLIGHT} 帧,描述符 init 一次写入"
+             set2 三条只读 storage + compute 专属 b3/b4/b5/b6/b7/b8/b9 ×{MAX_FRAMES_IN_FLIGHT} 帧,描述符 init 一次写入;\
+             RT: b10 地址表 {BLAS_ADDRESS_SIZE}B/槽 ×{MAX_FRAMES_IN_FLIGHT} 帧槽({},宿主增量写) + b11 实例数组 {TLAS_INSTANCE_SIZE}B/条 ×{MAX_FRAMES_IN_FLIGHT} 帧槽({},tlas_build 写)",
+            if rt {
+                format!("{blas_address_bytes}B")
+            } else {
+                "RT 关不建".to_owned()
+            },
+            if rt {
+                format!("{tlas_instance_bytes}B")
+            } else {
+                "RT 关不建".to_owned()
+            },
         );
         Ok(tables)
     }
@@ -484,6 +530,8 @@ impl InstanceTables {
         lod_table_rings: &[GpuBuffer],
         lod_level_rings: &[GpuBuffer],
         gap_mark_rings: &[GpuBuffer],
+        blas_address_rings: &[GpuBuffer],
+        tlas_instance_rings: &[GpuBuffer],
     ) -> Result<(
         vk::DescriptorSetLayout,
         Vec<vk::DescriptorSet>,
@@ -568,6 +616,24 @@ impl InstanceTables {
                 ] {
                     writer.buffer(binding, buffer.buffer(), 0, range);
                 }
+                // RT 两环（RT 关时为空：b10/b11 是 PARTIALLY_BOUND，不写合法）
+                if let (Some(address), Some(instances)) = (
+                    blas_address_rings.get(frame),
+                    tlas_instance_rings.get(frame),
+                ) {
+                    writer.buffer(
+                        10,
+                        address.buffer(),
+                        0,
+                        OBJECT_TABLE_CAPACITY as u64 * BLAS_ADDRESS_SIZE,
+                    );
+                    writer.buffer(
+                        11,
+                        instances.buffer(),
+                        0,
+                        OBJECT_TABLE_CAPACITY as u64 * TLAS_INSTANCE_SIZE,
+                    );
+                }
                 // 写入失败与前面两步失败同出口：已建的 pool/sets/layout 一并回收，
                 // 不留半套描述符对象（本函数文档承诺"任一步失败全部回收"）。
                 writer.submit(device).inspect_err(|_| {
@@ -648,6 +714,18 @@ impl InstanceTables {
     /// 第 `frame` 帧槽的缺口标记环（宿主读到的是两帧前 compute 的输出）。
     pub fn gap_mark_ring(&mut self, frame: usize) -> &mut GpuBuffer {
         &mut self.gap_mark_rings[frame]
+    }
+
+    /// 第 `frame` 帧槽的 BLAS 地址表（RT 关时 None；宿主增量写 u64/槽）。
+    pub fn blas_address_ring(&mut self, frame: usize) -> Option<&mut GpuBuffer> {
+        self.blas_address_rings.get_mut(frame)
+    }
+
+    /// 第 `frame` 帧槽的 TLAS 实例数组句柄（RT 关时 None；tlas_build compute 写、
+    /// TLAS 构建经设备地址读）。
+    #[must_use]
+    pub fn tlas_instance_buffer(&self, frame: usize) -> Option<vk::Buffer> {
+        self.tlas_instance_rings.get(frame).map(GpuBuffer::buffer)
     }
 
     /// 分配一个实例槽。

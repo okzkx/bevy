@@ -34,7 +34,7 @@ use crate::{
         bake, block_bytes, cache_key, convert_mesh, has_alpha, image_spec, pack_object_record,
         sampler_key, AtlasGpu, BakeError, BakedBcn, BcnCache, BindlessTextureTable, Context,
         ConvertedMesh, FramePool, GpuImage, ImageCache, ImageSpec, InstanceTables, MeshPool,
-        PoolRange, StagingCopy, StagingImageCopy, TextureRole, UploadBatch, Uploader,
+        PoolRange, RayScene, StagingCopy, StagingImageCopy, TextureRole, UploadBatch, Uploader,
         MAX_LOD_LEVELS, OBJECT_RECORD_SIZE,
     },
     scene::{
@@ -42,6 +42,8 @@ use crate::{
         InstanceRow, LodDemand, LodGroups, ResidencySet,
     },
 };
+
+use super::host::drawlist::blas_asset_id;
 
 /// StandardMaterial 的贴图槽清单(五槽)。
 fn texture_slots(m: &StandardMaterial) -> [&Option<Handle<Image>>; 5] {
@@ -88,6 +90,10 @@ struct UploadState {
     settled_logged: OnceLog,
     /// BCn 烘焙缓存(首次有压缩角色贴图时懒建;缓存是优化不是正确性)。
     bcn_cache: Option<BcnCache>,
+    /// BLAS 排建待重算：本帧有 mesh 提交/回收或 LOD 组变化时置位，下一轮 flush 开头重扫。
+    blas_dirty: bool,
+    /// 上次重扫 BLAS 时的 LOD 组代数（档位到货/退场会改变"最粗已驻留变体"）。
+    last_lod_generation: u64,
 }
 
 /// mesh 腿三态:完成(驻留且无失效凭据)/失败(身份在 failed 集,不再重试)/待到货
@@ -213,6 +219,8 @@ struct UploadData<'w> {
     image_cache: ResMut<'w, ImageCache>,
     tables: ResMut<'w, BindlessTextureTable>,
     uploader: ResMut<'w, Uploader>,
+    /// 求交器（RT 支持时存在）：BLAS 排建/排销毁/停尸房排空。
+    ray: Option<ResMut<'w, RayScene>>,
 }
 
 /// 账本脏行 → 去重(mesh 直读 + 贴图经材质五槽)→ 转换/建图 → 容量保证 → 合批提交 →
@@ -225,8 +233,21 @@ fn flush_uploads(mut data: UploadData, mut state: Local<UploadState>) -> Result<
     if crate::common::error::fatal_pending() {
         return Ok(());
     }
+    // LOD 组代数变化 = 锚档规则可能换变体（最粗已驻留），BLAS 归属要重扫
+    let lod_generation = data.lod_groups.generation();
+    if lod_generation != state.last_lod_generation {
+        state.last_lod_generation = lod_generation;
+        state.blas_dirty = true;
+    }
     let drained_slots = drain_graveyards(&mut data)?;
-    reclaim_retired(&mut data, drained_slots);
+    if reclaim_retired(&mut data, drained_slots) {
+        state.blas_dirty = true;
+    }
+    // BLAS 排建重扫：上帧提交的资产已驻留、退役的已出账，是排建/换档的唯一时机
+    if state.blas_dirty {
+        reconcile_blas_builds(&mut data)?;
+        state.blas_dirty = false;
+    }
     // overlay 图集旧代:同样要等帧侧 + 上传票据。旧代的描述符槽已在整传帧交回表,由下一轮
     // drain_retired_slots 归还
     let UploadData {
@@ -259,7 +280,7 @@ fn flush_uploads(mut data: UploadData, mut state: Local<UploadState>) -> Result<
             .reconcile(&ready.marked_meshes, &ready.marked_images);
         return Ok(());
     }
-    upload_batch(&mut data, &scan, ready)
+    upload_batch(&mut data, &scan, ready, &mut state)
 }
 
 /// 统一排空点(内容重传/卸载/替换换下的旧资源):"图形最后使用 = 全部帧槽 fence"且
@@ -277,6 +298,7 @@ fn drain_graveyards(data: &mut UploadData) -> Result<usize, BevyError> {
         image_cache,
         tables,
         uploader,
+        ray,
         ..
     } = data;
     let mut wait_draws = || frames.wait_all_inflight();
@@ -295,6 +317,11 @@ fn drain_graveyards(data: &mut UploadData) -> Result<usize, BevyError> {
     instance_tables
         .drain_graveyard(&mut wait_draws)
         .or_fatal("对象表待回收队列排空失败(帧侧等待),上传链无法继续")?;
+    // BLAS 停尸房同一等待点：旧 AS/scratch 在飞帧用完才拆
+    if let Some(ray) = ray.as_mut() {
+        ray.drain(&mut wait_draws)
+            .or_fatal("BLAS 停尸房排空失败(帧侧等待),上传链无法继续")?;
+    }
     Ok(drained_slots)
 }
 
@@ -303,7 +330,7 @@ fn drain_graveyards(data: &mut UploadData) -> Result<usize, BevyError> {
 ///
 /// 坑:必须先于脏行盘点——同帧"卸载又重载同身份"的行要看到驻留已出账,否则被旧条目
 /// 误判为已完成。
-fn reclaim_retired(data: &mut UploadData, drained_slots: usize) {
+fn reclaim_retired(data: &mut UploadData, drained_slots: usize) -> bool {
     let UploadData {
         ledger,
         invalidations,
@@ -312,12 +339,17 @@ fn reclaim_retired(data: &mut UploadData, drained_slots: usize) {
         pool,
         image_cache,
         tables,
+        ray,
         ..
     } = data;
     let mut reclaimed = 0u64;
     for id in retirements.take_meshes() {
         if pool.retire(id).is_some() {
             reclaimed += 1;
+        }
+        // BLAS 跟着资产退场：进停尸房（下轮 drain 等帧侧用完再拆），地址表整表重写
+        if let Some(ray) = ray.as_mut() {
+            ray.retire_blas(id);
         }
         invalidations.consume_mesh(id);
         // 驻留出账后,以该身份为锚的行可能翻暂缓(基准锚直引 + 保底档锚经组反查)
@@ -344,6 +376,47 @@ fn reclaim_retired(data: &mut UploadData, drained_slots: usize) {
              描述符槽归还 {drained_slots} 条"
         );
     }
+    reclaimed > 0 || drained_slots > 0
+}
+
+/// BLAS 排建重扫：账本行的锚档资产（LOD 组按"最粗已驻留变体"）各排一份，幂等——
+/// 已建成/已排队的直接跳过。驻留出账后新锚变体到货的组也在这里换档。
+fn reconcile_blas_builds(data: &mut UploadData) -> Result<(), BevyError> {
+    let UploadData {
+        ray,
+        pool,
+        ledger,
+        lod_groups,
+        ctx,
+        ..
+    } = data;
+    let Some(ray) = ray.as_mut() else {
+        return Ok(());
+    };
+    let (Some(vertex), Some(index)) = (pool.vertex_buffer(), pool.index_buffer()) else {
+        return Ok(());
+    };
+    let mut wanted: HashSet<AssetId<Mesh>> = HashSet::new();
+    for (_, row) in ledger.rows() {
+        wanted.insert(blas_asset_id(pool, lod_groups, row.mesh.id()));
+    }
+    let mut built = 0usize;
+    for id in wanted {
+        let Some(slot) = pool.resident(id) else {
+            continue; // 锚档未驻留：该组暂不建 BLAS（地址 0，到货后下一轮再排）
+        };
+        let slot = *slot;
+        if ray
+            .ensure_blas(ctx, id, &slot, vertex, index)
+            .or_fatal("BLAS 排建失败，渲染链无法继续")?
+        {
+            built += 1;
+        }
+    }
+    if built > 0 {
+        info!("BLAS 排建: 本轮新增 {built} 份(构建命令在本帧 ② 段录制)");
+    }
+    Ok(())
 }
 
 /// 脏行盘点(上传清单 = 账本脏行):每行查各腿资产的驻留状态,未驻留或持失效凭据的
@@ -680,6 +753,7 @@ fn upload_batch(
     data: &mut UploadData,
     scan: &RowScan,
     ready: ReadyAssets,
+    state: &mut UploadState,
 ) -> Result<(), BevyError> {
     let UploadData {
         image_assets,
@@ -694,6 +768,7 @@ fn upload_batch(
         image_cache,
         tables,
         uploader,
+        ray,
         ..
     } = data;
     let ReadyAssets {
@@ -863,6 +938,10 @@ fn upload_batch(
                 c.local_aabb,
                 ticket,
             );
+            // 换内容：旧 BLAS 排销毁（地址随整表重写失效），新 BLAS 下一轮 flush 重扫排建
+            if let Some(ray) = ray.as_mut() {
+                ray.retire_blas(id);
+            }
             replaced_meshes += 1;
         } else {
             pool.commit(
@@ -877,6 +956,10 @@ fn upload_batch(
             .or_fatal("驻留登记失败,上传链无法继续")?;
         }
         committed_meshes.push(id);
+    }
+    // 新驻留/换内容的资产可能成为某行的锚档：下一轮 flush 重扫排建 BLAS
+    if !committed_meshes.is_empty() {
+        state.blas_dirty = true;
     }
     // 槽位发布:提交成功后分槽(采样器按功能键去重)并随驻留登记。发布失败 = 槽容量
     // 耗尽,致命退出,不静默截断。

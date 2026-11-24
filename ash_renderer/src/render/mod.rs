@@ -24,6 +24,7 @@ mod frame;
 mod layout_registry;
 mod passes;
 mod resident;
+mod rt;
 mod stats;
 
 #[cfg(test)]
@@ -31,7 +32,9 @@ mod layout_contract_tests;
 
 pub use self::core::binding::set_layout::{SetLayout, SetLayouts};
 pub use self::core::device::context::{Context, MAX_FRAMES_IN_FLIGHT};
+pub use self::core::device::rt::{RtCaps, RtSupport};
 pub use self::core::target::color::HDR_FORMAT;
+pub use self::rt::{BlasRegistry, RayScene, RaySceneStats, RtSettings, TlasFrame};
 pub(crate) use layout_registry::{ALL_PIPELINES, ALL_SETS};
 pub use passes::visibility::cull::{
     aabb_visible, frustum_planes, CullDiagnostics, CullDraw, CullPass, CullSettings,
@@ -77,9 +80,10 @@ pub(crate) use resident::tables::frame_uniform_table::{
 pub use resident::tables::instance_table::{
     conservative_world_aabb, material_alpha_fields, material_is_transparent, pack_lod_entry,
     pack_material_record, pack_model, pack_object_record, InstanceTables, MaterialAlpha,
-    ALPHA_MODE_BLEND, ALPHA_MODE_MASK, ALPHA_MODE_OPAQUE, GAP_MARK_SIZE, INDIRECT_COMMAND_SIZE,
-    LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MARK_SIZE, MATERIAL_RECORD_SIZE,
-    MAX_LOD_LEVELS, MODEL_STRIDE, NO_TEXTURE_INDEX, OBJECT_RECORD_SIZE, OBJECT_TABLE_CAPACITY,
+    ALPHA_MODE_BLEND, ALPHA_MODE_MASK, ALPHA_MODE_OPAQUE, BLAS_ADDRESS_SIZE, GAP_MARK_SIZE,
+    INDIRECT_COMMAND_SIZE, LOD_ENTRY_SIZE, LOD_LEVEL_SIZE, LOD_TABLE_STRIDE, MARK_SIZE,
+    MATERIAL_RECORD_SIZE, MAX_LOD_LEVELS, MODEL_STRIDE, NO_TEXTURE_INDEX, OBJECT_RECORD_SIZE,
+    OBJECT_TABLE_CAPACITY, TLAS_INSTANCE_SIZE,
 };
 pub use stats::egui_pass_timing::EguiPassTiming;
 pub(crate) use stats::monitor_history::MonitorHistory;
@@ -128,6 +132,9 @@ pub use passes::post::post_chain::PostChainDraw;
 pub use passes::post::present_tonemap_pipeline::PresentTonemapPipeline;
 pub use passes::post::smaa::{
     SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
+};
+pub use passes::rt::{
+    ray_debug_draw, readback_debug_image, tlas_build_draw, RtFrameDraw, RtPipelines, RtTargets,
 };
 pub use passes::shadow::cascades::{
     cascade_matrices, pack_shadow_uniforms, ShadowCascadeInput, ShadowCascades, ShadowSettings,

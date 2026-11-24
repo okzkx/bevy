@@ -115,12 +115,20 @@ impl GpuBuffer {
             let memory_type =
                 contract.find_type(reqs.memory_type_bits, spec.required, spec.preferred)?;
             let property_flags = contract.type_properties(memory_type);
-            let memory = device.allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(reqs.size)
-                    .memory_type_index(memory_type),
-                None,
-            )?;
+            // BDA 缓冲的分配必须链 VkMemoryAllocateFlagsInfo{DEVICE_ADDRESS}（VUID-03339）。
+            // 从 usage 推导而不是另立角色字段：两份真源会漂移。
+            let wants_bda = spec
+                .usage
+                .contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
+            let mut address_flags = vk::MemoryAllocateFlagsInfo::default()
+                .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+            let mut allocate_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(reqs.size)
+                .memory_type_index(memory_type);
+            if wants_bda {
+                allocate_info = allocate_info.push_next(&mut address_flags);
+            }
+            let memory = device.allocate_memory(&allocate_info, None)?;
             if let Err(e) = device.bind_buffer_memory(buffer, memory, 0) {
                 device.free_memory(memory, None);
                 return Err(VulkanError::Vk(e));

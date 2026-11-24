@@ -12,6 +12,7 @@
 //! | `post` | 后处理：Bloom、tonemap、SMAA |
 //! | `sky` | 程序化天空参数（天空函数在 `shaders/common/sky.wgsl`） |
 //! | `ibl` | 环境光照：天空 → 环境 cubemap、SH-L2 漫反射、GGX 预滤波高光 |
+//! | `rt` | 求交器调试面：RT 描述符集、RGBA16F 调试图、TLAS 组装与主射线两条 compute |
 //! | `overlay` | UI：overlay 管线、字体图集、UI 顶点环 |
 
 pub(crate) mod gbuffer;
@@ -19,6 +20,7 @@ pub(crate) mod ibl;
 pub(crate) mod lighting;
 pub(crate) mod overlay;
 pub(crate) mod post;
+pub(crate) mod rt;
 pub(crate) mod shadow;
 pub(crate) mod sky;
 pub(crate) mod transparent;

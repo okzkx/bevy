@@ -26,6 +26,7 @@ use crate::render::passes::post::smaa::{
     SMAA_A_SET_DESC, SMAA_BLEND_PIPELINE, SMAA_B_SET_DESC, SMAA_EDGE_PIPELINE,
     SMAA_NEIGHBORHOOD_PIPELINE,
 };
+use crate::render::passes::rt::{RAY_DEBUG_PIPELINE, RT_SET_DESC, TLAS_BUILD_PIPELINE};
 use crate::render::passes::shadow::shadow_build::SHADOW_BUILD_PIPELINE;
 use crate::render::passes::shadow::shadow_map::{
     SHADOW_SET_DESC, SHADOW_WRITE_MASK_PIPELINE, SHADOW_WRITE_PIPELINE,
@@ -77,6 +78,9 @@ pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
     &GLOBAL_PROBE_PIPELINE,
     &PREFILTER_PIPELINE,
     &BRDF_LUT_PIPELINE,
+    // RT：主机只在 RT 支持时建（登记表恒列，契约测试按清单核对）
+    &TLAS_BUILD_PIPELINE,
+    &RAY_DEBUG_PIPELINE,
 ];
 
 /// 宿主声明并建出的全部 set 布局。
@@ -102,4 +106,5 @@ pub(crate) const ALL_SETS: &[&SetLayoutDesc] = &[
     &IBL_PREFILTER_SET_DESC,
     &IBL_DFG_SET_DESC,
     &IBL_SET_DESC,
+    &RT_SET_DESC,
 ];

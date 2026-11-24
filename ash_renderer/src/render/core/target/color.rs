@@ -78,6 +78,43 @@ impl ColorTarget {
             view: a.view,
         })
     }
+
+    /// 建存储图像目标：compute 以 storage image 写、宿主以 TRANSFER_SRC 拷回，从不作附件。
+    /// RT 调试图（RGBA16F）用这条路径。
+    ///
+    /// # Errors
+    /// 格式不支持 STORAGE_IMAGE/TRANSFER_SRC，或 Vulkan 创建/分配/绑定失败。
+    pub(crate) fn new_storage(
+        ctx: &Context,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        role: &str,
+    ) -> Result<Self> {
+        let features = unsafe {
+            ctx.instance
+                .get_physical_device_format_properties(ctx.physical_device, format)
+        }
+        .optimal_tiling_features;
+        let required = vk::FormatFeatureFlags::STORAGE_IMAGE | vk::FormatFeatureFlags::TRANSFER_SRC;
+        if !features.contains(required) {
+            return Err(VulkanError::Init(format!(
+                "{role} 格式 {format:?} 的 optimal tiling features 不含 {required:?}——该设备不支持按此形态写 storage image"
+            )));
+        }
+        let a = attachment::create(
+            ctx,
+            extent,
+            format,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
+            vk::ImageAspectFlags::COLOR,
+        )?;
+        Ok(Self {
+            device: ctx.device.clone(),
+            image: a.image,
+            memory: a.memory,
+            view: a.view,
+        })
+    }
 }
 
 impl Drop for ColorTarget {
