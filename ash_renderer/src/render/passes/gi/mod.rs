@@ -126,11 +126,13 @@ impl Default for GiSettings {
             light_samples: 128,
             // 9.7 的开关默认关：与 `ibl_enabled` / `estimation` 同纪律，A/B 时由 BRP 或面板开
             spatial_filter: false,
-            spatial_radius: 1.5,
+            // 场景验收调档（2026-11-24）：1.5 体素 + 1 遍去噪在大面积平面上仍看得出块状，
+            // 3.0 + 2 遍基本抹平且不糊掉几何（见 9.7.7 施工记录 §滤波调档）
+            spatial_radius: 3.0,
             temporal_filter: false,
             temporal_smoothing: 0.5,
             lookup_samples: 3,
-            denoise_passes: 1,
+            denoise_passes: 2,
             upsample_bilinear: false,
             scgi: false,
             config: SurfaceCacheConfig::default(),
