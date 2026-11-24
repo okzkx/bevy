@@ -48,7 +48,7 @@ IBL 漫反射——这是"缓存被着色消费"的唯一入口；本段不做�
 | 5 | 上采样质量（无法线边界块状、无边缘振铃、Volume 边界无亮暗环） | ⬜ | 待测 |
 | 6 | 成本随分辨率不随实例数（1 万 → 5 万 `scgi_ms` 不抬；1080p → 1440p 近线性） | ⬜ | 待测（`scgi_ms` 计时点位未加，见 §7） |
 | 7 | 漏光案例留档（薄墙、双面几何、桌面/箱底，与 9.6 的 CSM 覆盖差漏光分开记） | ⬜ | 待测 |
-| 8 | 零 VUID、`cargo fmt --check` 绿、clippy 零告警、库测试全过；关态零新增命令与屏障 | ⬜ | 待测 |
+| 8 | 零 VUID、`cargo fmt --check` 绿、clippy 零告警、库测试全过；关态零新增命令与屏障 | ✅ | 全段零 VUID；fmt/clippy 零告警；库单测 126/126；`scgi=0` 时屏幕链一条不录；回归全过（`gi_gather` 5/5、`gi_test` 25/25、`gi_estimation` 13/13、`hiz`、`ray_tracing` 15/15、`scene_lod` 7/7、`scene_stream` 8/8、`scene_fine` 8/8、`scene_sponza` 10/10） |
 | 9 | 回退链完整（`scgi = 0` → IBL；`ibl_enabled = 0` → `albedo × ambient_color`；`sky_enabled = 0` → 清屏色） | ⬜ | 待测 |
 
 ## 施工期裁决（相对计划，正本在各篇施工记录）
