@@ -51,6 +51,44 @@
 | ⑦ | 回退硬线：`estimation=false` = 9.5 收官逐字节一致；GI 关 = 9.3 逐位一致 | ✅ | 同进程连拍两帧逐字节一致；再开 distinct=61（确实生效）；`gi_test.py` 的 GI 开关硬线仍过 |
 | ⑧ | 零 VUID、clippy 全净、`cargo fmt --check` 绿、库测试与 `gi_test.py` 25 项不回退、五脚本回归全过 | ✅ | 零 VUID；库测试 117；`fmt --check` 绿；clippy 零告警；`gi_test` 25/25、`hiz` 14/14、`ray_tracing` 15/15、`scene_lod` 7/7、`scene_stream` 8/8、`scene_fine` 8/8、`scene_sponza` 10/10 |
 
+## 施工期缺陷修复（2026-11-24 收官后现场发现）
+
+### 1. resize 后管线悬空（VUID-vkCmdBindPipeline-pipeline-parameter）
+
+**现象**：手动拖动窗口尺寸后，宿主日志刷 10 条
+`[VK-ERROR] vkCmdBindPipeline(): pipeline ... [pipeline_layout: gi_patch_alloc] references deleted
+object VkDescriptorSetLayout[set_layout: gbuffer_sampled]`。
+
+**根因**：`GBufferTargets::rebuild()` 里的 `drop_resources()` 会**销毁并重建** `set_layout`，
+而管线与 `SetLayouts` 都只在 init 建一次，pipeline layout 里存的是旧句柄 → 悬空。这不是 9.6
+引入的（9.5 的 `gi_patch_alloc` 早就引用它），只是 9.6 的现场验证第一次拖了窗口。
+（复查过其余家族：RayTracing / HiZ / SMAA / Bloom / Cluster / Shadow / IBL 的
+`destroy_descriptor_set_layout` 都在 `Drop` 或 `new` 失败回收里，resize 路径不销毁布局；
+所以这条只发生在 G-buffer 一家。）
+
+**修法**（符合既有风格，先例是 9.5 的 `GiSetLayout`）：采样集布局改成**进程级形状**——
+只在首次创建，`resize` 只重建 pool/sets/附件与采样器；`Drop` 里才是唯一销毁点。另加
+`debug_assert_eq!` 把"resize 不得重建布局"钉成不变量。
+
+**复验**（`.temp/verify_resize.py`，6/6）：先 resize 再开估计、估计运行中连续 resize 两次，
+帧循环不断、视图 10 仍出图、**零 VUID/VK-ERROR**；`gi_test.py` 25/25 无回退。
+
+### 2. 判定线脚本的判据从"逐 patch 探针"收敛到"整屏差分"
+
+同一份代码两次跑，①的探针方向与③的绝对阈值各失败过一次（③ 8.82 → 32.45/255；① 探针
+on/off 反了、④ 探针 43.7 → 60.1）。原因是**池子 churn**：多跳开着时 bounce 持续分配/淘汰，
+ring 下标指向的 patch 在两次测量之间会被换掉，"单点对账"因此不可断言。
+
+改法（判据更硬，不是放水）：
+
+- ① / ④ 的**断言**改用整屏均值与整屏差分（一次平均上万像素），逐 patch 探针改成打印的
+  "单点对账"证据；
+- ③ 改成**相对同档噪声**：先量同档位隔两秒的噪声下限，再判"降档差 ≤ max(12, 2.5×噪声)"，
+  并加一条"紧预算后样本档不升"；
+- ④ 的自发光体换成 8×8 大面板，测量期把样本档/预算/滞后都拉高把噪声压下去。
+
+复验：`python tools/gi_estimation_test.py` **13/13**，连跑两次一致。
+
 ## 施工期裁决（相对计划，正本在各篇施工记录）
 
 1. **自发光不建 CDF**：改"均匀抽三角形 + 解析面积权重"（9.6.2）——naga 30 的 workgroup 聚合坑
