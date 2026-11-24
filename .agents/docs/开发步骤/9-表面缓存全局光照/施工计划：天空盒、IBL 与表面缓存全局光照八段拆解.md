@@ -143,9 +143,9 @@
   - 射线抽象：Rust 侧只暴露 `RayScene`（构建/更新/查询入口）；WGSL 侧封装 `rayQueryInitializeEXT` / `Proceed` / `Candidate`，返回 `(t, instanceID, primitiveID, barycentrics)`；接口不泄漏硬件类型，保留后端可替换语义。
   - 命中点重建：`instanceID → 实例表 → mesh → 顶点索引 →` 世界位置/法线/UV + 材质索引（+ 自发光参数）。这是 9.6 的取数面。
   - 调试视图：命中距离/命中法线/命中实例 ID、射线计数。
-- **落点**：`src/render/rt/`（新增：`context.rs` / `blas.rs` / `tlas.rs`）、`src/render/resident/assets/`（BLAS 归资产）、`shaders/common/raytracing.wgsl`。
-- **前置闸门**：AS/ray query 的 feature 启用与未启用两条路径首跑零 VUID；空场景 TLAS 可构建；RT 与既有 graphics/compute 提交的 barrier 纪律沿用（同一 graphics 队列）；`bufferDeviceAddress` 与 bindless 表共存。
-- **判定线草案**：①可对场景求交并返回命中点属性（调试视图验证）；②移动物体后命中跟随、无陈旧（TLAS 更新正确）；③流送卸载后无悬空实例、不崩溃；④不支持 RT 的设备/feature 关闭时 GI 走关闭路径；⑤零 VUID、clippy 全净。
+- **落点**：`src/render/ray_tracing/`（新增：`context.rs` / `blas.rs` / `tlas.rs`）、`src/render/resident/assets/`（BLAS 归资产）、`shaders/common/raytracing.wgsl`。
+- **前置闸门**：AS/ray query 的 feature 启用与未启用两条路径首跑零 VUID；空场景 TLAS 可构建；光线求交与既有 graphics/compute 提交的 barrier 纪律沿用（同一 graphics 队列）；`bufferDeviceAddress` 与 bindless 表共存。
+- **判定线草案**：①可对场景求交并返回命中点属性（调试视图验证）；②移动物体后命中跟随、无陈旧（TLAS 更新正确）；③流送卸载后无悬空实例、不崩溃；④不支持 光线求交的设备/feature 关闭时 GI 走关闭路径；⑤零 VUID、clippy 全净。
 - **待决**（§3）：BVH 几何 LOD；alpha 裁切；compute 软件求交排期。
 
 ### 9.5 世界空间表面缓存：patch 池
@@ -161,7 +161,7 @@
   - 调试视图 + BRP：patch 分布（按级联/桶着色）、cell 占用率、分配失败、rank 分布、池水位。
   - 参数基线：Res 32 / 4 级联 / Size 128 / 16 桶 / 池 65536（§1.3）。
 - **落点**：`src/render/resident/tables/surface_cache.rs`、`src/render/passes/gi/allocation.rs`、`shaders/scene/gi/{patch_alloc,scrolling,eviction,defrag}.wgsl`、`shaders/common/gi_cell.wgsl`。
-- **前置闸门**：cell 表双表读写 hazard（barrier 纪律）；屏幕播种读 G-buffer 的取数面——6.1 已实证深度附件不可采样，走 `gbuffer_composite` 通道；motion vectors 前置件。
+- **前置闸门**：cell 表双表读写 hazard（barrier 纪律）；屏幕播种读 G-buffer 的取数面（**2026-11-24 订正**：深度早已扩 `SAMPLED` usage、合成已在采样，"6.1 已实证深度附件不可采样"是 6.1 立案期的旧结论；真正的门槛是 G-buffer 采样集的 stage 只声明了 `FRAGMENT`，compute 要扩 stage 或另立集——见[9.5 施工计划](9.5-patch池与分配回收/施工计划：patch池与分配回收.md) §0.0/§0.7）；motion vectors 前置件（9.5 已裁决为"相机重投影接口先留、本体降级"，同文 §0.4）。
 - **判定线草案**：①patch 分布与 G-buffer 表面吻合（读图）；②池与 cell 表显存恒定、不随运行时长增长；③chunk 增删/移动后 patch 跟随、无残留；④稳态分配/回收计数平衡；⑤大世界档（Size 512 / 6 级联）可持续游历、滚动后旧 cell 释放；⑥零 VUID、clippy 全净。
 
 ### 9.6 irradiance 更新
@@ -218,16 +218,16 @@
 | alpha 裁切 | 9.4/9.8 | 首版按不透明（Unity 6.7 同款）/ any-hit 里做 alpha 判定（需 UV 与贴图取样） | 9.8 局限自检时定 |
 | 自发光首版 | 9.6 | 进首版（Atrio 式验收需要）/ 方向光+点光先行 | 9.6 立案时拍板；提案=进首版 |
 | CSM 与 GI 体积覆盖差 | 9.6 | 扩 CSM 覆盖到 GI Volume（阴影分辨率下降）/ 接受屏幕外无遮挡漏光并记录 | 9.6 立案时裁决 |
-| patch 池大小 | 9.5 | 65536 / 2^18 | 9.5 压测后按分配失败率定 |
-| 播种分辨率与滤波形态 | 9.5/9.7 | 1/4 固定 / 自适应；空间滤波与去噪默认开或关 | 9.5/9.7 立案时钉明 |
-| Volume 形状与焦点 | 9.5 | 球 / 盒；相机跟随 vs Focus Target | 9.5 立案时钉明 |
+| patch 池大小 | 9.5 | 65536 / 2^18 | **已裁决（2026-11-24）**：起步 65536（满足环形取模前提），2^18 留大世界档分配失败率触发，见 [9.5 计划](9.5-patch池与分配回收/施工计划：patch池与分配回收.md) §0.2 |
+| 播种分辨率与滤波形态 | 9.5/9.7 | 1/4 固定 / 自适应；空间滤波与去噪默认开或关 | **9.5 半裁（2026-11-24）**：分辨率=1/4 固定 + 4×4 子像素 16 帧轮转（见 [9.5 计划](9.5-patch池与分配回收/施工计划：patch池与分配回收.md) §0.3）；滤波形态归 9.7 立案 |
+| Volume 形状与焦点 | 9.5 | 球 / 盒；相机跟随 vs Focus Target | **已裁决（2026-11-24）**：球判据 + 立方存储、焦点=相机位置、Focus Target 不做（见 [9.5 计划](9.5-patch池与分配回收/施工计划：patch池与分配回收.md) §0.1） |
 
 ## 4. 与步骤 8 交付物的消费关系
 
 - **G-buffer 三原料**（albedo / normal / 世界位置深度重建）→ 9.5 屏幕播种、9.7 屏幕查表的取数面；9.1 的天空背景、9.2 的 IBL 都复用深度反投影。
 - **光照累积 pass 的环境项** → 9.1 加天空背景；9.2 把环境项替换为 IBL；9.7 再把 Volume 内的漫反射替换为 SCGI；`ibl_enabled=false`/`gi_enabled=false` 分别回退到上一层的原文。
 - **透明前向的环境项** → 9.2 接 IBL；9.7 不改透明（SCGI 只作用不透明）。
-- **深度语义**：与 6.1 反向 Z 对齐；深度附件不可采样（6.1 实证）→ 播种走 `gbuffer_composite` 的取数面。
+- **深度语义**：与 6.1 反向 Z 对齐；深度附件现为 `DEPTH_STENCIL_ATTACHMENT｜SAMPLED`（**2026-11-24 订正**：旧文"不可采样"是 6.1 立案期结论，Hi-Z 为采样扩了 usage 后失效）→ 播种在 compute 里直接 `textureLoad` 取深度，不必绕 `gbuffer_composite` 通道。
 - **CSM/PCSS** → 9.6 直接光遮挡复用；阴影分辨率与级联覆盖的边界见 §3。
 - **光源常驻表** → 9.6 点/聚光取数。
 - **材质环** → 9.6 补 emissive 因子/贴图槽（扩列沿 5.1.1 解冻清单先例）。
@@ -242,7 +242,7 @@
 src/render/
 ├── passes/sky/                          # 新增：SkySettings 与天空参数
 ├── passes/ibl/                          # 新增：环境 cubemap、SH-L2、预滤波、GlobalProbe
-├── rt/                                  # 新增：求交器（能力探测与 feature 门、BLAS/TLAS 生命周期）
+├── ray_tracing/                         # 新增：求交器（能力探测与 feature 门、BLAS/TLAS 生命周期；9.4 落地现名，立案时写作 rt/）
 ├── resident/tables/surface_cache.rs     # 常驻表族新成员：cell 表 + patch 表 + ring 配置
 ├── passes/gi/                           # GI pass 录制：allocation / estimation / filtering / screen_gather
 └── stats/                               # gi_ms、patch 数、射线数、分配失败、IBL 捕获耗时
@@ -250,6 +250,7 @@ src/render/
 shaders/common/sky.wgsl                  # 天空函数（9.1）
 shaders/common/ibl.wgsl                  # SH-L2 / split-sum / 模式分支（9.2/9.3）
 shaders/common/octahedral.wgsl           # 八面体映射与桶索引（9.3/9.5/9.7 共用）
+shaders/common/gi_cell.wgsl              # Volume/cell/桶的纯函数（9.5 起，9.7 复用）
 shaders/scene/ibl/                       # capture / sh_project / prefilter / brdf_lut / global_probe
 shaders/scene/gi/                        # 与 Unity 对照的 patch 池/更新/滤波 pass 一族
 shaders/common/gi_*.wgsl                 # SH、cell 地址、采样、压缩等公共片段
@@ -299,7 +300,7 @@ shaders/common/gi_*.wgsl                 # SH、cell 地址、采样、压缩等
 | `SpatialFiltering.compute` / `TemporalFiltering.compute` | 同名 shader | 9.7 |
 | `IrradianceCompression.hlsl` | `gi_compression.wgsl` | 9.7 |
 | `ScreenResolveLookup` / `ScreenResolveUpsampling`（URP 侧） | `screen_gather.wgsl` / `upsample.wgsl` | 9.7 |
-| `SurfaceCacheWorld.cs`（变更跟踪 / 材质图集 / BVH 同步） | `render/rt/` + `resident/assets/` | 9.4 |
+| `SurfaceCacheWorld.cs`（变更跟踪 / 材质图集 / BVH 同步） | `render/ray_tracing/` + `resident/assets/` | 9.4 |
 | Filament `surface_shading` / `DFG`（split-sum、`energyCompensation`） | `ibl.wgsl` + `brdf_lut.wgsl` + 两个光照 pass | 9.2 |
 
 机制细节与数据布局逐个 pass 的源码级整理见[Unity SCGI 实现](../../笔记/光照与材质/Unity%20SCGI%20实现.md)；发布状态、参数面与已知局限见[Unity SCGI 调研](../../笔记/光照与材质/Unity%20SCGI%20调研.md)；谱系定位与选型阶梯见[全局光照谱系调研](../../笔记/光照与材质/全局光照谱系调研.md)；IBL/DFG 的对照基准见[Filament BRDF参考](../../笔记/光照与材质/Filament%20BRDF参考.md)。
@@ -326,6 +327,6 @@ shaders/common/gi_*.wgsl                 # SH、cell 地址、采样、压缩等
 
 - 步骤 8 已收官（8.1～8.6）；步骤 5/6 的步骤级验收归档欠账不阻塞本步（沿用路线图当前位置）。
 - F25/F26 挂账不阻塞本步（[待修复清单](../待修复清单/待修复清单.md)）。
-- 设备能力：本机 RTX 2060 已核实 `VK_KHR_acceleration_structure` / `VK_KHR_ray_query` / `VK_KHR_ray_tracing_pipeline` / `VK_KHR_ray_tracing_position_fetch`。**9.1～9.3 不依赖 RT**；9.4 起才要求。
+- 设备能力：本机 RTX 2060 已核实 `VK_KHR_acceleration_structure` / `VK_KHR_ray_query` / `VK_KHR_ray_tracing_pipeline` / `VK_KHR_ray_tracing_position_fetch`。**9.1～9.3 不依赖 光线求交**；9.4 起才要求。
 - 验收场：Sponza（室内基座/漏光）、zero_day（室外天空与规模）、DamagedHelmet（金属/粗糙度高光）、大世界档（Size 512）；Unity 251 / Atrio 仅作质量参照。
 - 调研底座：[Unity SCGI 调研](../../笔记/光照与材质/Unity%20SCGI%20调研.md)、[Unity SCGI 实现](../../笔记/光照与材质/Unity%20SCGI%20实现.md)、[全局光照谱系调研](../../笔记/光照与材质/全局光照谱系调研.md)、[Filament BRDF参考](../../笔记/光照与材质/Filament%20BRDF参考.md)、[SH 与光照探针](../../笔记/光照与材质/SH与光照探针.md)。

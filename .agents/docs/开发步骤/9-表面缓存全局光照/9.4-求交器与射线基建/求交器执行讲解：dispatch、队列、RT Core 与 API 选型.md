@@ -51,7 +51,7 @@ BLAS 是每份网格的加速结构，TLAS 是场景实例的加速结构；结�
 - shader（通用计算核）负责生成射线、控制 `Proceed` 循环、读命中结果、插值和着色；
 - RT core（固定功能单元）负责 BVH 遍历和 ray-box / ray-triangle 测试，由 shader 发出的 ray query 指令驱动。
 
-2060（Turing）有 RT core，这些指令走硬件。没有 RT 硬件、或设备没启用 feature 时，含 `RayQueryKHR` 的 shader 根本建不了管线——这也是 9.4 不把 ray query 塞进 `gbuffer_composite` 的原因：那会让"RT 关 = 与 9.3 逐位一致"的降级路径失效。
+2060（Turing）有 RT core，这些指令走硬件。没有 RT 硬件、或设备没启用 feature 时，含 `RayQueryKHR` 的 shader 根本建不了管线——这也是 9.4 不把 ray query 塞进 `gbuffer_composite` 的原因：那会让"光线求交关 = 与 9.3 逐位一致"的降级路径失效。
 
 naga 30.0.1 的 WGSL 前端已支持这套语法（`enable wgpu_ray_query;`），SPIR-V 后端会发 `SPV_KHR_ray_query`。9.4.4 要在 build.rs 的校验能力里补 `Capabilities::RAY_QUERY`，否则模块会校验失败。
 
@@ -78,7 +78,7 @@ RT 管线是给"整条光线追踪渲染器"设计的：命中后靠 SBT（shade
 
 ## 比 CPU 快多少：数量级，以及为什么不能只看倍数
 
-先给数量级，都是估算，实测留给 9.4 的 `rt_stats`：
+先给数量级，都是估算，实测留给 9.4 的 `ray_tracing_stats`：
 
 | 实现 | 不相干射线的吞吐量级 |
 |---|---|
@@ -92,7 +92,7 @@ RT 管线是给"整条光线追踪渲染器"设计的：命中后靠 SBT（shade
 - 几百万个线程并行，RT core 做固定功能遍历；
 - 射线在 GPU 上直接消费，没有"结果回 CPU、CPU 再上传指令"的往返。
 
-2060 是 Turing 第一代 RT core，吞吐不算高；我们的用法又是稀疏 GI 线而不是全屏路径追踪，所以"能打多少条"最终由帧预算反推，而不是先定一个射线数。9.4 的验收会给 `rt_stats` 的射线计数和命中率，9.8 再按实测压预算。
+2060 是 Turing 第一代 RT core，吞吐不算高；我们的用法又是稀疏 GI 线而不是全屏路径追踪，所以"能打多少条"最终由帧预算反推，而不是先定一个射线数。9.4 的验收会给 `ray_tracing_stats` 的射线计数和命中率，9.8 再按实测压预算。
 
 ## 相关
 
