@@ -105,6 +105,23 @@ pub use passes::gbuffer::gbuffer_pipeline::GBufferPipeline;
 pub use passes::gbuffer::gbuffer_targets::{
     GBufferTargets, ALBEDO_FORMAT, EMISSIVE_FORMAT, MATPARAM_FORMAT, NORMAL_FORMAT,
 };
+pub use passes::gi::allocation::{
+    alloc_grid, eviction_groups, pack_alloc_push, scrolling_groups, GiAllocDraw, GI_ALLOC_PUSH_SIZE,
+};
+pub use passes::gi::view::{pack_view_push, GiViewDraw, GI_VIEW_PUSH_SIZE};
+pub use passes::gi::volume::{
+    cascade_offsets as gi_cascade_offsets, cell_bucket as gi_cell_bucket,
+    cell_cascade as gi_cell_cascade, cell_index as gi_cell_index, cell_storage as gi_cell_storage,
+    direction_bucket as gi_direction_bucket, heartbeat_age as gi_heartbeat_age,
+    is_inside_cascade as gi_is_inside_cascade, pos_mod as gi_pos_mod,
+    resolve_cascade as gi_resolve_cascade, storage_to_volume as gi_storage_to_volume,
+    volume_position as gi_volume_position, volume_to_storage as gi_volume_to_storage,
+    volume_world_center as gi_volume_world_center, voxel_size as gi_voxel_size, BUCKETS_PER_CELL,
+    BUCKET_RESOLUTION, INVALID_PATCH, MAX_CASCADES,
+};
+pub use passes::gi::{
+    GiFrameDraw, GiPipelines, GiSettings, SurfaceCacheConfig, EVICT_AGE, UPDATE_MAX,
+};
 pub(crate) use passes::ibl::octahedral::{
     bucket_to_direction, direction_to_bucket, eval_probe_bucket,
 };
@@ -130,6 +147,7 @@ pub use passes::post::bloom::{
 };
 pub use passes::post::post_chain::PostChainDraw;
 pub use passes::post::present_tonemap_pipeline::PresentTonemapPipeline;
+pub use passes::post::smaa::LDR_FORMAT;
 pub use passes::post::smaa::{
     SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
 };
@@ -151,4 +169,12 @@ pub use passes::transparent::{
 };
 pub use resident::tables::light_table::{
     LightRecord, LightTable, LIGHT_FLAG_SHADOW, LIGHT_TYPE_POINT,
+};
+pub use resident::tables::surface_cache::{
+    pack_surface_cache_uniforms, GiSetLayout, SurfaceCacheMemory, SurfaceCacheTables,
+    SurfaceCacheUniformsData, COUNTER_ALLOC, COUNTER_DEFRAG_MOVED, COUNTER_FAILED, COUNTER_FREED,
+    COUNTER_VIEW_COVERED, COUNTER_VIEW_DEVIATION, COUNTER_VIEW_HOLES, GI_COUNTERS_SIZE,
+    GI_COUNTER_WORDS, GI_UBO_SIZE, PATCH_GEOMETRY_SIZE, PATCH_IRRADIANCE_SIZE,
+    PATCH_STATISTICS_SIZE, RING_ACTIVE, RING_CONFIGS, RING_CONFIG_SIZE, RING_CONFIG_WORDS,
+    RING_FLIP, RING_WATERMARK,
 };

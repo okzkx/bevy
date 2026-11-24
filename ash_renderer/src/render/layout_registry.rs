@@ -8,6 +8,10 @@ use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayoutDesc;
 use crate::render::passes::gbuffer::gbuffer_pipeline::GBUFFER_WRITE_PIPELINE;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
+use crate::render::passes::gi::{
+    DEFRAG_PIPELINE, EVICTION_PIPELINE, PATCH_ALLOC_PIPELINE, PATCH_MARKER_PIPELINE,
+    PATCH_VIEW_PIPELINE, SCROLLING_PIPELINE,
+};
 use crate::render::passes::ibl::{
     BRDF_LUT_PIPELINE, GLOBAL_PROBE_PIPELINE, IBL_CAPTURE_SET_DESC, IBL_DFG_SET_DESC,
     IBL_GLOBAL_PROBE_SET_DESC, IBL_PREFILTER_SET_DESC, IBL_SET_DESC, IBL_SH_CHECK_SET_DESC,
@@ -47,6 +51,7 @@ use crate::render::passes::visibility::occlusion::OCCLUSION_PIPELINE;
 use crate::render::resident::tables::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
 use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
 use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
+use crate::render::resident::tables::surface_cache::GI_SET_DESC;
 
 /// 宿主建的全部管线。
 pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
@@ -83,6 +88,13 @@ pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
     // 光线求交：主机只在 光线求交支持时建（登记表恒列，契约测试按清单核对）
     &TLAS_BUILD_PIPELINE,
     &RAY_DEBUG_PIPELINE,
+    // 表面缓存（9.5）：回收三件 + 播种 + 调试视图两形态
+    &SCROLLING_PIPELINE,
+    &EVICTION_PIPELINE,
+    &DEFRAG_PIPELINE,
+    &PATCH_ALLOC_PIPELINE,
+    &PATCH_VIEW_PIPELINE,
+    &PATCH_MARKER_PIPELINE,
 ];
 
 /// 宿主声明并建出的全部 set 布局。
@@ -109,4 +121,5 @@ pub(crate) const ALL_SETS: &[&SetLayoutDesc] = &[
     &IBL_DFG_SET_DESC,
     &IBL_SET_DESC,
     &RAY_TRACING_SET_DESC,
+    &GI_SET_DESC,
 ];

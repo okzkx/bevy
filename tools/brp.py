@@ -367,6 +367,43 @@ def cmd_hiz_census(args):
     out(rpc(args.host, args.port, "ash_renderer/hiz_census", params))
 
 
+def cmd_gi_stats(args):
+    out(rpc(args.host, args.port, "ash_renderer/gi_stats"))
+
+
+def cmd_gi_set(args):
+    params = {}
+    for key, value in (
+        ("enabled", None if args.enabled is None else args.enabled.lower() == "true"),
+        ("view", args.view),
+        ("form", args.form),
+        ("normal_source", args.normal_source),
+        ("seed", None if args.seed is None else args.seed.lower() == "true"),
+        ("defrag_waves", args.defrag_waves),
+        ("size", args.size),
+        ("res", args.res),
+        ("cascades", args.cascades),
+        ("capacity", args.capacity),
+    ):
+        if value is not None:
+            params[key] = value
+    out(rpc(args.host, args.port, "ash_renderer/gi_set", params))
+
+
+def cmd_gi_dump(args):
+    params = {"path": args.path}
+    if args.slot is not None:
+        params["slot"] = args.slot
+    out(rpc(args.host, args.port, "ash_renderer/gi_dump", params))
+
+
+def cmd_gi_census(args):
+    params = {}
+    if args.patches is not None:
+        params["patches"] = args.patches
+    out(rpc(args.host, args.port, "ash_renderer/gi_census", params))
+
+
 def cmd_occlusion_probe(args):
     params = {}
     if args.entity:
@@ -745,6 +782,31 @@ def main():
     p.add_argument("--entity", help="只探这一实体（缺省全部可绘行）")
     p.add_argument("--slot", type=int, help="金字塔帧槽（缺省 0）")
     p.set_defaults(func=cmd_occlusion_probe)
+
+    p = sub.add_parser("gi-stats", help="表面缓存读数（ash_renderer/gi_stats，9.5：池水位/分配失败/回收计数/显存/gi_ms）")
+    p.set_defaults(func=cmd_gi_stats)
+
+    p = sub.add_parser("gi-set", help="表面缓存开关/视图/规格（ash_renderer/gi_set，9.5：规格四件只能在关态改）")
+    p.add_argument("--enabled", choices=["true", "false"])
+    p.add_argument("--view", type=int, help="视图号 0 关 / 1 覆盖 / 2 级联 / 3 桶 / 4 rank / 5 心跳 / 6 池水位 / 7 位置偏离 / 8 cell 归属")
+    p.add_argument("--form", type=int, help="形态 0 覆盖图 / 1 覆盖图+方片 / 2 只方片")
+    p.add_argument("--normal-source", type=int, help="法线来源 0 平面 / 1 着色")
+    p.add_argument("--seed", choices=["true", "false"], help="播种开关（false = 只回收，A/B）")
+    p.add_argument("--defrag-waves", type=int, help="每帧整理波数（0..=16，每波 512 条）")
+    p.add_argument("--size", type=float, help="最粗级立方外沿（米）")
+    p.add_argument("--res", type=int, help="每级每轴体素数")
+    p.add_argument("--cascades", type=int, help="级联数（1..=8）")
+    p.add_argument("--capacity", type=int, help="patch 池容量（2 的幂）")
+    p.set_defaults(func=cmd_gi_set)
+
+    p = sub.add_parser("gi-dump", help="patch 调试视图 PPM 取证（ash_renderer/gi_dump；先 gi-set --enabled true --view N）")
+    p.add_argument("--path", required=True, help="输出 .ppm 路径")
+    p.add_argument("--slot", type=int, help="帧槽（缺省 0）")
+    p.set_defaults(func=cmd_gi_dump)
+
+    p = sub.add_parser("gi-census", help="cell↔patch 对账（ash_renderer/gi_census，9.5：双向一致/位置在体素内/法线在桶内）")
+    p.add_argument("--patches", type=int, help="抽检前 N 条 ring 槽（缺省 8，上限 64）")
+    p.set_defaults(func=cmd_gi_census)
 
     sub.add_parser("draw-stats", help="indirect 闭环读数：绘制调用数/命令条数/零实例条数/在场走访行（ash_renderer/draw_stats；读数陈旧一帧）").set_defaults(func=cmd_draw_stats)
     p = sub.add_parser("workload", help="变更形态注入开关（5.5 压测：每帧旋转迭代序前 rows 个 primitive；rows 0 = 关）（ash_renderer/workload）")

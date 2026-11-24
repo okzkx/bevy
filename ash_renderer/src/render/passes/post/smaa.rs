@@ -122,6 +122,10 @@ impl Default for SmaaSettings {
     }
 }
 
+/// LDR 后链目标格式（tonemap 写、SMAA 读、patch 调试视图写；sRGB 编码只在写
+/// swapchain 的 SRGB 视图时做一次）。
+pub const LDR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
+
 /// SMAA 资源族。
 #[derive(Resource)]
 pub struct SmaaTargets {
@@ -268,11 +272,7 @@ impl SmaaTargets {
         self.extent = extent;
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             self.ldrs.push(ColorTarget::new(
-                ctx,
-                extent,
-                vk::Format::R8G8B8A8_UNORM,
-                false,
-                "smaa ldr",
+                ctx, extent, LDR_FORMAT, false, "smaa ldr",
             )?);
             self.edges.push(ColorTarget::new(
                 ctx,

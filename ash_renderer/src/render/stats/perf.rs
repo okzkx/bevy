@@ -1,5 +1,5 @@
-//! GPU timestamp 计时与帧样本账。每帧槽一只 TIMESTAMP query pool（[`QUERIES_PER_FRAME`] = 11 位），
-//! 帧内写 11 个 timestamp，下一轮该槽 fence 等完后取回。
+//! GPU timestamp 计时与帧样本账。每帧槽一只 TIMESTAMP query pool（[`QUERIES_PER_FRAME`] = 12 位），
+//! 帧内写 12 个 timestamp，下一轮该槽 fence 等完后取回。
 //!
 //! 采样阶段：T0 用 TOP_OF_PIPE；其余用 BOTTOM_OF_PIPE，等记录序之前的命令全部走完才写。
 //! 坑：段界若用 TOP_OF_PIPE，timestamp 不等前面的工作，段间屏障也约束不到它，读数会系统性
@@ -12,12 +12,13 @@
 //! | T2 | compute 段（剔除/遮挡/LOD/组装/光源列表/透明）后 | compute（含 IBL 捕获） |
 //! | T3 | shadow depth pass 后 | shadow |
 //! | T4 | G-buffer pass 后 | G-buffer |
-//! | T5 | 合成 + 透明层后 | 合成（含透明） |
-//! | T6 | Hi-Z 归约后 | Hi-Z 构建 |
-//! | T7 | Bloom/tonemap/SMAA/neighborhood + UI 后 | 后处理 + UI |
-//! | T8 | end_command_buffer 前 | 尾段（不入账）；全帧取 T0→T8 |
-//! | T9 | ② 段 TLAS 组装/构建 + 屏障后 | 光线求交 TLAS（T9 单列，`fetch_ray_tracing` 取） |
-//! | T10 | ② 段调试图主射线后 | 光线求交射线（T10 单列，`fetch_ray_tracing` 取） |
+//! | T5 | ④.5 表面缓存（滚动/淘汰/整理/播种）后 | 表面缓存（T5 单列，`fetch_gi` 取） |
+//! | T6 | 合成 + 透明层后 | 合成（含透明） |
+//! | T7 | Hi-Z 归约后 | Hi-Z 构建 |
+//! | T8 | Bloom/tonemap/SMAA/neighborhood + UI 后 | 后处理 + UI |
+//! | T9 | end_command_buffer 前 | 尾段（不入账）；全帧取 T0→T9 |
+//! | T10 | ② 段 TLAS 组装/构建 + 屏障后 | 光线求交 TLAS（T10 单列，`fetch_ray_tracing` 取） |
+//! | T11 | ② 段调试图主射线后 | 光线求交射线（T11 单列，`fetch_ray_tracing` 取） |
 //!
 //! timestamp 只用于诊断：队列族 `timestamp_valid_bits == 0` 时降级停用（warn 一次），不阻断渲染。
 //!
@@ -38,8 +39,8 @@ fn wrapping_timestamp_delta(start: u64, end: u64, mask: u64) -> u64 {
     end.wrapping_sub(start) & mask
 }
 
-/// 每帧槽查询位数（T0..T10，见模块注释）。
-pub(crate) const QUERIES_PER_FRAME: u32 = 11;
+/// 每帧槽查询位数（T0..T11，见模块注释）。
+pub(crate) const QUERIES_PER_FRAME: u32 = 12;
 
 /// timestamp 采样点位：变体名 = 该点收尾的段，数值 = query pool 内槽位号。
 /// 各点位在录制体里的落位见模块注释表。
@@ -55,18 +56,20 @@ pub enum TimestampPoint {
     Shadow = 3,
     /// G-buffer pass 结束。
     GBuffer = 4,
+    /// ④.5 段表面缓存（滚动/淘汰/整理/播种）结束；GI 关的帧 ≈ GBuffer。
+    SurfaceCache = 5,
     /// 合成 + 透明层结束。
-    Lighting = 5,
+    Lighting = 6,
     /// Hi-Z 归约结束。
-    HiZ = 6,
+    HiZ = 7,
     /// 后处理 + UI（Bloom/tonemap/SMAA/neighborhood + UI）结束。
-    PostUi = 7,
+    PostUi = 8,
     /// 全帧结束（end_command_buffer 前，不入账；全帧取 FrameStart→FrameEnd）。
-    FrameEnd = 8,
+    FrameEnd = 9,
     /// ② 段光线求交：BLAS 待建 + TLAS 组装/构建 + 两条屏障结束（光线求交关的帧 ≈ IblCapture）。
-    RayTracingTlas = 9,
+    RayTracingTlas = 10,
     /// ② 段光线求交：调试图主射线 dispatch 结束（光线求交关的帧 ≈ RayTracingTlas）。
-    RayTracingRays = 10,
+    RayTracingRays = 11,
 }
 
 /// 一帧的计量样本：CPU 分段 + GPU 区间 + 规模读数，全部毫秒。
@@ -96,6 +99,8 @@ pub struct FrameSample {
     pub gpu_lighting_ms: f32,
     /// Hi-Z 金字塔构建。
     pub gpu_hiz_ms: f32,
+    /// ④.5 段表面缓存（滚动/淘汰/整理/播种）；GI 关的帧 ≈ 0。
+    pub gpu_gi_ms: f32,
     /// IBL 烘焙（捕获 + SH 投影/归约/自检 + 预滤波）；不烘焙的帧 ≈ 0。
     pub gpu_ibl_capture_ms: f32,
     /// ② 段 TLAS 组装/构建（含屏障）；光线求交关的帧 ≈ 0。
@@ -320,8 +325,8 @@ impl GpuTimer {
         }
     }
 
-    /// 取本槽上一轮的时间戳，换算成 7 段（T0→T2 … T7→T8）+ 全帧 T0→T8 + IBL 捕获
-    /// （T0→T1），共 9 项毫秒。须在本槽 fence 等完后调用（`wait_for_slot` 之后）。
+    /// 取本槽上一轮的时间戳，换算成 7 段（T0→T2 … T8→T9）+ 全帧 T0→T9 + IBL 捕获
+    /// （T0→T1），共 9 项毫秒。表面缓存段（T4→T5）单列在 [`Self::fetch_gi`]。须在本槽 fence 等完后调用（`wait_for_slot` 之后）。
     /// 停用、该槽没录过或结果未就绪返回 None。
     ///
     /// # Errors
@@ -367,6 +372,39 @@ impl GpuTimer {
             seg(FrameStart, FrameEnd),
             seg(FrameStart, IblCapture),
         ]))
+    }
+
+    /// 取本槽的表面缓存段毫秒（GBuffer→SurfaceCache）。停用、该槽没录过或结果未就绪
+    /// 返回 None。与 [`Self::fetch`] 同一次 fence 证据，只多读一位查询。
+    ///
+    /// # Errors
+    /// 取结果失败（如设备丢失）。
+    pub fn fetch_gi(&mut self, slot: usize) -> Result<Option<f32>> {
+        if !self.enabled || !self.recorded[slot].load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let mut raw = [0u64; QUERIES_PER_FRAME as usize];
+        unsafe {
+            match self.device.get_query_pool_results(
+                self.pools[slot],
+                0,
+                &mut raw,
+                vk::QueryResultFlags::TYPE_64,
+            ) {
+                Ok(()) => {}
+                Err(vk::Result::NOT_READY) => return Ok(None),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if raw.iter().all(|&t| t == 0) {
+            return Ok(None);
+        }
+        let start = raw[TimestampPoint::GBuffer as usize];
+        let end = raw[TimestampPoint::SurfaceCache as usize];
+        Ok(Some(
+            wrapping_timestamp_delta(start, end, self.timestamp_mask) as f32 * self.period_ns
+                / 1.0e6,
+        ))
     }
 
     /// 取本槽的 光线求交两段毫秒（T1→T9 TLAS、T9→T10 调试图）。停用、该槽没录过或结果

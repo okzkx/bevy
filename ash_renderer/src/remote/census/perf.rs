@@ -85,6 +85,7 @@ pub(crate) fn perf_stats(
         "gpu_ibl_capture_ms": percentile_block(&perf, |s| s.gpu_ibl_capture_ms),
         "gpu_ray_tracing_tlas_ms": percentile_block(&perf, |s| s.gpu_ray_tracing_tlas_ms),
         "gpu_ray_tracing_rays_ms": percentile_block(&perf, |s| s.gpu_ray_tracing_rays_ms),
+        "gpu_gi_ms": percentile_block(&perf, |s| s.gpu_gi_ms),
         "gpu_present_ms": percentile_block(&perf, |s| s.gpu_present_ms),
         "sections_mean": {
             "wait_slot_ms": mean_of(&perf, |s| s.wait_slot_ms),

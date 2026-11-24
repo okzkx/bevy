@@ -18,12 +18,13 @@ use crate::{
     render::{
         AtlasGpu, BindlessTextureTable, BloomPipelines, BloomTargets, ClusterBuildPass,
         CompositePipeline, Context, CullPass, FramePool, FrameUniformTable, GBufferPipeline,
-        GBufferTargets, GpuTimer, HizPyramid, IblEnvironment, ImageCache, IndirectPass,
-        InstanceTables, LightClusters, LightTable, LodPass, MeshPool, OcclusionPass,
-        OverlayPipeline, PresentTonemapPipeline, RayScene, RayTracingPipelines, RayTracingSettings,
-        RayTracingTargets, SetLayouts, ShadowBuildPass, ShadowPipeline, ShadowTargets,
-        SmaaPipelines, SmaaTargets, Swapchain, TransparentPasses, TransparentPipeline,
-        TransparentTargets, UiVertexRing, Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
+        GBufferTargets, GiPipelines, GiSetLayout, GiSettings, GpuTimer, HizPyramid, IblEnvironment,
+        ImageCache, IndirectPass, InstanceTables, LightClusters, LightTable, LodPass, MeshPool,
+        OcclusionPass, OverlayPipeline, PresentTonemapPipeline, RayScene, RayTracingPipelines,
+        RayTracingSettings, RayTracingTargets, SetLayouts, ShadowBuildPass, ShadowPipeline,
+        ShadowTargets, SmaaPipelines, SmaaTargets, SurfaceCacheConfig, SurfaceCacheTables,
+        Swapchain, TransparentPasses, TransparentPipeline, TransparentTargets, UiVertexRing,
+        Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
 
@@ -122,6 +123,11 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
         ray_tracing_enabled,
     )?;
     let light_table = LightTable::new(&ctx, ctx.memory_contract())?;
+    // 表面缓存（9.5）：布局先建（管线引用它，表重建不换）；表进程级、关态也建
+    //（BRP 读数与运行期开局不需重建，显存 ≈30 MiB）
+    let gi_set_layout = GiSetLayout::new(&ctx)?;
+    let surface_cache =
+        SurfaceCacheTables::new(&ctx, SurfaceCacheConfig::default(), gi_set_layout.raw())?;
     // 光线求交资源族：不支持时 None（视图中一切 光线求交资源缺席，帧路径整段跳过）
     let ray_scene = RayScene::new(&ctx)?;
     let ray_tracing_targets = match &ray_scene {
@@ -169,6 +175,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             smaa_targets.layout_b(),
             hiz.occlusion_layout(),
             ibl.set_layout(),
+            gi_set_layout.set_layout(),
         ];
         // 光线求交集布局只在 光线求交支持时存在（光线求交关没有可登记的句柄）
         if let Some(targets) = &ray_tracing_targets {
@@ -197,6 +204,8 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     let lod_pass = LodPass::new(&ctx, &layouts)?;
     let cluster_build_pass = ClusterBuildPass::new(&ctx, &layouts)?;
     let transparent_passes = TransparentPasses::new(&ctx, &layouts)?;
+    // 表面缓存六条管线（回收三件 + 播种 + 调试视图两形态）
+    let gi_pipelines = GiPipelines::new(&ctx, &layouts)?;
     // 光线求交管线：只在设备支持时创建（光线求交集布局已登记）
     let ray_tracing_pipelines = match &ray_scene {
         Some(_) => Some(RayTracingPipelines::new(&ctx, &layouts)?),
@@ -249,6 +258,11 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             lod_pass,
             cluster_build_pass,
             transparent_passes,
+            gi_pipelines,
+            surface_cache,
+            gi_set_layout,
+            // 表面缓存总开关恒插入（BRP gi_set/gi_stats 在关态也要回读数）
+            gi_settings: GiSettings::default(),
             // 光线求交总开关恒插入（BRP ray_tracing_set/ray_tracing_stats 在 光线求交关时也要回读数）
             ray_tracing_settings: RayTracingSettings {
                 enabled: ray_tracing.is_some(),
@@ -325,6 +339,10 @@ init_chain! {
     TransparentTargets => transparent_targets,
     LightClusters => light_clusters,
     LightTable => light_table,
+    GiPipelines => gi_pipelines,
+    SurfaceCacheTables => surface_cache,
+    GiSetLayout => gi_set_layout,
+    GiSettings => gi_settings,
     GBufferTargets => gbuffer,
     FramePool => frames,
     UiVertexRing => ui_ring,

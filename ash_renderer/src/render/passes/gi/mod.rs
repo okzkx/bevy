@@ -1,0 +1,299 @@
+//! 表面缓存全局光照（9.5）：Volume/cell 格子系统、patch 池与分配回收、patch 调试视图。
+//!
+//! 本段只建池与生命周期（位置/法线/计数/回收），不出辐照度（9.6）、不接屏幕查询（9.7）；
+//! `GiSettings::enabled = false`（默认）= 不录任何 dispatch、不建视图，画面与 9.3 逐位一致。
+//!
+//! 帧内顺序（④.5 段，G-buffer 转只读之后、合成之前）：
+//! `scrolling → eviction → defrag × waves → patch_alloc`，再加一道 compute→片元屏障给
+//! ⑧ 段视图读。先腾空间再分配，同帧被释放的槽本帧播种即可复用。
+//!
+//! 子模块：[`volume`] 格子系统 CPU 镜像；[`allocation`] 播种 dispatch 与录制束；
+//! [`view`] 调试视图两形态。常驻表与 GI UBO 在 `resident/tables/surface_cache.rs`。
+
+pub mod allocation;
+pub mod view;
+pub mod volume;
+
+use ash::{vk, Device};
+
+use crate::common::error::Result;
+use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
+use crate::render::core::binding::set_layout::{DescSet, SetLayouts};
+use crate::render::core::binding::shader_abi;
+use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
+use crate::render::core::record::compute::{ComputeHandles, Handoff};
+use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
+use crate::render::passes::ibl::IBL_SET_DESC;
+use crate::render::passes::post::smaa::LDR_FORMAT;
+use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
+use crate::render::resident::tables::surface_cache::GI_SET_DESC;
+use crate::render::Context;
+
+pub use self::allocation::GiAllocDraw;
+pub use self::view::GiViewDraw;
+pub use self::volume::SurfaceCacheConfig;
+
+const COMPUTE: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
+
+/// 淘汰年龄门限（帧）：心跳超过它就回收（60 fps 下 4 秒，Unity 同值 240）。
+pub const EVICT_AGE: u32 = 240;
+/// 9.6 的时域更新目标次数（本段只写进 UBO，不使用）。
+pub const UPDATE_MAX: u32 = 32;
+
+/// 表面缓存设置（宿主真源；BRP `gi_set` 写）。
+#[derive(Clone, Copy, bevy::prelude::Resource)]
+pub struct GiSettings {
+    /// 总开关：关 = 不录 dispatch、不建视图（画面与 9.3 逐位一致）。
+    pub enabled: bool,
+    /// 调试视图号：0 = 关；1 覆盖 / 2 级联 / 3 桶 / 4 rank / 5 心跳 / 6 池水位 /
+    /// 7 位置偏离 / 8 cell 归属。
+    pub view: u32,
+    /// 视图形态：0 = 覆盖图（主）；1 = 覆盖图 + 方片；2 = 只方片。
+    pub form: u32,
+    /// 法线来源：0 = 深度差分平面法线（默认）；1 = G-buffer 着色法线（A/B 对照）。
+    pub normal_source: u32,
+    /// 播种开关（0 = 只回收不播种，A/B 用）。
+    pub seed: bool,
+    /// 每帧整理波数（0 = 不整理；每波 512 条）。
+    pub defrag_waves: u32,
+    /// Volume/池规格（只在关态改；改后重建表）。
+    pub config: SurfaceCacheConfig,
+}
+
+impl Default for GiSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            view: 0,
+            form: 0,
+            normal_source: 0,
+            seed: true,
+            defrag_waves: 2,
+            config: SurfaceCacheConfig::default(),
+        }
+    }
+}
+
+impl GiSettings {
+    /// 视图是否要画覆盖图（形态 A）。
+    #[must_use]
+    pub fn cover_enabled(&self) -> bool {
+        self.enabled && self.view > 0 && self.form != 2
+    }
+
+    /// 视图是否要画方片（形态 B）。
+    #[must_use]
+    pub fn markers_enabled(&self) -> bool {
+        self.enabled && self.view > 0 && self.form >= 1
+    }
+}
+
+/// 滚动释放（set0 = GI 集，无 push；线程 = 级联数 × res³）。
+pub(crate) static SCROLLING_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_scrolling",
+    shader: &shader_abi::SCROLLING,
+    entries: &[c"cs_main"],
+    sets: &[&GI_SET_DESC],
+    push: None,
+    color_formats: &[],
+    depth_format: None,
+};
+
+/// 心跳淘汰（set0 = GI 集；线程 = 池容量）。
+pub(crate) static EVICTION_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_eviction",
+    shader: &shader_abi::EVICTION,
+    entries: &[c"cs_main"],
+    sets: &[&GI_SET_DESC],
+    push: None,
+    color_formats: &[],
+    depth_format: None,
+};
+
+/// 整理（set0 = GI 集；每次 dispatch 一个 workgroup / 一波 512 条）。
+pub(crate) static DEFRAG_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_defrag",
+    shader: &shader_abi::DEFRAG,
+    entries: &[c"cs_main"],
+    sets: &[&GI_SET_DESC],
+    push: None,
+    color_formats: &[],
+    depth_format: None,
+};
+
+/// 播种（set0 帧 UBO / set1 G-buffer / set2 IBL / set3 GI + 32B push）。
+pub(crate) static PATCH_ALLOC_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_patch_alloc",
+    shader: &shader_abi::PATCH_ALLOC,
+    entries: &[c"cs_main"],
+    sets: &[
+        &FRAME_UNIFORM_SET_DESC,
+        &GBUFFER_SAMPLED_SET_DESC,
+        &IBL_SET_DESC,
+        &GI_SET_DESC,
+    ],
+    push: Some(PushRange {
+        stages: COMPUTE,
+        size: allocation::GI_ALLOC_PUSH_SIZE,
+    }),
+    color_formats: &[],
+    depth_format: None,
+};
+
+/// 覆盖图（形态 A）：全屏三角形，颜色附件 = LDR 目标；16B push（视图/法线来源/宽高）。
+pub(crate) static PATCH_VIEW_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_patch_view",
+    shader: &shader_abi::PATCH_VIEW,
+    entries: &[c"vs_main", c"fs_cover"],
+    sets: &[
+        &FRAME_UNIFORM_SET_DESC,
+        &GBUFFER_SAMPLED_SET_DESC,
+        &GI_SET_DESC,
+    ],
+    push: Some(PushRange {
+        stages: crate::render::core::binding::set_layout::stages(&[
+            vk::ShaderStageFlags::VERTEX,
+            vk::ShaderStageFlags::FRAGMENT,
+        ]),
+        size: view::GI_VIEW_PUSH_SIZE,
+    }),
+    color_formats: &[LDR_FORMAT],
+    depth_format: None,
+};
+
+/// 方片（形态 B）：实例化 6 顶点 × 池容量，人工深度测试；同一份 sets/push。
+pub(crate) static PATCH_MARKER_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_patch_marker",
+    shader: &shader_abi::PATCH_VIEW,
+    entries: &[c"vs_marker", c"fs_marker"],
+    sets: &[
+        &FRAME_UNIFORM_SET_DESC,
+        &GBUFFER_SAMPLED_SET_DESC,
+        &GI_SET_DESC,
+    ],
+    push: Some(PushRange {
+        stages: crate::render::core::binding::set_layout::stages(&[
+            vk::ShaderStageFlags::VERTEX,
+            vk::ShaderStageFlags::FRAGMENT,
+        ]),
+        size: view::GI_VIEW_PUSH_SIZE,
+    }),
+    color_formats: &[LDR_FORMAT],
+    depth_format: None,
+};
+
+/// 表面缓存的六条管线（进程级）。
+#[derive(bevy::prelude::Resource)]
+pub struct GiPipelines {
+    scrolling: ComputePipeline,
+    eviction: ComputePipeline,
+    defrag: ComputePipeline,
+    alloc: ComputePipeline,
+    cover: FullscreenPipeline,
+    marker: FullscreenPipeline,
+}
+
+impl GiPipelines {
+    /// # Errors
+    /// 配方对账不过或管线创建失败。
+    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
+        Ok(Self {
+            scrolling: ComputePipeline::new(ctx, &SCROLLING_PIPELINE, layouts)?,
+            eviction: ComputePipeline::new(ctx, &EVICTION_PIPELINE, layouts)?,
+            defrag: ComputePipeline::new(ctx, &DEFRAG_PIPELINE, layouts)?,
+            alloc: ComputePipeline::new(ctx, &PATCH_ALLOC_PIPELINE, layouts)?,
+            cover: FullscreenPipeline::new(ctx, &PATCH_VIEW_PIPELINE, layouts)?,
+            marker: FullscreenPipeline::new(ctx, &PATCH_MARKER_PIPELINE, layouts)?,
+        })
+    }
+
+    #[must_use]
+    pub fn scrolling(&self) -> ComputeHandles {
+        self.scrolling.handles()
+    }
+
+    #[must_use]
+    pub fn eviction(&self) -> ComputeHandles {
+        self.eviction.handles()
+    }
+
+    #[must_use]
+    pub fn defrag(&self) -> ComputeHandles {
+        self.defrag.handles()
+    }
+
+    #[must_use]
+    pub fn alloc(&self) -> ComputeHandles {
+        self.alloc.handles()
+    }
+
+    #[must_use]
+    pub fn cover(&self) -> crate::render::core::record::graphics::PipelineRef {
+        self.cover.rec()
+    }
+
+    #[must_use]
+    pub fn marker(&self) -> crate::render::core::record::graphics::PipelineRef {
+        self.marker.rec()
+    }
+}
+
+/// ④.5 段录制束（GI 关 = None，整段跳过）。
+pub struct GiFrameDraw {
+    /// 滚动释放（只在级联偏移变化的帧为 Some）。
+    pub scrolling: Option<ComputeHandles>,
+    /// 滚动 dispatch 组数（级联数 × res³ / 64）。
+    pub scrolling_groups: u32,
+    /// 心跳淘汰。
+    pub eviction: ComputeHandles,
+    pub eviction_groups: u32,
+    /// 整理（每帧 `defrag_waves` 次、每次一个 workgroup 串行推进续扫游标）。
+    pub defrag: ComputeHandles,
+    pub defrag_waves: u32,
+    /// 屏幕播种（播种关 / 无相机的帧为 None）。
+    pub alloc: Option<GiAllocDraw>,
+    /// 本帧槽 GI 集（回收三件与播种共绑）。
+    pub gi_set: DescSet,
+    /// ⑧ 段调试视图（关 / 视图 0 为 None）。
+    pub view: Option<GiViewDraw>,
+}
+
+impl GiFrameDraw {
+    /// 录 ④.5 段：scrolling → eviction → defrag × waves → alloc，末道 compute→片元屏障。
+    pub(crate) fn record(&self, device: &Device, cb: vk::CommandBuffer) {
+        if let Some(scrolling) = &self.scrolling {
+            scrolling.record(
+                device,
+                cb,
+                &[self.gi_set],
+                &[],
+                self.scrolling_groups,
+                Handoff::ComputeReadWrite,
+            );
+        }
+        self.eviction.record(
+            device,
+            cb,
+            &[self.gi_set],
+            &[],
+            self.eviction_groups,
+            Handoff::ComputeReadWrite,
+        );
+        for _ in 0..self.defrag_waves {
+            self.defrag.record(
+                device,
+                cb,
+                &[self.gi_set],
+                &[],
+                1,
+                Handoff::ComputeReadWrite,
+            );
+        }
+        if let Some(alloc) = &self.alloc {
+            alloc.record(device, cb, self.gi_set);
+        }
+        // 缓存表 compute 写 → ⑧ 段片元读（视图）与 9.7 的片元查表
+        unsafe { Handoff::ComputeFragmentRead.barrier().record(device, cb) };
+    }
+}

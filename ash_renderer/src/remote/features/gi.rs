@@ -1,0 +1,407 @@
+//! 表面缓存方法族（9.5）：`gi_set` 写开关/视图/视图形态/法线来源/整理波数与 Volume 规格
+//! （规格只在关态改，改后重建表），`gi_stats` 读池水位/计数/显存/`gi_ms`，`gi_dump` 把
+//! LDR 帧（含 patch 视图）拷回写 PPM，`gi_census` 做 cell↔patch 双向一致与位置/桶归属对账。
+//! GI 关时 stats/dump/census 回 `enabled:false` 形态（不报错，脚本靠这个判分支）。
+
+use ash_macros::system;
+use bevy::{prelude::*, remote::BrpResult};
+use serde_json::{json, Value};
+
+use crate::remote::common::{
+    params::{internal_err, invalid_params, parse_params_or_default, res, res_mut},
+    readback::{f32_at, read_buffer, u32_at, words},
+};
+use crate::render::{
+    gi_cell_bucket, gi_cell_cascade, gi_cell_storage, gi_direction_bucket, gi_storage_to_volume,
+    gi_volume_world_center, gi_voxel_size, Context, FramePool, GiSetLayout, GiSettings, GpuTimer,
+    SurfaceCacheConfig, SurfaceCacheTables, COUNTER_ALLOC, COUNTER_DEFRAG_MOVED, COUNTER_FAILED,
+    COUNTER_FREED, COUNTER_VIEW_COVERED, COUNTER_VIEW_DEVIATION, COUNTER_VIEW_HOLES,
+    GI_COUNTER_WORDS, GI_UBO_SIZE, INVALID_PATCH, RING_ACTIVE, RING_CONFIGS, RING_CONFIG_WORDS,
+    RING_FLIP, RING_WATERMARK,
+};
+
+/// `gi_set` 参数：所有字段可省（缺省不动）；规格四件只允许在关态改。
+#[derive(serde::Deserialize, Default)]
+struct GiSetParams {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    view: Option<u32>,
+    #[serde(default)]
+    form: Option<u32>,
+    #[serde(default)]
+    normal_source: Option<u32>,
+    #[serde(default)]
+    seed: Option<bool>,
+    #[serde(default)]
+    defrag_waves: Option<u32>,
+    /// 最粗级立方外沿（米）。
+    #[serde(default)]
+    size: Option<f32>,
+    #[serde(default)]
+    res: Option<u32>,
+    #[serde(default)]
+    cascades: Option<u32>,
+    #[serde(default)]
+    capacity: Option<u32>,
+}
+
+fn settings_json(s: &GiSettings) -> Value {
+    json!({
+        "enabled": s.enabled,
+        "view": s.view,
+        "form": s.form,
+        "normal_source": s.normal_source,
+        "seed": s.seed,
+        "defrag_waves": s.defrag_waves,
+        "config": {
+            "voxel_min": s.config.voxel_min,
+            "res": s.config.res,
+            "cascades": s.config.cascades,
+            "capacity": s.config.capacity,
+            "size": s.config.size(),
+        },
+    })
+}
+
+/// # Errors
+/// 参数越界、规格在开态被改、规格非法或重建表失败。
+#[system]
+pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let p: GiSetParams = parse_params_or_default(params)?;
+    if p.view.is_some_and(|v| v > 8) {
+        return Err(invalid_params(
+            "view 越界（0 关 / 1 覆盖 / 2 级联 / 3 桶 / 4 rank / 5 心跳 / 6 池水位 / 7 位置偏离 / 8 cell 归属）",
+        ));
+    }
+    if p.form.is_some_and(|f| f > 2) {
+        return Err(invalid_params(
+            "form 越界（0 覆盖图 / 1 覆盖图+方片 / 2 只方片）",
+        ));
+    }
+    if p.normal_source.is_some_and(|n| n > 1) {
+        return Err(invalid_params(
+            "normal_source 越界（0 平面法线 / 1 着色法线）",
+        ));
+    }
+    if p.defrag_waves.is_some_and(|w| w > 16) {
+        return Err(invalid_params("defrag_waves 越界（0..=16）"));
+    }
+    let current = *res::<GiSettings>(world)?;
+    let config_change =
+        p.size.is_some() || p.res.is_some() || p.cascades.is_some() || p.capacity.is_some();
+    if config_change {
+        if current.enabled || p.enabled == Some(true) {
+            return Err(invalid_params(
+                "Volume/池规格只能在关态修改：先 {\"enabled\": false}，改完再开",
+            ));
+        }
+        let res_value = p.res.unwrap_or(current.config.res);
+        let cascades = p.cascades.unwrap_or(current.config.cascades);
+        let capacity = p.capacity.unwrap_or(current.config.capacity);
+        let config = match p.size {
+            Some(size) => SurfaceCacheConfig::from_size(size, res_value, cascades, capacity),
+            None => SurfaceCacheConfig {
+                voxel_min: current.config.voxel_min,
+                res: res_value,
+                cascades,
+                capacity,
+            },
+        };
+        let problems = config.problems();
+        if !problems.is_empty() {
+            return Err(invalid_params(format!("规格非法：{}", problems.join("；"))));
+        }
+        if config != current.config {
+            // 表可能与在飞帧同在：先排空再换
+            {
+                let ctx = res::<Context>(world)?;
+                unsafe { ctx.device.device_wait_idle() }
+                    .map_err(internal_err("GI 表重建前排空失败"))?;
+            }
+            let layout = res::<GiSetLayout>(world)?.raw();
+            let tables = {
+                let ctx = res::<Context>(world)?;
+                SurfaceCacheTables::new(ctx, config, layout)
+                    .map_err(internal_err("GI 表重建失败"))?
+            };
+            world.insert_resource(tables);
+            let mut settings = res_mut::<GiSettings>(world)?;
+            settings.config = config;
+        }
+    }
+    let mut settings = res_mut::<GiSettings>(world)?;
+    if let Some(enabled) = p.enabled {
+        settings.enabled = enabled;
+    }
+    if let Some(view) = p.view {
+        settings.view = view;
+    }
+    if let Some(form) = p.form {
+        settings.form = form;
+    }
+    if let Some(normal_source) = p.normal_source {
+        settings.normal_source = normal_source;
+    }
+    if let Some(seed) = p.seed {
+        settings.seed = seed;
+    }
+    if let Some(waves) = p.defrag_waves {
+        settings.defrag_waves = waves;
+    }
+    let effective = *settings;
+    Ok(settings_json(&effective))
+}
+
+/// # Errors
+/// 读回失败或 GPU 计时取回失败。
+#[system]
+pub(crate) fn gi_stats(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let settings = world
+        .get_resource::<GiSettings>()
+        .map_or_else(GiSettings::default, |s| *s);
+    let slot = res::<FramePool>(world)?.current_index();
+    let (ring, counters, memory, config) = {
+        let mut tables = res_mut::<SurfaceCacheTables>(world)?;
+        let ring = words(&read_buffer(
+            tables.ring(),
+            RING_CONFIG_WORDS * 4,
+            "GI ring 配置读失败",
+        )?);
+        let counters = words(&read_buffer(
+            tables.counters(slot),
+            GI_COUNTER_WORDS * 4,
+            "GI 计数缓冲读失败",
+        )?);
+        (ring, counters, tables.memory(), tables.config())
+    };
+    let flip = ring[RING_FLIP] as usize;
+    let ring_start = ring[RING_CONFIGS + flip * 4];
+    let ring_count = ring[RING_CONFIGS + flip * 4 + 1];
+    let active = ring[RING_ACTIVE];
+    let watermark = ring[RING_WATERMARK];
+    let gi_ms = world
+        .get_resource_mut::<GpuTimer>()
+        .map_or(Ok(None), |mut timer| timer.fetch_gi(slot))
+        .map_err(internal_err("GPU 表面缓存段计时取回失败"))?
+        .unwrap_or(0.0);
+    let cell_count = config.cell_count().max(1);
+    Ok(json!({
+        "enabled": settings.enabled,
+        "supported": true,
+        "settings": settings_json(&settings),
+        "slot": slot,
+        "pool": {
+            "active": active,
+            "watermark": watermark,
+            "capacity": config.capacity,
+            "ring_start": ring_start,
+            "ring_count": ring_count,
+            "flip": ring[RING_FLIP],
+        },
+        // 本槽最近一次完整帧的计数（两帧内新鲜；GI 关的帧全 0）
+        "counters": {
+            "alloc": counters[COUNTER_ALLOC],
+            "failed": counters[COUNTER_FAILED],
+            "freed": counters[COUNTER_FREED],
+            "defrag_moved": counters[COUNTER_DEFRAG_MOVED],
+            "view_holes": counters[COUNTER_VIEW_HOLES],
+            "view_deviation": counters[COUNTER_VIEW_DEVIATION],
+            "view_covered": counters[COUNTER_VIEW_COVERED],
+        },
+        "patches": active,
+        "cells": config.cell_count(),
+        "cell_occupancy": f64::from(active) / cell_count as f64,
+        "memory": {
+            "cell_bytes": memory.cell_bytes,
+            "patch_bytes": memory.patch_bytes,
+            "misc_bytes": memory.misc_bytes,
+            "total_bytes": memory.total(),
+        },
+        "gi_ms": gi_ms,
+    }))
+}
+
+/// `gi_dump` 参数：`path` 必填；`slot` 可选（帧槽 0/1）。
+#[derive(serde::Deserialize)]
+struct GiDumpParams {
+    path: String,
+    #[serde(default)]
+    slot: Option<u32>,
+}
+
+/// # Errors
+/// 视图关/参数越界/LDR 读回或写文件失败。
+#[system]
+pub(crate) fn gi_dump(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let p: GiDumpParams =
+        crate::remote::common::params::parse_params(params, "params 缺失：需要 path（写 .ppm）")?;
+    let settings = world
+        .get_resource::<GiSettings>()
+        .map_or_else(GiSettings::default, |s| *s);
+    if !settings.enabled || settings.view == 0 {
+        return Err(invalid_params(
+            "patch 调试视图当前关闭（gi_set {\"enabled\":true,\"view\":N} 后再 dump）——没有视图可读",
+        ));
+    }
+    let slot = crate::remote::census::frame_dump::check_slot(p.slot.unwrap_or(0) as usize)?;
+    crate::remote::census::frame_dump::dump_ldr_frame(world, &p.path, slot)
+}
+
+/// `gi_census` 参数：抽检前 N 条 ring 槽（缺省 8，上限 64）。
+#[derive(serde::Deserialize, Default)]
+struct GiCensusParams {
+    #[serde(default)]
+    patches: Option<u32>,
+}
+
+/// `ash_renderer/gi_census`：cell↔patch 双向一致、patch 位置落在所属体素内、法线落在
+/// 所属桶内。诊断路径，先 `device_wait_idle` 取一致快照（低频）。
+///
+/// # Errors
+/// GI 关 / 资源缺席 / 读回失败。
+#[system]
+pub(crate) fn gi_census(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let p: GiCensusParams = parse_params_or_default(params)?;
+    let settings = world
+        .get_resource::<GiSettings>()
+        .map_or_else(GiSettings::default, |s| *s);
+    if !settings.enabled {
+        return Ok(json!({ "enabled": false }));
+    }
+    {
+        let ctx = res::<Context>(world)?;
+        unsafe { ctx.device.device_wait_idle() }.map_err(internal_err("GI 对账前排空失败"))?;
+    }
+    let slot = res::<FramePool>(world)?.current_index();
+    let config = res::<SurfaceCacheTables>(world)?.config();
+    let n = p.patches.unwrap_or(8).min(64);
+    let res_value = config.res;
+    let (ring, ubo) = {
+        let mut tables = res_mut::<SurfaceCacheTables>(world)?;
+        let ring = words(&read_buffer(
+            tables.ring(),
+            RING_CONFIG_WORDS * 4,
+            "GI ring 配置读失败",
+        )?);
+        let ubo = read_buffer(tables.ubo(slot), GI_UBO_SIZE as usize, "GI UBO 读失败")?;
+        (ring, ubo)
+    };
+    let flip = ring[RING_FLIP] as usize;
+    let start = ring[RING_CONFIGS + flip * 4];
+    let count = ring[RING_CONFIGS + flip * 4 + 1];
+    let checked = n.min(count);
+    let mut rows = Vec::with_capacity(checked as usize);
+    let mut consistent = 0u32;
+    let mut dead = 0u32;
+    let mut dangling = 0u32;
+    let mut in_voxel = 0u32;
+    let mut bucket_ok = 0u32;
+    let mut tables = res_mut::<SurfaceCacheTables>(world)?;
+    for i in 0..checked {
+        let ring_index = (start + i) % config.capacity.max(1);
+        let mut raw = [0u8; 4];
+        tables
+            .patch_cell()
+            .read(u64::from(ring_index) * 4, &mut raw)
+            .map_err(internal_err("patch→cell 读失败"))?;
+        let cell = u32::from_le_bytes(raw);
+        if cell == INVALID_PATCH {
+            dead += 1;
+            continue;
+        }
+        let mut geometry = [0u8; 32];
+        tables
+            .patch_geometry()
+            .read(u64::from(ring_index) * 32, &mut geometry)
+            .map_err(internal_err("patch 几何读失败"))?;
+        let mut statistics = [0u8; 48];
+        tables
+            .patch_statistics()
+            .read(u64::from(ring_index) * 48, &mut statistics)
+            .map_err(internal_err("patch 统计读失败"))?;
+        let mut raw_cell = [0u8; 4];
+        tables
+            .cell_patch()
+            .read(u64::from(cell) * 4, &mut raw_cell)
+            .map_err(internal_err("cell→patch 读失败"))?;
+        let mapped = u32::from_le_bytes(raw_cell);
+        let mutual = mapped == ring_index;
+        if mutual {
+            consistent += 1;
+        } else {
+            dangling += 1;
+        }
+        let cascade = gi_cell_cascade(cell, res_value);
+        let storage = gi_cell_storage(cell, res_value);
+        let bucket = gi_cell_bucket(cell);
+        let offset = if (cascade as usize) < crate::render::MAX_CASCADES {
+            let base = 96 + cascade as usize * 16;
+            bevy::math::IVec3::new(
+                u32_at(&ubo, base)? as i32,
+                u32_at(&ubo, base + 4)? as i32,
+                u32_at(&ubo, base + 8)? as i32,
+            )
+        } else {
+            bevy::math::IVec3::ZERO
+        };
+        let voxel = gi_voxel_size(config.voxel_min, cascade);
+        let center = gi_volume_world_center(
+            gi_storage_to_volume(storage, offset, res_value as i32),
+            offset,
+            voxel,
+            res_value as i32,
+        );
+        let pos = Vec3::new(
+            f32_at(&geometry, 0)?,
+            f32_at(&geometry, 4)?,
+            f32_at(&geometry, 8)?,
+        );
+        let normal = [
+            f32_at(&geometry, 16)?,
+            f32_at(&geometry, 20)?,
+            f32_at(&geometry, 24)?,
+        ];
+        let distance = (pos - center).length();
+        let within = distance <= voxel;
+        if within {
+            in_voxel += 1;
+        }
+        let normal_bucket = gi_direction_bucket(normal);
+        let normal_ok = normal_bucket == bucket;
+        if normal_ok {
+            bucket_ok += 1;
+        }
+        rows.push(json!({
+            "ring": ring_index,
+            "cell": cell,
+            "cascade": cascade,
+            "storage": [storage.x, storage.y, storage.z],
+            "bucket": bucket,
+            "mapped": if mapped == INVALID_PATCH { json!(null) } else { json!(mapped) },
+            "mutual": mutual,
+            "position": [pos.x, pos.y, pos.z],
+            "distance_to_voxel_center": distance,
+            "voxel": voxel,
+            "in_voxel": within,
+            "normal_bucket": normal_bucket,
+            "bucket_ok": normal_ok,
+            "heartbeat": u32_at(&statistics, 44)?,
+            "state": u32_at(&statistics, 32)?,
+        }));
+    }
+    Ok(json!({
+        "enabled": true,
+        "slot": slot,
+        "checked": checked,
+        "ring_count": count,
+        "summary": {
+            "consistent": consistent,
+            "dangling": dangling,
+            "dead": dead,
+            "in_voxel": in_voxel,
+            "bucket_ok": bucket_ok,
+        },
+        "rows": rows,
+    }))
+}

@@ -39,6 +39,7 @@ mod cluster;
 mod culling;
 mod frame_logs;
 mod gaps;
+mod gi;
 mod indirect;
 mod input;
 mod lighting;
@@ -56,6 +57,7 @@ mod transparent;
 use self::cluster::create_cluster_build_draw;
 use self::culling::{create_frustum_cull_draw, create_occlusion_draw};
 use self::gaps::sample_gaps;
+use self::gi::prepare_gi;
 use self::indirect::create_indirect_draw;
 use self::input::{FrameInput, PassFrame};
 use self::lighting::FrameLight;
@@ -100,6 +102,8 @@ pub(crate) fn draw_frame(
         occlusion_gate,
         ray_tracing,
         ray_tracing_local,
+        gi,
+        gi_local,
     } = &mut input;
 
     // —— 帧首：最小化让路 + 挂起重建（尺寸相关资源随新 extent 重建，幂等；pending
@@ -180,6 +184,27 @@ pub(crate) fn draw_frame(
     post.write_slot_ubos(slot)?;
     cluster.write_slot(slot, &view, extent)?;
     transparent.clear_slot_count(slot)?;
+
+    // —— 表面缓存（9.5）：Volume 跟随 → 写 GI UBO / 清计数 → 组装 ④.5 段束。
+    // GI 关/无相机返回 None（整段跳过，与 9.3 逐位一致）。视图画在 LDR 目标上，
+    // 句柄取自后链资源（同一次 swapchain 尺寸）。
+    let gbuffer_sampled_set = post.gbuffer.targets.sampled_set(slot);
+    let ldr_target = (
+        post.smaa.ldr_view(slot),
+        post.smaa.ldr_image(slot),
+        post.smaa.ldr_extent(),
+    );
+    let gi_draw = prepare_gi(
+        gi,
+        gi_local,
+        slot,
+        extent,
+        &view,
+        gpu.frame_uniform_table.frame_set(slot),
+        gbuffer_sampled_set,
+        scene.ibl_env.frame_set(),
+        ldr_target,
+    )?;
 
     // 四环写入：模型增量 + 材质全量 + 在场全量 + LOD 表增量，都落本帧槽的环
     // （wait_for_slot 之后，fence 证据同本帧 UBO）。
@@ -351,6 +376,8 @@ pub(crate) fn draw_frame(
         },
         // —— ② compute 前置：求交器（BLAS 待建 / TLAS / 调试图）
         ray_tracing: ray_tracing_draw,
+        // —— ④.5 表面缓存：回收三件 + 播种 + ⑧ 段视图（GI 关 = None）
+        gi: gi_draw,
         // —— ⑦⑧ 后链 + UI
         post: PostChainDraw {
             tonemap: post.tonemap.rec(),

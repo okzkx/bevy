@@ -283,6 +283,14 @@ impl FramePool {
             barrier.record(device, cb);
         }
 
+        // ---- ④.5 表面缓存（9.5）：④ G-buffer 转只读之后、⑤ 合成之前 ----
+        // 回收三件（滚动/淘汰/整理）→ 屏幕播种；GI 关 = None 整段跳过（零命令、零屏障，
+        // 与 9.3 逐位一致）。段末的 compute→片元屏障在 GiFrameDraw::record 内。
+        if let Some(gi) = feature.gi.as_ref() {
+            gi.record(device, cb);
+        }
+        mark.mark(TimestampPoint::SurfaceCache);
+
         // 合成 pass（全屏，无深度附件）：读 G-buffer 算光照写 HDR 目标；depth==0（reverse-Z
         // 远平面）的像素当背景。set0 帧 UBO（与场景管线 set1 同一 layout）、set1 G-buffer 采样集、
         // set2 光源分簇、set3 shadow。
@@ -380,16 +388,22 @@ impl FramePool {
         mark.mark(TimestampPoint::HiZ);
 
         // ---- ⑦⑧ 后链 + UI：Bloom → tonemap → SMAA → neighborhood + UI ----
-        // ⑦⑧ 录制收进 PostChainDraw::record；neighborhood 开渲染不关，UI 接在同一次
-        // 渲染里按光栅序盖在场景之上。
-        feature.post.record(
-            device,
-            cb,
-            res.frame_set,
-            res.gbuffer.sampled_set(slot),
-            target.view,
-            extent,
-        );
+        // 前半收进 PostChainDraw::record_to_ldr；LDR 停在可采样，供 patch 调试视图
+        // 直接画在它上面（不经过 ACES，gi_dump/frame_dump 的 LDR 通道能取到视图）。
+        feature
+            .post
+            .record_to_ldr(device, cb, res.frame_set, res.gbuffer.sampled_set(slot));
+
+        // ⑧ 段 patch 调试视图（9.5）：画在 LDR 上、SMAA neighborhood 与 UI 之前；
+        // 视图关 = None 整段跳过（零命令、零屏障）。
+        if let Some(view) = feature.gi.as_ref().and_then(|gi| gi.view.as_ref()) {
+            view.record(device, cb);
+        }
+
+        // neighborhood 收尾：开渲染不关，UI 接在同一次渲染里按光栅序盖在场景之上。
+        feature
+            .post
+            .record_neighborhood(device, cb, target.view, extent);
 
         // UI
         if let Some(ui) = &feature.ui {

@@ -55,18 +55,22 @@ const SAMPLED_BINDING_MATPARAM: u32 = 5;
 const SAMPLED_BINDING_EMISSIVE: u32 = 6;
 
 const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
+/// G-buffer 采样集的可见阶段：片元（合成/Bloom/tonemap）+ compute（9.5 屏幕播种读
+/// 深度与法线）。扩阶段只放宽不改语义——同一份布局、同一份采样集，管线在 init 一次性建。
+const FS_CS: vk::ShaderStageFlags =
+    crate::render::core::binding::set_layout::stages(&[FS, vk::ShaderStageFlags::COMPUTE]);
 
-/// G-buffer 采样集：六张附件视图 + 一个共享采样器，片元阶段读。
+/// G-buffer 采样集：六张附件视图 + 一个共享采样器，片元与 compute 阶段读。
 pub(crate) static GBUFFER_SAMPLED_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "gbuffer_sampled",
     &[
-        BindingDesc::new(SAMPLED_BINDING_ALBEDO, DescKind::SampledImage, FS),
-        BindingDesc::new(SAMPLED_BINDING_NORMAL, DescKind::SampledImage, FS),
-        BindingDesc::new(SAMPLED_BINDING_HDR, DescKind::SampledImage, FS),
-        BindingDesc::new(SAMPLED_BINDING_DEPTH, DescKind::SampledImage, FS),
-        BindingDesc::new(SAMPLED_BINDING_MATPARAM, DescKind::SampledImage, FS),
-        BindingDesc::new(SAMPLED_BINDING_EMISSIVE, DescKind::SampledImage, FS),
-        BindingDesc::new(SAMPLED_BINDING_SAMPLER, DescKind::Sampler, FS),
+        BindingDesc::new(SAMPLED_BINDING_ALBEDO, DescKind::SampledImage, FS_CS),
+        BindingDesc::new(SAMPLED_BINDING_NORMAL, DescKind::SampledImage, FS_CS),
+        BindingDesc::new(SAMPLED_BINDING_HDR, DescKind::SampledImage, FS_CS),
+        BindingDesc::new(SAMPLED_BINDING_DEPTH, DescKind::SampledImage, FS_CS),
+        BindingDesc::new(SAMPLED_BINDING_MATPARAM, DescKind::SampledImage, FS_CS),
+        BindingDesc::new(SAMPLED_BINDING_EMISSIVE, DescKind::SampledImage, FS_CS),
+        BindingDesc::new(SAMPLED_BINDING_SAMPLER, DescKind::Sampler, FS_CS),
     ],
 );
 
