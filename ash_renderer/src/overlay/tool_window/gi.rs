@@ -139,6 +139,15 @@ impl GiPage<'_> {
                 .text("空间滤波半径（体素倍数）")
                 .fixed_decimals(2),
         );
+        ui.checkbox(
+            &mut gi.temporal_filter,
+            "时域后滤波（上一帧权重 0.9～0.95）",
+        );
+        ui.add(
+            egui::Slider::new(&mut gi.temporal_smoothing, 0.0..=1.0)
+                .text("时域平滑度")
+                .fixed_decimals(2),
+        );
         ui.add(
             egui::Slider::new(&mut gi.defrag_waves, 0..=16)
                 .text("每帧整理波数（每波 512 条）")

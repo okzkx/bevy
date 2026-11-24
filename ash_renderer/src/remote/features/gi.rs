@@ -68,6 +68,12 @@ struct GiSetParams {
     /// 9.7.2 切平面采样半径（体素倍数）。
     #[serde(default)]
     spatial_radius: Option<f32>,
+    /// 9.7.3 patch 级时域后滤波开关。
+    #[serde(default)]
+    temporal_filter: Option<bool>,
+    /// 9.7.3 时域平滑度 [0,1]。
+    #[serde(default)]
+    temporal_smoothing: Option<f32>,
     /// 最粗级立方外沿（米）。
     #[serde(default)]
     size: Option<f32>,
@@ -98,6 +104,8 @@ fn settings_json(s: &GiSettings) -> Value {
         "light_samples": s.light_samples,
         "spatial_filter": s.spatial_filter,
         "spatial_radius": s.spatial_radius,
+        "temporal_filter": s.temporal_filter,
+        "temporal_smoothing": s.temporal_smoothing,
         "config": {
             "voxel_min": s.config.voxel_min,
             "res": s.config.res,
@@ -153,6 +161,11 @@ pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRes
     }
     if p.spatial_radius.is_some_and(|v| !(0.0..=8.0).contains(&v)) {
         return Err(invalid_params("spatial_radius 越界（0..=8，体素倍数）"));
+    }
+    if p.temporal_smoothing
+        .is_some_and(|v| !(0.0..=1.0).contains(&v))
+    {
+        return Err(invalid_params("temporal_smoothing 越界（0..=1）"));
     }
     let current = *res::<GiSettings>(world)?;
     let config_change =
@@ -245,6 +258,12 @@ pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRes
     }
     if let Some(spatial_radius) = p.spatial_radius {
         settings.spatial_radius = spatial_radius;
+    }
+    if let Some(temporal_filter) = p.temporal_filter {
+        settings.temporal_filter = temporal_filter;
+    }
+    if let Some(temporal_smoothing) = p.temporal_smoothing {
+        settings.temporal_smoothing = temporal_smoothing;
     }
     let effective = *settings;
     Ok(settings_json(&effective))

@@ -66,6 +66,55 @@ pub fn pack_spatial_filter_push(
     push
 }
 
+/// 时域滤波 push 字节：enabled / capacity / frame_index / reserved / smoothing / 填充。
+pub const GI_TEMPORAL_FILTER_PUSH_SIZE: u32 = 24;
+
+/// 时域滤波 dispatch 的录制输入。
+#[derive(Clone, Copy)]
+pub struct GiTemporalFilterDraw {
+    pub pass: ComputeHandles,
+    /// 24B push（偏移见 [`pack_temporal_filter_push`]）。
+    pub push: [u8; GI_TEMPORAL_FILTER_PUSH_SIZE as usize],
+    /// dispatch 组数 = ceil(池容量 / 64)。
+    pub groups: u32,
+    /// 帧 UBO（与其它 compute 的集序一致）。
+    pub frame_set: DescSet,
+    /// GI 集（统计表 + `filtered` 两张表）。
+    pub gi_set: DescSet,
+}
+
+impl GiTemporalFilterDraw {
+    /// 录一次时域滤波 dispatch（set 序 = 帧 UBO / GI），后接 compute → compute 交接。
+    pub(crate) fn record(&self, device: &Device, cb: vk::CommandBuffer) {
+        self.pass.record(
+            device,
+            cb,
+            &[self.frame_set, self.gi_set],
+            &self.push,
+            self.groups,
+            Handoff::ComputeReadWrite,
+        );
+    }
+}
+
+/// 时域滤波 push：开关 / 池容量 / 帧号 / 平滑度。
+#[must_use]
+pub fn pack_temporal_filter_push(
+    enabled: bool,
+    capacity: u32,
+    frame_index: u32,
+    smoothing: f32,
+) -> [u8; GI_TEMPORAL_FILTER_PUSH_SIZE as usize] {
+    let mut push = [0u8; GI_TEMPORAL_FILTER_PUSH_SIZE as usize];
+    put_u32s(
+        &mut push,
+        0,
+        &[u32::from(enabled), capacity, frame_index, 0],
+    );
+    put_f32(&mut push, 16, smoothing);
+    push
+}
+
 /// 空间滤波 dispatch 组数 = ceil(池容量 / 64)（与淘汰同一档，线程 = 池槽位）。
 #[must_use]
 pub fn spatial_filter_groups(capacity: u32) -> u32 {
@@ -96,6 +145,21 @@ mod tests {
     fn disabled_push_is_zero_flag() {
         let push = pack_spatial_filter_push(false, 4, 3, 1024, 2.0);
         assert_eq!(u32::from_le_bytes([push[0], push[1], push[2], push[3]]), 0);
+    }
+
+    /// 时域 push 布局：三个 u32 + 保留字在前 16B、平滑度在 16B、填充 20B。
+    #[test]
+    fn temporal_filter_push_layout() {
+        let push = pack_temporal_filter_push(true, 65_536, 9, 0.75);
+        assert_eq!(push.len(), 24);
+        let words: Vec<u32> = push[0..16]
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(words, vec![1, 65_536, 9, 0]);
+        let smoothing = f32::from_le_bytes([push[16], push[17], push[18], push[19]]);
+        assert!((smoothing - 0.75).abs() < f32::EPSILON);
+        assert_eq!(&push[20..24], &[0, 0, 0, 0]);
     }
 
     /// 组数：65536 槽 → 1024 组；非整倍向上取整。

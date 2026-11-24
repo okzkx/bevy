@@ -115,8 +115,9 @@ pub use passes::gi::estimation::{
     GI_EMISSIVE_BUILD_PUSH_SIZE, GI_LIGHT_SAMPLING_PUSH_SIZE, RAYS_PER_SAMPLE_WORST,
 };
 pub use passes::gi::filtering::{
-    pack_spatial_filter_push, spatial_filter_groups, GiSpatialFilterDraw,
-    GI_SPATIAL_FILTER_PUSH_SIZE,
+    pack_spatial_filter_push, pack_temporal_filter_push, spatial_filter_groups,
+    GiSpatialFilterDraw, GiTemporalFilterDraw, GI_SPATIAL_FILTER_PUSH_SIZE,
+    GI_TEMPORAL_FILTER_PUSH_SIZE,
 };
 pub use passes::gi::view::{pack_view_push, GiViewDraw, GI_VIEW_PUSH_SIZE};
 pub use passes::gi::volume::{

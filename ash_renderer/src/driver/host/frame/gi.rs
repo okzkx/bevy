@@ -15,11 +15,12 @@ use crate::common::syntax::ResultTierExt;
 use crate::render::{
     alloc_grid, bounce_alloc_groups, emissive_build_groups, estimation_groups, eviction_groups,
     gi_cascade_offsets, light_sampling_groups, pack_alloc_push, pack_emissive_build_push,
-    pack_light_sampling_push, pack_spatial_filter_push, pack_view_push, plan_estimation_budget,
-    scrolling_groups, spatial_filter_groups, DescSet, GiAllocDraw, GiBounceAllocDraw,
-    GiEmissiveBuildDraw, GiEstimationDraw, GiFrameDraw, GiLightSampleDraw, GiPipelines, GiSettings,
-    GiSpatialFilterDraw, GiViewDraw, LightRecord, LightTable, SurfaceCacheTables,
-    SurfaceCacheUniformsData, EVICT_AGE, GI_BOUNCE_REQUEST_CAPACITY, MAX_CASCADES, UPDATE_MAX,
+    pack_light_sampling_push, pack_spatial_filter_push, pack_temporal_filter_push, pack_view_push,
+    plan_estimation_budget, scrolling_groups, spatial_filter_groups, DescSet, GiAllocDraw,
+    GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiFrameDraw, GiLightSampleDraw,
+    GiPipelines, GiSettings, GiSpatialFilterDraw, GiTemporalFilterDraw, GiViewDraw, LightRecord,
+    LightTable, SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE,
+    GI_BOUNCE_REQUEST_CAPACITY, MAX_CASCADES, UPDATE_MAX,
 };
 
 use super::scene::FrameView;
@@ -270,6 +271,20 @@ pub(super) fn prepare_gi(
         frame_set,
         gi_set,
     });
+    // 9.7.3 时域后滤波：跟空间滤波同生灭（没有 A 就没有可混合的输入）。关态同样录，
+    // push 里 enabled=0 → B = A 直拷。
+    let temporal_filter = spatial_filter.as_ref().map(|_| GiTemporalFilterDraw {
+        pass: pipelines.temporal_filter(),
+        push: pack_temporal_filter_push(
+            settings.temporal_filter,
+            config.capacity,
+            frame_index,
+            settings.temporal_smoothing,
+        ),
+        groups: spatial_filter_groups(config.capacity),
+        frame_set,
+        gi_set,
+    });
     let marker = settings.markers_enabled().then(|| pipelines.marker());
     let view_draw = (cover.is_some() || marker.is_some()).then(|| GiViewDraw {
         cover,
@@ -296,6 +311,7 @@ pub(super) fn prepare_gi(
         estimation,
         bounce_alloc,
         spatial_filter,
+        temporal_filter,
         gi_set,
         view: view_draw,
     }))
