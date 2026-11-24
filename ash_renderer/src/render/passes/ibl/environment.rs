@@ -153,14 +153,25 @@ pub(crate) static IBL_DFG_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
 /// 合成/透明前向读的 IBL 集（两条管线的 group 4）：b0 = 预滤波 cube（全 mip）、
 /// b1 = 采样器（cube 与 LUT 共用）、b2 = DFG LUT、b3 = SH 系数（9×vec4）、
 /// b4 = GlobalProbe 16 桶（16×4 vec4 = 1KB，§9.3）。
+///
+/// b3/b4 的可见阶段含 COMPUTE：9.5 播种（patch_alloc）把 SH/桶系数当种子基线读进
+/// 新 patch；b0..b2 仍只有片元，compute 端不声明它们。
 pub(crate) static IBL_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "ibl",
     &[
         BindingDesc::new(0, DescKind::SampledImage, FS),
         BindingDesc::new(1, DescKind::Sampler, FS),
         BindingDesc::new(2, DescKind::SampledImage, FS),
-        BindingDesc::new(3, DescKind::StorageBuffer, FS),
-        BindingDesc::new(4, DescKind::StorageBuffer, FS),
+        BindingDesc::new(
+            3,
+            DescKind::StorageBuffer,
+            crate::render::core::binding::set_layout::stages(&[FS, vk::ShaderStageFlags::COMPUTE]),
+        ),
+        BindingDesc::new(
+            4,
+            DescKind::StorageBuffer,
+            crate::render::core::binding::set_layout::stages(&[FS, vk::ShaderStageFlags::COMPUTE]),
+        ),
     ],
 );
 

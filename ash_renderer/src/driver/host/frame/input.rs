@@ -15,6 +15,7 @@ use crate::{
 use super::cluster::ClusterInput;
 use super::culling::{FrustumCullInput, OcclusionGate, OcclusionInput};
 use super::frame_logs::FrameLogs;
+use super::gi::{GiFrameLocal, GiInput};
 use super::indirect::IndirectInput;
 use super::lod::LodInput;
 use super::overlay::OverlayInput;
@@ -49,6 +50,9 @@ pub(crate) struct FrameInput<'w, 's> {
     /// 求交器（9.4）：光线求交资源族 + 总开关；设备不支持时 ray/targets/pipelines 全缺席。
     pub(super) ray_tracing: RayTracingInput<'w>,
     pub(super) ray_tracing_local: Local<'s, RayTracingFrameLocal>,
+    /// 表面缓存（9.5）：设置 + 常驻表 + 六条管线。
+    pub(super) gi: GiInput<'w>,
+    pub(super) gi_local: Local<'s, GiFrameLocal>,
 }
 
 /// 求交器取用束：资源只在 光线求交支持且初始化链插入时存在，其余情况按 None 跳过整段。

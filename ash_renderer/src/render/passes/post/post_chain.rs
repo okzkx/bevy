@@ -28,19 +28,18 @@ pub struct PostChainDraw {
 }
 
 impl PostChainDraw {
-    /// 录制 ⑦⑧ 后链：Bloom → tonemap → SMAA edge/blend → neighborhood。neighborhood
-    /// 开渲染不关——UI 在同一次渲染里接着画，`cmd_end_rendering` 由调用方负责。
+    /// 录制 ⑦⑧ 后链的前半：Bloom → tonemap → SMAA edge/blend，LDR 停在可采样。
+    /// 中间可插入别的 LDR 绘制（9.5 patch 调试视图），完成后调用
+    /// [`Self::record_neighborhood`] 收尾。两步拆开只改调用边界，命令序列与拆前逐条相同。
     ///
     /// # Safety
     /// 前提由 `record_frame_steps` 统一建立（本槽 fence 已等完，cb 记录中）。
-    pub fn record(
+    pub fn record_to_ldr(
         &self,
         device: &Device,
         cb: vk::CommandBuffer,
         frame_set: DescSet,
         gbuffer_sampled: DescSet,
-        swapchain_view: vk::ImageView,
-        extent: vk::Extent2D,
     ) {
         unsafe {
             if let Some(bloom) = &self.bloom {
@@ -79,9 +78,21 @@ impl PostChainDraw {
             if let Some(smaa) = &self.smaa_edge_blend {
                 smaa.record(device, cb);
             }
-
-            // neighborhood 合（终点）：LDR + blend → swapchain（SMAA 关闭时 shader 内直通）
-            self.smaa_nb.record(device, cb, swapchain_view, extent);
         }
+    }
+
+    /// 录制后半：neighborhood 合（终点）LDR + blend → swapchain（SMAA 关闭时 shader 内
+    /// 直通）。开渲染不关——UI 在同一次渲染里接着画，`cmd_end_rendering` 由调用方负责。
+    ///
+    /// # Safety
+    /// 同 [`Self::record_to_ldr`]；`swapchain_view` 须已处于 COLOR_ATTACHMENT_OPTIMAL。
+    pub fn record_neighborhood(
+        &self,
+        device: &Device,
+        cb: vk::CommandBuffer,
+        swapchain_view: vk::ImageView,
+        extent: vk::Extent2D,
+    ) {
+        self.smaa_nb.record(device, cb, swapchain_view, extent);
     }
 }

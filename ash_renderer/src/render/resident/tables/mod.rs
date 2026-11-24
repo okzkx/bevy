@@ -4,3 +4,4 @@ pub(crate) mod bindless_texture_table;
 pub(crate) mod frame_uniform_table;
 pub(crate) mod instance_table;
 pub(crate) mod light_table;
+pub(crate) mod surface_cache;

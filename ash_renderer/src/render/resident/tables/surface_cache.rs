@@ -1,0 +1,560 @@
+//! 表面缓存常驻表（9.5.2）：cell 双表 + patch 四表 + ring 配置 + 计数 + 每帧 GI UBO，
+//! 描述符集 `gi`（全 COMPUTE|FRAGMENT，视图在片元端读同一批表）。
+//!
+//! 生命周期：进程级（首次开 GI 后常驻；容量/分辨率变更才重建，重建前 device_wait_idle）。
+//! 建表时一次性写满全 buffer（cell 表 INVALID、marks 全 0、patch 表全 0、ring/计数全 0），
+//! 之后只由 GPU 读写——不能用 GPU 清零 dispatch 代替（零 size dispatch 与未初始化读都踩 VUID）。
+//!
+//! 内存口径（起步档 Res 32 / 4 级 / 池 65536）：
+//! - cell 双表：2,097,152 × 4B × 2 = 16 MiB
+//! - patch 表：几何 2 MiB + 辐照度两份 8 MiB + 统计 3 MiB + 反向指针 256 KiB
+//! - ring 48B + 计数 64B × 2 槽 + GI UBO 256B × 2 槽
+//!
+//! 与计划 §0.2 的差异（施工记录里钉明）：PatchStatistics 是 48B 而不是 32B——两份 vec4
+//! 之后还有 4 个 u32（state/request/update_count/heartbeat），32B 只够放两个；
+//! 总表因此从 ≈28.5 MiB 变为 ≈30.5 MiB。
+
+use std::time::Instant;
+
+use ash::{vk, Device};
+use bevy::log::info;
+use bevy::math::{IVec3, Mat4, Vec3};
+
+use crate::common::bytes::{put_f32, put_mat4, put_u32, put_vec4};
+use crate::common::error::{Result, VulkanError};
+
+use crate::render::core::binding::descriptor_writer::DescriptorWriter;
+use crate::render::core::binding::set_layout::{
+    stages, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc,
+};
+use crate::render::core::device::memory::buffer::GpuBuffer;
+use crate::render::core::device::memory::role::BufferRole;
+use crate::render::passes::gi::volume::{SurfaceCacheConfig, MAX_CASCADES};
+use crate::render::Context;
+use crate::render::MAX_FRAMES_IN_FLIGHT;
+
+/// GI 集的可见阶段：compute（回收/播种写）+ 片元（覆盖图读）+ 顶点（方片按实例号读
+/// 几何/统计）。一份布局一份集，扩阶段只放宽不改语义。
+const GI_STAGES: vk::ShaderStageFlags = stages(&[
+    vk::ShaderStageFlags::COMPUTE,
+    vk::ShaderStageFlags::FRAGMENT,
+    vk::ShaderStageFlags::VERTEX,
+]);
+
+/// GI 描述符集：b0 cell→patch / b1 cell 分配标记 / b2 几何 / b3 辐照度 0 / b4 辐照度 1 /
+/// b5 统计 / b6 patch→cell / b7 ring 配置 / b8 计数 / b9 GI UBO。
+pub(crate) static GI_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
+    "gi",
+    &[
+        BindingDesc::new(0, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(1, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(2, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(3, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(4, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(5, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(6, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(7, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(8, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(9, DescKind::UniformBuffer, GI_STAGES),
+    ],
+);
+
+/// 每帧 GI UBO 字节数（字段偏移见 [`SurfaceCacheUniformsLayout`] 的静态断言）。
+pub const GI_UBO_SIZE: u64 = 256;
+/// patch 几何记录：位置 vec4 + 法线 vec4。
+pub const PATCH_GEOMETRY_SIZE: u64 = 32;
+/// patch 辐照度记录：l0 / l1x / l1y / l1z 各一个 vec4。
+pub const PATCH_IRRADIANCE_SIZE: u64 = 64;
+/// patch 统计记录：mean + variance + 4 个 u32。
+pub const PATCH_STATISTICS_SIZE: u64 = 48;
+/// ring 配置的字数（flip / active / watermark / pad + 两份 4 字段配置）。
+pub const RING_CONFIG_WORDS: usize = 12;
+pub const RING_CONFIG_SIZE: u64 = RING_CONFIG_WORDS as u64 * 4;
+/// 每帧计数器字数与字节数。
+pub const GI_COUNTER_WORDS: usize = 16;
+pub const GI_COUNTERS_SIZE: u64 = GI_COUNTER_WORDS as u64 * 4;
+
+/// ring 配置字索引。
+pub const RING_FLIP: usize = 0;
+pub const RING_ACTIVE: usize = 1;
+pub const RING_WATERMARK: usize = 2;
+/// 两份 RingConfig 的起始字（每份 start / count / scan / pad）。
+pub const RING_CONFIGS: usize = 4;
+
+/// 每帧计数器索引（宿主每帧清本槽，GPU 累加，`gi_stats` 读）。
+pub const COUNTER_ALLOC: usize = 0;
+pub const COUNTER_FAILED: usize = 1;
+pub const COUNTER_FREED: usize = 2;
+pub const COUNTER_DEFRAG_MOVED: usize = 3;
+/// 覆盖视图（形态 A）本帧统计：空洞像素数 / 位置偏离超阈值像素数 / 有 patch 像素数。
+pub const COUNTER_VIEW_HOLES: usize = 4;
+pub const COUNTER_VIEW_DEVIATION: usize = 5;
+pub const COUNTER_VIEW_COVERED: usize = 6;
+
+/// 每帧 GI UBO 的宿主侧数据（`draw_frame` 组装，[`pack_surface_cache_uniforms`] 打包）。
+pub struct SurfaceCacheUniformsData {
+    /// 上一帧 view_proj（9.6 的种子重投影用；本段只写不用）。
+    pub prev_view_proj: Mat4,
+    /// Volume 焦点（主相机世界位置）。
+    pub target_pos: Vec3,
+    pub voxel_min: f32,
+    pub res: u32,
+    pub cascades: u32,
+    pub capacity: u32,
+    /// 各级整数体素偏移（超出级联数的项保持 0）。
+    pub cascade_offsets: [IVec3; MAX_CASCADES],
+    /// 本帧整理的波数。
+    pub defrag_waves: u32,
+    /// 法线来源：0 平面 / 1 着色。
+    pub normal_source: u32,
+    /// 播种开关（0 = 只回收不播种，BRP A/B 用）。
+    pub seed_enabled: u32,
+    pub frame_index: u32,
+    /// 淘汰年龄门限（帧）。
+    pub evict_age: u32,
+    pub bounce_enabled: u32,
+    pub update_max: u32,
+}
+
+/// [`SurfaceCacheUniformsData`] 的 WGSL uniform 布局镜像：静态断言钉偏移。
+#[repr(C)]
+struct SurfaceCacheUniformsLayout {
+    prev_view_proj: [f32; 16],
+    target_pos: [f32; 4],
+    volume: [f32; 4],
+    cascade_offsets: [[i32; 4]; MAX_CASCADES],
+    ring: [u32; 4],
+    frame: [u32; 4],
+}
+
+const _: () = {
+    assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, prev_view_proj) == 0);
+    assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, target_pos) == 64);
+    assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, volume) == 80);
+    assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, cascade_offsets) == 96);
+    assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, ring) == 224);
+    assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, frame) == 240);
+    assert!(std::mem::size_of::<SurfaceCacheUniformsLayout>() == GI_UBO_SIZE as usize);
+};
+
+/// [`SurfaceCacheUniformsData`] → 256B uniform 字节。
+#[must_use]
+pub fn pack_surface_cache_uniforms(d: &SurfaceCacheUniformsData) -> [u8; GI_UBO_SIZE as usize] {
+    let mut out = [0u8; GI_UBO_SIZE as usize];
+    put_mat4(&mut out, 0, &d.prev_view_proj);
+    put_vec4(
+        &mut out,
+        64,
+        &[d.target_pos.x, d.target_pos.y, d.target_pos.z, 0.0],
+    );
+    put_vec4(
+        &mut out,
+        80,
+        &[
+            d.voxel_min,
+            d.res as f32,
+            d.cascades as f32,
+            d.capacity as f32,
+        ],
+    );
+    for (i, offset) in d.cascade_offsets.iter().enumerate() {
+        let base = 96 + i * 16;
+        put_u32(&mut out, base, offset.x as u32);
+        put_u32(&mut out, base + 4, offset.y as u32);
+        put_u32(&mut out, base + 8, offset.z as u32);
+    }
+    put_u32(&mut out, 224, d.defrag_waves);
+    put_u32(&mut out, 228, d.normal_source);
+    put_u32(&mut out, 232, d.seed_enabled);
+    put_f32(&mut out, 236, 0.0);
+    put_u32(&mut out, 240, d.frame_index);
+    put_u32(&mut out, 244, d.evict_age);
+    put_u32(&mut out, 248, d.bounce_enabled);
+    put_u32(&mut out, 252, d.update_max);
+    out
+}
+
+/// 默认种子 UBO（identity 矩阵、零体积参数）：首帧写入前被读到也是确定值。
+fn identity_uniforms() -> SurfaceCacheUniformsData {
+    SurfaceCacheUniformsData {
+        prev_view_proj: Mat4::IDENTITY,
+        target_pos: Vec3::ZERO,
+        voxel_min: 0.5,
+        res: 32,
+        cascades: 4,
+        capacity: 65_536,
+        cascade_offsets: [IVec3::ZERO; MAX_CASCADES],
+        defrag_waves: 2,
+        normal_source: 0,
+        seed_enabled: 1,
+        frame_index: 0,
+        evict_age: 240,
+        bounce_enabled: 0,
+        update_max: 32,
+    }
+}
+
+/// 显存读数（BRP 出账）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SurfaceCacheMemory {
+    pub cell_bytes: u64,
+    pub patch_bytes: u64,
+    pub misc_bytes: u64,
+}
+
+impl SurfaceCacheMemory {
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.cell_bytes + self.patch_bytes + self.misc_bytes
+    }
+}
+
+/// GI 集布局的持有者（进程级）：布局被管线 layout 引用，必须在管线整个生命周期内存活；
+/// 表重建（改 Volume 规格）只换 buffer 与描述符集，**不换布局**——否则已建管线的
+/// pipeline layout 会引用被销毁的 set layout（VUID-vkCmdBindPipeline-pipeline-parameter）。
+#[derive(bevy::prelude::Resource)]
+pub struct GiSetLayout {
+    device: Device,
+    layout: vk::DescriptorSetLayout,
+}
+
+impl GiSetLayout {
+    /// # Errors
+    /// 布局创建失败。
+    pub fn new(ctx: &Context) -> Result<Self> {
+        Ok(Self {
+            device: ctx.device.clone(),
+            layout: GI_SET_DESC.create(&ctx.device)?,
+        })
+    }
+
+    #[must_use]
+    pub fn raw(&self) -> vk::DescriptorSetLayout {
+        self.layout
+    }
+
+    /// 登记给管线组装。
+    #[must_use]
+    pub fn set_layout(&self) -> SetLayout {
+        SetLayout::new(&GI_SET_DESC, self.layout)
+    }
+}
+
+impl Drop for GiSetLayout {
+    fn drop(&mut self) {
+        // 不等 GPU：拆除序由 init 链保证（管线与表先拆）
+        unsafe { self.device.destroy_descriptor_set_layout(self.layout, None) };
+    }
+}
+
+/// 表面缓存常驻表与描述符集（进程级）。
+#[derive(bevy::prelude::Resource)]
+pub struct SurfaceCacheTables {
+    device: Device,
+    config: SurfaceCacheConfig,
+    layout: vk::DescriptorSetLayout,
+    pool: vk::DescriptorPool,
+    sets: Vec<vk::DescriptorSet>,
+    ubos: Vec<GpuBuffer>,
+    cell_patch: GpuBuffer,
+    cell_marks: GpuBuffer,
+    patch_geometry: GpuBuffer,
+    patch_irradiance0: GpuBuffer,
+    patch_irradiance1: GpuBuffer,
+    patch_statistics: GpuBuffer,
+    patch_cell: GpuBuffer,
+    ring: GpuBuffer,
+    counters: Vec<GpuBuffer>,
+    memory: SurfaceCacheMemory,
+}
+
+impl SurfaceCacheTables {
+    /// 按规格建全部表：一次写满初值（INVALID / 0），建 UBO 与两帧槽描述符集。
+    /// `layout` 由 [`GiSetLayout`] 持有（表重建不换布局）。
+    ///
+    /// # Errors
+    /// 规格非法、buffer/UBO/描述符集创建或初值写入失败。
+    pub fn new(
+        ctx: &Context,
+        config: SurfaceCacheConfig,
+        layout: vk::DescriptorSetLayout,
+    ) -> Result<Self> {
+        let problems = config.problems();
+        if !problems.is_empty() {
+            return Err(VulkanError::Init(format!(
+                "表面缓存规格非法：{}",
+                problems.join("；")
+            )));
+        }
+        let device = &ctx.device;
+        let contract = ctx.memory_contract();
+        let cell_bytes = config.cell_count() * 4;
+        let capacity = u64::from(config.capacity);
+        let patch_bytes = capacity
+            * (PATCH_GEOMETRY_SIZE + PATCH_IRRADIANCE_SIZE * 2 + PATCH_STATISTICS_SIZE + 4);
+
+        let started = Instant::now();
+        let mut cell_patch = GpuBuffer::create(device, contract, cell_bytes, BufferRole::Storage)?;
+        let mut cell_marks = GpuBuffer::create(device, contract, cell_bytes, BufferRole::Storage)?;
+        let mut patch_geometry = GpuBuffer::create(
+            device,
+            contract,
+            capacity * PATCH_GEOMETRY_SIZE,
+            BufferRole::Storage,
+        )?;
+        let mut patch_irradiance0 = GpuBuffer::create(
+            device,
+            contract,
+            capacity * PATCH_IRRADIANCE_SIZE,
+            BufferRole::Storage,
+        )?;
+        let mut patch_irradiance1 = GpuBuffer::create(
+            device,
+            contract,
+            capacity * PATCH_IRRADIANCE_SIZE,
+            BufferRole::Storage,
+        )?;
+        let mut patch_statistics = GpuBuffer::create(
+            device,
+            contract,
+            capacity * PATCH_STATISTICS_SIZE,
+            BufferRole::Storage,
+        )?;
+        let mut patch_cell =
+            GpuBuffer::create(device, contract, capacity * 4, BufferRole::Storage)?;
+        let mut ring = GpuBuffer::create(device, contract, RING_CONFIG_SIZE, BufferRole::Storage)?;
+
+        // 一次性写满：cell 双表 INVALID、marks / patch 表 / ring / 计数全 0
+        let invalid = vec![0xFFu8; cell_bytes as usize];
+        cell_patch.write(0, &invalid)?;
+        cell_marks.write(0, &vec![0u8; cell_bytes as usize])?;
+        patch_geometry.write(0, &vec![0u8; (capacity * PATCH_GEOMETRY_SIZE) as usize])?;
+        patch_irradiance0.write(0, &vec![0u8; (capacity * PATCH_IRRADIANCE_SIZE) as usize])?;
+        patch_irradiance1.write(0, &vec![0u8; (capacity * PATCH_IRRADIANCE_SIZE) as usize])?;
+        patch_statistics.write(0, &vec![0u8; (capacity * PATCH_STATISTICS_SIZE) as usize])?;
+        patch_cell.write(0, &vec![0xFFu8; (capacity * 4) as usize])?;
+        ring.write(0, &[0u8; RING_CONFIG_SIZE as usize])?;
+
+        let mut ubos = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let initial = pack_surface_cache_uniforms(&identity_uniforms());
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let mut ubo =
+                GpuBuffer::create(device, contract, GI_UBO_SIZE, BufferRole::FrameUniform)?;
+            ubo.write(0, &initial)?;
+            ubos.push(ubo);
+        }
+        let mut counters = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let mut buffer =
+                GpuBuffer::create(device, contract, GI_COUNTERS_SIZE, BufferRole::Storage)?;
+            buffer.write(0, &[0u8; GI_COUNTERS_SIZE as usize])?;
+            counters.push(buffer);
+        }
+        let init_millis = started.elapsed().as_secs_f32() * 1000.0;
+
+        let mut this = Self {
+            device: ctx.device.clone(),
+            config,
+            layout,
+            pool: vk::DescriptorPool::null(),
+            sets: Vec::new(),
+            ubos,
+            cell_patch,
+            cell_marks,
+            patch_geometry,
+            patch_irradiance0,
+            patch_irradiance1,
+            patch_statistics,
+            patch_cell,
+            ring,
+            counters,
+            memory: SurfaceCacheMemory {
+                cell_bytes: cell_bytes * 2,
+                patch_bytes,
+                misc_bytes: RING_CONFIG_SIZE
+                    + GI_COUNTERS_SIZE * MAX_FRAMES_IN_FLIGHT as u64
+                    + GI_UBO_SIZE * MAX_FRAMES_IN_FLIGHT as u64,
+            },
+        };
+        this.build_sets(ctx)?;
+        info!(
+            "表面缓存表就绪: cell 双表 {:.1} MiB ×2 + patch {:.1} MiB（池 {}）+ ring/计数（初值写 {:.1} ms）",
+            cell_bytes as f64 / (1024.0 * 1024.0),
+            patch_bytes as f64 / (1024.0 * 1024.0),
+            this.config.capacity,
+            init_millis,
+        );
+        Ok(this)
+    }
+
+    fn build_sets(&mut self, ctx: &Context) -> Result<()> {
+        let device = &ctx.device;
+        let slots = MAX_FRAMES_IN_FLIGHT as u32;
+        let pool_sizes = GI_SET_DESC.pool_sizes_vec(slots);
+        self.pool = unsafe {
+            device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .max_sets(slots)
+                        .pool_sizes(&pool_sizes),
+                    None,
+                )
+                .inspect_err(|_| device.destroy_descriptor_set_layout(self.layout, None))?
+        };
+        let layouts = vec![self.layout; MAX_FRAMES_IN_FLIGHT];
+        self.sets = match unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(self.pool)
+                    .set_layouts(&layouts),
+            )
+        } {
+            Ok(sets) => sets,
+            Err(e) => {
+                unsafe { device.destroy_descriptor_pool(self.pool, None) };
+                self.pool = vk::DescriptorPool::null();
+                return Err(e.into());
+            }
+        };
+        for (frame, set) in self.sets.iter().enumerate() {
+            let mut writer = DescriptorWriter::new(&GI_SET_DESC, *set);
+            writer
+                .buffer(0, self.cell_patch.buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(1, self.cell_marks.buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(2, self.patch_geometry.buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(3, self.patch_irradiance0.buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(4, self.patch_irradiance1.buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(5, self.patch_statistics.buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(6, self.patch_cell.buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(7, self.ring.buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(8, self.counters[frame].buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(9, self.ubos[frame].buffer(), 0, GI_UBO_SIZE);
+            writer.submit(device)?;
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn config(&self) -> SurfaceCacheConfig {
+        self.config
+    }
+
+    #[must_use]
+    pub fn memory(&self) -> SurfaceCacheMemory {
+        self.memory
+    }
+
+    /// 第 `frame` 帧槽的 GI 集。
+    #[must_use]
+    pub fn set(&self, frame: usize) -> DescSet {
+        DescSet::new(&GI_SET_DESC, self.sets[frame])
+    }
+
+    /// 写第 `frame` 帧槽 GI UBO（须在该帧槽 fence 之后）。
+    ///
+    /// # Errors
+    /// 写入失败。
+    pub fn write_uniforms(&mut self, frame: usize, data: &SurfaceCacheUniformsData) -> Result<()> {
+        let bytes = pack_surface_cache_uniforms(data);
+        self.ubos[frame].write(0, &bytes)
+    }
+
+    /// 宿主清本槽计数器（wait_for_slot 之后调，上一轮 GPU 已用完本槽）。
+    ///
+    /// # Errors
+    /// 写入失败。
+    pub fn clear_counters(&mut self, frame: usize) -> Result<()> {
+        self.counters[frame].write(0, &[0u8; GI_COUNTERS_SIZE as usize])
+    }
+
+    /// 第 `frame` 帧槽计数缓冲（BRP 读数）。
+    pub fn counters(&mut self, frame: usize) -> &mut GpuBuffer {
+        &mut self.counters[frame]
+    }
+
+    /// ring 配置（BRP 读数与单元测试）。
+    pub fn ring(&mut self) -> &mut GpuBuffer {
+        &mut self.ring
+    }
+
+    /// 第 `frame` 帧槽 GI UBO 句柄（BRP 对账）。
+    #[must_use]
+    pub fn ubo_handle(&self, frame: usize) -> vk::Buffer {
+        self.ubos[frame].buffer()
+    }
+
+    /// 第 `frame` 帧槽 GI UBO（BRP 读回解析体积参数与偏移）。
+    pub fn ubo(&mut self, frame: usize) -> &mut GpuBuffer {
+        &mut self.ubos[frame]
+    }
+
+    /// cell→patch 表（BRP census 读回）。
+    pub fn cell_patch(&mut self) -> &mut GpuBuffer {
+        &mut self.cell_patch
+    }
+
+    /// patch→cell 表。
+    pub fn patch_cell(&mut self) -> &mut GpuBuffer {
+        &mut self.patch_cell
+    }
+
+    /// patch 几何表。
+    pub fn patch_geometry(&mut self) -> &mut GpuBuffer {
+        &mut self.patch_geometry
+    }
+
+    /// patch 统计表。
+    pub fn patch_statistics(&mut self) -> &mut GpuBuffer {
+        &mut self.patch_statistics
+    }
+}
+
+impl Drop for SurfaceCacheTables {
+    fn drop(&mut self) {
+        // 不等 GPU：重建前调用方已 device_wait_idle，退出排空由 teardown 先行。
+        // 布局不归本结构（见 GiSetLayout），只拆 pool（连带释放集）。
+        unsafe {
+            if self.pool != vk::DescriptorPool::null() {
+                self.device.destroy_descriptor_pool(self.pool, None);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// UBO 打包偏移与字段值逐项对账（跨端布局的宿主侧锚点）。
+    #[test]
+    fn uniforms_pack_at_documented_offsets() {
+        let mut data = identity_uniforms();
+        data.cascade_offsets[0] = IVec3::new(-3, 4, 5);
+        data.cascade_offsets[3] = IVec3::new(7, -8, 9);
+        data.defrag_waves = 2;
+        data.normal_source = 1;
+        data.seed_enabled = 0;
+        data.frame_index = 123;
+        data.evict_age = 240;
+        data.bounce_enabled = 0;
+        data.update_max = 32;
+        let bytes = pack_surface_cache_uniforms(&data);
+        let word = |off: usize| u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        assert_eq!(word(64 + 0), 0.0f32.to_bits());
+        assert_eq!(word(96), (-3i32) as u32);
+        assert_eq!(word(96 + 4), 4);
+        assert_eq!(word(96 + 8), 5);
+        assert_eq!(word(96 + 3 * 16), 7);
+        assert_eq!(word(96 + 3 * 16 + 4), (-8i32) as u32);
+        assert_eq!(word(80), 0.5f32.to_bits());
+        assert_eq!(word(80 + 4), 32.0f32.to_bits());
+        assert_eq!(word(80 + 8), 4.0f32.to_bits());
+        assert_eq!(word(80 + 12), 65_536.0f32.to_bits());
+        assert_eq!(word(224), 2);
+        assert_eq!(word(228), 1);
+        assert_eq!(word(232), 0);
+        assert_eq!(word(240), 123);
+        assert_eq!(word(244), 240);
+        assert_eq!(word(252), 32);
+    }
+}
