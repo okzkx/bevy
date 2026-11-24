@@ -12,7 +12,7 @@
 
 | 任务 | 内容 | 记录 |
 |---|---|---|
-| 9.6.1 | 采样基座：`QrngKronecker2D`、均匀半球、low-bias hash（`gi_sampling.wgsl` + 自检） | 待写 |
+| 9.6.1 | 采样基座：`QrngKronecker2D`、均匀半球、low-bias hash（`gi_sampling.wgsl` + 自检） | [9.6.1-采样基座与最小估计打通](9.6.1-采样基座与最小估计打通.md) |
 | 9.6.2 | 直接光三路：CSM 低档 PCF、光源侧采样清单、自发光三角形列表与 CDF | 待写 |
 | 9.6.3 | 多跳与 bounce 分配（自查询读上一帧、rank 0 才分配、marks 仲裁复用） | 待写 |
 | 9.6.4 | L1 投影、余弦卷积与方差引导时域混合（GI UBO 扩字段） | 待写 |
@@ -26,8 +26,8 @@
 
 | # | 闸门 | 状态 | 证据 |
 |---|---|---|---|
-| 1 | 最小 estimation 打通（单 patch 一条半球射线、只取方向光、零 VUID） | ⬜ | — |
-| 2 | 阴影集 stage 扩 `COMPUTE` vs 另立 compute 变体（两案择一） | ⬜ | — |
+| 1 | 最小 estimation 打通（单 patch 一条半球射线、只取方向光、零 VUID） | ✅ | 3320 patch × 2 样本 = 6640 射线/帧、`update_count` 到 32、`mean` 与一份 `l0` 逐位相等、零 VUID、`gi_ms` 0.69～1.24，见 [9.6.1](9.6.1-采样基座与最小估计打通.md) |
+| 2 | 阴影集 stage 扩 `COMPUTE` vs 另立 compute 变体（两案择一） | ✅ | 取"扩阶段位"一案（b1..b4 扩 `COMPUTE`，两份屏障同步补阶段），见 [9.6.1](9.6.1-采样基座与最小估计打通.md) §裁决 3 |
 | 3 | 六集管线空 dispatch 零 VUID（`instance + gi_ray + gi + light_clusters + shadow + bindless`） | ⬜ | — |
 | 4 | ping-pong 奇偶（写 A / 视图读 A / 自查询读 B）连跑 120 帧无抖动 | ⬜ | — |
 | 5 | 空场景 / 无灯 / 无光追 / 无自发光材质：不 panic、不录 dispatch、`gi_stats` 回 0 形态 | ⬜ | — |
