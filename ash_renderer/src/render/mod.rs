@@ -108,7 +108,10 @@ pub use passes::gbuffer::gbuffer_targets::{
 pub use passes::gi::allocation::{
     alloc_grid, eviction_groups, pack_alloc_push, scrolling_groups, GiAllocDraw, GI_ALLOC_PUSH_SIZE,
 };
-pub use passes::gi::estimation::{estimation_groups, GiEstimationDraw};
+pub use passes::gi::estimation::{
+    estimation_groups, light_sampling_groups, pack_light_sampling_push, GiEstimationDraw,
+    GiLightSampleDraw, GI_LIGHT_SAMPLING_PUSH_SIZE,
+};
 pub use passes::gi::view::{pack_view_push, GiViewDraw, GI_VIEW_PUSH_SIZE};
 pub use passes::gi::volume::{
     cascade_offsets as gi_cascade_offsets, cell_bucket as gi_cell_bucket,
@@ -175,6 +178,7 @@ pub use resident::tables::surface_cache::{
     pack_surface_cache_uniforms, GiSetLayout, SurfaceCacheMemory, SurfaceCacheTables,
     SurfaceCacheUniformsData, COUNTER_ALLOC, COUNTER_DEFRAG_MOVED, COUNTER_EST_BOUNCE_REQUESTS,
     COUNTER_EST_HITS, COUNTER_EST_PATCHES, COUNTER_EST_RAYS, COUNTER_EST_SAMPLES, COUNTER_FAILED,
+    GI_LIGHT_CAPACITY, GI_LIGHT_SAMPLE_CAPACITY, GI_LIGHT_SAMPLE_SIZE,
     COUNTER_FREED, COUNTER_VIEW_COVERED, COUNTER_VIEW_DEVIATION, COUNTER_VIEW_HOLES,
     GI_COUNTERS_SIZE,
     GI_COUNTER_WORDS, GI_UBO_SIZE, PATCH_GEOMETRY_SIZE, PATCH_IRRADIANCE_SIZE,

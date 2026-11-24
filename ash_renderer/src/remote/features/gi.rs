@@ -18,7 +18,8 @@ use crate::render::{
     COUNTER_EST_BOUNCE_REQUESTS, COUNTER_EST_HITS, COUNTER_EST_PATCHES, COUNTER_EST_RAYS,
     COUNTER_EST_SAMPLES, COUNTER_FAILED, COUNTER_FREED, COUNTER_VIEW_COVERED,
     COUNTER_VIEW_DEVIATION, COUNTER_VIEW_HOLES, GI_COUNTER_WORDS, GI_UBO_SIZE, INVALID_PATCH,
-    PATCH_GEOMETRY_SIZE, PATCH_IRRADIANCE_SIZE, PATCH_STATISTICS_SIZE, RING_ACTIVE, RING_CONFIGS,
+    GI_LIGHT_SAMPLE_CAPACITY, GI_LIGHT_SAMPLE_SIZE, PATCH_GEOMETRY_SIZE, PATCH_IRRADIANCE_SIZE,
+    PATCH_STATISTICS_SIZE, RING_ACTIVE, RING_CONFIGS,
     RING_CONFIG_WORDS, RING_FLIP, RING_WATERMARK,
 };
 
@@ -262,6 +263,29 @@ pub(crate) fn gi_stats(In(_params): In<Option<Value>>, world: &mut World) -> Brp
         .map_or(Ok(None), |mut timer| timer.fetch_gi(slot))
         .map_err(internal_err("GPU 表面缓存段计时取回失败"))?
         .unwrap_or(0.0);
+    // 9.6.2 光源侧清单读数：GET 本帧条数与有效条数（估计关的帧两者都是 0）
+    let (light_count, light_sample_total, light_sample_valid) = {
+        let mut tables = res_mut::<SurfaceCacheTables>(world)?;
+        let ubo = read_buffer(tables.ubo(slot), GI_UBO_SIZE as usize, "GI UBO 读失败")?;
+        let light_count = u32_at(&ubo, 288)?;
+        let sample_total = u32_at(&ubo, 292)?;
+        let mut valid = 0u32;
+        if sample_total > 0 {
+            let bytes = read_buffer(
+                tables.light_samples(slot),
+                sample_total.min(GI_LIGHT_SAMPLE_CAPACITY) as usize * GI_LIGHT_SAMPLE_SIZE as usize,
+                "光源侧清单读失败",
+            )?;
+            for i in 0..sample_total.min(GI_LIGHT_SAMPLE_CAPACITY) as usize {
+                // 每条 64B：info 在 48..63，其中 info.y（1 有效 / 0 无效）在 52
+                let base = i * 64 + 52;
+                if u32_at(&bytes, base)? == 1 {
+                    valid += 1;
+                }
+            }
+        }
+        (light_count, sample_total, valid)
+    };
     let cell_count = config.cell_count().max(1);
     Ok(json!({
         "enabled": settings.enabled,
@@ -293,6 +317,12 @@ pub(crate) fn gi_stats(In(_params): In<Option<Value>>, world: &mut World) -> Brp
             "bounce_requests": counters[COUNTER_EST_BOUNCE_REQUESTS],
             "patches": counters[COUNTER_EST_PATCHES],
             "samples": counters[COUNTER_EST_SAMPLES],
+        },
+        // 9.6.2 光源侧采样清单：活灯数 / 本帧条数 / 命中有效的条数
+        "light_samples": {
+            "lights": light_count,
+            "count": light_sample_total,
+            "valid": light_sample_valid,
         },
         "patches": active,
         "cells": config.cell_count(),
@@ -524,25 +554,22 @@ pub(crate) fn gi_estimate_probe(In(params): In<Option<Value>>, world: &mut World
     let slot = res::<FramePool>(world)?.current_index();
     let config = res::<SurfaceCacheTables>(world)?.config();
     let patch = if let Some(ring_index) = p.ring {
-        let (flip, count) = {
+        let ring = {
             let mut tables = res_mut::<SurfaceCacheTables>(world)?;
-            let ring = words(&read_buffer(
+            words(&read_buffer(
                 tables.ring(),
                 RING_CONFIG_WORDS * 4,
                 "GI ring 配置读失败",
-            )?);
-            (ring[RING_FLIP] as usize, 0u32.max(ring[RING_CONFIGS + 1]))
+            )?)
         };
-        let _ = count;
-        let start = {
-            let mut tables = res_mut::<SurfaceCacheTables>(world)?;
-            let ring = words(&read_buffer(
-                tables.ring(),
-                RING_CONFIG_WORDS * 4,
-                "GI ring 配置读失败",
-            )?);
-            ring[RING_CONFIGS + flip * 4]
-        };
+        let flip = ring[RING_FLIP] as usize;
+        let count = ring[RING_CONFIGS + flip * 4 + 1];
+        if ring_index >= count {
+            return Err(invalid_params(format!(
+                "ring 下标越界（本帧 ring 里 {count} 条）"
+            )));
+        }
+        let start = ring[RING_CONFIGS + flip * 4];
         (start + ring_index) % config.capacity.max(1)
     } else {
         p.patch.unwrap_or(0)

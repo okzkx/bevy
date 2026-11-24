@@ -25,6 +25,8 @@ enable wgpu_binding_array;
 // #import frame
 // #import gi_cell
 // #import gi_sampling
+// #import gi_light_sample
+// #import cluster
 // #import instance
 // #import raytracing
 // #import sky
@@ -39,6 +41,8 @@ enable wgpu_binding_array;
 @group(1) @binding(6) var<storage, read> patch_cell: array<u32>;
 @group(1) @binding(8) var<storage, read_write> counters: array<atomic<u32>, 16>;
 @group(1) @binding(9) var<uniform> gi: GiUniforms;
+@group(1) @binding(10) var<storage, read> gi_lights: array<LightRecord>;
+@group(1) @binding(11) var<storage, read> light_samples: array<LightSample>;
 @group(2) @binding(0) var<storage, read> objects: array<ObjectRecord>;
 @group(2) @binding(2) var<storage, read> materials: array<MaterialRecord>;
 @group(3) @binding(0) var scene_tlas: acceleration_structure;
@@ -99,6 +103,59 @@ fn hit_radiance(hit: SceneHit, light_dir: vec3f) -> vec3f {
     let visibility = shadow_visibility_low(world_pos, world_normal, l);
     // light_color.rgb 已含强度（见 frame.wgsl 的字段注释），这里只差 BRDF 的 1/π
     return albedo * (1.0 / PI) * frame.light_color.rgb * no_l * visibility;
+}
+
+// 光源侧清单的重连接取样（照 Unity `SamplePunctualLightBounceRadiance`）：
+// 清单里的一条采样给了"灯照亮了某个隐面点"，这里从 patch 往那个点补一条重连接射线验证
+// 遮挡，再用面积↔立体角的 Jacobian 把"隐面点被照亮的辐亮度"换算成 patch 方向上的辐射亮度。
+// 归一化：`hit_normal.w` 里存着 1/pdf（= 4π × 灯数），这里不再乘任何采样数——
+// 调用方最后统一除样本条数。
+fn punctual_bounce_radiance(sample_index: u32, position: vec3f, normal: vec3f, origin: vec3f) -> vec3f {
+    let record = light_samples[sample_index];
+    if (record.info.y == 0u) {
+        return vec3f(0.0);
+    }
+    let to_hit = record.hit_pos.xyz - position;
+    // 隐面点必须落在 patch 的前半球（Unity 的 planeDistance > epsilon）
+    let plane_distance = dot(normal, to_hit);
+    if (plane_distance <= 0.01) {
+        return vec3f(0.0);
+    }
+    let distance_squared = dot(to_hit, to_hit);
+    let reconnection_distance = sqrt(max(distance_squared, 1e-8));
+    let direction = to_hit / reconnection_distance;
+    // 重连接射线：打近一点（留 2cm 余量）只判遮挡，不要求命中同一三角形
+    let occluder = trace_scene(origin, direction, 0.0, reconnection_distance - 0.02, RAY_MASK);
+    if (occluder.hit) {
+        return vec3f(0.0);
+    }
+    let light = gi_lights[record.info.x];
+    if (light.pos_radius.w <= 0.0) {
+        return vec3f(0.0);
+    }
+    let light_to_hit = record.hit_pos.xyz - light.pos_radius.xyz;
+    let light_distance_squared = max(dot(light_to_hit, light_to_hit), 1e-6);
+    let light_direction = light_to_hit / sqrt(light_distance_squared);
+    // 隐面点被这盏灯照亮的辐亮度：cos_bounce · 距离衰减（含 1/d² 与作用半径的平滑窗）
+    let cos_bounce = max(dot(-light_direction, record.hit_normal.xyz), 0.0);
+    if (cos_bounce <= 0.0) {
+        return vec3f(0.0);
+    }
+    let falloff = 1.0 / max(light.pos_radius.w * light.pos_radius.w, 1e-8);
+    let window = getSquareFalloffAttenuation(light_distance_squared, falloff);
+    if (window <= 0.0) {
+        return vec3f(0.0);
+    }
+    let emitted = light.color_intensity.rgb * light.color_intensity.w * (window / light_distance_squared) * cos_bounce;
+    let reflected = record.albedo.rgb * (1.0 / PI) * emitted;
+    // 面积测度 → patch 方向立体角：cos_rec / d²，再乘 1/pdf
+    let cos_reconnection = max(dot(-direction, record.hit_normal.xyz), 0.0);
+    let contribution = reflected * (cos_reconnection / max(distance_squared, 1e-6)) * record.hit_normal.w;
+    // 有限性兜底：极近的重连接点会炸出 Inf/NaN，一个坏样本会把整条 patch 染黑
+    if (!(contribution.x == contribution.x) || !(contribution.y == contribution.y) || !(contribution.z == contribution.z)) {
+        return vec3f(0.0);
+    }
+    return contribution;
 }
 
 @compute @workgroup_size(64)
@@ -165,9 +222,31 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
         return;
     }
 
-    // 1/pdf·1/N（半球均匀）+ 余弦卷积折基常数 → 求值式辐照度
-    let estimate = gi_cosine_convolve_fold(
-        gi_rgbl1_scale(accumulator, GI_TWO_PI / f32(valid)));
+    // 第一路（迹线）：1/pdf · 1/N（半球均匀）
+    var total = gi_rgbl1_scale(accumulator, GI_TWO_PI / f32(valid));
+
+    // 第二路（光源侧清单）：每条样本自带 1/pdf（记录里），这里只除样本条数。
+    // 两路的归一化不同，必须在各自归一化之后再合流，否则点光那路会被 2π/valid 放大。
+    let light_sample_count = gi.estimation_l.y;
+    if (light_sample_count > 0u && gi.estimation_l.x > 0u) {
+        // 单独一条序列（Unity 也是重新 Init 同一个 seed/offset），避免与半球样本相关
+        var light_rng = gi_r2_init(low_bias_hash_32(patch_idx) ^ 0x517CC1B7u, sample_offset);
+        var punctual = gi_rgbl1_zero();
+        for (var i = 0u; i < sample_count; i = i + 1u) {
+            let u = gi_r2_sample2(light_rng, 0u);
+            gi_r2_next(&light_rng);
+            let pick = min(u32(u.x * f32(light_sample_count)), light_sample_count - 1u);
+            let radiance = punctual_bounce_radiance(pick, position, normal, origin);
+            if (all(radiance == vec3f(0.0))) {
+                continue;
+            }
+            gi_project_accumulate(&punctual, radiance, normalize(light_samples[pick].hit_pos.xyz - position));
+        }
+        gi_rgbl1_add_scaled(&total, punctual, 1.0 / f32(sample_count));
+    }
+
+    // 余弦卷积折基常数 → 求值式辐照度
+    let estimate = gi_cosine_convolve_fold(total);
 
     // 本帧写哪一份、上一帧的结果在哪一份（ping-pong，读另一份 = 读上一帧）
     let write_second = (gi.frame.x & 1u) == 1u;

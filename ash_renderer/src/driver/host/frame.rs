@@ -217,6 +217,7 @@ pub(crate) fn draw_frame(
         gpu.tables.descriptor_set(),
         gi_ray_set,
         indirect_count,
+        &cluster.lights,
     )?;
 
     // 四环写入：模型增量 + 材质全量 + 在场全量 + LOD 表增量，都落本帧槽的环

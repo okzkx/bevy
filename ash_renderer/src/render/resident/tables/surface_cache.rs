@@ -30,6 +30,7 @@ use crate::render::core::binding::set_layout::{
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::role::BufferRole;
 use crate::render::passes::gi::volume::{SurfaceCacheConfig, MAX_CASCADES};
+use crate::render::resident::tables::light_table::{LightRecord, LIGHT_RECORD_SIZE};
 use crate::render::Context;
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
@@ -42,7 +43,9 @@ const GI_STAGES: vk::ShaderStageFlags = stages(&[
 ]);
 
 /// GI 描述符集：b0 cell→patch / b1 cell 分配标记 / b2 几何 / b3 辐照度 0 / b4 辐照度 1 /
-/// b5 统计 / b6 patch→cell / b7 ring 配置 / b8 计数 / b9 GI UBO。
+/// b5 统计 / b6 patch→cell / b7 ring 配置 / b8 计数 / b9 GI UBO /
+/// b10 光源紧凑表（9.6.2 光源侧清单的灯记录，**不是** cluster 的那份环形槽表）/
+/// b11 光源侧采样清单（9.6.2）。
 pub(crate) static GI_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "gi",
     &[
@@ -56,14 +59,17 @@ pub(crate) static GI_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
         BindingDesc::new(7, DescKind::StorageBuffer, GI_STAGES),
         BindingDesc::new(8, DescKind::StorageBuffer, GI_STAGES),
         BindingDesc::new(9, DescKind::UniformBuffer, GI_STAGES),
+        BindingDesc::new(10, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(11, DescKind::StorageBuffer, GI_STAGES),
     ],
 );
 
 /// 每帧 GI UBO 字节数（字段偏移见 [`SurfaceCacheUniformsLayout`] 的静态断言）。
 ///
 /// 9.5 是 256B（`prev_view_proj 64 + target_pos 16 + volume 16 + 级联 128 + ring 16 +
-/// frame 16`）已排满；9.6 追加两个 vec4（估计参数 u32 组与 f32 组）→ 288B。
-pub const GI_UBO_SIZE: u64 = 288;
+/// frame 16`）已排满；9.6.1 追加两个 vec4（估计参数 u32 组与 f32 组）→ 288B；
+/// 9.6.2 再追加一个 vec4（光源紧凑表的灯数与清单条数）→ 304B。
+pub const GI_UBO_SIZE: u64 = 304;
 /// patch 几何记录：位置 vec4 + 法线 vec4。
 pub const PATCH_GEOMETRY_SIZE: u64 = 32;
 /// patch 辐照度记录：l0 / l1x / l1y / l1z 各一个 vec4。
@@ -74,6 +80,21 @@ pub const PATCH_STATISTICS_SIZE: u64 = 48;
 pub const RING_CONFIG_WORDS: usize = 12;
 pub const RING_CONFIG_SIZE: u64 = RING_CONFIG_WORDS as u64 * 4;
 /// 每帧计数器字数与字节数。
+/// 光源紧凑表容量：与 `light_table::LIGHT_TABLE_CAPACITY` 同值（9.6.2 的清单按它上限）。
+pub const GI_LIGHT_CAPACITY: u32 = 256;
+const _: () = assert!(
+    GI_LIGHT_CAPACITY == crate::render::resident::tables::light_table::LIGHT_TABLE_CAPACITY,
+    "光源紧凑表容量必须与 cluster 侧光源常驻表一致"
+);
+/// 光源侧采样清单上限（每帧条数上限；`gi_set` 的 `light_samples` 不得超过它）。
+pub const GI_LIGHT_SAMPLE_CAPACITY: u32 = 256;
+/// 一条光源侧采样记录的字节数：命中点位置 / 法线 / 反照率 / 杂项（距离、1/pdf、灯号、标记）。
+pub const GI_LIGHT_SAMPLE_SIZE: u64 = 64;
+const _: () = assert!(
+    GI_LIGHT_SAMPLE_SIZE == LIGHT_RECORD_SIZE,
+    "光源紧凑表沿用 LightRecord 的 64B 步长"
+);
+
 pub const GI_COUNTER_WORDS: usize = 16;
 pub const GI_COUNTERS_SIZE: u64 = GI_COUNTER_WORDS as u64 * 4;
 
@@ -139,6 +160,10 @@ pub struct SurfaceCacheUniformsData {
     pub short_hysteresis: f32,
     /// 9.6：自发光三角形强度倍数。
     pub emissive_intensity: f32,
+    /// 9.6.2：光源紧凑表里活灯的条数（estimation 的 `reciprocalDensity` 用它）。
+    pub light_count: u32,
+    /// 9.6.2：本帧光源侧采样清单的条数（0 = 不做重连接取样）。
+    pub light_sample_count: u32,
 }
 
 /// [`SurfaceCacheUniformsData`] 的 WGSL uniform 布局镜像：静态断言钉偏移。
@@ -152,6 +177,7 @@ struct SurfaceCacheUniformsLayout {
     frame: [u32; 4],
     estimation: [u32; 4],
     estimation_f: [f32; 4],
+    estimation_l: [u32; 4],
 }
 
 const _: () = {
@@ -163,6 +189,7 @@ const _: () = {
     assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, frame) == 240);
     assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, estimation) == 256);
     assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, estimation_f) == 272);
+    assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, estimation_l) == 288);
     assert!(std::mem::size_of::<SurfaceCacheUniformsLayout>() == GI_UBO_SIZE as usize);
 };
 
@@ -208,6 +235,10 @@ pub fn pack_surface_cache_uniforms(d: &SurfaceCacheUniformsData) -> [u8; GI_UBO_
     put_f32(&mut out, 276, d.emissive_intensity);
     put_f32(&mut out, 280, 0.0);
     put_f32(&mut out, 284, 0.0);
+    put_u32(&mut out, 288, d.light_count);
+    put_u32(&mut out, 292, d.light_sample_count);
+    put_u32(&mut out, 296, 0);
+    put_u32(&mut out, 300, 0);
     out
 }
 
@@ -234,6 +265,8 @@ fn identity_uniforms() -> SurfaceCacheUniformsData {
         light_samples: 128,
         short_hysteresis: 0.85,
         emissive_intensity: 1.0,
+        light_count: 0,
+        light_sample_count: 0,
     }
 }
 
@@ -308,6 +341,10 @@ pub struct SurfaceCacheTables {
     patch_cell: GpuBuffer,
     ring: GpuBuffer,
     counters: Vec<GpuBuffer>,
+    /// 9.6.2 光源紧凑表（每帧槽一份，宿主写活灯记录，`b10`）。
+    gi_lights: Vec<GpuBuffer>,
+    /// 9.6.2 光源侧采样清单（每帧槽一份，compute 写、estimation 读，`b11`）。
+    light_samples: Vec<GpuBuffer>,
     memory: SurfaceCacheMemory,
 }
 
@@ -393,6 +430,18 @@ impl SurfaceCacheTables {
             buffer.write(0, &[0u8; GI_COUNTERS_SIZE as usize])?;
             counters.push(buffer);
         }
+        // 9.6.2：光源紧凑表与光源侧采样清单（各 2 槽 × 256 条 × 64B = 16 KiB/槽）
+        let mut gi_lights = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut light_samples = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let light_bytes = u64::from(GI_LIGHT_CAPACITY) * GI_LIGHT_SAMPLE_SIZE;
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let mut buffer = GpuBuffer::create(device, contract, light_bytes, BufferRole::Storage)?;
+            buffer.write(0, &vec![0u8; light_bytes as usize])?;
+            gi_lights.push(buffer);
+            let mut buffer = GpuBuffer::create(device, contract, light_bytes, BufferRole::Storage)?;
+            buffer.write(0, &vec![0u8; light_bytes as usize])?;
+            light_samples.push(buffer);
+        }
         let init_millis = started.elapsed().as_secs_f32() * 1000.0;
 
         let mut this = Self {
@@ -411,12 +460,15 @@ impl SurfaceCacheTables {
             patch_cell,
             ring,
             counters,
+            gi_lights,
+            light_samples,
             memory: SurfaceCacheMemory {
                 cell_bytes: cell_bytes * 2,
                 patch_bytes,
                 misc_bytes: RING_CONFIG_SIZE
                     + GI_COUNTERS_SIZE * MAX_FRAMES_IN_FLIGHT as u64
-                    + GI_UBO_SIZE * MAX_FRAMES_IN_FLIGHT as u64,
+                    + GI_UBO_SIZE * MAX_FRAMES_IN_FLIGHT as u64
+                    + light_bytes * 2 * MAX_FRAMES_IN_FLIGHT as u64,
             },
         };
         this.build_sets(ctx)?;
@@ -471,7 +523,9 @@ impl SurfaceCacheTables {
                 .buffer(6, self.patch_cell.buffer(), 0, vk::WHOLE_SIZE)
                 .buffer(7, self.ring.buffer(), 0, vk::WHOLE_SIZE)
                 .buffer(8, self.counters[frame].buffer(), 0, vk::WHOLE_SIZE)
-                .buffer(9, self.ubos[frame].buffer(), 0, GI_UBO_SIZE);
+                .buffer(9, self.ubos[frame].buffer(), 0, GI_UBO_SIZE)
+                .buffer(10, self.gi_lights[frame].buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(11, self.light_samples[frame].buffer(), 0, vk::WHOLE_SIZE);
             writer.submit(device)?;
         }
         Ok(())
@@ -559,6 +613,36 @@ impl SurfaceCacheTables {
     /// 辐照度第 1 份（ping-pong 的 B）。
     pub fn patch_irradiance1(&mut self) -> &mut GpuBuffer {
         &mut self.patch_irradiance1
+    }
+
+    /// 9.6.2：第 `slot` 帧槽的光源紧凑表。
+    pub fn gi_lights(&mut self, slot: usize) -> &mut GpuBuffer {
+        &mut self.gi_lights[slot]
+    }
+
+    /// 9.6.2：把活灯记录按紧凑顺序写进本帧槽（多余槽位写 0 = 死灯）。
+    ///
+    /// # Errors
+    /// 灯数超过 [`GI_LIGHT_CAPACITY`] 或写入失败。
+    pub fn write_gi_lights(&mut self, slot: usize, lights: &[LightRecord]) -> Result<()> {
+        if lights.len() > GI_LIGHT_CAPACITY as usize {
+            return Err(VulkanError::Init(format!(
+                "光源紧凑表超出容量：{} > {}",
+                lights.len(),
+                GI_LIGHT_CAPACITY
+            )));
+        }
+        let mut bytes = vec![0u8; (u64::from(GI_LIGHT_CAPACITY) * GI_LIGHT_SAMPLE_SIZE) as usize];
+        for (i, record) in lights.iter().enumerate() {
+            let base = i * GI_LIGHT_SAMPLE_SIZE as usize;
+            bytes[base..base + LIGHT_RECORD_SIZE as usize].copy_from_slice(&record.pack());
+        }
+        self.gi_lights[slot].write(0, &bytes)
+    }
+
+    /// 9.6.2：第 `slot` 帧槽的光源侧采样清单（诊断读数用）。
+    pub fn light_samples(&mut self, slot: usize) -> &mut GpuBuffer {
+        &mut self.light_samples[slot]
     }
 }
 

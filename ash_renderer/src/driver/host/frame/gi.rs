@@ -13,9 +13,10 @@ use bevy::prelude::*;
 
 use crate::common::syntax::ResultTierExt;
 use crate::render::{
-    alloc_grid, estimation_groups, eviction_groups, gi_cascade_offsets, pack_alloc_push,
-    pack_view_push, scrolling_groups, DescSet, GiAllocDraw, GiEstimationDraw, GiFrameDraw,
-    GiPipelines, GiSettings, GiViewDraw, SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE,
+    alloc_grid, estimation_groups, eviction_groups, gi_cascade_offsets, light_sampling_groups,
+    pack_alloc_push, pack_light_sampling_push, pack_view_push, scrolling_groups, DescSet,
+    GiAllocDraw, GiEstimationDraw, GiFrameDraw, GiLightSampleDraw, GiPipelines, GiSettings,
+    GiViewDraw, LightRecord, LightTable, SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE,
     MAX_CASCADES, UPDATE_MAX,
 };
 
@@ -74,6 +75,7 @@ pub(super) fn prepare_gi(
     texture_set: DescSet,
     ray_set: Option<DescSet>,
     instance_count: u32,
+    lights: &LightTable,
 ) -> Result<Option<GiFrameDraw>, BevyError> {
     let settings = &*gi.settings;
     if !settings.enabled {
@@ -92,6 +94,26 @@ pub(super) fn prepare_gi(
     let offsets_changed =
         !local.was_enabled || offsets[..cascades] != local.prev_offsets[..cascades];
     let frame_index = local.frame_index;
+
+    // 9.6.2：把活灯按紧凑顺序写进本帧槽的光源表（清单与 estimation 都按 0..light_count 索引）。
+    // 每帧重写 16 KiB：比"变更检测 + 增量"简单，且环表的槽号是持久分配的、不能直接当紧凑下标。
+    let light_records: Vec<LightRecord> = lights
+        .active_slots()
+        .into_iter()
+        .filter_map(|slot| lights.record(slot))
+        .collect();
+    let light_count = light_records.len() as u32;
+    gi.tables
+        .write_gi_lights(slot, &light_records)
+        .or_fatal("光源紧凑表写入失败，渲染链无法继续")?;
+    // 清单条数：有灯才采；上限是清单容量（超过就按容量截断，不报错）
+    let light_sample_count = if light_count == 0 {
+        0
+    } else {
+        settings
+            .light_samples
+            .min(crate::render::GI_LIGHT_SAMPLE_CAPACITY)
+    };
 
     let data = SurfaceCacheUniformsData {
         prev_view_proj: local.prev_view_proj,
@@ -116,6 +138,8 @@ pub(super) fn prepare_gi(
         light_samples: settings.light_samples,
         short_hysteresis: settings.short_hysteresis,
         emissive_intensity: settings.emissive_intensity,
+        light_count,
+        light_sample_count,
     };
     gi.tables
         .write_uniforms(slot, &data)
@@ -143,6 +167,23 @@ pub(super) fn prepare_gi(
             ibl_set,
         }
     });
+    // 9.6.2 清单：估计开、有实例（要 TLAS）、有灯、光线求交开着才录
+    let light_sampling = if settings.estimation && instance_count > 0 && light_sample_count > 0 {
+        match (ray_set, pipelines.light_sampling()) {
+            (Some(ray_set), Some(pass)) => Some(GiLightSampleDraw {
+                pass,
+                push: pack_light_sampling_push(light_sample_count, light_count),
+                groups: light_sampling_groups(light_sample_count),
+                gi_set,
+                instance_set,
+                ray_set,
+                texture_set,
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let cover = settings.cover_enabled().then(|| pipelines.cover());
     // 9.6 estimation：估计开关 + 有实例（0 实例时 TLAS 从未构建，绝不能打射线）+
     // 光线求交开着（关闭时求交集不存在，管线也不建）。
@@ -184,6 +225,7 @@ pub(super) fn prepare_gi(
         defrag: pipelines.defrag(),
         defrag_waves: waves,
         alloc,
+        light_sampling,
         estimation,
         gi_set,
         view: view_draw,

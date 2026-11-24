@@ -53,7 +53,7 @@ struct PatchStatistics {
     heartbeat: u32,
 }
 
-// 每帧 GI 参数（宿主每帧整份写；288B，偏移见 surface_cache.rs 的静态断言表）。
+// 每帧 GI 参数（宿主每帧整份写；304B，偏移见 surface_cache.rs 的静态断言表）。
 struct GiUniforms {
     // 上一帧 view_proj（9.6 的种子重投影用；9.5 只写入不使用）。
     prev_view_proj: mat4x4f,
@@ -71,6 +71,8 @@ struct GiUniforms {
     estimation: vec4u,
     // 9.6 估计参数（f32 组）：x = 短时滞后；y = 自发光强度倍数；zw 保留。
     estimation_f: vec4f,
+    // 9.6.2 光源侧清单：x = 光源紧凑表活灯数；y = 本帧清单条数；zw 保留。
+    estimation_l: vec4u,
 }
 
 // ---- 整数与体素算术 ----

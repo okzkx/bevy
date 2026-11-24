@@ -10,6 +10,7 @@
 
 use ash::{vk, Device};
 
+use crate::common::bytes::put_u32s;
 use crate::render::core::binding::set_layout::DescSet;
 use crate::render::core::record::compute::{ComputeHandles, Handoff};
 
@@ -54,6 +55,55 @@ impl GiEstimationDraw {
     }
 }
 
+/// 光源侧采样清单的 push 字节：清单条数 + 活灯数。
+pub const GI_LIGHT_SAMPLING_PUSH_SIZE: u32 = 8;
+
+/// 光源侧采样清单的录制输入（`prepare_gi` 组装，先于 estimation 录）。
+#[derive(Clone, Copy)]
+pub struct GiLightSampleDraw {
+    pub pass: ComputeHandles,
+    /// 8B push（清单条数 / 活灯数，偏移见 [`pack_light_sampling_push`]）。
+    pub push: [u8; GI_LIGHT_SAMPLING_PUSH_SIZE as usize],
+    /// dispatch 组数 = ceil(清单条数 / 64)。
+    pub groups: u32,
+    /// GI 集（b9 UBO 帧号 / b10 光源紧凑表 / b11 本清单）。
+    pub gi_set: DescSet,
+    /// 实例表（命中重建）。
+    pub instance_set: DescSet,
+    /// 光线求交集。
+    pub ray_set: DescSet,
+    /// bindless 贴图（命中点反照率）。
+    pub texture_set: DescSet,
+}
+
+impl GiLightSampleDraw {
+    /// 录一次清单 dispatch（set 序 = GI / 实例 / 光线求交 / bindless）。
+    pub(crate) fn record(&self, device: &Device, cb: vk::CommandBuffer) {
+        self.pass.record(
+            device,
+            cb,
+            &[self.gi_set, self.instance_set, self.ray_set, self.texture_set],
+            &self.push,
+            self.groups,
+            Handoff::ComputeReadWrite,
+        );
+    }
+}
+
+/// 清单 push：条数 + 活灯数。
+#[must_use]
+pub fn pack_light_sampling_push(sample_count: u32, light_count: u32) -> [u8; GI_LIGHT_SAMPLING_PUSH_SIZE as usize] {
+    let mut push = [0u8; GI_LIGHT_SAMPLING_PUSH_SIZE as usize];
+    put_u32s(&mut push, 0, &[sample_count, light_count]);
+    push
+}
+
+/// 清单 dispatch 组数 = ceil(条数 / 64)。
+#[must_use]
+pub fn light_sampling_groups(sample_count: u32) -> u32 {
+    u64::from(sample_count).div_ceil(64) as u32
+}
+
 /// dispatch 组数 = ceil(池容量 / 64)（每线程一条 patch，非活跃线程直接返回）。
 #[must_use]
 pub fn estimation_groups(capacity: u32) -> u32 {
@@ -69,5 +119,14 @@ mod tests {
         assert_eq!(estimation_groups(64), 1);
         assert_eq!(estimation_groups(65), 2);
         assert_eq!(estimation_groups(65_536), 1024);
+        assert_eq!(light_sampling_groups(128), 2);
+        assert_eq!(light_sampling_groups(1), 1);
+    }
+
+    #[test]
+    fn light_sampling_push_layout() {
+        let push = pack_light_sampling_push(128, 3);
+        assert_eq!(u32::from_le_bytes([push[0], push[1], push[2], push[3]]), 128);
+        assert_eq!(u32::from_le_bytes([push[4], push[5], push[6], push[7]]), 3);
     }
 }

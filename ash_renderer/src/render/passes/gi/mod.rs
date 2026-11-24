@@ -36,7 +36,7 @@ use crate::render::resident::tables::surface_cache::GI_SET_DESC;
 use crate::render::Context;
 
 pub use self::allocation::GiAllocDraw;
-pub use self::estimation::GiEstimationDraw;
+pub use self::estimation::{GiEstimationDraw, GiLightSampleDraw};
 pub use self::view::GiViewDraw;
 pub use self::volume::SurfaceCacheConfig;
 
@@ -195,6 +195,28 @@ pub(crate) static ESTIMATION_PIPELINE: PipelineDesc = PipelineDesc {
     depth_format: None,
 };
 
+/// 9.6.2 光源侧采样清单（set 序 = GI / 实例 / 光线求交 / bindless + 8B push）。
+///
+/// 与 estimation 同样只在光线求交支持的机器上建；它的交换屏障是 compute→compute，
+/// 下游 estimation 同段录制，屏障随 `ComputeReadWrite` 走。
+pub(crate) static LIGHT_SAMPLING_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_light_sampling",
+    shader: &shader_abi::LIGHT_SAMPLING,
+    entries: &[c"cs_main"],
+    sets: &[
+        &GI_SET_DESC,
+        &INSTANCE_SET_DESC,
+        &RAY_TRACING_SET_DESC,
+        &BINDLESS_TEXTURE_SET_DESC,
+    ],
+    push: Some(PushRange {
+        stages: COMPUTE,
+        size: estimation::GI_LIGHT_SAMPLING_PUSH_SIZE,
+    }),
+    color_formats: &[],
+    depth_format: None,
+};
+
 /// 覆盖图（形态 A）：全屏三角形，颜色附件 = LDR 目标；16B push（视图/法线来源/宽高）。
 pub(crate) static PATCH_VIEW_PIPELINE: PipelineDesc = PipelineDesc {
     label: "gi_patch_view",
@@ -245,6 +267,7 @@ pub struct GiPipelines {
     defrag: ComputePipeline,
     alloc: ComputePipeline,
     estimation: Option<ComputePipeline>,
+    light_sampling: Option<ComputePipeline>,
     cover: FullscreenPipeline,
     marker: FullscreenPipeline,
 }
@@ -259,12 +282,16 @@ impl GiPipelines {
         let estimation = ray_tracing
             .then(|| ComputePipeline::new(ctx, &ESTIMATION_PIPELINE, layouts))
             .transpose()?;
+        let light_sampling = ray_tracing
+            .then(|| ComputePipeline::new(ctx, &LIGHT_SAMPLING_PIPELINE, layouts))
+            .transpose()?;
         Ok(Self {
             scrolling: ComputePipeline::new(ctx, &SCROLLING_PIPELINE, layouts)?,
             eviction: ComputePipeline::new(ctx, &EVICTION_PIPELINE, layouts)?,
             defrag: ComputePipeline::new(ctx, &DEFRAG_PIPELINE, layouts)?,
             alloc: ComputePipeline::new(ctx, &PATCH_ALLOC_PIPELINE, layouts)?,
             estimation,
+            light_sampling,
             cover: FullscreenPipeline::new(ctx, &PATCH_VIEW_PIPELINE, layouts)?,
             marker: FullscreenPipeline::new(ctx, &PATCH_MARKER_PIPELINE, layouts)?,
         })
@@ -296,6 +323,12 @@ impl GiPipelines {
         self.estimation.as_ref().map(ComputePipeline::handles)
     }
 
+    /// 9.6.2 光源侧采样清单的录制句柄（None = 本机不支持光线求交）。
+    #[must_use]
+    pub fn light_sampling(&self) -> Option<ComputeHandles> {
+        self.light_sampling.as_ref().map(ComputePipeline::handles)
+    }
+
     #[must_use]
     pub fn cover(&self) -> crate::render::core::record::graphics::PipelineRef {
         self.cover.rec()
@@ -321,6 +354,8 @@ pub struct GiFrameDraw {
     pub defrag_waves: u32,
     /// 屏幕播种（播种关 / 无相机的帧为 None）。
     pub alloc: Option<GiAllocDraw>,
+    /// 9.6.2 光源侧采样清单（估计关 / 无灯 / 无光线求交的帧为 None）。
+    pub light_sampling: Option<GiLightSampleDraw>,
     /// 9.6 estimation（估计关 / 无光线求交 / 无实例的帧为 None）。
     pub estimation: Option<GiEstimationDraw>,
     /// 本帧槽 GI 集（回收三件与播种共绑）。
@@ -362,6 +397,10 @@ impl GiFrameDraw {
         }
         if let Some(alloc) = &self.alloc {
             alloc.record(device, cb, self.gi_set);
+        }
+        // 9.6.2：清单先录（estimation 的重连接取样读它），两者都在播种之后
+        if let Some(light_sampling) = &self.light_sampling {
+            light_sampling.record(device, cb);
         }
         // 9.6：播种之后、段末屏障之前——estimation 读本帧刚刷新/分配的 patch 几何
         if let Some(estimation) = &self.estimation {
