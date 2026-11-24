@@ -380,6 +380,8 @@ pub(crate) static PATCH_VIEW_PIPELINE: PipelineDesc = PipelineDesc {
         &FRAME_UNIFORM_SET_DESC,
         &GBUFFER_SAMPLED_SET_DESC,
         &GI_SET_DESC,
+        // 9.7.7 视图 14/15 读 SCGI 全分辨率辐照度（与合成 pass 同一个采样集）
+        &screen_gather::SCGI_SAMPLE_SET_DESC,
     ],
     push: Some(PushRange {
         stages: crate::render::core::binding::set_layout::stages(&[

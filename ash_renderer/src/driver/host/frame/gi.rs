@@ -364,6 +364,8 @@ pub(super) fn prepare_gi(
         frame_set,
         gbuffer_set,
         gi_set,
+        // 9.7.7：视图 14/15 读 SCGI 全分辨率辐照度
+        scgi_set: gi.scgi.sample_set(),
         capacity: config.capacity,
         ldr_view: ldr.0,
         ldr_image: ldr.1,

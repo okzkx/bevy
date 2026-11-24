@@ -137,7 +137,7 @@ fn settings_json(s: &GiSettings) -> Value {
 #[system]
 pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: GiSetParams = parse_params_or_default(params)?;
-    if p.view.is_some_and(|v| v > 13) {
+    if p.view.is_some_and(|v| v > 15) {
         return Err(invalid_params(
             "view 越界（0 关 / 1 覆盖 / 2 级联 / 3 桶 / 4 rank / 5 心跳 / 6 池水位 / 7 位置偏离 /              8 cell 归属 / 9 样本档与稀释 / 10 辐照度 / 11 方差 / 12 更新次数 / 13 rank 分布）",
         ));

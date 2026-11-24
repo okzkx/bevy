@@ -15,6 +15,7 @@
 // 接口：set0 帧 UBO / set1 G-buffer（b1 normal、b3 depth）/ set2 GI 表 + UBO；
 // push（var<immediate>，16B）：视图号 + 法线来源 + 屏幕宽高。
 // #import frame
+// #import brdf
 // #import fullscreen
 // #import gi_cell
 // #import gi_sampling
@@ -27,6 +28,8 @@
 @group(2) @binding(4) var<storage, read> patch_irradiance1: array<PatchIrradiance>;
 @group(2) @binding(2) var<storage, read> patch_geometry: array<PatchGeometry>;
 @group(2) @binding(5) var<storage, read> patch_statistics: array<PatchStatistics>;
+// 9.7.7 视图 14/15：SCGI 全分辨率辐照度（rgb = E(n)，a = 覆盖率）。与合成 pass 同一个集。
+@group(3) @binding(0) var scgi_irradiance: texture_2d<f32>;
 @group(2) @binding(6) var<storage, read> patch_cell: array<u32>;
 @group(2) @binding(7) var<storage, read> ring: array<u32, 12>;
 @group(2) @binding(8) var<storage, read> counters: array<u32, 16>;
@@ -170,6 +173,17 @@ fn estimate_view_input(patch_index: u32) -> EstimateViewInput {
 fn fs_cover(in: VsOut) -> @location(0) vec4f {
     let pixel_xy = in.clip.xy;
     let pixel = vec2i(i32(pixel_xy.x), i32(pixel_xy.y));
+
+    // 视图 14：屏幕辐照度（乘 EXPOSURE 后直接显示，色阶按判定线②的实测定档）
+    // 视图 15：覆盖率 a（0 = 不接管 → 暗，1 = 完全接管 → 亮）
+    if (push.view == 14u || push.view == 15u) {
+        let irr = textureLoad(scgi_irradiance, pixel, 0);
+        if (push.view == 14u) {
+            // 0.25 的色阶系数：常量天空 L=1 时 E ≈ π，乘 EXPOSURE 后 0.25 仍在线性可读区间
+            return vec4f(irr.rgb * EXPOSURE * 0.25, 1.0);
+        }
+        return vec4f(vec3f(clamp(irr.a, 0.0, 1.0)), 1.0);
+    }
 
     // 视图 6：整屏只画顶部条 + 暗色 cell 归属底
     if (push.view == 6u) {
