@@ -46,6 +46,7 @@ BRP 读数/取证：`ibl_stats.probe16`（六方向 + 16 桶中心能量）、`i
 | `src/render/core/target/color.rs` | ColorTarget 加 `TRANSFER_SRC`（帧取证用） |
 | `src/render/passes/post/smaa.rs` | `readback_ldr`：LDR 后链目标拷贝回宿主 |
 | `src/remote/features/ibl.rs` | `ibl_set.diffuse_mode`、`ibl_stats.probe16`、`ibl_census.probe` |
+| `src/overlay/tool_window/ibl.rs`（新 35 行） | 工具窗口"环境光照 IBL"页：开关/强度/编码二选一（与 BRP 同一份设置） |
 | `src/remote/census/frame_dump.rs`（新 66 行） | `frame_dump` BRP：写 PPM（锁屏兜底取证） |
 
 ## 逐时刻走读

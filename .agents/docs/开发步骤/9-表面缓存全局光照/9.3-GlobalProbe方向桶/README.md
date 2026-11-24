@@ -18,6 +18,7 @@
 - `src/render/passes/ibl/environment.rs`：probe buffer（1KB，`BufferRole::DeviceStorage`）、投影管线与捕获侧 set、帧集 b4、初始化清零、烘焙链 dispatch 与屏障。
 - `src/remote/features/ibl.rs`：`ibl_set` 的 `diffuse_mode`，`ibl_stats` 的 `probe16` 摘要，`ibl_census` 的 `probe: true` 全量读回。
 - `src/render/frame/render_mode.rs`：`probe_buckets` 调试档（mode 11）。
+- `src/overlay/tool_window/ibl.rs`（新，2026-11-24 追加）：工具窗口"环境光照 IBL"页——开关/强度/漫反射编码二选一，与 BRP `ibl_set` 写同一份资源。
 - `src/remote/census/frame_dump.rs`（新）+ `src/render/passes/post/smaa.rs`：`frame_dump` 帧取证（LDR → PPM，锁屏环境兜底）。
 
 ## 任务面板
