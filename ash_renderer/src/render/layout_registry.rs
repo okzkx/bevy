@@ -8,7 +8,7 @@ use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayoutDesc;
 use crate::render::passes::gbuffer::gbuffer_pipeline::GBUFFER_WRITE_PIPELINE;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
-use crate::render::passes::gi::screen_gather::SCGI_TARGET_SET_DESC;
+use crate::render::passes::gi::screen_gather::{SCGI_SAMPLE_SET_DESC, SCGI_TARGET_SET_DESC};
 use crate::render::passes::gi::{
     BOUNCE_ALLOC_PIPELINE, DEFRAG_PIPELINE, DENOISE_PIPELINE, EMISSIVE_BUILD_PIPELINE,
     ESTIMATION_PIPELINE, EVICTION_PIPELINE, LIGHT_SAMPLING_PIPELINE, PATCH_ALLOC_PIPELINE,
@@ -137,6 +137,8 @@ pub(crate) const ALL_SETS: &[&SetLayoutDesc] = &[
     &IBL_SET_DESC,
     &RAY_TRACING_SET_DESC,
     &GI_SET_DESC,
-    // 9.7.4 1/4 屏幕目标（两张图各双缓冲的四个 storage image 绑定）
+    // 9.7.4 1/4 屏幕目标（两张图各双缓冲 + 全分辨率辐照度的五个 storage image 绑定）
     &SCGI_TARGET_SET_DESC,
+    // 9.7.6 合成 pass 的采样集（单张全分辨率辐照度）
+    &SCGI_SAMPLE_SET_DESC,
 ];

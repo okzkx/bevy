@@ -32,4 +32,6 @@ struct FrameUniforms {
     // 常量天空（9.2.0 自检开关）：xyz = 辐亮度；w = 1 开 / 0 关。
     // 开时 sky_radiance 直接返回 rgb（不受 sky_intensity 影响，自检锚点须精确）。
     sky_uniform: vec4f,
+    // 9.7.6 SCGI 注入：x = 开关（0 关 / 1 开）；y = 预留质量档；zw 保留。
+    scgi: vec4u,
 }

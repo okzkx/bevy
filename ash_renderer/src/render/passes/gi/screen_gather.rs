@@ -37,8 +37,10 @@ pub const SCGI_BUFFERS: usize = 2;
 pub const SCGI_L0_BYTES: u64 = 16;
 /// `scgi_l1` 每像素字节数（RGBA8）。
 pub const SCGI_L1_BYTES: u64 = 4;
-/// 目标图总数（两格式 × 双缓冲 + 全分辨率一张）＝ 需要首次布局迁移的图数。
+/// 目标图总数（两格式 × 双缓冲 + 全分辨率一张）：`ensure` 里一次性迁到 GENERAL 的那批。
 pub const SCGI_IMAGES: usize = SCGI_BUFFERS * 2 + 1;
+
+const _: () = assert!(SCGI_IMAGES == 5);
 
 /// 全分辨率辐照度目标格式：rgb = 按全分辨率法线求值的 E(n)，a = 覆盖率。
 pub const SCGI_IRRADIANCE_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
@@ -58,6 +60,19 @@ pub(crate) static SCGI_TARGET_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
         BindingDesc::new(3, DescKind::StorageImage, CS),
         BindingDesc::new(4, DescKind::StorageImage, CS),
     ],
+);
+
+/// 合成 pass 侧的单张采样集：b0 = `scgi_irradiance`（片元读，`textureLoad`）。
+///
+/// 与 [`SCGI_TARGET_SET_DESC`] 分开是必须的：那个集是 compute 阶段的 storage image，
+/// 片元阶段既不能写存储图、也不能混绑；合成只要"按像素取一张全分辨率辐照度"。
+pub(crate) static SCGI_SAMPLE_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
+    "scgi_sample",
+    &[BindingDesc::new(
+        0,
+        DescKind::SampledImage,
+        vk::ShaderStageFlags::FRAGMENT,
+    )],
 );
 
 /// 查表 push 字节：low_w / low_h / full_w / full_h / frame_index / normal_source / samples / 保留。
@@ -145,49 +160,11 @@ pub struct GiScreenGatherDraw {
     pub gbuffer_set: DescSet,
     /// 本段目标集（两张 1/4 图的 A/B 组）。
     pub target_set: DescSet,
-    /// 本帧需要 UNDEFINED→GENERAL 首次迁移的图（建成/重建后的第一帧，最多 [`SCGI_IMAGES`] 张）。
-    pub acquire: [vk::Image; SCGI_IMAGES],
-    /// `acquire` 里有效的前缀长度（0 = 全部已是 GENERAL）。
-    pub acquire_count: u32,
 }
 
 impl GiScreenGatherDraw {
     /// 录一次查表 dispatch（set 序 = 帧 UBO / GI / G-buffer / 目标）。
     pub(crate) fn record(&self, device: &Device, cb: vk::CommandBuffer) {
-        // 首次使用：每张目标 UNDEFINED → GENERAL（之后恒 GENERAL，不再迁移）
-        if self.acquire_count > 0 {
-            let range = vk::ImageSubresourceRange::default()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .level_count(1)
-                .layer_count(1);
-            let barriers: Vec<vk::ImageMemoryBarrier> = self.acquire[..self.acquire_count as usize]
-                .iter()
-                .map(|image| {
-                    vk::ImageMemoryBarrier::default()
-                        .old_layout(vk::ImageLayout::UNDEFINED)
-                        .new_layout(vk::ImageLayout::GENERAL)
-                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .image(*image)
-                        .subresource_range(range)
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(
-                            vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
-                        )
-                })
-                .collect();
-            unsafe {
-                device.cmd_pipeline_barrier(
-                    cb,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &barriers,
-                );
-            }
-        }
         self.pass.record(
             device,
             cb,
@@ -312,10 +289,13 @@ pub struct ScgiTargets {
     set_main: vk::DescriptorSet,
     /// 反方向集：b0/b1 = P1、b2/b3 = P0（去噪 P1→P0、上采样读 P1 用它）。
     set_reverse: vk::DescriptorSet,
+    /// 采样集布局（合成 pass 用，只建一次）。
+    sample_layout: vk::DescriptorSetLayout,
+    sample_pool: vk::DescriptorPool,
+    /// 合成 pass 读的那张：b0 = 全分辨率辐照度。
+    sample_set: vk::DescriptorSet,
     /// 目标是否已写过（首帧写之前内容未定义，读侧靠 a 判"无数据"）。
     initialized: AtomicBool,
-    /// 是否还欠一次 UNDEFINED→GENERAL 的首次迁移（建成/重建后为 true）。
-    pending_layout: AtomicBool,
 }
 
 impl ScgiTargets {
@@ -354,6 +334,37 @@ impl ScgiTargets {
                 return Err(e.into());
             }
         };
+        let sample_layout = SCGI_SAMPLE_SET_DESC.create(device)?;
+        let sample_pool_sizes = SCGI_SAMPLE_SET_DESC.pool_sizes_vec(1);
+        let sample_pool = unsafe {
+            device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .max_sets(1)
+                        .pool_sizes(&sample_pool_sizes),
+                    None,
+                )
+                .inspect_err(|_| device.destroy_descriptor_set_layout(sample_layout, None))?
+        };
+        let sample_layouts = [sample_layout];
+        let sample_set = match unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(sample_pool)
+                    .set_layouts(&sample_layouts),
+            )
+        } {
+            Ok(sets) => sets[0],
+            Err(e) => {
+                unsafe {
+                    device.destroy_descriptor_pool(sample_pool, None);
+                    device.destroy_descriptor_set_layout(sample_layout, None);
+                    device.destroy_descriptor_pool(pool, None);
+                    device.destroy_descriptor_set_layout(layout, None);
+                }
+                return Err(e.into());
+            }
+        };
         Ok(Self {
             device: device.clone(),
             layout,
@@ -374,8 +385,10 @@ impl ScgiTargets {
             irradiance_view: Vec::new(),
             set_main,
             set_reverse,
+            sample_layout,
+            sample_pool,
+            sample_set,
             initialized: AtomicBool::new(false),
-            pending_layout: AtomicBool::new(true),
         })
     }
 
@@ -438,9 +451,14 @@ impl ScgiTargets {
         self.irradiance = irradiance;
         self.l0_views = l0_views;
         self.l1_views = l1_views;
+        let mut sample_writer = DescriptorWriter::new(&SCGI_SAMPLE_SET_DESC, self.sample_set);
+        sample_writer.image(0, irradiance_view[0], vk::ImageLayout::GENERAL);
+        sample_writer.submit(device)?;
         self.irradiance_view = irradiance_view;
+        // 全部目标图一次性 UNDEFINED → GENERAL（之后恒 GENERAL）：迁移放在这里而不是每帧，
+        // 因为合成 pass 也会绑这张图，而 GI 关掉的帧不录 ④.5 段——那类帧同样需要合法布局。
+        self.transition_all(ctx)?;
         self.initialized.store(false, Ordering::Relaxed);
-        self.pending_layout.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -492,23 +510,84 @@ impl ScgiTargets {
         self.initialized.store(true, Ordering::Relaxed);
     }
 
-    /// 本帧要迁进 GENERAL 的图（建成/重建后的第一帧返回全部 [`SCGI_IMAGES`] 张，之后返回空）。
+    /// 采样集布局（登记进 `SetLayouts` 给合成管线对账）。
     #[must_use]
-    pub fn take_acquire(&self) -> ([vk::Image; SCGI_IMAGES], u32) {
-        let mut images = [vk::Image::null(); SCGI_IMAGES];
-        if !self.pending_layout.swap(false, Ordering::Relaxed) {
-            return (images, 0);
+    pub fn sample_layout(&self) -> SetLayout {
+        SetLayout::new(&SCGI_SAMPLE_SET_DESC, self.sample_layout)
+    }
+
+    /// 合成 pass 的采样集（b0 = 全分辨率辐照度）。
+    #[must_use]
+    pub fn sample_set(&self) -> DescSet {
+        DescSet::new(&SCGI_SAMPLE_SET_DESC, self.sample_set)
+    }
+
+    /// 把新建/重建出来的目标图一次性从 UNDEFINED 迁到 GENERAL（一次性提交 + 等空闲）。
+    ///
+    /// 放在 ensure 里而不是每帧录屏障：合成 pass 每帧都绑这张图，而 GI 关掉的帧不录 ④.5 段，
+    /// 那类帧也得有合法布局。resize 本来就让帧循环暂停重建，这里等空闲不进入每帧路径。
+    fn transition_all(&self, ctx: &Context) -> Result<()> {
+        let mut images: Vec<vk::Image> = self.l0.iter().map(|i| i.image).collect();
+        images.extend(self.l1.iter().map(|i| i.image));
+        images.extend(self.irradiance.iter().map(|i| i.image));
+        if images.is_empty() {
+            return Ok(());
         }
-        for (slot, image) in images.iter_mut().enumerate() {
-            *image = if slot < SCGI_BUFFERS {
-                self.l0[slot].image
-            } else if slot < SCGI_BUFFERS * 2 {
-                self.l1[slot - SCGI_BUFFERS].image
-            } else {
-                self.irradiance[0].image
-            };
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .level_count(1)
+            .layer_count(1);
+        let barriers: Vec<vk::ImageMemoryBarrier> = images
+            .iter()
+            .map(|image| {
+                vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(*image)
+                    .subresource_range(range)
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+            })
+            .collect();
+        let device = &ctx.device;
+        unsafe {
+            let pool = device.create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .queue_family_index(ctx.queue_family_index)
+                    .flags(vk::CommandPoolCreateFlags::TRANSIENT),
+                None,
+            )?;
+            let cbs = device.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )?;
+            let cb = cbs[0];
+            device.begin_command_buffer(
+                cb,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
+            device.cmd_pipeline_barrier(
+                cb,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &barriers,
+            );
+            device.end_command_buffer(cb)?;
+            let cbs_to_submit = [cb];
+            let submit = vk::SubmitInfo::default().command_buffers(&cbs_to_submit);
+            device.queue_submit(ctx.queue, &[submit], vk::Fence::null())?;
+            device.queue_wait_idle(ctx.queue)?;
+            device.destroy_command_pool(pool, None);
         }
-        (images, SCGI_IMAGES as u32)
+        Ok(())
     }
 
     fn drop_targets(&mut self) {
@@ -532,6 +611,9 @@ impl Drop for ScgiTargets {
         unsafe {
             self.device.destroy_descriptor_pool(self.pool, None);
             self.device.destroy_descriptor_set_layout(self.layout, None);
+            self.device.destroy_descriptor_pool(self.sample_pool, None);
+            self.device
+                .destroy_descriptor_set_layout(self.sample_layout, None);
         }
     }
 }

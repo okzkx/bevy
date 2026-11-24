@@ -49,6 +49,9 @@ enable wgpu_binding_array;
 @group(4) @binding(2) var dfg_lut: texture_2d<f32>;
 @group(4) @binding(3) var<storage, read> sh_coeffs: array<vec4f, 9>;
 @group(4) @binding(4) var<storage, read> probe_buckets: array<vec4f, 64>;
+// 9.7.6 SCGI：全分辨率辐照度（9.7.5 的上采样产物）。按像素 `textureLoad`，不走采样器——
+// 上采样已经做完，这里只要"这一像素的那一项"。`a` = 覆盖率（0 = 不接管，回 IBL 基线）。
+@group(5) @binding(0) var scgi_irradiance: texture_2d<f32>;
 
 const MODE_SHADING: u32 = 0u;   // 宿主侧名为 FRAME_MODE_LAMBERT
 const MODE_UNLIT: u32 = 1u;
@@ -214,8 +217,25 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
         let center = bucket_index_to_direction(direction_to_bucket_index(n, 4u), 4u);
         return vec4f(center * 0.5 + vec3f(0.5), 1.0);
     }
+    // 9.7.6 SCGI 注入：只换 IBL 的**漫反射**项，高光原样；`a == 0`（Volume 外 / 无命中 /
+    // SCGI 关）逐像素回 IBL 基线——`mix` 两边都已算好，不存在"把 IBL 一侧写成 0 再混"的整屏变暗。
+    // 乘 `ibl_intensity` 与 IBL 同域（计划 §5 的待决项，首次 A/B 后再定；见 9.7.6 施工记录）。
+    var scgi_diffuse = ibl.diffuse;
+    if (frame.scgi.x != 0u && frame.ibl_enabled != 0u) {
+        let irr = textureLoad(
+            scgi_irradiance,
+            vec2i(i32(in.clip.x), i32(in.clip.y)),
+            0,
+        );
+        let replacement = pixel.diffuseColor * Fd_Lambert() * irr.rgb * frame.ibl_intensity;
+        scgi_diffuse = mix(ibl.diffuse, replacement, clamp(irr.a, 0.0, 1.0));
+    }
     let ambient = albedo.rgb * frame.ambient_color.rgb;
-    let environment = select(ambient, ibl.diffuse + ibl.specular, frame.ibl_enabled != 0u);
+    let environment = select(
+        ambient,
+        scgi_diffuse + ibl.specular,
+        frame.ibl_enabled != 0u,
+    );
     // 自发光：不受光照/阴影/AO 影响，直接加进 HDR。Bevy StandardMaterial 默认
     // emissive_exposure_weight = 0，即自发光不随相机曝光缩放；本引擎的 EXPOSURE
     // 锚在 20000 lx 直射（0.00016），跟着乘会把 glTF 的 emissiveFactor=1 压到

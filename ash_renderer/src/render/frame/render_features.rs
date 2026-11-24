@@ -2,6 +2,7 @@
 //! 消费时序排列。场景资源与规格不在这里，见 [`SceneResources`](super::scene_resources::SceneResources)。
 
 use super::frame_pool::UploadWait;
+use crate::render::core::binding::set_layout::DescSet;
 use crate::render::passes::gi::GiFrameDraw;
 use crate::render::passes::ibl::IblFrameDraw;
 use crate::render::passes::lighting::cluster::ClusterFrameDraw;
@@ -47,6 +48,9 @@ pub struct RenderFeatures<'a> {
     /// 表面缓存（9.5）：④.5 段回收三件 + 屏幕播种，⑧ 段 patch 调试视图；GI 关为 None，
     /// 整段跳过（GI 关 = 与 9.3 逐位一致）。
     pub gi: Option<GiFrameDraw>,
+    /// 9.7.6 合成 pass 第 6 集：SCGI 全分辨率辐照度（`frame.scgi.x == 0` 时着色器不读它，
+    /// 但集恒绑——pipeline layout 恒定，"关 = 基线"才不用重建管线）。
+    pub scgi_set: DescSet,
     // —— ⑦⑧ 后链 + UI ——
     /// ⑦⑧ 后链束：Bloom → tonemap → SMAA → neighborhood（全部来自 `post`）。
     pub post: PostChainDraw,

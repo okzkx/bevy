@@ -162,7 +162,9 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     // 渲染用的附件完全一致，否则验证层报 VUID-08914 ----
     // 9.7.4 的 1/4 屏幕目标：它的描述符布局在这里建（与 GiSetLayout 同形，管线按它取用），
     // 目标图在首次 `ensure` 时按 swapchain 尺寸建
-    let scgi_targets = ScgiTargets::new(&ctx)?;
+    let mut scgi_targets = ScgiTargets::new(&ctx)?;
+    // 启动就按初始尺寸建一次：合成 pass 每帧都绑这张采样图（SCGI 关时也不读，但布局必须合法）
+    scgi_targets.ensure(&ctx, swapchain.extent)?;
     let layouts = {
         let mut list = vec![
             tables.set_layout(),
@@ -180,6 +182,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             ibl.set_layout(),
             gi_set_layout.set_layout(),
             scgi_targets.set_layout(),
+            scgi_targets.sample_layout(),
         ];
         // 光线求交集布局只在 光线求交支持时存在（光线求交关没有可登记的句柄）
         if let Some(targets) = &ray_tracing_targets {

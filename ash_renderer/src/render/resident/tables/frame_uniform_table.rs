@@ -8,7 +8,7 @@
 
 use ash::{vk, Device};
 
-use crate::common::bytes::{put_f32, put_mat4, put_u32, put_vec4};
+use crate::common::bytes::{put_f32, put_mat4, put_u32, put_u32s, put_vec4};
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
 use crate::render::core::binding::set_layout::{
@@ -36,7 +36,7 @@ pub(crate) static FRAME_UNIFORM_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
 
 /// 每帧 UBO 字节数（set1 b0；偏移见 `FrameUniformTableLayout` 静态断言）。range 在写描述符时
 /// 给出，改尺寸不影响 binding 形状与 pipeline layout。
-pub const FRAME_UBO_SIZE: u64 = 336;
+pub const FRAME_UBO_SIZE: u64 = 352;
 
 /// UBO `mode` 字段取值（语义见 `gbuffer_composite.wgsl`）；4 起只有合成 pass 使用，用来直出
 /// G-buffer 单通道调试。
@@ -103,6 +103,8 @@ pub struct FrameUniformsData {
     pub ibl_intensity: f32,
     /// 常量天空（9.2.0 自检开关）：xyz = 辐亮度；w = 1 开 / 0 关（开时忽略太阳与大气参数）。
     pub sky_uniform: [f32; 4],
+    /// 9.7.6 SCGI 注入开关与质量档：x = 开关（0 关 / 1 开）；y = 预留质量档；zw 保留。
+    pub scgi: [u32; 4],
 }
 
 /// [`FrameUniformsData`] 的 WGSL uniform 布局镜像：不参与运行时，只用 `offset_of!` 静态断言
@@ -130,6 +132,7 @@ struct FrameUniformTableLayout {
     ibl_intensity: f32,
     _pad2: u32,
     sky_uniform: [f32; 4],
+    scgi: [u32; 4],
 }
 
 const _: () = {
@@ -152,8 +155,9 @@ const _: () = {
     assert!(std::mem::offset_of!(FrameUniformTableLayout, ibl_mode) == 308);
     assert!(std::mem::offset_of!(FrameUniformTableLayout, ibl_intensity) == 312);
     assert!(std::mem::offset_of!(FrameUniformTableLayout, sky_uniform) == 320);
-    assert!(std::mem::size_of::<FrameUniformTableLayout>() == 336);
-    assert!(FRAME_UBO_SIZE == 336);
+    assert!(std::mem::offset_of!(FrameUniformTableLayout, scgi) == 336);
+    assert!(std::mem::size_of::<FrameUniformTableLayout>() == 352);
+    assert!(FRAME_UBO_SIZE == 352);
 };
 
 /// [`FrameUniformsData`] → 336B uniform 字节（偏移见 `FrameUniformTableLayout`）。
@@ -181,6 +185,7 @@ pub fn pack_frame_uniforms(d: &FrameUniformsData) -> [u8; FRAME_UBO_SIZE as usiz
     put_f32(&mut out, 312, d.ibl_intensity);
     // 316..320 对齐垫保持 0
     put_vec4(&mut out, 320, &d.sky_uniform);
+    put_u32s(&mut out, 336, &d.scgi);
     out
 }
 
@@ -207,6 +212,7 @@ fn identity_frame_uniforms() -> FrameUniformsData {
         ibl_mode: 0,
         ibl_intensity: 0.0,
         sky_uniform: [0.0; 4],
+        scgi: [0; 4],
     }
 }
 

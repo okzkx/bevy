@@ -100,6 +100,9 @@ pub struct GiSettings {
     pub denoise_passes: u32,
     /// 9.7.5 上采样是否退回纯双线性（A/B 对照；默认双边）。
     pub upsample_bilinear: bool,
+    /// 9.7.6 SCGI 注入开关：合成 pass 是否用 `scgi_irradiance` 替换 Volume 内不透明像素的
+    /// IBL 漫反射。与 `enabled`（生产者）正交；关 = 整条屏幕链不录、画面回 9.6 收官基线。
+    pub scgi: bool,
     /// Volume/池规格（只在关态改；改后重建表）。
     pub config: SurfaceCacheConfig,
 }
@@ -129,6 +132,7 @@ impl Default for GiSettings {
             lookup_samples: 3,
             denoise_passes: 1,
             upsample_bilinear: false,
+            scgi: false,
             config: SurfaceCacheConfig::default(),
         }
     }

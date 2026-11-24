@@ -167,6 +167,7 @@ pub(crate) fn draw_frame(
         render_mode,
         &scene.sky,
         &scene.ibl_settings,
+        gi.settings.scgi,
     )?;
     // 环境光照烘焙计划：脏帧才重烘（sky_hash 含大气参数/太阳/100 m 量化海拔），
     // ibl_enabled=false 时只可能带"布局初始化"一次。判定只在这里做，录制层照单执行。
@@ -370,6 +371,8 @@ pub(crate) fn draw_frame(
         gbuffer: &post.gbuffer.targets,
         composite: post.composite.rec(),
     };
+    // 9.7.6：合成 pass 第 6 集恒绑 SCGI 辐照度（SCGI 关时着色器不读它）
+    let scgi_set = gi.scgi.sample_set();
     let mut feature = RenderFeatures {
         // —— ① 帧首
         timer: timing.timer.enabled.then_some(&*timing.timer),
@@ -387,6 +390,7 @@ pub(crate) fn draw_frame(
             set: cluster.clusters.frame_set(slot),
         },
         transparent: transparent_frame,
+        scgi_set,
         ibl: IblFrameDraw {
             bake: Some(ibl_plan)
                 .filter(|plan| !plan.is_empty())

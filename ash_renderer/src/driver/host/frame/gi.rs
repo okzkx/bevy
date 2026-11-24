@@ -259,10 +259,11 @@ pub(super) fn prepare_gi(
     } else {
         None
     };
-    // 9.7.2 空间滤波：estimation 录了才录（没有本帧输出可滤）。开关关闭时**仍然录**，
-    // push 里 enabled=0 → shader 直拷，`filtered` 表因此永远是"本帧可消费的完整一份"，
-    // 9.7.3/9.7.4 不必再判断读哪张表。9.7.6 接上 `scgi` 后整条屏幕链改由它把关。
-    let spatial_filter = estimation.as_ref().map(|_| GiSpatialFilterDraw {
+    // 9.7.2 空间滤波：9.7.6 起整条屏幕链由 `scgi` 把关——`scgi = 0` 时这里一条都不录，
+    // 于是"关 = 基线且零新增命令"成立。`scgi = 1` 时即使空间滤波开关关掉也**仍然录**，
+    // push 里 enabled=0 → shader 直拷，`filtered` 表因此永远是"本帧可消费的完整一份"。
+    let screen_chain = estimation.is_some() && settings.scgi;
+    let spatial_filter = screen_chain.then(|| GiSpatialFilterDraw {
         pass: pipelines.spatial_filter(),
         push: pack_spatial_filter_push(
             settings.spatial_filter,
@@ -296,7 +297,6 @@ pub(super) fn prepare_gi(
         if low.width == 0 || low.height == 0 {
             return None;
         }
-        let (acquire, acquire_count) = gi.scgi.take_acquire();
         Some(GiScreenGatherDraw {
             pass: pipelines.screen_gather(),
             push: pack_screen_gather_push(
@@ -311,8 +311,6 @@ pub(super) fn prepare_gi(
             gi_set,
             gbuffer_set,
             target_set: gi.scgi.set(),
-            acquire,
-            acquire_count,
         })
     });
     if screen_gather.is_some() {

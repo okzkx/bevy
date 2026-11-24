@@ -77,6 +77,9 @@ struct GiSetParams {
     /// 9.7.5 上采样退回纯双线性（A/B）。
     #[serde(default)]
     upsample_bilinear: Option<bool>,
+    /// 9.7.6 SCGI 注入开关（关 = 整条屏幕链不录、合成回 IBL 基线）。
+    #[serde(default)]
+    scgi: Option<bool>,
     /// 9.7.3 patch 级时域后滤波开关。
     #[serde(default)]
     temporal_filter: Option<bool>,
@@ -116,6 +119,7 @@ fn settings_json(s: &GiSettings) -> Value {
         "lookup_samples": s.lookup_samples,
         "denoise_passes": s.denoise_passes,
         "upsample_bilinear": s.upsample_bilinear,
+        "scgi": s.scgi,
         "temporal_filter": s.temporal_filter,
         "temporal_smoothing": s.temporal_smoothing,
         "config": {
@@ -291,6 +295,9 @@ pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRes
     }
     if let Some(upsample_bilinear) = p.upsample_bilinear {
         settings.upsample_bilinear = upsample_bilinear;
+    }
+    if let Some(scgi) = p.scgi {
+        settings.scgi = scgi;
     }
     let effective = *settings;
     Ok(settings_json(&effective))

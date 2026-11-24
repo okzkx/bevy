@@ -154,6 +154,10 @@ impl GiPage<'_> {
                 .fixed_decimals(0),
         );
         ui.checkbox(&mut gi.upsample_bilinear, "上采样退回纯双线性（A/B）");
+        ui.checkbox(
+            &mut gi.scgi,
+            "SCGI 注入（关 = 回 IBL 基线，整条屏幕链不录）",
+        );
         ui.add(
             egui::Slider::new(&mut gi.temporal_smoothing, 0.0..=1.0)
                 .text("时域平滑度")
