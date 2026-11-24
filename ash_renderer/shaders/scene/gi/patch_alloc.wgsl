@@ -19,6 +19,7 @@
 // 同 cell 的不同样本像素之间，差值是同一体素内的采样抖动。
 // #import frame
 // #import gi_cell
+// #import gi_ring
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(1) @binding(1) var normal_tex: texture_2d<f32>;
@@ -79,26 +80,7 @@ fn seed_irradiance(n: vec3f) -> PatchIrradiance {
     return out;
 }
 
-// ring 追加一条：返回池内槽号（0xFFFFFFFF = 池满）。count 只增不减，洞由整理回收。
-fn ring_append(capacity: u32) -> u32 {
-    let flip = atomicLoad(&ring[0]);
-    let count_index = 4u + flip * 4u + 1u;
-    let start_index = 4u + flip * 4u;
-    var slot = INVALID_PATCH;
-    loop {
-        let count = atomicLoad(&ring[count_index]);
-        if (count >= capacity) {
-            break;
-        }
-        let result = atomicCompareExchangeWeak(&ring[count_index], count, count + 1u);
-        if (result.exchanged) {
-            let start = atomicLoad(&ring[start_index]);
-            slot = (start + count) % capacity;
-            break;
-        }
-    }
-    return slot;
-}
+// ring 追加在 common/gi_cell.wgsl 的 ring_append（9.6.3 起两个分配入口共用）。
 
 @compute @workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) gid: vec3u) {

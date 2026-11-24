@@ -48,9 +48,12 @@ const _: () = assert!(
 );
 const CS: vk::ShaderStageFlags = vk::ShaderStageFlags::COMPUTE;
 const FS: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
+/// 级联图的可见阶段：片元（合成）＋ compute（9.6 estimation 的低档 PCF）。
+const FS_CS: vk::ShaderStageFlags = stages(&[FS, CS]);
 
-/// shadow 集：b0 均匀数据（绘制/合成/剔除都读）/ b1..b4 各级阴影图（合成采样）/
-/// b5 剔除标记 / b6..b9 不透明命令环 / b10..b13 MASK 命令环（后两类只给 compute）。
+/// shadow 集：b0 均匀数据（绘制/合成/剔除都读）/ b1..b4 各级阴影图（合成与 9.6
+/// estimation 采样）/ b5 剔除标记 / b6..b9 不透明命令环 / b10..b13 MASK 命令环
+///（后两类只给 compute）。
 pub(crate) static SHADOW_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "shadow",
     &[
@@ -59,10 +62,10 @@ pub(crate) static SHADOW_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
             DescKind::UniformBuffer,
             stages(&[vk::ShaderStageFlags::VERTEX, FS, CS]),
         ),
-        BindingDesc::new(SHADOW_BINDING_MAP0, DescKind::SampledImage, FS),
-        BindingDesc::new(SHADOW_BINDING_MAP0 + 1, DescKind::SampledImage, FS),
-        BindingDesc::new(SHADOW_BINDING_MAP0 + 2, DescKind::SampledImage, FS),
-        BindingDesc::new(SHADOW_BINDING_MAP0 + 3, DescKind::SampledImage, FS),
+        BindingDesc::new(SHADOW_BINDING_MAP0, DescKind::SampledImage, FS_CS),
+        BindingDesc::new(SHADOW_BINDING_MAP0 + 1, DescKind::SampledImage, FS_CS),
+        BindingDesc::new(SHADOW_BINDING_MAP0 + 2, DescKind::SampledImage, FS_CS),
+        BindingDesc::new(SHADOW_BINDING_MAP0 + 3, DescKind::SampledImage, FS_CS),
         BindingDesc::new(SHADOW_BINDING_MARK0, DescKind::StorageBuffer, CS),
         BindingDesc::new(SHADOW_BINDING_CMD0, DescKind::StorageBuffer, CS),
         BindingDesc::new(SHADOW_BINDING_CMD0 + 1, DescKind::StorageBuffer, CS),

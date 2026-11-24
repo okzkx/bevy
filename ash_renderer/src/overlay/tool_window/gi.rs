@@ -1,10 +1,12 @@
-//! 表面缓存（9.5）页：总开关、调试视图与形态、法线来源、播种/整理参数，控件就地写
+//! 表面缓存（9.5/9.6）页：总开关、调试视图与形态、法线来源、播种/整理参数，9.6 起再补
+//! 估计开关与全部估计参数（样本档/预热/短滞后/多跳/预算/自发光强度/清单条数）。控件就地写
 //! [`GiSettings`]；`draw_frame` 每帧照资源写 GI UBO / 组装 ④.5 段，改参下一帧生效。
-//! BRP `gi_set` 写同一份，面板手动切与 AI 调参互不冲突。
+//! BRP `gi_set` 写同一份，面板手动切与 AI 调参互不冲突——**面板是默认入口**，BRP 是脚本通道。
 //!
-//! 勾上总开关时若还没选视图（view=0），自动切到覆盖图（view=1），否则开了也看不到
-//! 任何视觉变化——这是面板的便利默认；BRP 侧保持"view>0 才画"的原样语义。
-//! Volume/池规格（Size/Res/级联/容量）只能在关态改，面板不提供，走 BRP `gi_set`。
+//! 勾上总开关时若还没选视图（view=0），自动切到覆盖图（view=1）；勾上估计开关时若还没选视图，
+//! 自动切到辐照度视图（view=10）——否则开了也看不到任何视觉变化。这是面板的便利默认；
+//! BRP 侧保持"view>0 才画"的原样语义。Volume/池规格（Size/Res/级联/容量）只能在关态改，
+//! 面板不提供，走 BRP `gi_set`。
 
 use crate::render::GiSettings;
 
@@ -19,6 +21,11 @@ const VIEWS: &[(u32, &str)] = &[
     (6, "池水位与失败计数"),
     (7, "位置偏离（离面距离 / 体素）"),
     (8, "cell 归属"),
+    (9, "样本档与稀释（本帧谁在算）"),
+    (10, "辐照度 E(n)"),
+    (11, "方差（绿稳 / 红抖）"),
+    (12, "更新次数（收敛程度）"),
+    (13, "rank 分布（0 屏幕播种 / 1 bounce）"),
 ];
 
 /// 形态名（0 覆盖图 / 1 覆盖图+方片 / 2 只方片）。
@@ -33,11 +40,19 @@ impl GiPage<'_> {
     pub(in crate::overlay) fn show(self, ui: &mut egui::Ui) {
         let Self { gi } = self;
         let was_enabled = gi.enabled;
+        let was_estimating = gi.estimation;
         ui.checkbox(&mut gi.enabled, "表面缓存 GI（gi_enabled）");
         if gi.enabled && !was_enabled && gi.view == 0 {
             gi.view = 1;
         }
-        ui.monospace("BRP: ash_renderer/gi_set / gi_stats / gi_dump / gi_census");
+        ui.checkbox(&mut gi.estimation, "估计辐照度（gi_estimation）");
+        if gi.estimation && !was_estimating && gi.view == 0 {
+            // 开了估计却还在视图 0 = 什么也看不到；自动切到辐照度视图
+            gi.view = 10;
+        }
+        ui.monospace(
+            "BRP: ash_renderer/gi_set / gi_stats / gi_dump / gi_census / gi_estimate_probe",
+        );
         ui.small("关闭 = 不录任何 dispatch、不画视图，画面与 9.3 逐位一致。");
         ui.separator();
 
@@ -75,6 +90,49 @@ impl GiPage<'_> {
         ui.separator();
 
         ui.checkbox(&mut gi.seed, "屏幕播种（关 = 只回收不分配）");
+        ui.separator();
+
+        ui.strong("估计参数（9.6）");
+        ui.horizontal(|ui| {
+            ui.label("样本档");
+            for tier in [1u32, 2, 4, 8] {
+                ui.selectable_value(&mut gi.samples, tier, format!("{tier}"));
+            }
+            ui.separator();
+            ui.label("预热倍率");
+            for tier in [1u32, 2, 4, 8] {
+                ui.selectable_value(&mut gi.warmup, tier, format!("{tier}"));
+            }
+        });
+        ui.checkbox(&mut gi.multi_bounce, "多跳（命中点查缓存 + bounce 分配）");
+        ui.add(
+            egui::Slider::new(&mut gi.short_hysteresis, 0.5..=0.99)
+                .text("短时滞后（越小越跟手）")
+                .fixed_decimals(2),
+        );
+        // 预算按"万条射线"给滑条：直接给条数是 6 位数字，拖不动也不好读
+        let mut budget_wan = gi.budget as f32 / 10_000.0;
+        if ui
+            .add(
+                egui::Slider::new(&mut budget_wan, 0.1..=200.0)
+                    .text("射线预算（万条/帧）")
+                    .fixed_decimals(1),
+            )
+            .changed()
+        {
+            gi.budget = (budget_wan * 10_000.0).round().max(1.0) as u32;
+        }
+        ui.add(
+            egui::Slider::new(&mut gi.emissive_intensity, 0.0..=8.0)
+                .text("自发光强度倍数")
+                .fixed_decimals(2),
+        );
+        ui.add(
+            egui::Slider::new(&mut gi.light_samples, 0..=256)
+                .text("光源侧清单条数")
+                .fixed_decimals(0),
+        );
+        ui.small("样本档会被射线预算自动降档（视图 9 看本帧实际档位与稀释）。");
         ui.add(
             egui::Slider::new(&mut gi.defrag_waves, 0..=16)
                 .text("每帧整理波数（每波 512 条）")

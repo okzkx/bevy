@@ -13,9 +13,13 @@ use bevy::prelude::*;
 
 use crate::common::syntax::ResultTierExt;
 use crate::render::{
-    alloc_grid, eviction_groups, gi_cascade_offsets, pack_alloc_push, pack_view_push,
-    scrolling_groups, DescSet, GiAllocDraw, GiFrameDraw, GiPipelines, GiSettings, GiViewDraw,
-    SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE, MAX_CASCADES, UPDATE_MAX,
+    alloc_grid, bounce_alloc_groups, emissive_build_groups, estimation_groups, eviction_groups,
+    gi_cascade_offsets, light_sampling_groups, pack_alloc_push, pack_emissive_build_push,
+    pack_light_sampling_push, pack_view_push, plan_estimation_budget, scrolling_groups, DescSet,
+    GiAllocDraw, GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiFrameDraw,
+    GiLightSampleDraw, GiPipelines, GiSettings, GiViewDraw, LightRecord, LightTable,
+    SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE, GI_BOUNCE_REQUEST_CAPACITY,
+    MAX_CASCADES, UPDATE_MAX,
 };
 
 use super::scene::FrameView;
@@ -68,6 +72,12 @@ pub(super) fn prepare_gi(
     gbuffer_set: DescSet,
     ibl_set: DescSet,
     ldr: (vk::ImageView, vk::Image, vk::Extent2D),
+    instance_set: DescSet,
+    shadow_set: DescSet,
+    texture_set: DescSet,
+    ray_set: Option<DescSet>,
+    instance_count: u32,
+    lights: &LightTable,
 ) -> Result<Option<GiFrameDraw>, BevyError> {
     let settings = &*gi.settings;
     if !settings.enabled {
@@ -87,6 +97,41 @@ pub(super) fn prepare_gi(
         !local.was_enabled || offsets[..cascades] != local.prev_offsets[..cascades];
     let frame_index = local.frame_index;
 
+    // 9.6.2：把活灯按紧凑顺序写进本帧槽的光源表（清单与 estimation 都按 0..light_count 索引）。
+    // 每帧重写 16 KiB：比"变更检测 + 增量"简单，且环表的槽号是持久分配的、不能直接当紧凑下标。
+    let light_records: Vec<LightRecord> = lights
+        .active_slots()
+        .into_iter()
+        .filter_map(|slot| lights.record(slot))
+        .collect();
+    let light_count = light_records.len() as u32;
+    gi.tables
+        .write_gi_lights(slot, &light_records)
+        .or_fatal("光源紧凑表写入失败，渲染链无法继续")?;
+    // 清单条数：有灯才采；上限是清单容量（超过就按容量截断，不报错）
+    let light_sample_count = if light_count == 0 {
+        0
+    } else {
+        settings
+            .light_samples
+            .min(crate::render::GI_LIGHT_SAMPLE_CAPACITY)
+    };
+
+    // 9.6.5 预算：活跃 patch 数取 ring 水位（上一帧的计数，一次 48B 主机读，误差一帧）
+    let mut ring_words = [0u8; crate::render::RING_CONFIG_WORDS * 4];
+    gi.tables
+        .ring()
+        .read(0, &mut ring_words)
+        .or_fatal("GI ring 配置读失败，渲染链无法继续")?;
+    let active_patches = u32::from_le_bytes([
+        ring_words[crate::render::RING_ACTIVE * 4],
+        ring_words[crate::render::RING_ACTIVE * 4 + 1],
+        ring_words[crate::render::RING_ACTIVE * 4 + 2],
+        ring_words[crate::render::RING_ACTIVE * 4 + 3],
+    ]);
+    let budget_plan =
+        plan_estimation_budget(active_patches, settings.samples.max(1), settings.budget);
+
     let data = SurfaceCacheUniformsData {
         prev_view_proj: local.prev_view_proj,
         target_pos: center,
@@ -100,8 +145,20 @@ pub(super) fn prepare_gi(
         seed_enabled: u32::from(settings.seed),
         frame_index,
         evict_age: EVICT_AGE,
-        bounce_enabled: 0,
+        // bounce 分配开关（frame.z）：只有估计真的在跑时才算"多跳"，否则 9.5 的淘汰
+        // 分支（rank 0→1、本轮不淘汰）会因为 multi_bounce 默认开而被误触发。
+        bounce_enabled: u32::from(settings.estimation && settings.multi_bounce),
         update_max: UPDATE_MAX,
+        samples: budget_plan.samples,
+        warmup: settings.warmup.max(1),
+        multi_bounce: u32::from(settings.estimation && settings.multi_bounce),
+        light_samples: settings.light_samples,
+        short_hysteresis: settings.short_hysteresis,
+        emissive_intensity: settings.emissive_intensity,
+        light_count,
+        light_sample_count,
+        estimation_stride: budget_plan.stride,
+        estimation_active: active_patches,
     };
     gi.tables
         .write_uniforms(slot, &data)
@@ -129,7 +186,71 @@ pub(super) fn prepare_gi(
             ibl_set,
         }
     });
+    // 9.6.2 自发光表：估计开且光线求交开着就每帧重建（顶点/索引池要带 storage）
+    let object_capacity = crate::render::OBJECT_TABLE_CAPACITY;
+    let emissive_build = if settings.estimation {
+        match (ray_set, pipelines.emissive_build()) {
+            (Some(ray_set), Some(pass)) => Some(GiEmissiveBuildDraw {
+                pass,
+                push: pack_emissive_build_push(object_capacity),
+                groups: emissive_build_groups(object_capacity),
+                gi_set,
+                instance_set,
+                ray_set,
+                texture_set,
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    // 9.6.2 清单：估计开、有实例（要 TLAS）、有灯、光线求交开着才录
+    let light_sampling = if settings.estimation && instance_count > 0 && light_sample_count > 0 {
+        match (ray_set, pipelines.light_sampling()) {
+            (Some(ray_set), Some(pass)) => Some(GiLightSampleDraw {
+                pass,
+                push: pack_light_sampling_push(light_sample_count, light_count),
+                groups: light_sampling_groups(light_sample_count),
+                gi_set,
+                instance_set,
+                ray_set,
+                texture_set,
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    // 9.6.3 bounce 分配：只在估计 + 多跳都开着时录（关掉时请求表无人写）
+    let bounce_alloc = if settings.estimation && settings.multi_bounce {
+        pipelines.bounce_alloc().map(|pass| GiBounceAllocDraw {
+            pass,
+            groups: bounce_alloc_groups(GI_BOUNCE_REQUEST_CAPACITY),
+            gi_set,
+        })
+    } else {
+        None
+    };
     let cover = settings.cover_enabled().then(|| pipelines.cover());
+    // 9.6 estimation：估计开关 + 有实例（0 实例时 TLAS 从未构建，绝不能打射线）+
+    // 光线求交开着（关闭时求交集不存在，管线也不建）。
+    let estimation = if settings.estimation && instance_count > 0 {
+        match (ray_set, pipelines.estimation()) {
+            (Some(ray_set), Some(pass)) => Some(GiEstimationDraw {
+                pass,
+                groups: estimation_groups(config.capacity),
+                frame_set,
+                gi_set,
+                instance_set,
+                ray_set,
+                shadow_set,
+                texture_set,
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let marker = settings.markers_enabled().then(|| pipelines.marker());
     let view_draw = (cover.is_some() || marker.is_some()).then(|| GiViewDraw {
         cover,
@@ -151,6 +272,10 @@ pub(super) fn prepare_gi(
         defrag: pipelines.defrag(),
         defrag_waves: waves,
         alloc,
+        emissive_build,
+        light_sampling,
+        estimation,
+        bounce_alloc,
         gi_set,
         view: view_draw,
     }))

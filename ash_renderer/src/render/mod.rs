@@ -108,6 +108,12 @@ pub use passes::gbuffer::gbuffer_targets::{
 pub use passes::gi::allocation::{
     alloc_grid, eviction_groups, pack_alloc_push, scrolling_groups, GiAllocDraw, GI_ALLOC_PUSH_SIZE,
 };
+pub use passes::gi::estimation::{
+    bounce_alloc_groups, emissive_build_groups, estimation_groups, light_sampling_groups,
+    pack_emissive_build_push, pack_light_sampling_push, plan_estimation_budget, EstimationBudget,
+    GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiLightSampleDraw,
+    GI_EMISSIVE_BUILD_PUSH_SIZE, GI_LIGHT_SAMPLING_PUSH_SIZE, RAYS_PER_SAMPLE_WORST,
+};
 pub use passes::gi::view::{pack_view_push, GiViewDraw, GI_VIEW_PUSH_SIZE};
 pub use passes::gi::volume::{
     cascade_offsets as gi_cascade_offsets, cell_bucket as gi_cell_bucket,
@@ -172,9 +178,13 @@ pub use resident::tables::light_table::{
 };
 pub use resident::tables::surface_cache::{
     pack_surface_cache_uniforms, GiSetLayout, SurfaceCacheMemory, SurfaceCacheTables,
-    SurfaceCacheUniformsData, COUNTER_ALLOC, COUNTER_DEFRAG_MOVED, COUNTER_FAILED, COUNTER_FREED,
-    COUNTER_VIEW_COVERED, COUNTER_VIEW_DEVIATION, COUNTER_VIEW_HOLES, GI_COUNTERS_SIZE,
-    GI_COUNTER_WORDS, GI_UBO_SIZE, PATCH_GEOMETRY_SIZE, PATCH_IRRADIANCE_SIZE,
+    SurfaceCacheUniformsData, COUNTER_ALLOC, COUNTER_DEFRAG_MOVED, COUNTER_EMISSIVE_TRIANGLES,
+    COUNTER_EST_BOUNCE_HITS, COUNTER_EST_BOUNCE_MISSES, COUNTER_EST_BOUNCE_REQUESTS,
+    COUNTER_EST_HITS, COUNTER_EST_PATCHES, COUNTER_EST_RAYS, COUNTER_EST_SAMPLES, COUNTER_FAILED,
+    COUNTER_FREED, COUNTER_VIEW_COVERED, COUNTER_VIEW_DEVIATION, COUNTER_VIEW_HOLES,
+    GI_BOUNCE_REQUEST_CAPACITY, GI_BOUNCE_REQUEST_SIZE, GI_COUNTERS_SIZE, GI_COUNTER_WORDS,
+    GI_EMISSIVE_CAPACITY, GI_EMISSIVE_TRIANGLE_SIZE, GI_LIGHT_CAPACITY, GI_LIGHT_SAMPLE_CAPACITY,
+    GI_LIGHT_SAMPLE_SIZE, GI_UBO_SIZE, PATCH_GEOMETRY_SIZE, PATCH_IRRADIANCE_SIZE,
     PATCH_STATISTICS_SIZE, RING_ACTIVE, RING_CONFIGS, RING_CONFIG_SIZE, RING_CONFIG_WORDS,
     RING_FLIP, RING_WATERMARK,
 };

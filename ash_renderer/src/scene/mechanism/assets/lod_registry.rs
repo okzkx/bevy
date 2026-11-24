@@ -151,6 +151,7 @@ pub fn spawn_lod_ladder(
         color,
         None,
         None,
+        None,
         translation,
         None,
         scale,

@@ -38,11 +38,13 @@ impl ShadowFrameDraw {
     pub fn record_depth(&self, device: &Device, cb: vk::CommandBuffer) {
         unsafe {
             // 进场：→ DEPTH_ATTACHMENT。深度图跨帧共享（不分帧槽）：等上一帧的片元
-            // 采样读完再覆写（WAR）
+            // 采样读完再覆写（WAR）。9.6 起 compute（estimation）也采样级联图，
+            // 所以 src 侧要等 COMPUTE_SHADER 读完。
             for &image in &self.images {
                 ImageBarrier::discard_to_depth_attachment(
                     image,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER
+                        | vk::PipelineStageFlags::COMPUTE_SHADER,
                 )
                 .record(device, cb);
             }

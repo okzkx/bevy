@@ -8,7 +8,7 @@
 //! 内存口径（起步档 Res 32 / 4 级 / 池 65536）：
 //! - cell 双表：2,097,152 × 4B × 2 = 16 MiB
 //! - patch 表：几何 2 MiB + 辐照度两份 8 MiB + 统计 3 MiB + 反向指针 256 KiB
-//! - ring 48B + 计数 64B × 2 槽 + GI UBO 256B × 2 槽
+//! - ring 48B + 计数 64B × 2 槽 + GI UBO 288B × 2 槽
 //!
 //! 与计划 §0.2 的差异（施工记录里钉明）：PatchStatistics 是 48B 而不是 32B——两份 vec4
 //! 之后还有 4 个 u32（state/request/update_count/heartbeat），32B 只够放两个；
@@ -30,6 +30,7 @@ use crate::render::core::binding::set_layout::{
 use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::role::BufferRole;
 use crate::render::passes::gi::volume::{SurfaceCacheConfig, MAX_CASCADES};
+use crate::render::resident::tables::light_table::{LightRecord, LIGHT_RECORD_SIZE};
 use crate::render::Context;
 use crate::render::MAX_FRAMES_IN_FLIGHT;
 
@@ -42,7 +43,10 @@ const GI_STAGES: vk::ShaderStageFlags = stages(&[
 ]);
 
 /// GI 描述符集：b0 cell→patch / b1 cell 分配标记 / b2 几何 / b3 辐照度 0 / b4 辐照度 1 /
-/// b5 统计 / b6 patch→cell / b7 ring 配置 / b8 计数 / b9 GI UBO。
+/// b5 统计 / b6 patch→cell / b7 ring 配置 / b8 计数 / b9 GI UBO /
+/// b10 光源紧凑表（9.6.2 光源侧清单的灯记录，**不是** cluster 的那份环形槽表）/
+/// b11 光源侧采样清单（9.6.2）/ b12 自发光三角形表（9.6.2，每帧重建）/
+/// b13 bounce 分配请求表（9.6.3，estimation 写、同帧 bounce_alloc 消费）。
 pub(crate) static GI_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
     "gi",
     &[
@@ -56,11 +60,19 @@ pub(crate) static GI_SET_DESC: SetLayoutDesc = SetLayoutDesc::new(
         BindingDesc::new(7, DescKind::StorageBuffer, GI_STAGES),
         BindingDesc::new(8, DescKind::StorageBuffer, GI_STAGES),
         BindingDesc::new(9, DescKind::UniformBuffer, GI_STAGES),
+        BindingDesc::new(10, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(11, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(12, DescKind::StorageBuffer, GI_STAGES),
+        BindingDesc::new(13, DescKind::StorageBuffer, GI_STAGES),
     ],
 );
 
 /// 每帧 GI UBO 字节数（字段偏移见 [`SurfaceCacheUniformsLayout`] 的静态断言）。
-pub const GI_UBO_SIZE: u64 = 256;
+///
+/// 9.5 是 256B（`prev_view_proj 64 + target_pos 16 + volume 16 + 级联 128 + ring 16 +
+/// frame 16`）已排满；9.6.1 追加两个 vec4（估计参数 u32 组与 f32 组）→ 288B；
+/// 9.6.2 再追加一个 vec4（光源紧凑表的灯数与清单条数）→ 304B。
+pub const GI_UBO_SIZE: u64 = 304;
 /// patch 几何记录：位置 vec4 + 法线 vec4。
 pub const PATCH_GEOMETRY_SIZE: u64 = 32;
 /// patch 辐照度记录：l0 / l1x / l1y / l1z 各一个 vec4。
@@ -71,6 +83,30 @@ pub const PATCH_STATISTICS_SIZE: u64 = 48;
 pub const RING_CONFIG_WORDS: usize = 12;
 pub const RING_CONFIG_SIZE: u64 = RING_CONFIG_WORDS as u64 * 4;
 /// 每帧计数器字数与字节数。
+/// 光源紧凑表容量：与 `light_table::LIGHT_TABLE_CAPACITY` 同值（9.6.2 的清单按它上限）。
+pub const GI_LIGHT_CAPACITY: u32 = 256;
+const _: () = assert!(
+    GI_LIGHT_CAPACITY == crate::render::resident::tables::light_table::LIGHT_TABLE_CAPACITY,
+    "光源紧凑表容量必须与 cluster 侧光源常驻表一致"
+);
+/// 光源侧采样清单上限（每帧条数上限；`gi_set` 的 `light_samples` 不得超过它）。
+pub const GI_LIGHT_SAMPLE_CAPACITY: u32 = 256;
+/// 一条光源侧采样记录的字节数：命中点位置 / 法线 / 反照率 / 杂项（距离、1/pdf、灯号、标记）。
+pub const GI_LIGHT_SAMPLE_SIZE: u64 = 64;
+const _: () = assert!(
+    GI_LIGHT_SAMPLE_SIZE == LIGHT_RECORD_SIZE,
+    "光源紧凑表沿用 LightRecord 的 64B 步长"
+);
+
+/// 自发光三角形表上限（超限截断，`counters[14]` 仍会记到超限值，便于读数发现）。
+pub const GI_EMISSIVE_CAPACITY: u32 = 32768;
+/// 一条自发光三角形记录的字节数：p0(+面积) / e1 / e2 / 自发光辐亮度。
+pub const GI_EMISSIVE_TRIANGLE_SIZE: u64 = 64;
+/// 每帧 bounce 分配请求的上限（超限丢弃，`counters[11]` 仍记到超限值）。
+pub const GI_BOUNCE_REQUEST_CAPACITY: u32 = 4096;
+/// 一条 bounce 分配请求的字节数：cell / 命中点位置 / 命中点法线。
+pub const GI_BOUNCE_REQUEST_SIZE: u64 = 48;
+
 pub const GI_COUNTER_WORDS: usize = 16;
 pub const GI_COUNTERS_SIZE: u64 = GI_COUNTER_WORDS as u64 * 4;
 
@@ -90,6 +126,22 @@ pub const COUNTER_DEFRAG_MOVED: usize = 3;
 pub const COUNTER_VIEW_HOLES: usize = 4;
 pub const COUNTER_VIEW_DEVIATION: usize = 5;
 pub const COUNTER_VIEW_COVERED: usize = 6;
+/// 9.6 估计计数（8 号留空，9 号起）：发出的射线数。
+pub const COUNTER_EST_RAYS: usize = 9;
+/// 9.6：命中射线条数。
+pub const COUNTER_EST_HITS: usize = 10;
+/// 9.6：bounce 分配请求条数。
+pub const COUNTER_EST_BOUNCE_REQUESTS: usize = 11;
+/// 9.6：本帧参与估计的 patch 数。
+pub const COUNTER_EST_PATCHES: usize = 12;
+/// 9.6：本帧样本总数（含预热倍率），用于读数换算平均样本档。
+pub const COUNTER_EST_SAMPLES: usize = 13;
+/// 9.6.2：本帧自发光三角形条数（超过 [`GI_EMISSIVE_CAPACITY`] 时是超限值）。
+pub const COUNTER_EMISSIVE_TRIANGLES: usize = 14;
+/// 9.6.3：多跳自查询命中缓存（找到 patch）的次数。
+pub const COUNTER_EST_BOUNCE_HITS: usize = 8;
+/// 9.6.3：多跳自查询落空（该 cell 无 patch）的次数——桶错位率的读数代理。
+pub const COUNTER_EST_BOUNCE_MISSES: usize = 15;
 
 /// 每帧 GI UBO 的宿主侧数据（`draw_frame` 组装，[`pack_surface_cache_uniforms`] 打包）。
 pub struct SurfaceCacheUniformsData {
@@ -114,6 +166,27 @@ pub struct SurfaceCacheUniformsData {
     pub evict_age: u32,
     pub bounce_enabled: u32,
     pub update_max: u32,
+    /// 9.6：每 patch 每帧样本档（预算换算后的实际值，宿主写）。
+    pub samples: u32,
+    /// 9.6：预热倍率（`update_count == 0 && rank == 0` 的 patch 用 `samples × warmup` 条）。
+    pub warmup: u32,
+    /// 9.6：多跳开关（命中点查缓存读上一帧）。
+    pub multi_bounce: u32,
+    /// 9.6：光源侧采样清单长度（每帧条数）。
+    pub light_samples: u32,
+    /// 9.6：方差引导时域混合的短时滞后（0.75～0.95）。
+    pub short_hysteresis: f32,
+    /// 9.6：自发光三角形强度倍数。
+    pub emissive_intensity: f32,
+    /// 9.6.2：光源紧凑表里活灯的条数（estimation 的 `reciprocalDensity` 用它）。
+    pub light_count: u32,
+    /// 9.6.2：本帧光源侧采样清单的条数（0 = 不做重连接取样）。
+    pub light_sample_count: u32,
+    /// 9.6.5：帧稀释步长（1 = 不稀释；N > 1 时只有 `patch_hash % N == frame % N` 的 patch
+    /// 本帧参与估计）。
+    pub estimation_stride: u32,
+    /// 9.6.5：预算换算用的活跃 patch 数（读数对账用：与 ring 水位同源）。
+    pub estimation_active: u32,
 }
 
 /// [`SurfaceCacheUniformsData`] 的 WGSL uniform 布局镜像：静态断言钉偏移。
@@ -125,6 +198,9 @@ struct SurfaceCacheUniformsLayout {
     cascade_offsets: [[i32; 4]; MAX_CASCADES],
     ring: [u32; 4],
     frame: [u32; 4],
+    estimation: [u32; 4],
+    estimation_f: [f32; 4],
+    estimation_l: [u32; 4],
 }
 
 const _: () = {
@@ -134,6 +210,9 @@ const _: () = {
     assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, cascade_offsets) == 96);
     assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, ring) == 224);
     assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, frame) == 240);
+    assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, estimation) == 256);
+    assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, estimation_f) == 272);
+    assert!(std::mem::offset_of!(SurfaceCacheUniformsLayout, estimation_l) == 288);
     assert!(std::mem::size_of::<SurfaceCacheUniformsLayout>() == GI_UBO_SIZE as usize);
 };
 
@@ -171,6 +250,18 @@ pub fn pack_surface_cache_uniforms(d: &SurfaceCacheUniformsData) -> [u8; GI_UBO_
     put_u32(&mut out, 244, d.evict_age);
     put_u32(&mut out, 248, d.bounce_enabled);
     put_u32(&mut out, 252, d.update_max);
+    put_u32(&mut out, 256, d.samples);
+    put_u32(&mut out, 260, d.warmup);
+    put_u32(&mut out, 264, d.multi_bounce);
+    put_u32(&mut out, 268, d.light_samples);
+    put_f32(&mut out, 272, d.short_hysteresis);
+    put_f32(&mut out, 276, d.emissive_intensity);
+    put_f32(&mut out, 280, 0.0);
+    put_f32(&mut out, 284, 0.0);
+    put_u32(&mut out, 288, d.light_count);
+    put_u32(&mut out, 292, d.light_sample_count);
+    put_u32(&mut out, 296, d.estimation_stride);
+    put_u32(&mut out, 300, d.estimation_active);
     out
 }
 
@@ -191,6 +282,16 @@ fn identity_uniforms() -> SurfaceCacheUniformsData {
         evict_age: 240,
         bounce_enabled: 0,
         update_max: 32,
+        samples: 2,
+        warmup: 4,
+        multi_bounce: 1,
+        light_samples: 128,
+        short_hysteresis: 0.85,
+        emissive_intensity: 1.0,
+        light_count: 0,
+        light_sample_count: 0,
+        estimation_stride: 1,
+        estimation_active: 0,
     }
 }
 
@@ -265,6 +366,14 @@ pub struct SurfaceCacheTables {
     patch_cell: GpuBuffer,
     ring: GpuBuffer,
     counters: Vec<GpuBuffer>,
+    /// 9.6.2 光源紧凑表（每帧槽一份，宿主写活灯记录，`b10`）。
+    gi_lights: Vec<GpuBuffer>,
+    /// 9.6.2 光源侧采样清单（每帧槽一份，compute 写、estimation 读，`b11`）。
+    light_samples: Vec<GpuBuffer>,
+    /// 9.6.2 自发光三角形表（每帧槽一份，每帧重建，`b12`）。
+    emissive_triangles: Vec<GpuBuffer>,
+    /// 9.6.3 bounce 分配请求表（每帧槽一份，`b13`）。
+    bounce_requests: Vec<GpuBuffer>,
     memory: SurfaceCacheMemory,
 }
 
@@ -350,6 +459,36 @@ impl SurfaceCacheTables {
             buffer.write(0, &[0u8; GI_COUNTERS_SIZE as usize])?;
             counters.push(buffer);
         }
+        // 9.6.2：光源紧凑表与光源侧采样清单（各 2 槽 × 256 条 × 64B = 16 KiB/槽）
+        let mut gi_lights = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut light_samples = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let light_bytes = u64::from(GI_LIGHT_CAPACITY) * GI_LIGHT_SAMPLE_SIZE;
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let mut buffer = GpuBuffer::create(device, contract, light_bytes, BufferRole::Storage)?;
+            buffer.write(0, &vec![0u8; light_bytes as usize])?;
+            gi_lights.push(buffer);
+            let mut buffer = GpuBuffer::create(device, contract, light_bytes, BufferRole::Storage)?;
+            buffer.write(0, &vec![0u8; light_bytes as usize])?;
+            light_samples.push(buffer);
+        }
+        // 9.6.2：自发光三角形表（2 槽 × 32768 条 × 64B = 4 MiB/槽）
+        let emissive_bytes = u64::from(GI_EMISSIVE_CAPACITY) * GI_EMISSIVE_TRIANGLE_SIZE;
+        let mut emissive_triangles = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let mut buffer =
+                GpuBuffer::create(device, contract, emissive_bytes, BufferRole::Storage)?;
+            buffer.write(0, &vec![0u8; emissive_bytes as usize])?;
+            emissive_triangles.push(buffer);
+        }
+        // 9.6.3：bounce 分配请求表（2 槽 × 4096 条 × 48B = 192 KiB/槽）
+        let request_bytes = u64::from(GI_BOUNCE_REQUEST_CAPACITY) * GI_BOUNCE_REQUEST_SIZE;
+        let mut bounce_requests = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let mut buffer =
+                GpuBuffer::create(device, contract, request_bytes, BufferRole::Storage)?;
+            buffer.write(0, &vec![0u8; request_bytes as usize])?;
+            bounce_requests.push(buffer);
+        }
         let init_millis = started.elapsed().as_secs_f32() * 1000.0;
 
         let mut this = Self {
@@ -368,12 +507,19 @@ impl SurfaceCacheTables {
             patch_cell,
             ring,
             counters,
+            gi_lights,
+            light_samples,
+            emissive_triangles,
+            bounce_requests,
             memory: SurfaceCacheMemory {
                 cell_bytes: cell_bytes * 2,
                 patch_bytes,
                 misc_bytes: RING_CONFIG_SIZE
                     + GI_COUNTERS_SIZE * MAX_FRAMES_IN_FLIGHT as u64
-                    + GI_UBO_SIZE * MAX_FRAMES_IN_FLIGHT as u64,
+                    + GI_UBO_SIZE * MAX_FRAMES_IN_FLIGHT as u64
+                    + light_bytes * 2 * MAX_FRAMES_IN_FLIGHT as u64
+                    + emissive_bytes * MAX_FRAMES_IN_FLIGHT as u64
+                    + request_bytes * MAX_FRAMES_IN_FLIGHT as u64,
             },
         };
         this.build_sets(ctx)?;
@@ -428,7 +574,16 @@ impl SurfaceCacheTables {
                 .buffer(6, self.patch_cell.buffer(), 0, vk::WHOLE_SIZE)
                 .buffer(7, self.ring.buffer(), 0, vk::WHOLE_SIZE)
                 .buffer(8, self.counters[frame].buffer(), 0, vk::WHOLE_SIZE)
-                .buffer(9, self.ubos[frame].buffer(), 0, GI_UBO_SIZE);
+                .buffer(9, self.ubos[frame].buffer(), 0, GI_UBO_SIZE)
+                .buffer(10, self.gi_lights[frame].buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(11, self.light_samples[frame].buffer(), 0, vk::WHOLE_SIZE)
+                .buffer(
+                    12,
+                    self.emissive_triangles[frame].buffer(),
+                    0,
+                    vk::WHOLE_SIZE,
+                )
+                .buffer(13, self.bounce_requests[frame].buffer(), 0, vk::WHOLE_SIZE);
             writer.submit(device)?;
         }
         Ok(())
@@ -506,6 +661,56 @@ impl SurfaceCacheTables {
     /// patch 统计表。
     pub fn patch_statistics(&mut self) -> &mut GpuBuffer {
         &mut self.patch_statistics
+    }
+
+    /// 辐照度第 0 份（ping-pong 的 A；9.6 的估计写 `frame&1` 选中的那一份）。
+    pub fn patch_irradiance0(&mut self) -> &mut GpuBuffer {
+        &mut self.patch_irradiance0
+    }
+
+    /// 辐照度第 1 份（ping-pong 的 B）。
+    pub fn patch_irradiance1(&mut self) -> &mut GpuBuffer {
+        &mut self.patch_irradiance1
+    }
+
+    /// 9.6.2：第 `slot` 帧槽的光源紧凑表。
+    pub fn gi_lights(&mut self, slot: usize) -> &mut GpuBuffer {
+        &mut self.gi_lights[slot]
+    }
+
+    /// 9.6.2：把活灯记录按紧凑顺序写进本帧槽（多余槽位写 0 = 死灯）。
+    ///
+    /// # Errors
+    /// 灯数超过 [`GI_LIGHT_CAPACITY`] 或写入失败。
+    pub fn write_gi_lights(&mut self, slot: usize, lights: &[LightRecord]) -> Result<()> {
+        if lights.len() > GI_LIGHT_CAPACITY as usize {
+            return Err(VulkanError::Init(format!(
+                "光源紧凑表超出容量：{} > {}",
+                lights.len(),
+                GI_LIGHT_CAPACITY
+            )));
+        }
+        let mut bytes = vec![0u8; (u64::from(GI_LIGHT_CAPACITY) * GI_LIGHT_SAMPLE_SIZE) as usize];
+        for (i, record) in lights.iter().enumerate() {
+            let base = i * GI_LIGHT_SAMPLE_SIZE as usize;
+            bytes[base..base + LIGHT_RECORD_SIZE as usize].copy_from_slice(&record.pack());
+        }
+        self.gi_lights[slot].write(0, &bytes)
+    }
+
+    /// 9.6.2：第 `slot` 帧槽的光源侧采样清单（诊断读数用）。
+    pub fn light_samples(&mut self, slot: usize) -> &mut GpuBuffer {
+        &mut self.light_samples[slot]
+    }
+
+    /// 9.6.2：第 `slot` 帧槽的自发光三角形表（诊断读数用）。
+    pub fn emissive_triangles(&mut self, slot: usize) -> &mut GpuBuffer {
+        &mut self.emissive_triangles[slot]
+    }
+
+    /// 9.6.3：第 `slot` 帧槽的 bounce 分配请求表（诊断读数用）。
+    pub fn bounce_requests(&mut self, slot: usize) -> &mut GpuBuffer {
+        &mut self.bounce_requests[slot]
     }
 }
 

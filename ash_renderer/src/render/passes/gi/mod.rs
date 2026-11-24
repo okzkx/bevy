@@ -11,6 +11,7 @@
 //! [`view`] 调试视图两形态。常驻表与 GI UBO 在 `resident/tables/surface_cache.rs`。
 
 pub mod allocation;
+pub mod estimation;
 pub mod view;
 pub mod volume;
 
@@ -26,11 +27,18 @@ use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
 use crate::render::passes::ibl::IBL_SET_DESC;
 use crate::render::passes::post::smaa::LDR_FORMAT;
+use crate::render::passes::ray_tracing::RAY_TRACING_SET_DESC;
+use crate::render::passes::shadow::shadow_map::SHADOW_SET_DESC;
+use crate::render::resident::tables::bindless_texture_table::BINDLESS_TEXTURE_SET_DESC;
 use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
+use crate::render::resident::tables::instance_table::INSTANCE_SET_DESC;
 use crate::render::resident::tables::surface_cache::GI_SET_DESC;
 use crate::render::Context;
 
 pub use self::allocation::GiAllocDraw;
+pub use self::estimation::{
+    GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiLightSampleDraw,
+};
 pub use self::view::GiViewDraw;
 pub use self::volume::SurfaceCacheConfig;
 
@@ -57,6 +65,23 @@ pub struct GiSettings {
     pub seed: bool,
     /// 每帧整理波数（0 = 不整理；每波 512 条）。
     pub defrag_waves: u32,
+    /// 9.6 估计开关：关 = 不录 estimation dispatch，patch 表只有 IBL 种子
+    /// （与 9.5 收官画面逐字节一致；默认关）。
+    pub estimation: bool,
+    /// 9.6 每 patch 每帧样本档（1/2/4/8）。预算不足时宿主按 §9.6.5 降到下界 1 再写 UBO。
+    pub samples: u32,
+    /// 9.6 预热倍率（1/2/4/8）：`update_count == 0` 且 rank 0 的 patch 一次吃这么多倍样本。
+    pub warmup: u32,
+    /// 9.6 方差引导时域混合的短时滞后（0.5～0.99；越小越跟手、越大越稳）。
+    pub short_hysteresis: f32,
+    /// 9.6 多跳开关：命中点查自己所属 cell 的 patch（读上一帧）。
+    pub multi_bounce: bool,
+    /// 9.6 每帧射线预算（射线数 = 活跃 patch × 样本档 × 每样本射线数）。
+    pub budget: u32,
+    /// 9.6 自发光三角形强度倍数（Unity `_EmissiveTriangleIntensityMultiplier` 同款）。
+    pub emissive_intensity: f32,
+    /// 9.6 光源侧采样清单长度（每帧从灯位向锥内采样的条数）。
+    pub light_samples: u32,
     /// Volume/池规格（只在关态改；改后重建表）。
     pub config: SurfaceCacheConfig,
 }
@@ -70,6 +95,14 @@ impl Default for GiSettings {
             normal_source: 0,
             seed: true,
             defrag_waves: 2,
+            estimation: false,
+            samples: 2,
+            warmup: 4,
+            short_hysteresis: 0.85,
+            multi_bounce: true,
+            budget: 262_144,
+            emissive_intensity: 1.0,
+            light_samples: 128,
             config: SurfaceCacheConfig::default(),
         }
     }
@@ -141,6 +174,86 @@ pub(crate) static PATCH_ALLOC_PIPELINE: PipelineDesc = PipelineDesc {
     depth_format: None,
 };
 
+/// 9.6 estimation（set 序 = 帧 UBO / GI 表 / 实例表 / 光线求交集 / 阴影集 / bindless）。
+///
+/// 只在光线求交支持且开启的机器上建管线：含 `RayQueryKHR` 的 shader 在非光线求交设备上
+/// 建不了管线，塞进恒建清单会破坏"关闭 = 逐字节一致"的降级路径（9.4 同款教训）。
+/// 光线求交集是**复用** 9.4 那一份（b0 TLAS / b1 顶点池 / b2 索引池），本 shader 不声明
+/// 它的 b3 调试图与 b4 统计。
+pub(crate) static ESTIMATION_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_estimation",
+    shader: &shader_abi::ESTIMATION,
+    entries: &[c"cs_main"],
+    sets: &[
+        &FRAME_UNIFORM_SET_DESC,
+        &GI_SET_DESC,
+        &INSTANCE_SET_DESC,
+        &RAY_TRACING_SET_DESC,
+        &SHADOW_SET_DESC,
+        &BINDLESS_TEXTURE_SET_DESC,
+    ],
+    push: None,
+    color_formats: &[],
+    depth_format: None,
+};
+
+/// 9.6.2 光源侧采样清单（set 序 = GI / 实例 / 光线求交 / bindless + 8B push）。
+///
+/// 与 estimation 同样只在光线求交支持的机器上建；它的交换屏障是 compute→compute，
+/// 下游 estimation 同段录制，屏障随 `ComputeReadWrite` 走。
+pub(crate) static LIGHT_SAMPLING_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_light_sampling",
+    shader: &shader_abi::LIGHT_SAMPLING,
+    entries: &[c"cs_main"],
+    sets: &[
+        &GI_SET_DESC,
+        &INSTANCE_SET_DESC,
+        &RAY_TRACING_SET_DESC,
+        &BINDLESS_TEXTURE_SET_DESC,
+    ],
+    push: Some(PushRange {
+        stages: COMPUTE,
+        size: estimation::GI_LIGHT_SAMPLING_PUSH_SIZE,
+    }),
+    color_formats: &[],
+    depth_format: None,
+};
+
+/// 9.6.2 自发光三角形表重建（set 序 = GI / 实例 / 光线求交 / bindless + 4B push）。
+///
+/// 每帧重建：按对象槽展开自发光三角形，条数记进 `counters[14]`。只在光线求交支持的
+/// 机器上建（顶点/索引池要带 storage）。
+pub(crate) static EMISSIVE_BUILD_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_emissive_build",
+    shader: &shader_abi::EMISSIVE_BUILD,
+    entries: &[c"cs_main"],
+    sets: &[
+        &GI_SET_DESC,
+        &INSTANCE_SET_DESC,
+        &RAY_TRACING_SET_DESC,
+        &BINDLESS_TEXTURE_SET_DESC,
+    ],
+    push: Some(PushRange {
+        stages: COMPUTE,
+        size: estimation::GI_EMISSIVE_BUILD_PUSH_SIZE,
+    }),
+    color_formats: &[],
+    depth_format: None,
+};
+
+/// 9.6.3 bounce 分配（set0 = GI 集；线程 = 请求上限，实际条数取 `counters[11]`）。
+///
+/// 录在 estimation 之后：同帧消费它写下的请求，新 patch 下一帧起参与估计。
+pub(crate) static BOUNCE_ALLOC_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_bounce_alloc",
+    shader: &shader_abi::BOUNCE_ALLOC,
+    entries: &[c"cs_main"],
+    sets: &[&GI_SET_DESC],
+    push: None,
+    color_formats: &[],
+    depth_format: None,
+};
+
 /// 覆盖图（形态 A）：全屏三角形，颜色附件 = LDR 目标；16B push（视图/法线来源/宽高）。
 pub(crate) static PATCH_VIEW_PIPELINE: PipelineDesc = PipelineDesc {
     label: "gi_patch_view",
@@ -183,26 +296,49 @@ pub(crate) static PATCH_MARKER_PIPELINE: PipelineDesc = PipelineDesc {
     depth_format: None,
 };
 
-/// 表面缓存的六条管线（进程级）。
+/// 表面缓存的七条管线（进程级；estimation 只在光线求交支持的机器上建）。
 #[derive(bevy::prelude::Resource)]
 pub struct GiPipelines {
     scrolling: ComputePipeline,
     eviction: ComputePipeline,
     defrag: ComputePipeline,
     alloc: ComputePipeline,
+    estimation: Option<ComputePipeline>,
+    light_sampling: Option<ComputePipeline>,
+    emissive_build: Option<ComputePipeline>,
+    bounce_alloc: Option<ComputePipeline>,
     cover: FullscreenPipeline,
     marker: FullscreenPipeline,
 }
 
 impl GiPipelines {
+    /// `ray_tracing` = 本机支持并开启了光线求交：只决定 estimation 管线建不建
+    /// （其余六条与 9.5 一致）。
+    ///
     /// # Errors
     /// 配方对账不过或管线创建失败。
-    pub fn new(ctx: &Context, layouts: &SetLayouts) -> Result<Self> {
+    pub fn new(ctx: &Context, layouts: &SetLayouts, ray_tracing: bool) -> Result<Self> {
+        let estimation = ray_tracing
+            .then(|| ComputePipeline::new(ctx, &ESTIMATION_PIPELINE, layouts))
+            .transpose()?;
+        let light_sampling = ray_tracing
+            .then(|| ComputePipeline::new(ctx, &LIGHT_SAMPLING_PIPELINE, layouts))
+            .transpose()?;
+        let emissive_build = ray_tracing
+            .then(|| ComputePipeline::new(ctx, &EMISSIVE_BUILD_PIPELINE, layouts))
+            .transpose()?;
+        let bounce_alloc = ray_tracing
+            .then(|| ComputePipeline::new(ctx, &BOUNCE_ALLOC_PIPELINE, layouts))
+            .transpose()?;
         Ok(Self {
             scrolling: ComputePipeline::new(ctx, &SCROLLING_PIPELINE, layouts)?,
             eviction: ComputePipeline::new(ctx, &EVICTION_PIPELINE, layouts)?,
             defrag: ComputePipeline::new(ctx, &DEFRAG_PIPELINE, layouts)?,
             alloc: ComputePipeline::new(ctx, &PATCH_ALLOC_PIPELINE, layouts)?,
+            estimation,
+            light_sampling,
+            emissive_build,
+            bounce_alloc,
             cover: FullscreenPipeline::new(ctx, &PATCH_VIEW_PIPELINE, layouts)?,
             marker: FullscreenPipeline::new(ctx, &PATCH_MARKER_PIPELINE, layouts)?,
         })
@@ -226,6 +362,30 @@ impl GiPipelines {
     #[must_use]
     pub fn alloc(&self) -> ComputeHandles {
         self.alloc.handles()
+    }
+
+    /// 9.6 estimation 的录制句柄（None = 本机不支持光线求交）。
+    #[must_use]
+    pub fn estimation(&self) -> Option<ComputeHandles> {
+        self.estimation.as_ref().map(ComputePipeline::handles)
+    }
+
+    /// 9.6.2 光源侧采样清单的录制句柄（None = 本机不支持光线求交）。
+    #[must_use]
+    pub fn light_sampling(&self) -> Option<ComputeHandles> {
+        self.light_sampling.as_ref().map(ComputePipeline::handles)
+    }
+
+    /// 9.6.2 自发光三角形表重建的录制句柄（None = 本机不支持光线求交）。
+    #[must_use]
+    pub fn emissive_build(&self) -> Option<ComputeHandles> {
+        self.emissive_build.as_ref().map(ComputePipeline::handles)
+    }
+
+    /// 9.6.3 bounce 分配的录制句柄（None = 本机不支持光线求交）。
+    #[must_use]
+    pub fn bounce_alloc(&self) -> Option<ComputeHandles> {
+        self.bounce_alloc.as_ref().map(ComputePipeline::handles)
     }
 
     #[must_use]
@@ -253,6 +413,14 @@ pub struct GiFrameDraw {
     pub defrag_waves: u32,
     /// 屏幕播种（播种关 / 无相机的帧为 None）。
     pub alloc: Option<GiAllocDraw>,
+    /// 9.6.2 自发光三角形表重建（估计关 / 无光线求交的帧为 None；每帧重建）。
+    pub emissive_build: Option<GiEmissiveBuildDraw>,
+    /// 9.6.2 光源侧采样清单（估计关 / 无灯 / 无光线求交的帧为 None）。
+    pub light_sampling: Option<GiLightSampleDraw>,
+    /// 9.6 estimation（估计关 / 无光线求交 / 无实例的帧为 None）。
+    pub estimation: Option<GiEstimationDraw>,
+    /// 9.6.3 bounce 分配（估计关 / 多跳关 / 无光线求交的帧为 None）。
+    pub bounce_alloc: Option<GiBounceAllocDraw>,
     /// 本帧槽 GI 集（回收三件与播种共绑）。
     pub gi_set: DescSet,
     /// ⑧ 段调试视图（关 / 视图 0 为 None）。
@@ -292,6 +460,21 @@ impl GiFrameDraw {
         }
         if let Some(alloc) = &self.alloc {
             alloc.record(device, cb, self.gi_set);
+        }
+        // 9.6.2：自发光表重建 → 清单 → estimation（后两者都读前者的产出）
+        if let Some(emissive_build) = &self.emissive_build {
+            emissive_build.record(device, cb);
+        }
+        if let Some(light_sampling) = &self.light_sampling {
+            light_sampling.record(device, cb);
+        }
+        // 9.6：播种之后、段末屏障之前——estimation 读本帧刚刷新/分配的 patch 几何
+        if let Some(estimation) = &self.estimation {
+            estimation.record(device, cb);
+        }
+        // 9.6.3：同帧消费 estimation 写下的分配请求（新 patch 下一帧起参与估计）
+        if let Some(bounce_alloc) = &self.bounce_alloc {
+            bounce_alloc.record(device, cb);
         }
         // 缓存表 compute 写 → ⑧ 段片元读（视图）与 9.7 的片元查表
         unsafe { Handoff::ComputeFragmentRead.barrier().record(device, cb) };
