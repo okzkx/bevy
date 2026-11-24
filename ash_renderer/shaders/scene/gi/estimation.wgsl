@@ -26,6 +26,7 @@ enable wgpu_binding_array;
 // #import gi_cell
 // #import gi_sampling
 // #import gi_light_sample
+// #import gi_emissive
 // #import cluster
 // #import instance
 // #import raytracing
@@ -43,6 +44,7 @@ enable wgpu_binding_array;
 @group(1) @binding(9) var<uniform> gi: GiUniforms;
 @group(1) @binding(10) var<storage, read> gi_lights: array<LightRecord>;
 @group(1) @binding(11) var<storage, read> light_samples: array<LightSample>;
+@group(1) @binding(12) var<storage, read> emissive_triangles: array<EmissiveTriangle>;
 @group(2) @binding(0) var<storage, read> objects: array<ObjectRecord>;
 @group(2) @binding(2) var<storage, read> materials: array<MaterialRecord>;
 @group(3) @binding(0) var scene_tlas: acceleration_structure;
@@ -158,6 +160,42 @@ fn punctual_bounce_radiance(sample_index: u32, position: vec3f, normal: vec3f, o
     return contribution;
 }
 
+// 自发光面积采样（第三路）：均匀抽三角形 + 解析面积权重。
+// pdf（面积测度）= 1/(N·area_i)，所以 1/pdf = N·area_i；再乘面积→立体角的
+// Jacobian `cos/d²` 就是这条样本对方向积分的权重。定向光的可见性用一条阴影射线判。
+fn emissive_area_sample(triangle_index: u32, u_primary: vec2f, u_secondary: vec2f,
+    origin: vec3f) -> vec3f {
+    let record = emissive_triangles[triangle_index];
+    // 均匀重心采样：r1 = sqrt(1-ξ1) 的常规参数化（两分量之和 ≤ 1）
+    let r1 = sqrt(max(0.0, 1.0 - u_primary.y));
+    let b1 = r1 * (1.0 - u_secondary.x);
+    let b2 = r1 * u_secondary.x;
+    let point = record.p0.xyz + record.e1.xyz * b1 + record.e2.xyz * b2;
+    let to_point = point - origin;
+    let distance_squared = dot(to_point, to_point);
+    if (distance_squared < 1e-8) {
+        return vec3f(0.0);
+    }
+    let distance = sqrt(distance_squared);
+    let direction = to_point / distance;
+    // 阴影射线：打近 2cm 留余量，命中即被挡
+    let occluder = trace_scene(origin, direction, 0.0, distance - 0.02, RAY_MASK);
+    if (occluder.hit) {
+        return vec3f(0.0);
+    }
+    let triangle_normal = cross(record.e1.xyz, record.e2.xyz);
+    let normal_length = length(triangle_normal);
+    if (!(normal_length > 0.0)) {
+        return vec3f(0.0);
+    }
+    // 双面自发光：取 |cos|，两面的贡献都算
+    let cos_triangle = abs(dot(triangle_normal / normal_length, direction));
+    if (!(cos_triangle > 0.0)) {
+        return vec3f(0.0);
+    }
+    return record.emissive.rgb * (cos_triangle / distance_squared);
+}
+
 @compute @workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     let patch_idx = gid.x;
@@ -243,6 +281,29 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
             gi_project_accumulate(&punctual, radiance, normalize(light_samples[pick].hit_pos.xyz - position));
         }
         gi_rgbl1_add_scaled(&total, punctual, 1.0 / f32(sample_count));
+    }
+
+    // 第三路（自发光面积采样）：条数取 counters[14]（超容量时夹到容量）。
+    let emissive_count = min(atomicLoad(&counters[14]), GI_EMISSIVE_CAPACITY);
+    let emissive_intensity = gi.estimation_f.y;
+    if (emissive_count > 0u && emissive_intensity > 0.0) {
+        var emissive_rng = gi_r2_init(low_bias_hash_32(patch_idx) ^ 0x2545F491u, sample_offset);
+        var emissive_acc = gi_rgbl1_zero();
+        for (var i = 0u; i < sample_count; i = i + 1u) {
+            let primary = gi_r2_sample2(emissive_rng, 0u);
+            let secondary = gi_r2_sample2(emissive_rng, 1u);
+            gi_r2_next(&emissive_rng);
+            let pick = min(u32(primary.x * f32(emissive_count)), emissive_count - 1u);
+            let record = emissive_triangles[pick];
+            let radiance = emissive_area_sample(pick, primary, secondary, origin);
+            if (all(radiance == vec3f(0.0))) {
+                continue;
+            }
+            // 1/pdf = N · area（面积测度），再乘自发光强度与全局倍数
+            let weight = f32(emissive_count) * record.p0.w * emissive_intensity;
+            gi_project_accumulate(&emissive_acc, radiance * weight, normalize(record.p0.xyz - origin));
+        }
+        gi_rgbl1_add_scaled(&total, emissive_acc, 1.0 / f32(sample_count));
     }
 
     // 余弦卷积折基常数 → 求值式辐照度

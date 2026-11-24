@@ -44,6 +44,8 @@ struct MaterialKey {
     color: [u32; 3],
     metallic: u32,
     perceptual_roughness: u32,
+    /// 自发光（线性 rgb）各通道的位模式；None 用 f32::NAN 占位，与另一参数的缺省同法。
+    emissive: [u32; 3],
 }
 
 /// 延迟创建的测试资产缓存；首次需要时才创建并登记资源。
@@ -78,6 +80,8 @@ pub fn spawn_test_shape(
     color: [f32; 3],
     metallic: Option<f32>,
     perceptual_roughness: Option<f32>,
+    // 自发光（线性 rgb）；9.6 判定线④ 用它造可复现的自发光几何体。
+    emissive: Option<[f32; 3]>,
     translation: Option<Vec3>,
     rotation_euler_deg: Option<Vec3>,
     scale: Option<Vec3>,
@@ -115,6 +119,9 @@ pub fn spawn_test_shape(
         color: color.map(f32::to_bits),
         metallic: metallic.unwrap_or(f32::NAN).to_bits(),
         perceptual_roughness: perceptual_roughness.unwrap_or(f32::NAN).to_bits(),
+        emissive: emissive
+            .unwrap_or([f32::NAN; 3])
+            .map(f32::to_bits),
     };
     let material_handle = match world
         .get_resource::<TestShapeAssets>()
@@ -130,6 +137,9 @@ pub fn spawn_test_shape(
                     // 未提供时采用 metallic=0、perceptual_roughness=0.5。
                     metallic: metallic.unwrap_or(0.0),
                     perceptual_roughness: perceptual_roughness.unwrap_or(0.5),
+                    emissive: emissive.map_or(bevy::color::LinearRgba::BLACK, |e| {
+                        bevy::color::LinearRgba::rgb(e[0], e[1], e[2])
+                    }),
                     ..Default::default()
                 });
             world
@@ -204,6 +214,7 @@ mod tests {
             &mut world,
             TestShape::Cuboid,
             [0.8, 0.8, 0.8],
+            None,
             None,
             None,
             None,

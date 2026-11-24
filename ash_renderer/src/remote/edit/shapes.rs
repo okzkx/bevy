@@ -30,6 +30,9 @@ struct SpawnShapeParams {
     /// 感知粗糙度 `[0,1]`（PBR 参数面；缺省 = StandardMaterial 默认 0.5）。
     #[serde(default)]
     perceptual_roughness: Option<f32>,
+    /// 自发光（线性 rgb；缺省 = 不发光）。9.6 判定线④ 用它造可复现的自发光几何体。
+    #[serde(default)]
+    emissive: Option<[f32; 3]>,
     #[serde(default)]
     translation: Option<[f32; 3]>,
     /// 欧拉角 YXZ 度数（与 set_transform/属性面板同口径）。
@@ -58,6 +61,7 @@ pub(crate) fn spawn_shape(In(params): In<Option<Value>>, world: &mut World) -> B
         color,
         p.metallic,
         p.perceptual_roughness,
+        p.emissive,
         p.translation.map(Vec3::from_array),
         p.rotation_euler_deg.map(Vec3::from_array),
         p.scale.map(Vec3::from_array),

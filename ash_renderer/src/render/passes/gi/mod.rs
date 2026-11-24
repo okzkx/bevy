@@ -36,7 +36,7 @@ use crate::render::resident::tables::surface_cache::GI_SET_DESC;
 use crate::render::Context;
 
 pub use self::allocation::GiAllocDraw;
-pub use self::estimation::{GiEstimationDraw, GiLightSampleDraw};
+pub use self::estimation::{GiEmissiveBuildDraw, GiEstimationDraw, GiLightSampleDraw};
 pub use self::view::GiViewDraw;
 pub use self::volume::SurfaceCacheConfig;
 
@@ -217,6 +217,28 @@ pub(crate) static LIGHT_SAMPLING_PIPELINE: PipelineDesc = PipelineDesc {
     depth_format: None,
 };
 
+/// 9.6.2 自发光三角形表重建（set 序 = GI / 实例 / 光线求交 / bindless + 4B push）。
+///
+/// 每帧重建：按对象槽展开自发光三角形，条数记进 `counters[14]`。只在光线求交支持的
+/// 机器上建（顶点/索引池要带 storage）。
+pub(crate) static EMISSIVE_BUILD_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_emissive_build",
+    shader: &shader_abi::EMISSIVE_BUILD,
+    entries: &[c"cs_main"],
+    sets: &[
+        &GI_SET_DESC,
+        &INSTANCE_SET_DESC,
+        &RAY_TRACING_SET_DESC,
+        &BINDLESS_TEXTURE_SET_DESC,
+    ],
+    push: Some(PushRange {
+        stages: COMPUTE,
+        size: estimation::GI_EMISSIVE_BUILD_PUSH_SIZE,
+    }),
+    color_formats: &[],
+    depth_format: None,
+};
+
 /// 覆盖图（形态 A）：全屏三角形，颜色附件 = LDR 目标；16B push（视图/法线来源/宽高）。
 pub(crate) static PATCH_VIEW_PIPELINE: PipelineDesc = PipelineDesc {
     label: "gi_patch_view",
@@ -268,6 +290,7 @@ pub struct GiPipelines {
     alloc: ComputePipeline,
     estimation: Option<ComputePipeline>,
     light_sampling: Option<ComputePipeline>,
+    emissive_build: Option<ComputePipeline>,
     cover: FullscreenPipeline,
     marker: FullscreenPipeline,
 }
@@ -285,6 +308,9 @@ impl GiPipelines {
         let light_sampling = ray_tracing
             .then(|| ComputePipeline::new(ctx, &LIGHT_SAMPLING_PIPELINE, layouts))
             .transpose()?;
+        let emissive_build = ray_tracing
+            .then(|| ComputePipeline::new(ctx, &EMISSIVE_BUILD_PIPELINE, layouts))
+            .transpose()?;
         Ok(Self {
             scrolling: ComputePipeline::new(ctx, &SCROLLING_PIPELINE, layouts)?,
             eviction: ComputePipeline::new(ctx, &EVICTION_PIPELINE, layouts)?,
@@ -292,6 +318,7 @@ impl GiPipelines {
             alloc: ComputePipeline::new(ctx, &PATCH_ALLOC_PIPELINE, layouts)?,
             estimation,
             light_sampling,
+            emissive_build,
             cover: FullscreenPipeline::new(ctx, &PATCH_VIEW_PIPELINE, layouts)?,
             marker: FullscreenPipeline::new(ctx, &PATCH_MARKER_PIPELINE, layouts)?,
         })
@@ -329,6 +356,12 @@ impl GiPipelines {
         self.light_sampling.as_ref().map(ComputePipeline::handles)
     }
 
+    /// 9.6.2 自发光三角形表重建的录制句柄（None = 本机不支持光线求交）。
+    #[must_use]
+    pub fn emissive_build(&self) -> Option<ComputeHandles> {
+        self.emissive_build.as_ref().map(ComputePipeline::handles)
+    }
+
     #[must_use]
     pub fn cover(&self) -> crate::render::core::record::graphics::PipelineRef {
         self.cover.rec()
@@ -354,6 +387,8 @@ pub struct GiFrameDraw {
     pub defrag_waves: u32,
     /// 屏幕播种（播种关 / 无相机的帧为 None）。
     pub alloc: Option<GiAllocDraw>,
+    /// 9.6.2 自发光三角形表重建（估计关 / 无光线求交的帧为 None；每帧重建）。
+    pub emissive_build: Option<GiEmissiveBuildDraw>,
     /// 9.6.2 光源侧采样清单（估计关 / 无灯 / 无光线求交的帧为 None）。
     pub light_sampling: Option<GiLightSampleDraw>,
     /// 9.6 estimation（估计关 / 无光线求交 / 无实例的帧为 None）。
@@ -398,7 +433,10 @@ impl GiFrameDraw {
         if let Some(alloc) = &self.alloc {
             alloc.record(device, cb, self.gi_set);
         }
-        // 9.6.2：清单先录（estimation 的重连接取样读它），两者都在播种之后
+        // 9.6.2：自发光表重建 → 清单 → estimation（后两者都读前者的产出）
+        if let Some(emissive_build) = &self.emissive_build {
+            emissive_build.record(device, cb);
+        }
         if let Some(light_sampling) = &self.light_sampling {
             light_sampling.record(device, cb);
         }

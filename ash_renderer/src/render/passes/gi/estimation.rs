@@ -98,6 +98,55 @@ pub fn pack_light_sampling_push(sample_count: u32, light_count: u32) -> [u8; GI_
     push
 }
 
+/// 自发光重建的 push 字节：对象表容量。
+pub const GI_EMISSIVE_BUILD_PUSH_SIZE: u32 = 4;
+
+/// 自发光三角形表重建的录制输入（`prepare_gi` 组装，先于清单与 estimation 录）。
+#[derive(Clone, Copy)]
+pub struct GiEmissiveBuildDraw {
+    pub pass: ComputeHandles,
+    /// 4B push（对象表容量）。
+    pub push: [u8; GI_EMISSIVE_BUILD_PUSH_SIZE as usize],
+    /// dispatch 组数 = ceil(对象表容量 / 64)。
+    pub groups: u32,
+    /// GI 集（b8 计数 / b12 自发光表）。
+    pub gi_set: DescSet,
+    /// 实例表（对象 / 模型矩阵 / 材质环）。
+    pub instance_set: DescSet,
+    /// 光线求交集（顶点池 / 索引池）。
+    pub ray_set: DescSet,
+    /// bindless 贴图（自发光贴图）。
+    pub texture_set: DescSet,
+}
+
+impl GiEmissiveBuildDraw {
+    /// 录一次重建 dispatch（set 序 = GI / 实例 / 光线求交 / bindless）。
+    pub(crate) fn record(&self, device: &Device, cb: vk::CommandBuffer) {
+        self.pass.record(
+            device,
+            cb,
+            &[self.gi_set, self.instance_set, self.ray_set, self.texture_set],
+            &self.push,
+            self.groups,
+            Handoff::ComputeReadWrite,
+        );
+    }
+}
+
+/// 自发光重建 push：对象表容量。
+#[must_use]
+pub fn pack_emissive_build_push(object_capacity: u32) -> [u8; GI_EMISSIVE_BUILD_PUSH_SIZE as usize] {
+    let mut push = [0u8; GI_EMISSIVE_BUILD_PUSH_SIZE as usize];
+    put_u32s(&mut push, 0, &[object_capacity]);
+    push
+}
+
+/// 自发光重建的组数 = ceil(对象表容量 / 64)。
+#[must_use]
+pub fn emissive_build_groups(object_capacity: u32) -> u32 {
+    u64::from(object_capacity).div_ceil(64) as u32
+}
+
 /// 清单 dispatch 组数 = ceil(条数 / 64)。
 #[must_use]
 pub fn light_sampling_groups(sample_count: u32) -> u32 {
@@ -121,6 +170,7 @@ mod tests {
         assert_eq!(estimation_groups(65_536), 1024);
         assert_eq!(light_sampling_groups(128), 2);
         assert_eq!(light_sampling_groups(1), 1);
+        assert_eq!(emissive_build_groups(131_072), 2048);
     }
 
     #[test]

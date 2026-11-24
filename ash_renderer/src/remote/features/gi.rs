@@ -16,7 +16,7 @@ use crate::render::{
     gi_volume_world_center, gi_voxel_size, Context, FramePool, GiSetLayout, GiSettings, GpuTimer,
     SurfaceCacheConfig, SurfaceCacheTables, COUNTER_ALLOC, COUNTER_DEFRAG_MOVED,
     COUNTER_EST_BOUNCE_REQUESTS, COUNTER_EST_HITS, COUNTER_EST_PATCHES, COUNTER_EST_RAYS,
-    COUNTER_EST_SAMPLES, COUNTER_FAILED, COUNTER_FREED, COUNTER_VIEW_COVERED,
+    COUNTER_EMISSIVE_TRIANGLES, COUNTER_EST_SAMPLES, COUNTER_FAILED, COUNTER_FREED, COUNTER_VIEW_COVERED,
     COUNTER_VIEW_DEVIATION, COUNTER_VIEW_HOLES, GI_COUNTER_WORDS, GI_UBO_SIZE, INVALID_PATCH,
     GI_LIGHT_SAMPLE_CAPACITY, GI_LIGHT_SAMPLE_SIZE, PATCH_GEOMETRY_SIZE, PATCH_IRRADIANCE_SIZE,
     PATCH_STATISTICS_SIZE, RING_ACTIVE, RING_CONFIGS,
@@ -318,6 +318,8 @@ pub(crate) fn gi_stats(In(_params): In<Option<Value>>, world: &mut World) -> Brp
             "patches": counters[COUNTER_EST_PATCHES],
             "samples": counters[COUNTER_EST_SAMPLES],
         },
+        // 9.6.2 自发光三角形条数（超过容量 = 已截断，读数是超限值）
+        "emissive_triangles": counters[COUNTER_EMISSIVE_TRIANGLES],
         // 9.6.2 光源侧采样清单：活灯数 / 本帧条数 / 命中有效的条数
         "light_samples": {
             "lights": light_count,

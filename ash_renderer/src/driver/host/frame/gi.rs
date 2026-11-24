@@ -13,11 +13,11 @@ use bevy::prelude::*;
 
 use crate::common::syntax::ResultTierExt;
 use crate::render::{
-    alloc_grid, estimation_groups, eviction_groups, gi_cascade_offsets, light_sampling_groups,
-    pack_alloc_push, pack_light_sampling_push, pack_view_push, scrolling_groups, DescSet,
-    GiAllocDraw, GiEstimationDraw, GiFrameDraw, GiLightSampleDraw, GiPipelines, GiSettings,
-    GiViewDraw, LightRecord, LightTable, SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE,
-    MAX_CASCADES, UPDATE_MAX,
+    alloc_grid, emissive_build_groups, estimation_groups, eviction_groups, gi_cascade_offsets,
+    light_sampling_groups, pack_alloc_push, pack_emissive_build_push, pack_light_sampling_push,
+    pack_view_push, scrolling_groups, DescSet, GiAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw,
+    GiFrameDraw, GiLightSampleDraw, GiPipelines, GiSettings, GiViewDraw, LightRecord, LightTable,
+    SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE, MAX_CASCADES, UPDATE_MAX,
 };
 
 use super::scene::FrameView;
@@ -167,6 +167,24 @@ pub(super) fn prepare_gi(
             ibl_set,
         }
     });
+    // 9.6.2 自发光表：估计开且光线求交开着就每帧重建（顶点/索引池要带 storage）
+    let object_capacity = crate::render::OBJECT_TABLE_CAPACITY;
+    let emissive_build = if settings.estimation {
+        match (ray_set, pipelines.emissive_build()) {
+            (Some(ray_set), Some(pass)) => Some(GiEmissiveBuildDraw {
+                pass,
+                push: pack_emissive_build_push(object_capacity),
+                groups: emissive_build_groups(object_capacity),
+                gi_set,
+                instance_set,
+                ray_set,
+                texture_set,
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
     // 9.6.2 清单：估计开、有实例（要 TLAS）、有灯、光线求交开着才录
     let light_sampling = if settings.estimation && instance_count > 0 && light_sample_count > 0 {
         match (ray_set, pipelines.light_sampling()) {
@@ -225,6 +243,7 @@ pub(super) fn prepare_gi(
         defrag: pipelines.defrag(),
         defrag_waves: waves,
         alloc,
+        emissive_build,
         light_sampling,
         estimation,
         gi_set,
