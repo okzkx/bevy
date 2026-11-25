@@ -2,8 +2,9 @@
 
 判定线（详见 `.agents/docs/开发步骤/9-表面缓存全局光照/9.7-屏幕gather与注入/施工计划`）：
   ① 干净锚：开阔测试场 + 常量天空 L=1 + 太阳压地平线 → 缓存求值 E = πL（±5%）
-  ② 场景 A/B：受控测试场（地面/背墙/白箱/红柱/绿球/自发光）× 多机位 × 多灯光，
-     `scgi` 开/关的画面必须不同；且"墙背面"那组必须**变暗**（缓存会如实反映遮挡）
+  ② 场景 A/B：受控测试场（地面/背墙/白箱/红柱/绿球/自发光/悬挑板）× 多机位 × 多灯光，
+     `scgi` 开/关的画面必须不同；"墙背面"要求有实质差异（方向由多跳决定，不指定变暗）；
+     **悬挑板下的地板**必须明显变暗（那才是 GI 遮挡的正例）
   ③ 零 VUID / VK-ERROR
   ④ 新鲜度自检：转一下太阳，前后两帧必须不同（否则说明渲染停了、取证作废）
 
@@ -119,6 +120,26 @@ def mean_and_diff(path_a, path_b):
         return ImageStat.Stat(ga).mean[0], ImageStat.Stat(gb).mean[0], ImageStat.Stat(diff).mean[0]
 
 
+def wait_sky_uniform(timeout=90.0):
+    """等 IBL 的常量天空捕获落定：`probe16.center_energy` ≈ π 才算就绪。
+
+    坑：`sky_uniform` 只是改开关，环境 cube/SH 要等下一次捕获；不等待就直接取帧，
+    会拿到"上一张天空"下的 IBL（实测出现过 IBL 4.59 的假读数）。
+    """
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        try:
+            st = rpc("ash_renderer/ibl_stats")
+            last = st["probe16"]["center_energy"][0][0]
+        except Exception:  # noqa: BLE001
+            last = None
+        if last is not None and abs(last / math.pi - 1.0) <= 0.05:
+            return round(last, 4)
+        time.sleep(0.5)
+    return None
+
+
 def build_field():
     ox, oy, oz = TEST_ORIGIN
     for shape in [
@@ -135,6 +156,11 @@ def build_field():
         dict(shape="cuboid", color=[0.05, 0.05, 0.05], scale=[0.8, 0.8, 0.1],
              emissive=[6.0, 3.0, 0.6], translation=[ox + 3.8, oy + 1.6, oz + 10.5],
              name="gt_emissive"),
+        # 悬挑板：给"真遮挡"一个正例。板下的地板只剩一条天空带，缓存必须明显暗于 IBL；
+        # 而孤立的墙背面其实**不是** GI 遮挡（它朝开阔天空 + 被太阳照亮的地板要多跳补光），
+        # 所以判定线不再要求"墙背面必须变暗"——那是把直射遮挡与 GI 遮挡混为一谈。
+        dict(shape="cuboid", color=[0.02, 0.02, 0.02], scale=[12.0, 0.3, 12.0],
+             translation=[ox - 8.0, oy + 2.4, oz + 16.0], name="gt_overhang"),
     ]:
         rpc("ash_renderer/spawn_shape", shape)
 
@@ -172,6 +198,9 @@ def anchor():
         "spatial_filter": True, "temporal_filter": True, "scgi": False,
     })
     time.sleep(10.0)
+    ready = wait_sky_uniform()
+    check("① 常量天空就绪：GlobalProbe 中心能量 ≈ π（±5%）", ready is not None,
+          f"center_energy={ready}")
     p_ibl = dump("anchor_ibl")
     rpc("ash_renderer/gi_set", {"scgi": True})
     time.sleep(6.0)
@@ -298,10 +327,40 @@ def main():
         behind = [r for r in rows if r[0].endswith("cam_behind") and r[0].startswith("sun_hi")]
         if behind:
             name, m_ibl, m_scgi, _ = behind[0]
-            check("② 墙背面：SCGI 比 IBL 暗（缓存如实反映遮挡）", m_scgi < m_ibl,
-                  f"{name}: IBL {m_ibl:.1f} → SCGI {m_scgi:.1f}")
+            ratio = m_scgi / m_ibl if m_ibl else 1.0
+            # 孤立的墙背面朝开阔天空，而且地板被太阳照亮要多跳补光：它比 IBL 略亮是对的。
+            # 这里只要求"注入真的换了数"（≥2%），遮挡的正例交给下面的悬挑遮挡。
+            check("② 墙背面：注入与 IBL 有实质差异（≥2%，方向由多跳决定）",
+                  abs(ratio - 1.0) >= 0.02, f"{name}: IBL {m_ibl:.1f} → SCGI {m_scgi:.1f}（{ratio:.3f}×）")
         else:
-            check("② 墙背面：SCGI 比 IBL 暗（缓存如实反映遮挡）", False, "缺该组读数")
+            check("② 墙背面：注入与 IBL 有实质差异（≥2%，方向由多跳决定）", False, "缺该组读数")
+
+        # ② 遮挡的正例：悬挑板下的地板。
+        # 用**物理量对账**（scgi_stats 的 E 读回）而不是 LDR 屏均值：常量天空 L=1 是 1 lux 量级，
+        # 那样的帧整体接近黑，比屏均值会把噪声当信号。这里在真实天空下取两次 E：
+        # 板下（黑板把天光挡掉大半）必须明显低于开阔处。
+        def E_mean(tag):
+            sc = rpc("ash_renderer/scgi_stats", {"stride": 8})
+            return sum(sc["l0_covered_mean"]) / 3.0, sc["coverage"], tag
+
+        rpc("ash_renderer/sun_set", {"azimuth_deg": 45.0, "elevation_deg": 55.0})
+        rpc("ash_renderer/set_camera", {"target": [TEST_ORIGIN[0], 1.0, TEST_ORIGIN[2] + 9.5],
+                                        "yaw_deg": 0.0, "pitch_deg": 10.0, "radius": 13.0})
+        time.sleep(6.0)
+        e_open = E_mean("open")
+        rpc("ash_renderer/set_camera", {
+            "target": [TEST_ORIGIN[0] - 8.0, 0.2, TEST_ORIGIN[2] + 16.0],
+            "yaw_deg": 0.0, "pitch_deg": 35.0, "radius": 2.0,
+        })
+        time.sleep(8.0)
+        e_under = E_mean("under")
+        ratio = e_under[0] / e_open[0] if e_open[0] else 1.0
+        check("② 悬挑遮挡：板下屏幕辐照度明显低于开阔处（比值 ≤0.60）", ratio <= 0.60,
+              f"开阔 E={e_open[0]:.0f}（覆盖 {e_open[1]:.2f}）/ 板下 E={e_under[0]:.0f}"
+              f"（覆盖 {e_under[1]:.2f}）→ 比值 {ratio:.3f}")
+        rpc("ash_renderer/set_camera", {"target": [TEST_ORIGIN[0], 1.0, TEST_ORIGIN[2] + 9.5],
+                                        "yaw_deg": 0.0, "pitch_deg": 10.0, "radius": 13.0})
+        time.sleep(2.0)
 
         off_matrix()
 
