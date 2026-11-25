@@ -111,33 +111,36 @@ fn cs_main(@builtin(local_invocation_index) lid: u32) {
     if (live0 == 1u) {
         let dst_offset = atomicAdd(&ring[write_config + 1u], 1u);
         let dst = (start + dst_offset) % capacity;
-        patch_geometry[dst] = geometry0;
-        patch_irradiance0[dst] = irradiance0_a;
-        patch_irradiance1[dst] = irradiance1_a;
-        patch_statistics[dst] = statistics0;
-        patch_cell[dst] = cell0;
-        // 时域历史跟着走（原地不动时 dst == slot0，写回同值也无副作用，但省掉这两笔拷贝）
+        // 领取号（上面的 atomicAdd）必须每条存活项都做——那是本轮的"存活数"累计；
+        // 但落到 dst == src 时这一条根本不用动：稳态（ring 没洞）下这是绝大多数"搬"。
+        // 跳过整块写回，`counters[3]` 也只在真的搬了才加，指标才反映实际搬运量。
         if (dst != slot0) {
+            patch_geometry[dst] = geometry0;
+            patch_irradiance0[dst] = irradiance0_a;
+            patch_irradiance1[dst] = irradiance1_a;
+            patch_statistics[dst] = statistics0;
+            patch_cell[dst] = cell0;
+            cell_patch[cell0] = dst;
+            // 时域历史（b14/b15）跟着 patch 走
             filtered_irradiance0[dst] = filtered0_a;
             filtered_irradiance1[dst] = filtered1_a;
+            atomicAdd(&counters[3], 1u);
         }
-        cell_patch[cell0] = dst;
-        atomicAdd(&counters[3], 1u);
     }
     if (live1 == 1u) {
         let dst_offset = atomicAdd(&ring[write_config + 1u], 1u);
         let dst = (start + dst_offset) % capacity;
-        patch_geometry[dst] = geometry1;
-        patch_irradiance0[dst] = irradiance0_b;
-        patch_irradiance1[dst] = irradiance1_b;
-        patch_statistics[dst] = statistics1;
-        patch_cell[dst] = cell1;
         if (dst != slot1) {
+            patch_geometry[dst] = geometry1;
+            patch_irradiance0[dst] = irradiance0_b;
+            patch_irradiance1[dst] = irradiance1_b;
+            patch_statistics[dst] = statistics1;
+            patch_cell[dst] = cell1;
+            cell_patch[cell1] = dst;
             filtered_irradiance0[dst] = filtered0_b;
             filtered_irradiance1[dst] = filtered1_b;
+            atomicAdd(&counters[3], 1u);
         }
-        cell_patch[cell1] = dst;
-        atomicAdd(&counters[3], 1u);
     }
 
     workgroupBarrier();

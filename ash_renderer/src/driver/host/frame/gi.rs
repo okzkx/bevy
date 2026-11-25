@@ -137,6 +137,29 @@ pub(super) fn prepare_gi(
         ring_words[crate::render::RING_ACTIVE * 4 + 2],
         ring_words[crate::render::RING_ACTIVE * 4 + 3],
     ]);
+    // 9.5 整理的按需门控：读配置的区间长度 == 活跃数 ⇒ ring 里没有洞，整段跳过。
+    // 否则每帧都要重扫并重写整个 ring——稳态下 `defrag_moved` 会等于活跃池，
+    // 等于"每帧把全场搬一遍"（白烧带宽，并在补上 b14/b15 之前冲掉时域历史）。
+    let word = |index: usize| {
+        u32::from_le_bytes([
+            ring_words[index * 4],
+            ring_words[index * 4 + 1],
+            ring_words[index * 4 + 2],
+            ring_words[index * 4 + 3],
+        ])
+    };
+    let ring_flip = word(crate::render::RING_FLIP) as usize;
+    let ring_count = word(crate::render::RING_CONFIGS + ring_flip * 4 + 1);
+    // 空洞比例低于阈值就先不整理：槽位有效性由 cell↔patch 双表互指保证（陈旧槽只会被当死项
+    // 忽略），稀疏 12% 以内只是少量空槽，压紧的收益抵不过"每帧搬整场"的带宽。超过阈值才开波。
+    const DEFRAG_HOLE_PERCENT: u32 = 12;
+    let holes = ring_count.saturating_sub(active_patches);
+    // 双条件：空洞比例过阈值，或者 ring 区间已经涨到池容量的一半（安全阀——比例门控下
+    // 长期稀疏也只是浪费扫描范围，但区间一旦逼近容量就必须压紧，否则 `start + offset`
+    // 绕圈会把条目覆盖掉）。
+    let ring_holey = ring_count > 0
+        && (holes * 100 >= ring_count * DEFRAG_HOLE_PERCENT
+            || ring_count * 2 >= config.capacity.max(1));
     let budget_plan =
         plan_estimation_budget(active_patches, settings.samples.max(1), settings.budget);
 
@@ -182,7 +205,8 @@ pub(super) fn prepare_gi(
 
     let pipelines = &*gi.pipelines;
     let gi_set = gi.tables.set(slot);
-    let waves = settings.defrag_waves.min(16);
+    // 没有洞就一波都不录：整理只在"真的需要压紧"时才跑
+    let waves = if ring_holey { settings.defrag_waves.min(16) } else { 0 };
     let alloc = settings.seed.then(|| {
         let (low, groups) = alloc_grid(extent);
         GiAllocDraw {
