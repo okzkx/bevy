@@ -308,10 +308,10 @@ mod tests {
     #[test]
     fn constant_sky_folds_to_pi_times_radiance() {
         use std::f32::consts::{PI, TAU};
-        const SH_Y0: f32 = 0.282_094_791_773_878_1;
-        const SH_Y1: f32 = 0.488_602_511_902_919_9;
-        const FOLD_L0: f32 = 0.886_226_925_452_758_1;
-        const FOLD_L1: f32 = 1.023_326_707_946_488_5;
+        const SH_Y0: f32 = 0.282_094_79;
+        const SH_Y1: f32 = 0.488_602_5;
+        const FOLD_L0: f32 = 0.886_226_9;
+        const FOLD_L1: f32 = 1.023_326_7;
 
         // 折叠乘数 = 余弦卷积系数 × 基常数
         assert!((FOLD_L0 - PI * SH_Y0).abs() < 1e-6);

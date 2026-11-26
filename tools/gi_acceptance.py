@@ -201,7 +201,7 @@ class Host:
         raise SystemExit("renderer did not answer BRP within 120s")
 
     def close(self):
-        if self.proc is None or self.args.keep or self.attached:
+        if self.proc is None or getattr(self.args, "keep", False) or self.attached:
             return
         self.proc.terminate()
         try:

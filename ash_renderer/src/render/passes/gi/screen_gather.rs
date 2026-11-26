@@ -1031,8 +1031,10 @@ mod tests {
         );
         assert_eq!(push.len(), 32);
         let words: Vec<u32> = push
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect();
         assert_eq!(words, vec![480, 270, 1920, 1080, 42, 1, 3, 0]);
     }

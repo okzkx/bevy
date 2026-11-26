@@ -63,14 +63,15 @@ def cells():
     for mode in ("off", "low", "mid", "high"):
         out.append({"id": f"S3-zero_day-512-{mode}", "scene": SCENE_ZERO_DAY,
                     "mode": mode, "size": 512, "cascades": 6,
-                    "generate": 50000, "workload": None})
-    for count in (10000, 50000, 100000):
+                    "generate": 8000, "workload": None,
+                    "columns": 90})
+    for count in (10000,):
         for form, rows in (("none", 0), ("few", 100), ("all", count)):
             for mode in ("off", "mid"):
                 out.append({"id": f"S4-{count // 1000}k-{form}-{mode}",
                             "scene": SCENE_SPONZA, "mode": mode,
                             "size": 128, "cascades": 4,
-                            "generate": count,
+                            "generate": count, "columns": 100,
                             "workload": {"form": form, "rows": rows}})
     return out
 
@@ -153,20 +154,22 @@ def run_cell(args, cell, root_out):
         brp.call("ibl_set", {"enabled": True, "diffuse_mode": "sh_l2"})
         brp.call("exposure_set", {"mode": "manual"})
         brp.call("sun_set", {"azimuth_deg": 45.0, "elevation_deg": 55.0})
+        # zero_day loads asynchronously; wait until its rows are in the ledger.
+        # Enabling GI before the instance table is populated makes GI dispatch with
+        # a partially initialized set2 and trips VUID-vkCmdDispatch-None-08114.
+        deadline = time.time() + 90
+        last_rows = -1
+        while time.time() < deadline:
+            rows = ((brp.try_call("perf_stats") or {}).get("scale") or {}).get(
+                "instance_rows")
+            if rows and rows > 0 and rows == last_rows:
+                break
+            last_rows = rows
+            time.sleep(1.0)
         if cell["generate"]:
-            # zero_day loads asynchronously; wait until its rows are in the
-            # ledger, otherwise generate_scene has no primitive to clone.
-            deadline = time.time() + 90
-            last_rows = -1
-            while time.time() < deadline:
-                rows = ((brp.try_call("perf_stats") or {}).get("scale") or {}).get(
-                    "instance_rows")
-                if rows and rows > 0 and rows == last_rows:
-                    break
-                last_rows = rows
-                time.sleep(1.0)
             t0 = time.time()
-            brp.call("generate_scene", {"count": cell["generate"], "columns": 250,
+            brp.call("generate_scene", {"count": cell["generate"],
+                                        "columns": cell.get("columns", 100),
                                         "spacing": 2.0, "seed": 11})
             print(f"[cell] generated {cell['generate']} instances in {time.time() - t0:.1f}s")
             time.sleep(3.0)

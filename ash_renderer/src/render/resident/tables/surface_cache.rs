@@ -913,7 +913,7 @@ mod tests {
         data.update_max = 32;
         let bytes = pack_surface_cache_uniforms(&data);
         let word = |off: usize| u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
-        assert_eq!(word(64 + 0), 0.0f32.to_bits());
+        assert_eq!(word(64), 0.0f32.to_bits());
         assert_eq!(word(96), (-3i32) as u32);
         assert_eq!(word(96 + 4), 4);
         assert_eq!(word(96 + 8), 5);

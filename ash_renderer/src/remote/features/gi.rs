@@ -662,7 +662,7 @@ pub(crate) fn scgi_low_probe(In(params): In<Option<Value>>, world: &mut World) -
     };
     let read = |image: ash::vk::Image, bytes_per_texel: u64| {
         crate::render::readback_image_region(
-            &ctx,
+            ctx,
             image,
             ash::vk::ImageAspectFlags::COLOR,
             ash::vk::ImageLayout::GENERAL,
@@ -905,7 +905,7 @@ fn pixel_input(
         height: last[1] - origin[1] + 1,
     };
     let depth = readback_image_region(
-        &ctx,
+        ctx,
         res::<FramePool>(world)?.depth_image(slot),
         vk::ImageAspectFlags::DEPTH,
         vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
@@ -919,7 +919,7 @@ fn pixel_input(
     .map_err(internal_err("深度 stencil 回读失败"))?;
     let read_color = |image, layout, bytes| {
         readback_image_region(
-            &ctx,
+            ctx,
             image,
             vk::ImageAspectFlags::COLOR,
             layout,

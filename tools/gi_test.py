@@ -223,6 +223,9 @@ def main():
         print(f"已在跑的宿主不可达（端口 {BRP_PORT}）")
         return 2
 
+    # 自动曝光会让静止画面逐帧变化，先冻结曝光再做 LDR 逐字节对比。
+    rpc("ash_renderer/exposure_set", {"mode": "manual"})
+
     vuid_base = log_vuid_count()
     print(f"启动后 VUID/VK-ERROR 基线行数：{vuid_base}")
     restored = False

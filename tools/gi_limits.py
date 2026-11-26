@@ -63,11 +63,14 @@ def main():
             lambda: session.brp.call("ibl_set", {"enabled": False}),
             lambda: session.brp.call("ibl_set", {"enabled": True, "diffuse_mode": "sh_l2"}))
 
+        # Isolate the IBL diffuse representation: SCGI would otherwise mask it.
+        session.set_gi({"scgi": False})
         result["ab"]["sh_l2_probe16"] = ab(
             session, "ab_diffuse",
             lambda: session.brp.call("ibl_set", {"enabled": True, "diffuse_mode": "sh_l2"}),
             lambda: session.brp.call("ibl_set", {"enabled": True, "diffuse_mode": "probe16"}))
         session.brp.call("ibl_set", {"enabled": True, "diffuse_mode": "sh_l2"})
+        session.set_gi({"scgi": True})
 
         result["ab"]["scgi_on_off"] = ab(
             session, "ab_scgi",
@@ -104,16 +107,16 @@ def main():
         # Thin-geometry leak: a 5 cm wall between the camera and a strong light.
         thin = session.brp.call("spawn_shape", {
             "shape": "cuboid", "translation": [80, 2, -6],
-            "scale": [12, 4, 0.05], "color": [0.8, 0.8, 0.8],
+            "scale": [12, 4, 0.05], "color": [0.2, 0.2, 0.2],
             "name": "gi98-thin-wall"})
         # An emissive panel behind the thin wall: only GI rays can carry its light,
         # so any brightening of the front face is a thin-geometry leak.
         panel = session.brp.call("spawn_shape", {
             "shape": "cuboid", "translation": [80, 2, -9],
             "scale": [3, 3, 0.2], "color": [1.0, 0.9, 0.8],
-            "emissive": [20.0, 10.0, 5.0], "name": "gi98-leak-emissive"})
-        session.set_camera({"target": [80, 2, -5.9], "yaw_deg": 0, "pitch_deg": 0,
-                            "radius": 2.5}, settle=10)
+            "emissive": [40.0, 20.0, 10.0], "name": "gi98-leak-emissive"})
+        session.set_camera({"target": [80, 2, -5.95], "yaw_deg": 0, "pitch_deg": 0,
+                            "radius": 1.5}, settle=10)
         session.set_gi({"scgi": True})
         session.settle(4)
         scgi_on = snap(session, "leak_scgi_on")
@@ -122,9 +125,19 @@ def main():
         scgi_off = snap(session, "leak_scgi_off")
         leak_diff = diff_frames(session.out / "leak_scgi_on.png",
                                 session.out / "leak_scgi_off.png")
+        # Differential leak probe: remove the hidden panel and keep SCGI on. If the
+        # 5 cm wall leaks, the wall front changes at the panel's screen location.
+        session.set_gi({"scgi": True})
+        session.settle(6)
+        panel_removed = snap(session, "leak_panel_removed")
+        panel_diff = diff_frames(session.out / "leak_scgi_on.png",
+                                 session.out / "leak_panel_removed.png")
         result["leak"] = {"thin_wall": thin, "panel": panel, "scgi_on": scgi_on,
-                          "scgi_off": scgi_off, "diff": leak_diff}
+                          "scgi_off": scgi_off, "panel_removed": panel_removed,
+                          "diff": leak_diff, "panel_removed_diff": panel_diff}
         print(f"[leak] scgi on/off mean={leak_diff['mean_abs']} p99={leak_diff['p99']}")
+        print(f"[leak] panel removed mean={panel_diff['mean_abs']} p99={panel_diff['p99']} "
+              f"bbox={panel_diff['changed_bbox']}")
 
         session.brp.world_call("world.despawn_entity", {"entity": thin["entity"]})
         session.brp.world_call("world.despawn_entity", {"entity": panel["entity"]})

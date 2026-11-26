@@ -60,6 +60,13 @@ pub(crate) fn f32_at(bytes: &[u8], offset: usize) -> Result<f32, BrpError> {
     u32_at(bytes, offset).map(f32::from_bits)
 }
 
+fn out_of_range(bytes: &[u8], offset: usize, len: usize) -> BrpError {
+    BrpError::internal(format!(
+        "读回越界：偏移 {offset} 取 {len} 字节，读回段仅 {} 字节",
+        bytes.len()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,11 +78,4 @@ mod tests {
         assert!(f16_at(&[0x00], 0).is_err());
         assert!(f16_at(&[0x00, 0x3c], usize::MAX).is_err());
     }
-}
-
-fn out_of_range(bytes: &[u8], offset: usize, len: usize) -> BrpError {
-    BrpError::internal(format!(
-        "读回越界：偏移 {offset} 取 {len} 字节，读回段仅 {} 字节",
-        bytes.len()
-    ))
 }

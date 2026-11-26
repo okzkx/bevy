@@ -182,7 +182,7 @@ pub(crate) fn exposure_get(In(_params): In<Option<Value>>, world: &mut World) ->
         .read_state(slot)
         .map_err(internal_err("曝光状态读失败"))?;
     let settings = res::<ExposureSettings>(world)?;
-    Ok(exposure_json(&settings, Some(state)))
+    Ok(exposure_json(settings, Some(state)))
 }
 
 /// 设置 + （可选）适应状态的统一 JSON 形态，`exposure_set`/`exposure_get` 共用。

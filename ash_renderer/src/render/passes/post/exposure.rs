@@ -528,11 +528,13 @@ mod tests {
     }
 
     /// 曝光倍数的口径：帧均值 = key 时倍数 1（手写一遍 shader 的公式，防止两边跑偏）。
+    #[allow(clippy::disallowed_methods)] // 测试夹具重演 shader 公式，非渲染热路径
     fn scale_for(avg_log2: f32, key: f32, min: f32, max: f32) -> f32 {
         (key / avg_log2.exp2()).clamp(min, max)
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // 测试夹具重演 shader 公式，非渲染热路径
     fn scale_is_one_at_key_and_clamped() {
         assert!((scale_for(0.18f32.log2(), 0.18, 0.5, 6.0) - 1.0).abs() < 1e-5);
         // 更暗的帧 → 倍数更大；更亮的帧 → 倍数更小
