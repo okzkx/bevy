@@ -1,6 +1,6 @@
 # 施工计划：9.10 SCGI 与 Unity7 URP 对照审计
 
-> 2026-11-26 立案（纯文档，未开工；2026-11-26 用户增补段，编号追加在 9.8 之后）。对应[步骤 9 README](README.md)、[八段拆解 §8 对照索引](施工计划：天空盒、IBL 与表面缓存全局光照八段拆解.md)与[路线图步骤 9 表](../学习目标实现步骤.md)。对照基准是本机 URP 17.7.0 源码：core `...\com.unity.render-pipelines.core@d1e054958f77\Runtime\Lighting\SurfaceCache\`（26 个非 meta 文件）、URP `...\com.unity.render-pipelines.universal@f74a61fa3847\Runtime\RendererFeatures\SurfaceCacheGIRendererFeature\`（14 个非 meta 文件）；许可边界与"可逐行搬运逻辑"的授权见[八段 §8.1](施工计划：天空盒、IBL 与表面缓存全局光照八段拆解.md)，机制整理见[Unity SCGI 实现](../../笔记/光照与材质/Unity%20SCGI%20实现.md)，Unity 侧发布状态见[Unity SCGI 调研](../../笔记/光照与材质/Unity%20SCGI%20调研.md)。本文只管 9.10 段做什么、按什么顺序、验收什么；开工后在该段目录（`9.10-SCGI与Unity7对照审计/`，开工时立）落对照表、审计报告与施工记录。
+> 2026-11-26 立案（纯文档，未开工；2026-11-26 用户增补段，编号追加在 9.8 之后）。对应[步骤 9 README](../README.md)、[八段拆解 §8 对照索引](../施工计划：天空盒、IBL 与表面缓存全局光照八段拆解.md)与[路线图步骤 9 表](../../学习目标实现步骤.md)。对照基准是本机 URP 17.7.0 源码：core `...\com.unity.render-pipelines.core@d1e054958f77\Runtime\Lighting\SurfaceCache\`（26 个非 meta 文件）、URP `...\com.unity.render-pipelines.universal@f74a61fa3847\Runtime\RendererFeatures\SurfaceCacheGIRendererFeature\`（14 个非 meta 文件）；许可边界与"可逐行搬运逻辑"的授权见[八段 §8.1](../施工计划：天空盒、IBL 与表面缓存全局光照八段拆解.md)，机制整理见[Unity SCGI 实现](../../../笔记/光照与材质/Unity%20SCGI%20实现.md)，Unity 侧发布状态见[Unity SCGI 调研](../../../笔记/光照与材质/Unity%20SCGI%20调研.md)。本文只管 9.10 段做什么、按什么顺序、验收什么；本计划已入该段目录（`9.10-SCGI与Unity7对照审计/`）；开工后在同目录落对照表、审计报告与施工记录。
 >
 > **当前状态：⬜ 已立案（2026-11-26 用户增补），未开工。** 任务 9.10.1～9.10.6 为待施工拆解；前置闸门见 §3、判定线草案见文末。
 
@@ -18,7 +18,7 @@
 | 既有回归工具 | `tools/gi_*.py` 共 14 个：gi_test、gi_energy_regression、gi_estimation_test、gi_gather_test、gi_flicker_test、gi_flicker_isolate、gi_flicker_map、gi_geometry_jitter、gi_pixel_audit、gi_point_audit、gi_probe_regression、gi_resize_regression、gi_scene_regression、gi_stage_audit | `tools/` 实测 |
 | 已知顺延项 | 调试视图 16/17 未实现（`remote/features/gi.rs:135` 的 `>15` 截断）、无 `scgi_ms`（源码 grep 零命中）、`GI_COUNTER_WORDS` 16→20 未扩 | 9.7 段施工计划/README、路线图 9.7 行 |
 | 9.7 判定线遗留 | 透明 A/B 读图缺、rank1 取证缺、Volume 边界环/振铃未留档、漏光案例未做（八段 §6 说归 9.8） | 9.7 段施工计划判定线、路线图 `:267` |
-| 9.9 工具 | 9.9 立案的颜色面板 / `color_scope_get` 是审计修复的读数工具（9.9 未开工时用 `frame_dump` + 现有 BRP） | [9.9 施工计划](施工计划：ToneMapping颜色校验面板（9.9 追加）.md) |
+| 9.9 工具 | 9.9 立案的颜色面板 / `color_scope_get` 是审计修复的读数工具（9.9 未开工时用 `frame_dump` + 现有 BRP） | [9.9 施工计划](../9.9-ToneMapping颜色校验面板/施工计划：ToneMapping颜色校验面板（9.9 追加）.md) |
 | 9.8 状态 | 未立项未开工，不在对照面 | 路线图 `:268` |
 
 ### 0.1 判定口径：按功能语义，不按文件一一对应
