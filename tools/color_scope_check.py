@@ -11,7 +11,7 @@
 校验项（与计划 §2 判定线同源）:
   1. magic/stride/bins 长度与常量一致（7199 u32、stride 2）；
   2. 每域 `luma 直方图和 + below + above + zero == samples`（计数不漏样本）；
-  3. `samples == ceil(w/2) * ceil(h/2)`（stride 2 的采样点总数）；
+  3. `samples == ceil(w/4) * ceil(h/4)`（stride 4 的采样点总数）；
   4. B 域加权均值与 `avg_log2 + log2(scale)` 差 ≤ 0.15 EV（B 已乘曝光倍数，
      头里的 avg_log2 是乘法之前的测光值，直接比会固定偏 log2(scale)）；
   5. 低于轴比例 > 5% 时告警（计划待决项 2：轴可能不够宽）；
@@ -33,7 +33,7 @@ import urllib.request
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 15702
 EXPECTED_BINS_U32 = 7199
-EXPECTED_STRIDE = 2
+EXPECTED_STRIDE = 4
 BINS = 256
 AXIS_MIN_EV = -16.0
 AXIS_SPAN_EV = 24.0
@@ -97,7 +97,7 @@ def check(snap):
 
     width = int(snap.get("width", 0))
     height = int(snap.get("height", 0))
-    expected = (width + 1) // 2 * ((height + 1) // 2)
+    expected = (width + 3) // 4 * ((height + 3) // 4)
 
     for name in ("a", "b", "c"):
         domain = snap["domains"][name]
@@ -116,7 +116,7 @@ def check(snap):
             )
         if width and height and samples != expected:
             errors.append(
-                f"{name} 域采样点数 {samples}，期望 ceil({width}/2)*ceil({height}/2)"
+                f"{name} 域采样点数 {samples}，期望 ceil({width}/4)*ceil({height}/4)"
                 f" = {expected}"
             )
         below_ratio = domain["ratios"]["below"]

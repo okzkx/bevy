@@ -197,9 +197,9 @@ pub(super) fn color_scope_draw(
         ..
     } = post;
     let extent = smaa.ldr_extent();
-    let _frame = color_scope
-        .begin_frame(slot, extent)
-        .or_fatal("颜色校验 bins 清零/写头失败，渲染链无法继续")?;
+    let frame_index = color_scope
+        .begin_frame(slot)
+        .or_fatal("颜色校验 bins 槽号越界，渲染链无法继续")?;
     let bindings = ColorScopeBindings {
         hdr: gbuffer.targets.hdr_view(slot),
         blit_sampler: gbuffer.targets.sampler(),
@@ -216,5 +216,7 @@ pub(super) fn color_scope_draw(
         color_scope_pipelines.handles(),
         color_scope.set(slot),
         extent,
+        frame_index as u32,
+        color_scope.bins(slot).buffer(),
     )))
 }

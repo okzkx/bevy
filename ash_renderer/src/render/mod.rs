@@ -169,12 +169,12 @@ pub use passes::post::bloom::{
     BloomTargets, TonemapCurve,
 };
 pub use passes::post::color_scope::{
-    pack_color_scope_header, ColorScopeBindings, ColorScopeCounts, ColorScopeDomain,
-    ColorScopeDraw, ColorScopePipelines, ColorScopeRatios, ColorScopeReader, ColorScopeSettings,
-    ColorScopeSnapshot, ColorScopeTargets, COLOR_SCOPE_AXIS_MIN_EV, COLOR_SCOPE_AXIS_SPAN_EV,
-    COLOR_SCOPE_BINS_BYTES, COLOR_SCOPE_BINS_U32, COLOR_SCOPE_CBCR_EDGE, COLOR_SCOPE_DOMAIN_U32,
-    COLOR_SCOPE_HEADER_FRAME, COLOR_SCOPE_HEADER_HEIGHT, COLOR_SCOPE_HEADER_U32,
-    COLOR_SCOPE_HEADER_WIDTH, COLOR_SCOPE_MAGIC, COLOR_SCOPE_STRIDE,
+    ColorScopeBindings, ColorScopeCounts, ColorScopeDomain, ColorScopeDraw, ColorScopePipelines,
+    ColorScopeRatios, ColorScopeReader, ColorScopeSettings, ColorScopeSnapshot, ColorScopeTargets,
+    COLOR_SCOPE_AXIS_MIN_EV, COLOR_SCOPE_AXIS_SPAN_EV, COLOR_SCOPE_BINS_BYTES,
+    COLOR_SCOPE_BINS_U32, COLOR_SCOPE_CBCR_EDGE, COLOR_SCOPE_DOMAIN_U32, COLOR_SCOPE_HEADER_FRAME,
+    COLOR_SCOPE_HEADER_HEIGHT, COLOR_SCOPE_HEADER_U32, COLOR_SCOPE_HEADER_WIDTH, COLOR_SCOPE_MAGIC,
+    COLOR_SCOPE_STRIDE,
 };
 pub use passes::post::exposure::{
     pack_exposure_params, ExposureDraw, ExposureMode, ExposureParamsData, ExposurePipelines,

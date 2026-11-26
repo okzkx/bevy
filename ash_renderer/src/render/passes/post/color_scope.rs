@@ -16,10 +16,9 @@
 
 use ash::{vk, Device};
 
-use crate::common::bytes::put_u32s;
 use crate::common::error::{Result, VulkanError};
 use crate::render::core::binding::descriptor_writer::DescriptorWriter;
-use crate::render::core::binding::pipeline_layout::PipelineDesc;
+use crate::render::core::binding::pipeline_layout::{PipelineDesc, PushRange};
 use crate::render::core::binding::set_layout::{
     merged_pool_sizes, BindingDesc, DescKind, DescSet, SetLayout, SetLayoutDesc, SetLayouts,
 };
@@ -28,11 +27,12 @@ use crate::render::core::device::memory::buffer::GpuBuffer;
 use crate::render::core::device::memory::role::BufferRole;
 use crate::render::core::device::readback::OneShotReadback;
 use crate::render::core::pipeline::compute::ComputePipeline;
+use crate::render::core::record::barrier::MemoryBarrierDesc;
 use crate::render::core::record::compute::{ComputeHandles, Handoff};
 use crate::render::Context;
 
 /// 采样步长：每 2 像素取 1（1600×900 约 36 万样本）。
-pub const COLOR_SCOPE_STRIDE: u32 = 2;
+pub const COLOR_SCOPE_STRIDE: u32 = 4;
 /// 头区 u32 数。
 pub const COLOR_SCOPE_HEADER_U32: u32 = 16;
 /// 单个域的 u32 数：luma 256 + RGB 3×256 + 计数 5（样本 / 低于轴 / 高于轴 / ≤0 / ≥1）。
@@ -48,6 +48,9 @@ pub const COLOR_SCOPE_BINS_U32: u32 =
 pub const COLOR_SCOPE_BINS_BYTES: u64 = COLOR_SCOPE_BINS_U32 as u64 * 4;
 /// bins magic（`"CSCP"` 小端）：面板/BRP 据此判断还没采过样。
 pub const COLOR_SCOPE_MAGIC: u32 = u32::from_le_bytes(*b"CSCP");
+
+/// 采样 compute 的 push constant 字节数（一个 u32：采样帧号）。
+pub const COLOR_SCOPE_PUSH_BYTES: u32 = 4;
 
 /// A/B 直方图的 EV 下限（与 `shaders/post/color_scope.wgsl` 的 `AXIS_MIN_EV` 同源）。
 pub const COLOR_SCOPE_AXIS_MIN_EV: f32 = -16.0;
@@ -85,7 +88,10 @@ pub(crate) static COLOR_SCOPE_PIPELINE: PipelineDesc = PipelineDesc {
     shader: &shader_abi::COLOR_SCOPE,
     entries: &[c"cs_main"],
     sets: &[&COLOR_SCOPE_SET_DESC],
-    push: None,
+    push: Some(PushRange {
+        stages: COMPUTE,
+        size: COLOR_SCOPE_PUSH_BYTES,
+    }),
     color_formats: &[],
     depth_format: None,
 };
@@ -131,24 +137,6 @@ pub fn color_scope_groups(extent: vk::Extent2D) -> (u32, u32) {
     )
 }
 
-/// bins 的 CPU 侧头（曝光 4 个 f32 由 shader 同帧覆写，这里只写静态字段）。
-#[must_use]
-pub fn pack_color_scope_header(extent: vk::Extent2D, frame_index: u64) -> [u8; 64] {
-    let mut raw = [0u8; 64];
-    put_u32s(
-        &mut raw,
-        0,
-        &[
-            COLOR_SCOPE_MAGIC,
-            COLOR_SCOPE_STRIDE,
-            extent.width,
-            extent.height,
-            frame_index as u32,
-        ],
-    );
-    raw
-}
-
 /// 采样资源族：每帧槽一份 bins + 一张描述符集，池/布局随资源族存亡。
 #[derive(bevy::prelude::Resource)]
 pub struct ColorScopeTargets {
@@ -159,8 +147,6 @@ pub struct ColorScopeTargets {
     sets: Vec<vk::DescriptorSet>,
     /// 每槽集里当前写入的三张视图（缓冲/采样器稳定，只有视图随 resize 换）。
     bound: Vec<[vk::ImageView; 3]>,
-    /// 清零 + 写头用的复用缓冲（避免每帧分配 28.8 KB）。
-    scratch: Vec<u8>,
     /// 已开始的采样帧计数（写进 bins 头，供 `frame_age` 对账）。
     frame_index: u64,
     /// 最近一次 [`Self::begin_frame`] 的帧槽（面板按它选 bins 回读）。
@@ -196,20 +182,20 @@ impl ColorScopeTargets {
             bins: Vec::with_capacity(slots),
             sets: Vec::with_capacity(slots),
             bound: vec![[vk::ImageView::null(); 3]; slots],
-            scratch: vec![0u8; COLOR_SCOPE_BINS_BYTES as usize],
             frame_index: 0,
             last_slot: 0,
         };
         for _ in 0..slots {
-            let mut bins = GpuBuffer::create_with_families(
+            // bins 必须是显存里的 storage：每帧约 250 万次原子写，放宿主可见内存
+            //（走 PCIe 的 system memory）会让一帧的采样从 0.3 ms 涨到几十毫秒。
+            // 清零改由录制侧 `vkCmdFillBuffer` 做，头由 shader 自己写。
+            let bins = GpuBuffer::create_with_families(
                 &ctx.device,
                 ctx.memory_contract(),
                 COLOR_SCOPE_BINS_BYTES,
-                BufferRole::Storage,
+                BufferRole::DeviceStorage,
                 &sharing,
             )?;
-            // 首帧前是"没采过样"：magic 为 0，面板据此显示空态
-            bins.write(0, &this.scratch)?;
             this.bins.push(bins);
         }
         this.layout = COLOR_SCOPE_SET_DESC.create(&ctx.device)?;
@@ -232,11 +218,12 @@ impl ColorScopeTargets {
         Ok(this)
     }
 
-    /// 开一帧采样：清零该槽 bins 并写头（magic / stride / 尺寸 / 帧号）。返回本帧号。
+    /// 开一帧采样：记下帧槽与本帧号。bins 的清零与头由录制侧（fill + shader）完成，
+    /// 这里只推进计数器，不碰显存（bins 在 DEVICE_LOCAL）。
     ///
     /// # Errors
-    /// 槽号越界或缓冲写失败。
-    pub fn begin_frame(&mut self, slot: usize, extent: vk::Extent2D) -> Result<u64> {
+    /// 槽号越界。
+    pub fn begin_frame(&mut self, slot: usize) -> Result<u64> {
         if slot >= self.bins.len() {
             return Err(VulkanError::Contract(format!(
                 "颜色校验 bins 槽 {slot} 越界（共 {}）",
@@ -246,9 +233,6 @@ impl ColorScopeTargets {
         let frame_index = self.frame_index;
         self.frame_index = self.frame_index.wrapping_add(1);
         self.last_slot = slot;
-        self.scratch.fill(0);
-        self.scratch[..64].copy_from_slice(&pack_color_scope_header(extent, frame_index));
-        self.bins[slot].write(0, &self.scratch)?;
         Ok(frame_index)
     }
 
@@ -654,35 +638,71 @@ pub struct ColorScopeDraw {
     handles: ComputeHandles,
     set: DescSet,
     groups: (u32, u32),
+    /// 本帧号（push constant，shader 写进 bins 头）。
+    frame_index: u32,
+    /// 本帧槽的 bins（录制侧先整份清零）。
+    bins: vk::Buffer,
 }
 
 impl ColorScopeDraw {
     /// 组装一条 dispatch（`extent` 为渲染分辨率，组数由 [`color_scope_groups`] 推出）。
     #[must_use]
-    pub fn new(handles: ComputeHandles, set: DescSet, extent: vk::Extent2D) -> Self {
+    pub fn new(
+        handles: ComputeHandles,
+        set: DescSet,
+        extent: vk::Extent2D,
+        frame_index: u32,
+        bins: vk::Buffer,
+    ) -> Self {
         Self {
             handles,
             set,
             groups: color_scope_groups(extent),
+            frame_index,
+            bins,
         }
     }
 
-    /// write bins → 下游（SMAA edge 的 FS 读）可见。
+    /// 清零 bins → 采样 dispatch → 下游（SMAA edge 的 FS 读）可见。
     pub(crate) fn record(&self, device: &Device, cb: vk::CommandBuffer) {
+        let push = self.frame_index.to_le_bytes();
+        unsafe {
+            device.cmd_fill_buffer(cb, self.bins, 0, COLOR_SCOPE_BINS_BYTES, 0);
+            MemoryBarrierDesc {
+                src_stage: vk::PipelineStageFlags::TRANSFER,
+                src_access: vk::AccessFlags::TRANSFER_WRITE,
+                dst_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
+                dst_access: vk::AccessFlags::SHADER_WRITE,
+            }
+            .record(device, cb);
+        }
         self.handles.record_grid(
             device,
             cb,
             &[self.set],
-            &[],
+            &push,
             self.groups,
             Handoff::ComputeFragmentRead,
         );
+        // bins 之后还会被 8 Hz 的一趟 `vkCmdCopyBuffer`（独立 command buffer、后续
+        // submit）读：dispatch 的 barrier 只覆盖片元读，这里补一条 compute 写 →
+        // transfer 读，否则同步校验报 READ_AFTER_WRITE。
+        unsafe {
+            MemoryBarrierDesc {
+                src_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
+                src_access: vk::AccessFlags::SHADER_WRITE,
+                dst_stage: vk::PipelineStageFlags::TRANSFER,
+                dst_access: vk::AccessFlags::TRANSFER_READ,
+            }
+            .record(device, cb);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::bytes::put_u32s;
 
     #[test]
     fn domain_bases_are_after_header() {
@@ -710,14 +730,28 @@ mod tests {
     }
 
     #[test]
-    fn header_packs_magic_stride_and_size() {
-        let raw = pack_color_scope_header(
-            vk::Extent2D {
-                width: 1600,
-                height: 900,
-            },
-            7,
-        );
+    fn header_magic_matches_shader_literal() {
+        // colo_scope.wgsl 的 MAGIC 字面量（0x50435343u）必须等于宿主的 "CSCP" 小端
+        assert_eq!(COLOR_SCOPE_MAGIC, 0x5043_5343);
+        let extent = vk::Extent2D {
+            width: 1600,
+            height: 900,
+        };
+        let raw = {
+            let mut raw = [0u8; 64];
+            put_u32s(
+                &mut raw,
+                0,
+                &[
+                    COLOR_SCOPE_MAGIC,
+                    COLOR_SCOPE_STRIDE,
+                    extent.width,
+                    extent.height,
+                    7,
+                ],
+            );
+            raw
+        };
         let u32_at = |o: usize| u32::from_le_bytes([raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]);
         assert_eq!(u32_at(0), COLOR_SCOPE_MAGIC);
         assert_eq!(u32_at(4), COLOR_SCOPE_STRIDE);
@@ -734,7 +768,7 @@ mod tests {
             width: 1600,
             height: 900,
         });
-        assert_eq!((gx, gy), (100, 57));
+        assert_eq!((gx, gy), (50, 29));
         // 小尺寸也至少发一组
         assert_eq!(
             color_scope_groups(vk::Extent2D {

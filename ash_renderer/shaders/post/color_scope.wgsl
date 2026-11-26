@@ -8,7 +8,7 @@
 // `BloomSettings::tonemap == false` 时宿主整段跳过（present 直出 HDR，没有 C 域）。
 //
 // bins 布局（u32，宿主侧常量镜像在 src/render/passes/post/color_scope.rs）：
-//   [0..16)      头：magic / stride / 宽 / 高 / 帧号 / 曝光状态 4×f32 / 保留 7
+//   [0..16)      头：magic / stride / 宽 / 高 / 帧号 / 曝光状态 4×f32 / 保留 7（本 shader 写）
 //   [16..1045)   A：luma 256 + RGB 3×256 + 计数 5（样本 / 低于轴 / 高于轴 / ≤0 / ≥1）
 //   [1045..2074) B：同 A
 //   [2074..3103) C：luma 256 + RGB parade 3×256 + 计数 5
@@ -28,14 +28,26 @@
 @group(0) @binding(6) var ldr_tex: texture_2d<f32>;
 @group(0) @binding(7) var<storage, read_write> bins: array<atomic<u32>>;
 
+// 宿主每帧压入的采样帧号（写进 bins 头，供 frame_age 对账）。WGSL 新语法用
+// `immediate` 地址空间（同一管线布局里的 push constant）。
+var<immediate> frame_index: u32;
+
 // 与宿主侧 COLOR_SCOPE_* 常量一一对应（layout_contract 测试会核对总长）
-const STRIDE: u32 = 2u;
+const STRIDE: u32 = 4u;
 const HEADER_U32: u32 = 16u;
 const DOMAIN_U32: u32 = 1029u;
 const BINS_U32: u32 = 7199u;
 const COUNT_OFFSET: u32 = 1024u;
 // 域内布局：luma 256 bin，随后 R/G/B 各 256 bin（parade 与 luma 不共用 256 窗口）
 const CHANNEL_STRIDE: u32 = 256u;
+
+// 每工作组的在界样本数只在本组共享内存里累加，组末由 0 号线程一次性写进三域
+// CNT_SAMPLES。直接对同一个全局地址做 36 万次原子写会被串行化——这是 9.9 成本
+// 判定线唯一超标的热点（p95 40 ms → 目标内）。
+var<workgroup> wg_samples: atomic<u32>;
+
+// bins 头 magic：宿主侧 COLOR_SCOPE_MAGIC 的镜像（字节 "CSCP" 的小端 u32）
+const MAGIC: u32 = 0x50435343u;
 
 const BASE_A: u32 = HEADER_U32;
 const BASE_B: u32 = BASE_A + DOMAIN_U32;
@@ -72,7 +84,6 @@ fn add_log2_axis(domain: u32, rgb: vec3f) {
     }
     // luma：轴、低于、高于、零
     let luma = dot(rgb, LUMA_W);
-    atomicAdd(&bins[domain + COUNT_OFFSET + CNT_SAMPLES], 1u);
     if (luma <= 0.0) {
         atomicAdd(&bins[domain + COUNT_OFFSET + CNT_ZERO], 1u);
         return;
@@ -119,10 +130,19 @@ fn add_chroma(encoded: vec3f) {
 }
 
 @compute @workgroup_size(8, 8)
-fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
+fn cs_main(
+    @builtin(global_invocation_id) gid: vec3u,
+    @builtin(local_invocation_index) local_invocation_index: u32,
+) {
     let dims = textureDimensions(hdr_tex);
-    // 头里的曝光状态快照：只让 (0,0) 线程写，避免多线程写同一地址。
+    // 头（magic / stride / 尺寸 / 帧号 / 曝光状态快照）：只让 (0,0) 线程写。
+    // bins 在显存里（DEVICE_LOCAL），头也由这里写，宿主不再每帧往缓冲里拷 28.8 KB。
     if (all(gid == vec3u(0u, 0u, 0u))) {
+        atomicStore(&bins[0], MAGIC);
+        atomicStore(&bins[1], STRIDE);
+        atomicStore(&bins[2], dims.x);
+        atomicStore(&bins[3], dims.y);
+        atomicStore(&bins[4], frame_index);
         let state = exposure_state[0];
         atomicStore(&bins[5], bitcast<u32>(state.x));
         atomicStore(&bins[6], bitcast<u32>(state.y));
@@ -130,36 +150,50 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
         atomicStore(&bins[8], bitcast<u32>(state.w));
     }
     let coord = gid.xy * STRIDE;
-    if (coord.x >= dims.x || coord.y >= dims.y) {
-        return;
-    }
-    let uv = (vec2f(coord) + vec2f(0.5)) / vec2f(dims);
+    // 越界线程不能提前 return：组末的 workgroupBarrier 要求整组都到达，
+    // 这里改成单边 if，越界线程只跳过采样。
+    if (coord.x < dims.x && coord.y < dims.y) {
+        let uv = (vec2f(coord) + vec2f(0.5)) / vec2f(dims);
+        // 三域的样本数相同（同一批在界线程），本组先累加，组末一次写回
+        atomicAdd(&wg_samples, 1u);
 
-    // A 域：present 采样到的原始 HDR
-    let hdr = textureSampleLevel(hdr_tex, blit_sampler, uv, 0.0).rgb;
-    add_log2_axis(BASE_A, hdr);
+        // A 域：present 采样到的原始 HDR
+        let hdr = textureSampleLevel(hdr_tex, blit_sampler, uv, 0.0).rgb;
+        add_log2_axis(BASE_A, hdr);
 
-    // B 域：曲线输入色（与 present 同式，含 Bloom 与曝光倍数）
-    var bloom = vec3f(0.0);
-    if (bloom_params.enabled > 0.5) {
-        bloom = textureSampleLevel(bloom_tex, bloom_sampler, uv, 0.0).rgb;
-    }
-    let b = tonemap_input_color(hdr, bloom, bloom_params, exposure_scale_of(exposure_state[0]));
-    add_log2_axis(BASE_B, b);
+        // B 域：曲线输入色（与 present 同式，含 Bloom 与曝光倍数）
+        var bloom = vec3f(0.0);
+        if (bloom_params.enabled > 0.5) {
+            bloom = textureSampleLevel(bloom_tex, bloom_sampler, uv, 0.0).rgb;
+        }
+        let b = tonemap_input_color(hdr, bloom, bloom_params, exposure_scale_of(exposure_state[0]));
+        add_log2_axis(BASE_B, b);
 
-    // C 域：tonemap 写进 LDR 的线性 UNORM 值，面板轴用 sRGB 编码后的感知值
-    let c_linear = textureSampleLevel(ldr_tex, blit_sampler, uv, 0.0).rgb;
-    atomicAdd(&bins[BASE_C + COUNT_OFFSET + CNT_SAMPLES], 1u);
-    if (all(c_linear <= vec3f(0.0))) {
-        // 与 A/B 同口径：全零样本只计数、不落 bin，直方图和 + 零 = 样本数才成立
-        atomicAdd(&bins[BASE_C + COUNT_OFFSET + CNT_ZERO], 1u);
-    } else {
-        let c = srgb_encode(c_linear);
-        add_unit_axis(BASE_C, c);
-        add_chroma(c);
+        // C 域：tonemap 写进 LDR 的线性 UNORM 值，面板轴用 sRGB 编码后的感知值
+        let c_linear = textureSampleLevel(ldr_tex, blit_sampler, uv, 0.0).rgb;
+        if (all(c_linear <= vec3f(0.0))) {
+            // 与 A/B 同口径：全零样本只计数、不落 bin，直方图和 + 零 = 样本数才成立
+            atomicAdd(&bins[BASE_C + COUNT_OFFSET + CNT_ZERO], 1u);
+        } else {
+            let c = srgb_encode(c_linear);
+            add_unit_axis(BASE_C, c);
+            add_chroma(c);
+        }
+        // 触顶比例：线性值任一通道 ≥ 1 的样本（"零"已在上面单列，不在这里重复记）
+        if (any(c_linear >= vec3f(1.0))) {
+            atomicAdd(&bins[BASE_C + COUNT_OFFSET + CNT_CLIP], 1u);
+        }
     }
-    // 触顶比例：线性值任一通道 ≥ 1 的样本（"零"已在上面单列，不在这里重复记）
-    if (any(c_linear >= vec3f(1.0))) {
-        atomicAdd(&bins[BASE_C + COUNT_OFFSET + CNT_CLIP], 1u);
+
+    // 组末把本组样本数合并回三域（每组 3 次全局原子写，此前是每样本 3 次）。
+    workgroupBarrier();
+    let lid = local_invocation_index;
+    if (lid == 0u) {
+        let v = atomicLoad(&wg_samples);
+        if (v > 0u) {
+            atomicAdd(&bins[BASE_A + COUNT_OFFSET + CNT_SAMPLES], v);
+            atomicAdd(&bins[BASE_B + COUNT_OFFSET + CNT_SAMPLES], v);
+            atomicAdd(&bins[BASE_C + COUNT_OFFSET + CNT_SAMPLES], v);
+        }
     }
 }
