@@ -11,6 +11,7 @@
 //! pass 之间调 [`ToolWindowParams::show`]；资源由 [`insert_tool_window_resources`]
 //! 在 Startup 落地。
 
+pub(super) mod color;
 pub(super) mod culling;
 pub(super) mod entity_tree;
 pub(super) mod frame_stats;
@@ -24,12 +25,14 @@ pub(super) mod sky;
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::render::{
-    BloomSettings, Context, CullDiagnostics, CullSettings, FrameSyncSettings, GiSettings,
-    IblSettings, ImageCache, IndirectStats, LodDiagnostics, LodSettings, MeshPool, MonitorHistory,
+    BloomSettings, ColorScopeReader, ColorScopeSettings, ColorScopeTargets, Context,
+    CullDiagnostics, CullSettings, ExposureSettings, FrameSyncSettings, GiSettings, IblSettings,
+    ImageCache, IndirectStats, LodDiagnostics, LodSettings, MeshPool, MonitorHistory,
     OcclusionDiagnostics, OcclusionSettings, PerfLedger, RenderMode, ShadowSettings, SkySettings,
     SmaaSettings,
 };
 use crate::scene::{TransformEditQueue, WorkloadSettings};
+use color::{ColorPage, ColorPageState};
 use culling::CullingPage;
 use entity_tree::{
     EntityTreePage, EntityTreeState, SelectedDetails, SelectedEntity, TexturePreviewHandles,
@@ -52,6 +55,7 @@ enum ToolPage {
     Sky,
     Ibl,
     Gi,
+    Color,
     FrameStats,
     Monitor,
     EntityTree,
@@ -66,6 +70,7 @@ impl ToolPage {
             Self::Sky => "程序化天空盒",
             Self::Ibl => "环境光照 IBL",
             Self::Gi => "表面缓存 GI",
+            Self::Color => "颜色校验",
             Self::FrameStats => "帧统计",
             Self::Monitor => "持续监控",
             Self::EntityTree => "实体层级树",
@@ -84,6 +89,7 @@ const GROUPS: &[(&str, &[ToolPage])] = &[
             ToolPage::Sky,
             ToolPage::Ibl,
             ToolPage::Gi,
+            ToolPage::Color,
         ],
     ),
     ("性能", &[ToolPage::FrameStats, ToolPage::Monitor]),
@@ -208,6 +214,8 @@ pub(in crate::overlay) fn insert_tool_window_resources(commands: &mut Commands) 
     // 随 fps 快照节奏采样，窗口显隐不影响记账
     commands.insert_resource(MonitorHistory::default());
     commands.insert_resource(PerfPanelCache::default());
+    // 颜色校验：CbCr 热力图纹理缓存（快照帧号换图）
+    commands.insert_resource(ColorPageState::default());
 }
 
 /// 工具窗口各页的参数束：各页读写的资源合成一个 SystemParam（避开系统参数
@@ -259,6 +267,16 @@ pub(in crate::overlay) struct ToolWindowParams<'w, 's> {
     ibl_settings: ResMut<'w, IblSettings>,
     /// 表面缓存（9.5）：开关/视图/形态/播种/整理（draw_frame 读，BRP gi_set 同源）
     gi_settings: ResMut<'w, GiSettings>,
+    /// 颜色校验（9.9）：采样开关（draw_frame 读，BRP color_scope_get 同源）
+    color_scope_settings: ResMut<'w, ColorScopeSettings>,
+    /// 颜色校验 bins 的 8 Hz 回读节流器
+    color_scope_reader: ResMut<'w, ColorScopeReader>,
+    /// bins 资源族（init 前缺席）
+    color_scope_targets: Option<Res<'w, ColorScopeTargets>>,
+    /// 曝光（自动眼适应；颜色页直写）
+    exposure_settings: ResMut<'w, ExposureSettings>,
+    /// 颜色页跨帧纹理
+    color_page: ResMut<'w, ColorPageState>,
 }
 
 impl ToolWindowParams<'_, '_> {
@@ -321,6 +339,17 @@ impl ToolWindowParams<'_, '_> {
             .show(body),
             ToolPage::Gi => GiPage {
                 gi: &mut self.gi_settings,
+            }
+            .show(body),
+            ToolPage::Color => ColorPage {
+                settings: &mut self.color_scope_settings,
+                reader: &mut self.color_scope_reader,
+                targets: self.color_scope_targets.as_deref(),
+                vulkan: self.vulkan.as_deref(),
+                bloom: &mut self.bloom_settings,
+                exposure: &mut self.exposure_settings,
+                mode: *self.mode,
+                state: &mut self.color_page,
             }
             .show(body),
             ToolPage::FrameStats => FrameStatsPage {

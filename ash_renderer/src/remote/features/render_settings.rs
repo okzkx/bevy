@@ -19,14 +19,15 @@ use crate::remote::common::params::{
     internal_err, invalid_params, parse_enabled, parse_params, res, res_mut,
 };
 
-/// `ash_renderer/bloom_set`：Bloom/tonemap 开关、曲线与增益。
+/// `ash_renderer/bloom_set`：Bloom/tonemap 开关、曲线、增益与校色强度。
 /// 请求 `{"enabled": bool, "strength": f32?, "tonemap": bool?,
-/// "curve": "narkowicz"|"filament"?, "gain": f32?}`——缺省字段不动。
+/// "curve": "narkowicz"|"filament"?, "gain": f32?, "tonemap_strength": f32?}`
+/// ——缺省字段不动。
 #[system]
 pub(crate) fn bloom_set(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let p: serde_json::Map<String, Value> = parse_params(
         params,
-        "params 缺失：需要 enabled/strength/tonemap/curve/gain 之一",
+        "params 缺失：需要 enabled/strength/tonemap/curve/gain/tonemap_strength 之一",
     )?;
     let mut settings = res_mut::<BloomSettings>(world)?;
     let mut echo = json!({});
@@ -70,9 +71,19 @@ pub(crate) fn bloom_set(In(params): In<Option<Value>>, world: &mut World) -> Brp
         settings.gain = gain as f32;
         echo["gain"] = json!(gain);
     }
+    if let Some(v) = p.get("tonemap_strength") {
+        let strength = v
+            .as_f64()
+            .ok_or_else(|| invalid_params("tonemap_strength 非数值"))?;
+        if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+            return Err(invalid_params("tonemap_strength 须为 0…=1 的有限值"));
+        }
+        settings.tonemap_strength = strength as f32;
+        echo["tonemap_strength"] = json!(strength);
+    }
     if echo.as_object().is_none_or(|o| o.is_empty()) {
         return Err(invalid_params(
-            "无有效字段（enabled/strength/tonemap/curve/gain 任一）",
+            "无有效字段（enabled/strength/tonemap/curve/gain/tonemap_strength 任一）",
         ));
     }
     Ok(json!({ "applied": echo, "current": {

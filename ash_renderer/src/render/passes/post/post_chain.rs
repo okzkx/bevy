@@ -10,6 +10,7 @@ use crate::render::core::record::graphics::{
     bind_graphics, color_attachment, full_rect, set_viewport_scissor, PipelineRef,
 };
 use crate::render::passes::post::bloom::BloomFrameDraw;
+use crate::render::passes::post::color_scope::ColorScopeDraw;
 use crate::render::passes::post::exposure::ExposureDraw;
 use crate::render::passes::post::smaa::{SmaaEdgeBlendDraw, SmaaNbDraw};
 
@@ -30,6 +31,8 @@ pub struct PostChainDraw {
     pub smaa_edge_blend: Option<SmaaEdgeBlendDraw>,
     /// neighborhood 混合（终点，写 swapchain，总是录）。
     pub smaa_nb: SmaaNbDraw,
+    /// 颜色校验采样（关闭/链未启用为 `None`）：只读三域、只写 bins，不改画面。
+    pub color_scope: Option<ColorScopeDraw>,
 }
 
 impl PostChainDraw {
@@ -90,6 +93,12 @@ impl PostChainDraw {
             device.cmd_draw(cb, 3, 1, 0, 1);
             device.cmd_end_rendering(cb);
             ImageBarrier::color_to_sampled(self.smaa_nb.ldr_image).record(device, cb);
+
+            // 颜色校验采样（9.9）：LDR 刚转 SHADER_READ_ONLY，HDR/Bloom 更早已是只读；
+            // 只读三域、只写 bins，命令序列在其他 pass 之间插一条 dispatch。
+            if let Some(scope) = &self.color_scope {
+                scope.record(device, cb);
+            }
 
             // SMAA edge → blend（关闭为 None）
             if let Some(smaa) = &self.smaa_edge_blend {

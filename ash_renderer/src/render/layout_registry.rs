@@ -29,6 +29,7 @@ use crate::render::passes::post::bloom::{
     BLOOM_DOWN_PIPELINE, BLOOM_PREFILTER_PIPELINE, BLOOM_TEX_SET_DESC, BLOOM_UP_PIPELINE,
     BLOOM_UP_SET_DESC,
 };
+use crate::render::passes::post::color_scope::{COLOR_SCOPE_PIPELINE, COLOR_SCOPE_SET_DESC};
 use crate::render::passes::post::exposure::{
     EXPOSURE_ADAPT_PIPELINE, EXPOSURE_MEASURE_PIPELINE, EXPOSURE_SET_DESC, EXPOSURE_STATE_SET_DESC,
 };
@@ -116,6 +117,8 @@ pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
     // 显示段：自动曝光（测光 + 适应），与 SCGI/IBL 无关
     &EXPOSURE_MEASURE_PIPELINE,
     &EXPOSURE_ADAPT_PIPELINE,
+    // 9.9 颜色校验：三域直方图采样
+    &COLOR_SCOPE_PIPELINE,
 ];
 
 /// 宿主声明并建出的全部 set 布局。
@@ -150,4 +153,6 @@ pub(crate) const ALL_SETS: &[&SetLayoutDesc] = &[
     // 显示段自动曝光：测光/适应共用集 + tonemap 读适应结果
     &EXPOSURE_SET_DESC,
     &EXPOSURE_STATE_SET_DESC,
+    // 9.9 颜色校验采样集
+    &COLOR_SCOPE_SET_DESC,
 ];

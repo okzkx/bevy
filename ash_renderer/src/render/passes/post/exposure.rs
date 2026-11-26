@@ -388,6 +388,12 @@ impl ExposureTargets {
         DescSet::new(&EXPOSURE_STATE_SET_DESC, self.neutral_set)
     }
 
+    /// 某帧槽的适应状态 buffer 句柄（颜色校验采样集与 tonemap 同源）。
+    #[must_use]
+    pub fn state_buffer(&self, slot: usize) -> vk::Buffer {
+        self.states[slot].buffer()
+    }
+
     /// 读某帧槽的适应状态（`(adapted_log2, scale, avg_log2, 1)`），供 BRP 自检。
     pub fn read_state(&mut self, slot: usize) -> Result<[f32; 4]> {
         let mut raw = [0u8; STATE_BYTES as usize];
