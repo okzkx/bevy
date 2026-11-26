@@ -8,6 +8,20 @@
 
 **当前状态：🚧 施工中——9.1 程序化天空盒、9.2 天空盒 IBL 与 9.3 GlobalProbe 方向桶已收官（2026-11-23；9.2 含 9.2.8 现场复检补修，9.3 含 L2/16 桶 A/B 与七条判定线），9.4 求交器与射线基建已收官（2026-11-24，硬件 ray query + BLAS/TLAS + 命中重建 + BRP 四口，判定线 15 项与五脚本回归全过），9.5 patch 池与分配回收已收官（2026-11-24，patch 池 + 回收三件 + 调试视图两形态，判定线 25/25 与五脚本回归全过），9.6 irradiance 更新已收官（2026-11-24，辐照度估计 + 多跳 + 预算 + 视图 9～13，判定线 12/12 与全套回归全过，[段 README](9.6-irradiance更新/README.md)），9.7 屏幕 gather 与最终注入主体收官（2026-11-24；1/4 查表 + 空间/时域滤波 + 全分辨率双边上采样 + 注入，判定线 7/9 闭环、2 项部分，视图 16/17 与 `scgi_ms` 按待决顺延，[段 README](9.7-屏幕gather与注入/README.md)），9.8 未立项。** 八段施工计划见[施工计划：天空盒、IBL 与表面缓存全局光照八段拆解](施工计划：天空盒、IBL 与表面缓存全局光照八段拆解.md)（2026-11-20 重规划），9.4 段细化计划见[施工计划：求交器与射线基建](9.4-求交器与射线基建/施工计划：求交器与射线基建.md)（2026-11-24 立案），9.5 段细化计划见[施工计划：patch 池与分配回收](9.5-patch池与分配回收/施工计划：patch池与分配回收.md)（2026-11-24 立案），9.6 段细化计划见[施工计划：irradiance 更新与多跳](9.6-irradiance更新/施工计划：irradiance更新与多跳.md)（2026-11-24 立案）；9.7 段细化计划见[施工计划：屏幕 gather 与最终注入](9.7-屏幕gather与注入/施工计划：屏幕gather与最终注入.md)（2026-11-24 用户增补立案，含"per-pixel → 1/4 查表 + 全分辨率上采样"与"撤 Chebyshev 软可见性"两处口径订正）。 SCGI 选型仍是 **Unity SCGI 骨架 + Kajiya 三件借用**（空间格子 + 16 方向桶 + 定长 65536 patch 池 + 屏幕播种 + rank/heartbeat/defrag；借法线偏置、rank 不变式、投票分配器备件）；天空/IBL 选型见施工计划 §1.5。理由与推翻判据见施工计划 §1。
 
+## 参照实现（Unity 7 URP 源码）
+
+遇到实现问题（屏幕 resolve、时域/空间去噪、上采样注入、分配回收、兜底材质等）时，**可以直接看 Unity 7 URP 的实现，允许源码级照抄**；移植到本仓库时按 WGSL / ash 口径重写，并在注释里注明来源文件名与函数名，方便复核。
+
+- 参考工程：`F:\okzkx\TestSCGI`（`com.unity.render-pipelines.universal` 17.7.0）
+- URP 源码：`F:\okzkx\TestSCGI\Library\PackageCache\com.unity.render-pipelines.universal@f74a61fa3847`
+- SCGI 参考实现目录：`Runtime\RendererFeatures\SurfaceCacheGIRendererFeature\`
+  - `ScreenResolveLookup.compute`——1/4 屏幕查表（gather）
+  - `ScreenResolveDenoising.compute`——去噪（空间/时域）
+  - `ScreenResolveUpsampling.compute`——全分辨率上采样与注入
+  - `FlatNormalResolution.compute`——法线重建；`PatchAllocation.compute`——patch 分配与回收
+  - `Debug.compute`——调试视图；`FallbackMaterial.shader`——无缓存区域的兜底
+  - `SurfaceCacheGIRendererFeature.cs`、`SurfaceCacheWorldAdapter.cs`——pass 顺序、资源生命周期与场景数据接驳
+
 ## 施工顺序
 
 | 段 | 文件夹（开工时立） | 范围 | 状态 |
