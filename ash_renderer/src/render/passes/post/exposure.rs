@@ -133,22 +133,31 @@ pub struct ExposureSettings {
 
 impl Default for ExposureSettings {
     fn default() -> Self {
-        // key 的口径：HDR 帧几何平均亮度等于它时倍数 = 1。取 0.01 是**实测标定**——
-        // 已验收的默认机位/沿大厅日照基线（`.temp/gi97-exp-manual-hall`）实测
-        // `avg_log2 = -6.65`，即 2^-6.65 ≈ 0.00996；把 key 定在那里，那个场景的
-        // 倍数就是 1（画面与没有本模块时一致），只有更暗的场景才被提亮。
+        // key 的口径：HDR 帧几何平均亮度等于它时倍数 = 1。9.9.9 重新标定：默认机位
+        // 今天实测 `avg_log2 = -6.261`（`exposure_get` 的 `avg_log2`，且 `color_scope_get`
+        // 的 A 域均值与它差 0.002 EV），2^-6.261 ≈ 0.01305——定在这里，默认机位的倍数
+        // 就是 1（画面与没有本模块时一致），只有更暗的场景才被提亮。
         //
-        // 不能照抄 HDRP 的 0.18：本管线 tonemap 前还有 `BloomSettings::gain = 8`
-        // （ACES_LEGACY 观感补偿），两者叠乘后暗室内会被推到 48×，日照地面整片死白、
-        // 帷幕褪成粉彩——这是实测过的错误配置（`.temp/gi97-exp-auto-hall`）。
+        // 9.9.9 之前 key=0.01（按旧基线 -6.65 标的），默认机位实际倍数 0.767、偏暗；
+        // 判定线⑭要求室内倍数落在 0.9–1.1，故改到实测中灰。
         //
-        // 上限 4× 的理由：默认太阳（太阳不进大厅）实测 avg_log2 ≈ -7.9，需要
-        // 0.00996/2^-7.9 ≈ 2.4× 才能达到同等的可读性；4× 留一点余量给更暗的机位，
-        // 同时不会把拱廊外的高光压到死白。下限 0.25 让室外强光场景能压暗。
+        // 不能照抄 HDRP 的 0.18：本管线 tonemap 前还有 `BloomSettings::gain`
+        // （ACES 亮度参数），两者叠乘。key 提到 0.01305 后 gain 同步从 8.0 降到 6.13，
+        // 保持 key × gain = 0.08 不变——未触下限的场景输入曲线不变，室内基线 C 域
+        // p50 与旧参数逐位同级（9.9.9 实测差 0.00%）。
+        //
+        // 上限 4× 的理由：默认太阳（太阳不进大厅）实测 avg_log2 ≈ -7.9，需要约 3.1×
+        // 才能达到同等的可读性；4× 留一点余量给更暗的机位，同时不会把拱廊外的高光
+        // 压到死白。
+        //
+        // 下限 0.05（9.9.9 由 0.25 下调）：纯天空实测 avg_log2 ≈ -2.87，要让它落到
+        // 中灰需要 0.01305/2^-2.87 ≈ 0.096 的压暗倍数；0.25 会把天空钳在比目标亮
+        // 2.6× 的位置（判定线⑬的"整体白"）。0.05 给正午天顶/日落米氏峰留 2× 余量，
+        // 同时不影响室内（室内需要的 0.77/1.0 远在下限之上）。
         Self {
             mode: ExposureMode::Auto,
-            key: 0.01,
-            min_scale: 0.25,
+            key: 0.01305,
+            min_scale: 0.05,
             max_scale: 4.0,
             rate_brighten: 0.7,
             rate_darken: 3.0,
@@ -552,19 +561,25 @@ mod tests {
     #[test]
     fn default_key_matches_accepted_baseline_exposure() {
         let s = ExposureSettings::default();
-        // 标定依据：`.temp/gi97-exp-manual-hall` 实测 avg_log2 = -6.65（已验收的
-        // 默认机位 + 沿大厅日照基线）。默认 key 必须让这个场景倍数≈1，否则等于
-        // 悄悄改动了验收过的画面亮度。
-        let accepted = scale_for(-6.65, s.key, s.min_scale, s.max_scale);
+        // 标定依据（9.9.9 重标）：默认机位实测 avg_log2 = -6.261（`exposure_get`，且
+        // 颜色页 A 域均值与它差 0.002 EV）。默认 key 必须让这个场景倍数≈1，否则等于
+        // 悄悄改动了验收过的画面亮度（判定线⑭：0.9–1.1）。
+        let accepted = scale_for(-6.261, s.key, s.min_scale, s.max_scale);
         assert!(
-            (accepted - 1.0).abs() < 0.06,
-            "默认 key 应让已验收基线倍数≈1，实测 {accepted}"
+            (accepted - 1.0).abs() < 0.03,
+            "默认 key 应让默认机位倍数≈1，实测 {accepted}"
         );
-        // 默认太阳（太阳不进大厅）实测 avg_log2 ≈ -7.9：应提亮 2–3×，且不顶到上限
+        // 默认太阳（太阳不进大厅）实测 avg_log2 ≈ -7.9：应提亮 2.5–3.5×，且不顶到上限
         let default_sun = scale_for(-7.9, s.key, s.min_scale, s.max_scale);
         assert!(
-            (2.0..3.0).contains(&default_sun),
-            "默认太阳应落在 2–3×，实测 {default_sun}"
+            (2.5..3.5).contains(&default_sun),
+            "默认太阳应落在 2.5–3.5×，实测 {default_sun}"
+        );
+        // 纯天空（9.9.9 基线 avg_log2 ≈ -2.87）：下限不钳制，倍数落在 0.05–0.2
+        let sky = scale_for(-2.873, s.key, s.min_scale, s.max_scale);
+        assert!(
+            (0.05..0.2).contains(&sky),
+            "纯天空应能压暗到 0.05–0.2×（下限 0.05 不钳制），实测 {sky}"
         );
     }
 

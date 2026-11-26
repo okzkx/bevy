@@ -173,12 +173,16 @@ impl Default for BloomSettings {
     fn default() -> Self {
         // 预览曝光覆盖含真实遮挡的室内间接光；这只是全帧显示校准，不改变 GI 物理辐照度。
         // GI 与 IBL 对照使用同一增益，不能随 SCGI 开关自动切曝光。BRP/面板仍可独立调节。
+        //
+        // 9.9.9：随曝光 key 0.01 → 0.01305 同步从 8.0 降到 6.13，保持 key × gain = 0.08
+        // 不变（未触下限的场景曲线输入不变，室内基线 C 域 p50 差 0.00%）；纯天空/日落
+        // 由新的 `min_scale = 0.05` 接管压暗，不再被固定增益送进曲线肩部。
         Self {
             enabled: true,
             strength: 0.04,
             tonemap: true,
             curve: TonemapCurve::default(),
-            gain: 8.0,
+            gain: 6.13,
             tonemap_strength: 1.0,
         }
     }
