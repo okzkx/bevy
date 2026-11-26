@@ -34,7 +34,7 @@ pub const SCGI_L1_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 /// 每张中间目标的双缓冲份数（A = 查表写、B = 去噪写；9.7.5 起轮换）。
 pub const SCGI_BUFFERS: usize = 2;
 /// `scgi_l0` 每像素字节数（RGBA16F）。
-pub const SCGI_L0_BYTES: u64 = 16;
+pub const SCGI_L0_BYTES: u64 = 8;
 /// `scgi_l1` 每像素字节数（RGBA8）。
 pub const SCGI_L1_BYTES: u64 = 4;
 /// 目标图总数（两格式 × 双缓冲 + 全分辨率一张）：`ensure` 里一次性迁到 GENERAL 的那批。
@@ -45,7 +45,7 @@ const _: () = assert!(SCGI_IMAGES == 5);
 /// 全分辨率辐照度目标格式：rgb = 按全分辨率法线求值的 E(n)，a = 覆盖率。
 pub const SCGI_IRRADIANCE_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 /// `scgi_irradiance` 每像素字节数。
-pub const SCGI_IRRADIANCE_BYTES: u64 = 16;
+pub const SCGI_IRRADIANCE_BYTES: u64 = 8;
 
 /// 目标集：b0/b1 = 主组（P0）的 l0/l1，b2/b3 = 副组（P1），b4 = 全分辨率辐照度。
 ///
@@ -294,6 +294,8 @@ pub struct ScgiTargets {
     sample_pool: vk::DescriptorPool,
     /// 合成 pass 读的那张：b0 = 全分辨率辐照度。
     sample_set: vk::DescriptorSet,
+    /// 布局初始化的一次性命令池；提交后等待失败时保留到排空，不能销毁 pending 命令。
+    transition_pool: vk::CommandPool,
     /// 目标是否已写过（首帧写之前内容未定义，读侧靠 a 判"无数据"）。
     initialized: AtomicBool,
 }
@@ -305,135 +307,123 @@ impl ScgiTargets {
     /// 布局/池/描述符集创建失败。
     pub fn new(ctx: &Context) -> Result<Self> {
         let device = &ctx.device;
-        let layout = SCGI_TARGET_SET_DESC.create(device)?;
-        let pool_sizes = SCGI_TARGET_SET_DESC.pool_sizes_vec(2);
-        let pool = unsafe {
-            device
-                .create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo::default()
-                        .max_sets(2)
-                        .pool_sizes(&pool_sizes),
-                    None,
-                )
-                .inspect_err(|_| device.destroy_descriptor_set_layout(layout, None))?
-        };
-        let layouts = [layout, layout];
-        let (set_main, set_reverse) = match unsafe {
-            device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(pool)
-                    .set_layouts(&layouts),
-            )
-        } {
-            Ok(sets) => (sets[0], sets[1]),
-            Err(e) => {
-                unsafe {
-                    device.destroy_descriptor_pool(pool, None);
-                    device.destroy_descriptor_set_layout(layout, None);
-                }
-                return Err(e.into());
-            }
-        };
-        let sample_layout = SCGI_SAMPLE_SET_DESC.create(device)?;
-        let sample_pool_sizes = SCGI_SAMPLE_SET_DESC.pool_sizes_vec(1);
-        let sample_pool = unsafe {
-            device
-                .create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo::default()
-                        .max_sets(1)
-                        .pool_sizes(&sample_pool_sizes),
-                    None,
-                )
-                .inspect_err(|_| device.destroy_descriptor_set_layout(sample_layout, None))?
-        };
-        let sample_layouts = [sample_layout];
-        let sample_set = match unsafe {
-            device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(sample_pool)
-                    .set_layouts(&sample_layouts),
-            )
-        } {
-            Ok(sets) => sets[0],
-            Err(e) => {
-                unsafe {
-                    device.destroy_descriptor_pool(sample_pool, None);
-                    device.destroy_descriptor_set_layout(sample_layout, None);
-                    device.destroy_descriptor_pool(pool, None);
-                    device.destroy_descriptor_set_layout(layout, None);
-                }
-                return Err(e.into());
-            }
-        };
-        Ok(Self {
+        // 取得的句柄立即归 Self：任意创建步骤失败，都由同一个 Drop 回收已建部分。
+        let mut this = Self {
             device: device.clone(),
-            layout,
-            pool,
-            extent: vk::Extent2D {
-                width: 0,
-                height: 0,
-            },
-            full_extent: vk::Extent2D {
-                width: 0,
-                height: 0,
-            },
+            layout: vk::DescriptorSetLayout::null(),
+            pool: vk::DescriptorPool::null(),
+            extent: vk::Extent2D::default(),
+            full_extent: vk::Extent2D::default(),
             l0: Vec::new(),
             l1: Vec::new(),
             irradiance: Vec::new(),
             l0_views: Vec::new(),
             l1_views: Vec::new(),
             irradiance_view: Vec::new(),
-            set_main,
-            set_reverse,
-            sample_layout,
-            sample_pool,
-            sample_set,
+            set_main: vk::DescriptorSet::null(),
+            set_reverse: vk::DescriptorSet::null(),
+            sample_layout: vk::DescriptorSetLayout::null(),
+            sample_pool: vk::DescriptorPool::null(),
+            sample_set: vk::DescriptorSet::null(),
+            transition_pool: vk::CommandPool::null(),
             initialized: AtomicBool::new(false),
-        })
+        };
+        this.layout = SCGI_TARGET_SET_DESC.create(device)?;
+        let pool_sizes = SCGI_TARGET_SET_DESC.pool_sizes_vec(2);
+        this.pool = unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(2)
+                    .pool_sizes(&pool_sizes),
+                None,
+            )?
+        };
+        let layouts = [this.layout, this.layout];
+        let sets = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(this.pool)
+                    .set_layouts(&layouts),
+            )?
+        };
+        this.set_main = sets[0];
+        this.set_reverse = sets[1];
+        this.sample_layout = SCGI_SAMPLE_SET_DESC.create(device)?;
+        let sample_pool_sizes = SCGI_SAMPLE_SET_DESC.pool_sizes_vec(1);
+        this.sample_pool = unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(1)
+                    .pool_sizes(&sample_pool_sizes),
+                None,
+            )?
+        };
+        let sample_layouts = [this.sample_layout];
+        let sample_sets = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(this.sample_pool)
+                    .set_layouts(&sample_layouts),
+            )?
+        };
+        this.sample_set = sample_sets[0];
+        Ok(this)
     }
 
     /// 尺寸变了就重建两张目标图并重写描述符集；同尺寸空操作。
     ///
     /// # Errors
-    /// 图/视图/描述符写失败（失败时旧图已清空，下次 ensure 会再试）。
+    /// 图/视图/描述符写或布局迁移失败。已建部分仍归 Self，尺寸保持未完成状态；
+    /// 下次 ensure 清理后重试，或由退出排空之后的 Drop 回收。
     pub fn ensure(&mut self, ctx: &Context, extent: vk::Extent2D) -> Result<()> {
-        let low = low_extent(extent);
-        if low == self.extent && !self.l0.is_empty() {
+        if target_extents_match(self.extent, self.full_extent, extent) && !self.l0.is_empty() {
             return Ok(());
         }
         let device = &ctx.device;
-        let full = vk::Extent2D {
-            width: extent.width.max(1),
-            height: extent.height.max(1),
-        };
-        // 先清旧的（Drop 回收 image/memory/view）
+        let low = low_extent(extent);
+        let full = nonzero_extent(extent);
+        // 初始化提交后等待失败，保留池与附件；重试须先排空才能回收这批资源。
+        if self.transition_pool != vk::CommandPool::null() {
+            unsafe { device.queue_wait_idle(ctx.queue)? };
+            self.drop_transition_pool();
+        }
         self.drop_targets();
-        let mut l0 = Vec::with_capacity(SCGI_BUFFERS);
-        let mut l1 = Vec::with_capacity(SCGI_BUFFERS);
+        // Image/view 立即归 Self，后续创建或描述符写入失败也不会遗失裸句柄。
         for _ in 0..SCGI_BUFFERS {
-            l0.push(create_target(ctx, low, SCGI_L0_FORMAT)?);
-            l1.push(create_target(ctx, low, SCGI_L1_FORMAT)?);
+            self.l0.push(create_target(ctx, low, SCGI_L0_FORMAT)?);
+            self.l1.push(create_target(ctx, low, SCGI_L1_FORMAT)?);
         }
-        let irradiance = vec![create_target(ctx, full, SCGI_IRRADIANCE_FORMAT)?];
-        let mut l0_views = Vec::with_capacity(SCGI_BUFFERS);
-        let mut l1_views = Vec::with_capacity(SCGI_BUFFERS);
-        for img in &l0 {
-            l0_views.push(create_view(device, img.image, SCGI_L0_FORMAT)?);
+        self.irradiance
+            .push(create_target(ctx, full, SCGI_IRRADIANCE_FORMAT)?);
+        for img in &self.l0 {
+            self.l0_views
+                .push(create_view(device, img.image, SCGI_L0_FORMAT)?);
         }
-        for img in &l1 {
-            l1_views.push(create_view(device, img.image, SCGI_L1_FORMAT)?);
+        for img in &self.l1 {
+            self.l1_views
+                .push(create_view(device, img.image, SCGI_L1_FORMAT)?);
         }
-        let irradiance_view = vec![create_view(
+        self.irradiance_view.push(create_view(
             device,
-            irradiance[0].image,
+            self.irradiance[0].image,
             SCGI_IRRADIANCE_FORMAT,
-        )?];
+        )?);
         // 主方向：b0/b1 = P0、b2/b3 = P1；反方向交换两组
         for (set, forward) in [(self.set_main, true), (self.set_reverse, false)] {
             let (first_l0, first_l1, second_l0, second_l1) = if forward {
-                (l0_views[0], l1_views[0], l0_views[1], l1_views[1])
+                (
+                    self.l0_views[0],
+                    self.l1_views[0],
+                    self.l0_views[1],
+                    self.l1_views[1],
+                )
             } else {
-                (l0_views[1], l1_views[1], l0_views[0], l1_views[0])
+                (
+                    self.l0_views[1],
+                    self.l1_views[1],
+                    self.l0_views[0],
+                    self.l1_views[0],
+                )
             };
             let mut writer = DescriptorWriter::new(&SCGI_TARGET_SET_DESC, set);
             writer
@@ -441,24 +431,18 @@ impl ScgiTargets {
                 .image(1, first_l1, vk::ImageLayout::GENERAL)
                 .image(2, second_l0, vk::ImageLayout::GENERAL)
                 .image(3, second_l1, vk::ImageLayout::GENERAL)
-                .image(4, irradiance_view[0], vk::ImageLayout::GENERAL);
+                .image(4, self.irradiance_view[0], vk::ImageLayout::GENERAL);
             writer.submit(device)?;
         }
-        self.extent = low;
-        self.full_extent = full;
-        self.l0 = l0;
-        self.l1 = l1;
-        self.irradiance = irradiance;
-        self.l0_views = l0_views;
-        self.l1_views = l1_views;
         let mut sample_writer = DescriptorWriter::new(&SCGI_SAMPLE_SET_DESC, self.sample_set);
-        sample_writer.image(0, irradiance_view[0], vk::ImageLayout::GENERAL);
+        sample_writer.image(0, self.irradiance_view[0], vk::ImageLayout::GENERAL);
         sample_writer.submit(device)?;
-        self.irradiance_view = irradiance_view;
         // 全部目标图一次性 UNDEFINED → GENERAL（之后恒 GENERAL）：迁移放在这里而不是每帧，
         // 因为合成 pass 也会绑这张图，而 GI 关掉的帧不录 ④.5 段——那类帧同样需要合法布局。
         self.transition_all(ctx)?;
-        self.initialized.store(false, Ordering::Relaxed);
+        // 尺寸是完成标记：只有全部建成且布局迁移成功，才允许同尺寸 fast-path 复用。
+        self.extent = low;
+        self.full_extent = full;
         Ok(())
     }
 
@@ -514,6 +498,24 @@ impl ScgiTargets {
     #[must_use]
     pub fn irradiance_image(&self) -> vk::Image {
         self.irradiance[0].image
+    }
+
+    /// 1/4 分辨率 L0 目标（0 = P0、1 = P1；BRP 逐块诊断读回用）。
+    ///
+    /// # Panics
+    /// `index` 超出双缓冲数量。
+    #[must_use]
+    pub fn low_l0_image(&self, index: usize) -> vk::Image {
+        self.l0[index].image
+    }
+
+    /// 1/4 分辨率 L1 目标（0 = P0、1 = P1；BRP 逐块诊断读回用）。
+    ///
+    /// # Panics
+    /// `index` 超出双缓冲数量。
+    #[must_use]
+    pub fn low_l1_image(&self, index: usize) -> vk::Image {
+        self.l1[index].image
     }
 
     /// 读回 `scgi_irradiance`（RGBA16F；读回后把布局迁回 GENERAL，不影响后续采样）。
@@ -611,7 +613,7 @@ impl ScgiTargets {
     ///
     /// 放在 ensure 里而不是每帧录屏障：合成 pass 每帧都绑这张图，而 GI 关掉的帧不录 ④.5 段，
     /// 那类帧也得有合法布局。resize 本来就让帧循环暂停重建，这里等空闲不进入每帧路径。
-    fn transition_all(&self, ctx: &Context) -> Result<()> {
+    fn transition_all(&mut self, ctx: &Context) -> Result<()> {
         let mut images: Vec<vk::Image> = self.l0.iter().map(|i| i.image).collect();
         images.extend(self.l1.iter().map(|i| i.image));
         images.extend(self.irradiance.iter().map(|i| i.image));
@@ -637,42 +639,60 @@ impl ScgiTargets {
             })
             .collect();
         let device = &ctx.device;
-        unsafe {
-            let pool = device.create_command_pool(
+        self.transition_pool = unsafe {
+            device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
                     .queue_family_index(ctx.queue_family_index)
                     .flags(vk::CommandPoolCreateFlags::TRANSIENT),
                 None,
-            )?;
-            let cbs = device.allocate_command_buffers(
-                &vk::CommandBufferAllocateInfo::default()
-                    .command_pool(pool)
-                    .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(1),
-            )?;
-            let cb = cbs[0];
-            device.begin_command_buffer(
-                cb,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
-            device.cmd_pipeline_barrier(
-                cb,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &barriers,
-            );
-            device.end_command_buffer(cb)?;
-            let cbs_to_submit = [cb];
-            let submit = vk::SubmitInfo::default().command_buffers(&cbs_to_submit);
-            device.queue_submit(ctx.queue, &[submit], vk::Fence::null())?;
-            device.queue_wait_idle(ctx.queue)?;
-            device.destroy_command_pool(pool, None);
+            )?
+        };
+        let pool = self.transition_pool;
+        let mut submitted = false;
+        let result = unsafe {
+            (|| -> Result<()> {
+                let cbs = device.allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .command_pool(pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(1),
+                )?;
+                let cb = cbs[0];
+                device.begin_command_buffer(
+                    cb,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )?;
+                device.cmd_pipeline_barrier(
+                    cb,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::ALL_COMMANDS,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &barriers,
+                );
+                device.end_command_buffer(cb)?;
+                let cbs_to_submit = [cb];
+                let submit = vk::SubmitInfo::default().command_buffers(&cbs_to_submit);
+                device.queue_submit(ctx.queue, &[submit], vk::Fence::null())?;
+                submitted = true;
+                device.queue_wait_idle(ctx.queue)?;
+                Ok(())
+            })()
+        };
+        // 未提交的失败可以立即回收；提交后的等待失败不能假定 GPU 已不再引用池与附件。
+        if transition_pool_can_drop(submitted, result.is_ok()) {
+            self.drop_transition_pool();
         }
-        Ok(())
+        result
+    }
+
+    fn drop_transition_pool(&mut self) {
+        if self.transition_pool != vk::CommandPool::null() {
+            unsafe { self.device.destroy_command_pool(self.transition_pool, None) };
+            self.transition_pool = vk::CommandPool::null();
+        }
     }
 
     fn drop_targets(&mut self) {
@@ -687,11 +707,16 @@ impl ScgiTargets {
         self.l0.clear();
         self.l1.clear();
         self.irradiance.clear();
+        self.extent = vk::Extent2D::default();
+        self.full_extent = vk::Extent2D::default();
+        self.initialized.store(false, Ordering::Relaxed);
     }
 }
 
 impl Drop for ScgiTargets {
     fn drop(&mut self) {
+        // 退出排空由 teardown 先行；构造失败尚未提交，不存在在飞引用。
+        self.drop_transition_pool();
         self.drop_targets();
         unsafe {
             self.device.destroy_descriptor_pool(self.pool, None);
@@ -701,6 +726,26 @@ impl Drop for ScgiTargets {
                 .destroy_descriptor_set_layout(self.sample_layout, None);
         }
     }
+}
+
+fn transition_pool_can_drop(submitted: bool, completed: bool) -> bool {
+    !submitted || completed
+}
+
+fn nonzero_extent(extent: vk::Extent2D) -> vk::Extent2D {
+    vk::Extent2D {
+        width: extent.width.max(1),
+        height: extent.height.max(1),
+    }
+}
+
+/// 1/4 尺寸相同不代表全分辨率相同：同一个 ceil/4 桶内的 resize 也要换辐照度附件。
+fn target_extents_match(
+    current_low: vk::Extent2D,
+    current_full: vk::Extent2D,
+    requested: vk::Extent2D,
+) -> bool {
+    current_low == low_extent(requested) && current_full == nonzero_extent(requested)
 }
 
 /// 1/4 尺寸 = 全分辨率向上取整除以 4（下限 1）。
@@ -794,6 +839,19 @@ fn create_bound_memory(ctx: &Context, image: vk::Image) -> Result<vk::DeviceMemo
 mod tests {
     use super::*;
 
+    const FILTER_SHADERS: [&str; 2] = [
+        include_str!("../../../../shaders/scene/gi/denoise.wgsl"),
+        include_str!("../../../../shaders/scene/gi/upsample.wgsl"),
+    ];
+
+    #[test]
+    fn transition_pool_cleanup_preserves_pending_submission() {
+        assert!(transition_pool_can_drop(false, false));
+        assert!(transition_pool_can_drop(false, true));
+        assert!(!transition_pool_can_drop(true, false));
+        assert!(transition_pool_can_drop(true, true));
+    }
+
     #[test]
     fn low_extent_rounds_up() {
         assert_eq!(
@@ -826,6 +884,134 @@ mod tests {
                 height: 1
             }
         );
+    }
+
+    #[test]
+    fn resize_within_same_low_extent_changes_full_target() {
+        let original = vk::Extent2D {
+            width: 1921,
+            height: 1081,
+        };
+        let resized = vk::Extent2D {
+            width: 1922,
+            height: 1082,
+        };
+        let low = low_extent(original);
+        assert_eq!(low, low_extent(resized));
+        assert!(target_extents_match(low, original, original));
+        assert!(!target_extents_match(low, original, resized));
+        assert!(!target_extents_match(low, resized, original));
+    }
+
+    #[test]
+    fn target_extents_normalize_zero_dimensions() {
+        let requested = vk::Extent2D {
+            width: 0,
+            height: 0,
+        };
+        let full = vk::Extent2D {
+            width: 1,
+            height: 1,
+        };
+        assert!(target_extents_match(full, full, requested));
+        assert!(!target_extents_match(requested, requested, requested));
+    }
+
+    #[test]
+    fn image_byte_sizes_match_formats() {
+        assert_eq!(SCGI_L0_BYTES, 4 * 2);
+        assert_eq!(SCGI_L1_BYTES, 4);
+        assert_eq!(SCGI_IRRADIANCE_BYTES, 4 * 2);
+    }
+
+    /// CPU/source 合同：读取 shader 常量，不代表 GPU fp16/UNORM 执行精度验收。
+    fn shader_l1_scale() -> f32 {
+        let shader = include_str!("../../../../shaders/common/gi_compression.wgsl");
+        assert!(shader.contains("ratio * L1_ENCODE_SCALE + 0.5"));
+        assert!(shader.contains("(encoded - 0.5) / L1_ENCODE_SCALE"));
+        let scale = shader.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix("const L1_ENCODE_SCALE: f32 = ")?
+                .strip_suffix(';')?
+                .parse::<f32>()
+                .ok()
+        });
+        assert_eq!(scale, Some(0.25));
+        scale.unwrap_or_default()
+    }
+
+    #[test]
+    fn l1_axis_ratio_two_survives_shader_encoding() {
+        let scale = shader_l1_scale();
+        for ratio in [-2.0f32, 0.0, 2.0] {
+            let encoded = (ratio * scale + 0.5).clamp(0.0, 1.0);
+            let decoded = (encoded - 0.5) / scale;
+            assert!((decoded - ratio).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn filtering_decoded_coefficients_preserves_energy() {
+        for shader in FILTER_SHADERS {
+            assert!(shader.contains("l1_decode_axis(sample_l1.x, sample_l0.xyz) * weight"));
+            assert!(shader.contains("l1_decode_axis(sample_l1.y, sample_l0.xyz) * weight"));
+            assert!(shader.contains("l1_decode_axis(sample_l1.z, sample_l0.xyz) * weight"));
+            assert!(shader.contains("acc_l0 / valid_weight_sum"));
+        }
+        assert!(FILTER_SHADERS[0].contains("l1_encode_axis(acc_l1x / valid_weight_sum, out_l0)"));
+        assert!(FILTER_SHADERS[1].contains("scgi_evaluate(l0, l1x, l1y, l1z, normal)"));
+        let scale = shader_l1_scale();
+        let l0 = [100.0f32, 1.0];
+        let ratio = [1.0f32, -1.0];
+        let encoded = ratio.map(|r| (r * scale + 0.5).clamp(0.0, 1.0));
+        let decoded_l1 = [
+            l0[0] * (encoded[0] - 0.5) / scale,
+            l0[1] * (encoded[1] - 0.5) / scale,
+        ];
+        let filtered_l0 = (l0[0] + l0[1]) * 0.5;
+        let filtered_l1 = (decoded_l1[0] + decoded_l1[1]) * 0.5;
+        assert!((filtered_l0 + filtered_l1 - 100.0).abs() < 1e-6);
+        let averaged_ratio = ((encoded[0] + encoded[1]) * 0.5 - 0.5) / scale;
+        assert!((filtered_l0 * (1.0 + averaged_ratio) - 50.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn invalid_samples_reduce_coverage_not_valid_irradiance() {
+        let attempted_terms = [
+            "attempted_weight = attempted_weight + geometry_weight;",
+            "attempted_weight = attempted_weight + weight;",
+        ];
+        for (shader, attempted_term) in FILTER_SHADERS.into_iter().zip(attempted_terms) {
+            assert!(!shader.contains("sample_l0.w <= 0.0"));
+            assert!(shader.contains(attempted_term));
+            let attempted_offset = shader.find(attempted_term).unwrap_or(shader.len());
+            let alpha_offset = shader
+                .find("clamp(sample_l0.w, 0.0, 1.0)")
+                .unwrap_or_default();
+            assert!(attempted_offset < alpha_offset);
+            assert!(shader.contains("* clamp(sample_l0.w, 0.0, 1.0)"));
+            assert!(shader.contains("valid_weight_sum = valid_weight_sum + weight"));
+            assert!(shader.contains("valid_weight_sum / attempted_weight"));
+        }
+        let weights = [1.0f32, 1.0];
+        let alpha = [1.0f32, 0.0];
+        let irradiance = [100.0f32, 0.0];
+        let total_weight = weights[0] + weights[1];
+        let covered_weight = weights[0] * alpha[0] + weights[1] * alpha[1];
+        let filtered = (irradiance[0] * weights[0] * alpha[0]
+            + irradiance[1] * weights[1] * alpha[1])
+            / covered_weight;
+        let coverage = covered_weight / total_weight;
+        assert!((filtered - 100.0).abs() < 1e-6);
+        assert!((coverage - 0.5).abs() < 1e-6);
+        let ibl = 20.0;
+        let injected = ibl * (1.0 - coverage) + filtered * coverage;
+        assert!((injected - 60.0).abs() < 1e-6);
+        // 另一张表面被几何权重拒绝时，不属于当前表面的缓存缺口。
+        let geometry_weights = [1.0f32, 0.0];
+        let attempted = geometry_weights[0] + geometry_weights[1];
+        let covered = geometry_weights[0] * alpha[0] + geometry_weights[1] * alpha[1];
+        assert!((covered / attempted - 1.0).abs() < 1e-6);
     }
 
     #[test]

@@ -104,6 +104,8 @@ pub(super) fn prepare_gi(
     let offsets_changed =
         !local.was_enabled || offsets[..cascades] != local.prev_offsets[..cascades];
     let frame_index = local.frame_index;
+    // GI 帧号在关态冻结，不能只凭相邻帧戳认定历史连续。
+    let history_contiguous = local.was_enabled;
 
     // 9.6.2：把活灯按紧凑顺序写进本帧槽的光源表（清单与 estimation 都按 0..light_count 索引）。
     // 每帧重写 16 KiB：比"变更检测 + 增量"简单，且环表的槽号是持久分配的、不能直接当紧凑下标。
@@ -206,7 +208,11 @@ pub(super) fn prepare_gi(
     let pipelines = &*gi.pipelines;
     let gi_set = gi.tables.set(slot);
     // 没有洞就一波都不录：整理只在"真的需要压紧"时才跑
-    let waves = if ring_holey { settings.defrag_waves.min(16) } else { 0 };
+    let waves = if ring_holey {
+        settings.defrag_waves.min(16)
+    } else {
+        0
+    };
     let alloc = settings.seed.then(|| {
         let (low, groups) = alloc_grid(extent);
         GiAllocDraw {
@@ -305,7 +311,7 @@ pub(super) fn prepare_gi(
     let temporal_filter = spatial_filter.as_ref().map(|_| GiTemporalFilterDraw {
         pass: pipelines.temporal_filter(),
         push: pack_temporal_filter_push(
-            settings.temporal_filter,
+            settings.temporal_filter && history_contiguous,
             config.capacity,
             frame_index,
             settings.temporal_smoothing,
@@ -337,9 +343,6 @@ pub(super) fn prepare_gi(
             target_set: gi.scgi.set(),
         })
     });
-    if screen_gather.is_some() {
-        gi.scgi.mark_written();
-    }
     // 9.7.5 去噪与上采样：跟着查表走。去噪每遍换一次描述符集（P0→P1、P1→P0 交替），
     // 遍数 0 时上采样直接读 P0。
     let denoise = screen_gather.as_ref().map_or_else(Vec::new, |_| {

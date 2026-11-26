@@ -2,14 +2,9 @@
 //! （规格只在关态改，改后重建表），`gi_stats` 读池水位/计数/显存/`gi_ms`，`gi_dump` 把
 //! LDR 帧（含 patch 视图）拷回写 PPM，`gi_census` 做 cell↔patch 双向一致与位置/桶归属对账。
 //! GI 关时 stats/dump/census 回 `enabled:false` 形态（不报错，脚本靠这个判分支）。
-
-use ash_macros::system;
-use bevy::{prelude::*, remote::BrpResult};
-use serde_json::{json, Value};
-
 use crate::remote::common::{
     params::{internal_err, invalid_params, parse_params_or_default, res, res_mut},
-    readback::{f32_at, read_buffer, u32_at, words},
+    readback::{f16_at, f32_at, read_buffer, u32_at, words},
 };
 use crate::render::{
     gi_cell_bucket, gi_cell_cascade, gi_cell_storage, gi_direction_bucket, gi_storage_to_volume,
@@ -22,7 +17,9 @@ use crate::render::{
     GI_LIGHT_SAMPLE_SIZE, GI_UBO_SIZE, INVALID_PATCH, PATCH_GEOMETRY_SIZE, PATCH_IRRADIANCE_SIZE,
     PATCH_STATISTICS_SIZE, RING_ACTIVE, RING_CONFIGS, RING_CONFIG_WORDS, RING_FLIP, RING_WATERMARK,
 };
-
+use ash_macros::system;
+use bevy::{prelude::*, remote::BrpResult};
+use serde_json::{json, Value};
 /// `gi_set` 参数：所有字段可省（缺省不动）；规格四件只允许在关态改。
 #[derive(serde::Deserialize, Default)]
 struct GiSetParams {
@@ -96,7 +93,6 @@ struct GiSetParams {
     #[serde(default)]
     capacity: Option<u32>,
 }
-
 fn settings_json(s: &GiSettings) -> Value {
     json!({
         "enabled": s.enabled,
@@ -131,7 +127,6 @@ fn settings_json(s: &GiSettings) -> Value {
         },
     })
 }
-
 /// # Errors
 /// 参数越界、规格在开态被改、规格非法或重建表失败。
 #[system]
@@ -302,7 +297,6 @@ pub(crate) fn gi_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRes
     let effective = *settings;
     Ok(settings_json(&effective))
 }
-
 /// # Errors
 /// 读回失败或 GPU 计时取回失败。
 #[system]
@@ -468,7 +462,6 @@ pub(crate) fn gi_stats(In(_params): In<Option<Value>>, world: &mut World) -> Brp
         "gi_ms": gi_ms,
     }))
 }
-
 /// `gi_dump` 参数：`path` 必填；`slot` 可选（帧槽 0/1）。
 #[derive(serde::Deserialize)]
 struct GiDumpParams {
@@ -476,7 +469,6 @@ struct GiDumpParams {
     #[serde(default)]
     slot: Option<u32>,
 }
-
 /// # Errors
 /// 视图关/参数越界/LDR 读回或写文件失败。
 #[system]
@@ -494,14 +486,14 @@ pub(crate) fn gi_dump(In(params): In<Option<Value>>, world: &mut World) -> BrpRe
     let slot = crate::remote::census::frame_dump::check_slot(p.slot.unwrap_or(0) as usize)?;
     crate::remote::census::frame_dump::dump_ldr_frame(world, &p.path, slot)
 }
-
-/// `scgi_stats` 参数：`stride` 可选（缺省 8 = 每 8×8 像素取一个样本）。
+/// `scgi_stats` 参数：stride 缺省 8；roi = [x, y, width, height]，缺省全图。
 #[derive(serde::Deserialize, Default)]
 struct ScgiStatsParams {
     #[serde(default)]
     stride: Option<u32>,
+    #[serde(default)]
+    roi: Option<[u32; 4]>,
 }
-
 /// `ash_renderer/scgi_stats`：读回 9.7 的全分辨率辐照度，报覆盖率与 L0 量级。
 ///
 /// 判定线②（常量天空下 `E = πL` 的精确锚）与"注入是不是把画面压暗了"的归因都靠它：
@@ -535,9 +527,15 @@ pub(crate) fn scgi_stats(In(params): In<Option<Value>>, world: &mut World) -> Br
     let bytes = scgi
         .readback_irradiance(ctx)
         .map_err(internal_err("SCGI 辐照度读回失败"))?;
-
     let width = extent.width as usize;
-    let height = extent.height as usize;
+    let [x, y, w, h] = p.roi.unwrap_or([0, 0, extent.width, extent.height]);
+    if w == 0 || h == 0 || x >= extent.width || y >= extent.height {
+        return Err(invalid_params(
+            "roi 必须是图内非空矩形 [x, y, width, height]",
+        ));
+    }
+    let end_x = x.saturating_add(w).min(extent.width) as usize;
+    let end_y = y.saturating_add(h).min(extent.height) as usize;
     let mut covered = 0u64;
     let mut sampled = 0u64;
     let mut sum_l0 = [0.0f64; 3];
@@ -545,9 +543,11 @@ pub(crate) fn scgi_stats(In(params): In<Option<Value>>, world: &mut World) -> Br
     let mut max_l0 = 0.0f32;
     let mut max_alpha = 0.0f32;
     let mut sum_alpha = 0.0f64;
+    let mut non_finite = 0u64;
+    let mut negative = 0u64;
     let step = stride as usize;
-    for y in (0..height).step_by(step) {
-        for x in (0..width).step_by(step) {
+    for y in (y as usize..end_y).step_by(step) {
+        for x in (x as usize..end_x).step_by(step) {
             let base = (y * width + x) * 8;
             if base + 8 > bytes.len() {
                 continue;
@@ -560,6 +560,13 @@ pub(crate) fn scgi_stats(In(params): In<Option<Value>>, world: &mut World) -> Br
             };
             let rgb = [channel(0), channel(1), channel(2)];
             let alpha = channel(3);
+            if !alpha.is_finite() || rgb.iter().any(|v| !v.is_finite()) {
+                non_finite += 1;
+                continue;
+            }
+            if rgb.iter().any(|v| *v < 0.0) {
+                negative += 1;
+            }
             sampled += 1;
             sum_alpha += f64::from(alpha);
             max_alpha = max_alpha.max(alpha);
@@ -587,6 +594,9 @@ pub(crate) fn scgi_stats(In(params): In<Option<Value>>, world: &mut World) -> Br
         "extent": { "width": extent.width, "height": extent.height },
         "stride": stride,
         "sampled": sampled,
+        "roi": [x, y, end_x as u32 - x, end_y as u32 - y],
+        "non_finite": non_finite,
+        "negative": negative,
         "coverage": covered as f64 / n,
         "alpha": { "mean": sum_alpha / n, "max": max_alpha },
         "l0_all_mean": [
@@ -605,13 +615,94 @@ pub(crate) fn scgi_stats(In(params): In<Option<Value>>, world: &mut World) -> Br
     }))
 }
 
+/// `scgi_low_probe` 参数：全分辨率像素坐标（读它所属的 1/4 块）。
+#[derive(serde::Deserialize, Default)]
+struct ScgiLowProbeParams {
+    #[serde(default)]
+    pixel: Option<[u32; 2]>,
+}
+
+/// `ash_renderer/scgi_low_probe`：读回某像素所属 1/4 块的 L0/L1 原始内容（双缓冲各一份）。
+///
+/// 9.7.4 的覆盖率不稳定性只能在这一层定位：全分辨率图的 `a` 已被去噪与上采样按几何权重
+/// 重新归一，看不出"是查表没覆盖还是上采样稀释"。这里直接读 `scgi_l0`/`scgi_l1` 的块值，
+/// 把 `l0.w`（覆盖率）、RGBL1 与 `l1.w`（guide 相位）原样报出来。
+///
+/// # Errors
+/// GI 关、目标未建或读回失败。
+#[system]
+pub(crate) fn scgi_low_probe(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let p: ScgiLowProbeParams = parse_params_or_default(params)?;
+    let pixel = p
+        .pixel
+        .ok_or_else(|| invalid_params("scgi_low_probe 需要 pixel = [x, y]"))?;
+    let Some(ctx) = world.get_resource::<Context>() else {
+        return Err(internal_err("Context 缺席——初始化链未插入")(
+            "scgi_low_probe 需要 Context",
+        ));
+    };
+    let Some(scgi) = world.get_resource::<crate::render::ScgiTargets>() else {
+        return Err(invalid_params("SCGI 目标资源缺席——初始化链未插入"));
+    };
+    let low = scgi.low_extent();
+    let full = scgi.full_extent();
+    if low.width == 0 || low.height == 0 {
+        return Err(invalid_params("SCGI 目标还没建（尺寸 0）"));
+    }
+    if pixel[0] >= full.width || pixel[1] >= full.height {
+        return Err(invalid_params("pixel 超出全分辨率画面"));
+    }
+    let block = ash::vk::Offset2D {
+        x: (pixel[0] / 4).min(low.width - 1) as i32,
+        y: (pixel[1] / 4).min(low.height - 1) as i32,
+    };
+    let one = ash::vk::Extent2D {
+        width: 1,
+        height: 1,
+    };
+    let read = |image: ash::vk::Image, bytes_per_texel: u64| {
+        crate::render::readback_image_region(
+            &ctx,
+            image,
+            ash::vk::ImageAspectFlags::COLOR,
+            ash::vk::ImageLayout::GENERAL,
+            block,
+            one,
+            bytes_per_texel,
+        )
+        .map_err(internal_err("1/4 目标读回失败"))
+    };
+    let mut buffers = Vec::with_capacity(2);
+    for index in 0..2 {
+        let l0_raw = read(scgi.low_l0_image(index), 8)?;
+        let l1_raw = read(scgi.low_l1_image(index), 4)?;
+        let mut rgba = [0.0f32; 4];
+        for (i, slot) in rgba.iter_mut().enumerate() {
+            *slot = f16_at(&l0_raw, i * 2)?;
+        }
+        buffers.push(json!({
+            "l0": [rgba[0], rgba[1], rgba[2]],
+            "coverage": rgba[3],
+            "l1": [l1_raw[0], l1_raw[1], l1_raw[2], l1_raw[3]],
+        }));
+    }
+    Ok(json!({
+        "pixel": pixel,
+        "block": [block.x, block.y],
+        "low_extent": { "width": low.width, "height": low.height },
+        "parity": res::<SurfaceCacheTables>(world)?
+            .submitted_gi_frame()
+            .map(|f| f.frame_index & 1),
+        "buffers": buffers,
+    }))
+}
+
 /// `gi_census` 参数：抽检前 N 条 ring 槽（缺省 8，上限 64）。
 #[derive(serde::Deserialize, Default)]
 struct GiCensusParams {
     #[serde(default)]
     patches: Option<u32>,
 }
-
 /// `ash_renderer/gi_census`：cell↔patch 双向一致、patch 位置落在所属体素内、法线落在
 /// 所属桶内。诊断路径，先 `device_wait_idle` 取一致快照（低频）。
 ///
@@ -630,7 +721,9 @@ pub(crate) fn gi_census(In(params): In<Option<Value>>, world: &mut World) -> Brp
         let ctx = res::<Context>(world)?;
         unsafe { ctx.device.device_wait_idle() }.map_err(internal_err("GI 对账前排空失败"))?;
     }
-    let slot = res::<FramePool>(world)?.current_index();
+    let Some(slot) = res::<SurfaceCacheTables>(world)?.submitted_gi_slot() else {
+        return Ok(json!({"enabled": true, "reason": "not_ready"}));
+    };
     let config = res::<SurfaceCacheTables>(world)?.config();
     let n = p.patches.unwrap_or(8).min(64);
     let res_value = config.res;
@@ -763,15 +856,203 @@ pub(crate) fn gi_census(In(params): In<Option<Value>>, world: &mut World) -> Brp
     }))
 }
 
-/// `gi_estimate_probe` 参数：`patch`（池槽号，缺省 0）或 `ring`（ring 内序号，缺省不用）。
+struct PixelInput {
+    surface: Option<(Vec3, Vec3)>,
+    value: Value,
+}
+
+fn pixel_input(
+    world: &mut World,
+    slot: usize,
+    pixel: [u32; 2],
+    normal_source: u32,
+) -> Result<PixelInput, bevy::remote::BrpError> {
+    use crate::render::{
+        gi_flat_normal, gi_world_from_depth, readback_image_region, FrameUniformTable,
+        GBufferTargets, ScgiTargets, SmaaTargets, FRAME_UBO_SIZE,
+    };
+    use ash::vk;
+
+    let frame = {
+        let mut table = res_mut::<FrameUniformTable>(world)?;
+        read_buffer(
+            table.ubo(slot),
+            FRAME_UBO_SIZE as usize,
+            "像素对账帧 UBO 读失败",
+        )?
+    };
+    let ctx = res::<Context>(world)?;
+    let gbuffer = res::<GBufferTargets>(world)?;
+    let scgi = res::<ScgiTargets>(world)?;
+    let extent = res::<SmaaTargets>(world)?.ldr_extent();
+    if pixel[0] >= extent.width || pixel[1] >= extent.height {
+        return Err(invalid_params("pixel 越出全分辨率目标"));
+    }
+    let screen_current = u32_at(&frame, 336)? != 0;
+    if screen_current && (!scgi.initialized() || scgi.full_extent() != extent) {
+        return Ok(PixelInput {
+            surface: None,
+            value: json!({"pixel": pixel, "reason": "screen_not_ready"}),
+        });
+    }
+    let origin = [pixel[0].saturating_sub(1), pixel[1].saturating_sub(1)];
+    let last = [
+        pixel[0].saturating_add(1).min(extent.width - 1),
+        pixel[1].saturating_add(1).min(extent.height - 1),
+    ];
+    let region = vk::Extent2D {
+        width: last[0] - origin[0] + 1,
+        height: last[1] - origin[1] + 1,
+    };
+    let depth = readback_image_region(
+        &ctx,
+        res::<FramePool>(world)?.depth_image(slot),
+        vk::ImageAspectFlags::DEPTH,
+        vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+        vk::Offset2D {
+            x: origin[0] as i32,
+            y: origin[1] as i32,
+        },
+        region,
+        4,
+    )
+    .map_err(internal_err("深度 stencil 回读失败"))?;
+    let read_color = |image, layout, bytes| {
+        readback_image_region(
+            &ctx,
+            image,
+            vk::ImageAspectFlags::COLOR,
+            layout,
+            vk::Offset2D {
+                x: pixel[0] as i32,
+                y: pixel[1] as i32,
+            },
+            vk::Extent2D {
+                width: 1,
+                height: 1,
+            },
+            bytes,
+        )
+        .map_err(internal_err("像素颜色目标回读失败"))
+    };
+    let sampled = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+    let normal_bytes = read_color(gbuffer.normal_image(slot), sampled, 8)?;
+    let albedo = read_color(gbuffer.albedo_image(slot), sampled, 4)?;
+    let material = read_color(gbuffer.matparam_image(slot), sampled, 4)?;
+    let hdr = read_color(gbuffer.hdr_image(slot), sampled, 8)?;
+    let irradiance = if screen_current {
+        Some(read_color(
+            scgi.irradiance_image(),
+            vk::ImageLayout::GENERAL,
+            8,
+        )?)
+    } else {
+        None
+    };
+    let rgba_half = |raw: &[u8]| -> Result<[f32; 4], bevy::remote::BrpError> {
+        Ok([
+            f16_at(raw, 0)?,
+            f16_at(raw, 2)?,
+            f16_at(raw, 4)?,
+            f16_at(raw, 6)?,
+        ])
+    };
+    let size = Vec2::new(extent.width as f32, extent.height as f32);
+    let uv = (Vec2::new(pixel[0] as f32, pixel[1] as f32) + Vec2::splat(0.5)) / size;
+    let mut inv = [0.0; 16];
+    let mut view_proj = [0.0; 16];
+    for i in 0..16 {
+        inv[i] = f32_at(&frame, 128 + i * 4)?;
+        view_proj[i] = f32_at(&frame, i * 4)?;
+    }
+    let inv = Mat4::from_cols_array(&inv);
+    let camera = Vec3::new(
+        f32_at(&frame, 192)?,
+        f32_at(&frame, 196)?,
+        f32_at(&frame, 200)?,
+    );
+    let light = Vec3::new(
+        f32_at(&frame, 64)?,
+        f32_at(&frame, 68)?,
+        f32_at(&frame, 72)?,
+    );
+    let neighbors = [
+        pixel,
+        [pixel[0].saturating_sub(1), pixel[1]],
+        [pixel[0].saturating_add(1).min(extent.width - 1), pixel[1]],
+        [pixel[0], pixel[1].saturating_add(1).min(extent.height - 1)],
+        [pixel[0], pixel[1].saturating_sub(1)],
+    ];
+    let mut depths = [0.0; 5];
+    let mut stencil = Vec::with_capacity(5);
+    for (i, xy) in neighbors.into_iter().enumerate() {
+        let index = (xy[1] - origin[1]) * region.width + xy[0] - origin[0];
+        depths[i] = f32_at(&depth, index as usize * 4)?;
+        let neighbor_uv = (Vec2::new(xy[0] as f32, xy[1] as f32) + Vec2::splat(0.5)) / size;
+        let position =
+            (depths[i] > 0.0).then(|| gi_world_from_depth(neighbor_uv, depths[i], inv).to_array());
+        stencil.push(json!({"pixel": xy, "depth": depths[i], "position": position}));
+    }
+    let mut value = json!({
+        "pixel": pixel, "ubo_slot": slot, "extent": [extent.width, extent.height],
+        "view_proj": view_proj, "camera": camera.to_array(), "sun_dir": light.to_array(),
+        "depth_stencil": stencil, "normal_source": normal_source,
+        "albedo": [
+            f32::from(albedo[0]) / 255.0,
+            f32::from(albedo[1]) / 255.0,
+            f32::from(albedo[2]) / 255.0,
+        ],
+        "material": {
+            "metallic": f32::from(material[0]) / 255.0,
+            "ao": f32::from(material[1]) / 255.0,
+            "roughness": f32::from(material[2]) / 255.0,
+            "reflectance": f32::from(material[3]) / 255.0,
+        },
+        "hdr": rgba_half(&hdr)?, "hdr_color_space": "linear_srgb_hdr_target",
+        "screen_current": screen_current,
+        "screen_irradiance": irradiance.as_ref().map(|bytes| rgba_half(bytes)).transpose()?,
+        "frame_mode": u32_at(&frame, 112)?,
+    });
+    if depths[0] <= 0.0 {
+        return Ok(PixelInput {
+            surface: None,
+            value,
+        });
+    }
+    let position = gi_world_from_depth(uv, depths[0], inv);
+    let encoded_normal = rgba_half(&normal_bytes)?;
+    let mut shading =
+        Vec3::new(encoded_normal[0], encoded_normal[1], encoded_normal[2]).normalize_or_zero();
+    if shading.dot(camera - position) < 0.0 {
+        shading = -shading;
+    }
+    let flat = gi_flat_normal(uv, Vec2::ONE / size, depths, inv, camera);
+    let selected = if normal_source == 0 { flat } else { shading };
+    value["position"] = json!(position.to_array());
+    value["flat_normal"] = json!(flat.to_array());
+    value["shading_normal"] = json!(shading.to_array());
+    value["selected_normal"] = json!(selected.to_array());
+    value["no_l"] = json!(selected.dot(light).max(0.0));
+    let valid = position.is_finite() && selected.is_finite() && selected.length_squared() >= 1e-8;
+    Ok(PixelInput {
+        surface: valid.then_some((position, selected)),
+        value,
+    })
+}
+/// `gi_estimate_probe` 参数：`pixel`（全分辨率）或 `position`+`normal`，或 `patch`/`ring`。
 #[derive(serde::Deserialize, Default)]
 struct GiEstimateProbeParams {
+    #[serde(default)]
+    pixel: Option<[u32; 2]>,
     #[serde(default)]
     patch: Option<u32>,
     #[serde(default)]
     ring: Option<u32>,
+    #[serde(default)]
+    position: Option<[f32; 3]>,
+    #[serde(default)]
+    normal: Option<[f32; 3]>,
 }
-
 /// `ash_renderer/gi_estimate_probe`（9.6）：单条 patch 的几何/统计/两份辐照度对账。
 ///
 /// 判定线要"单点对账"（多跳色渗、自发光 A/B、收敛），靠视图只能看颜色，所以这里回读数。
@@ -782,7 +1063,12 @@ struct GiEstimateProbeParams {
 /// GI 关 / 资源缺席 / 参数越界 / 读回失败。
 #[system]
 pub(crate) fn gi_estimate_probe(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let p: GiEstimateProbeParams = parse_params_or_default(params)?;
+    let mut p: GiEstimateProbeParams = parse_params_or_default(params)?;
+    if p.pixel.is_some()
+        && (p.patch.is_some() || p.ring.is_some() || p.position.is_some() || p.normal.is_some())
+    {
+        return Err(invalid_params("pixel 与 patch/ring/position/normal 互斥"));
+    }
     let settings = world
         .get_resource::<GiSettings>()
         .map_or_else(GiSettings::default, |s| *s);
@@ -793,9 +1079,103 @@ pub(crate) fn gi_estimate_probe(In(params): In<Option<Value>>, world: &mut World
         let ctx = res::<Context>(world)?;
         unsafe { ctx.device.device_wait_idle() }.map_err(internal_err("估计对账前排空失败"))?;
     }
-    let slot = res::<FramePool>(world)?.current_index();
+    // Read the actual submission, not the next reusable slot or live UI settings.
+    let Some(submitted) = res::<SurfaceCacheTables>(world)?.submitted_gi_frame() else {
+        return Ok(json!({"enabled": true, "alive": false, "reason": "not_ready"}));
+    };
+    let slot = submitted.slot;
+    let submission = json!({"slot": slot, "gi_frame_index": submitted.frame_index,
+        "normal_source": submitted.normal_source, "estimation": submitted.has_estimation,
+        "scgi": submitted.has_scgi, "extent": submitted.extent,
+        "requested_normal_source": settings.normal_source});
+    let mut input = json!(null);
+    if let Some(pixel) = p.pixel {
+        if !settings.estimation || !submitted.has_estimation {
+            return Ok(
+                json!({"enabled": true, "alive": false, "reason": "producer_stopped",
+                "submission": submission}),
+            );
+        }
+        let extent = res::<crate::render::SmaaTargets>(world)?.ldr_extent();
+        if submitted.extent != [extent.width, extent.height] {
+            return Ok(
+                json!({"enabled": true, "alive": false, "reason": "frame_extent_changed",
+                "submission": submission}),
+            );
+        }
+        let PixelInput { surface, value } =
+            pixel_input(world, slot, pixel, submitted.normal_source)?;
+        input = value;
+        input["submission"] = submission.clone();
+        let Some((position, normal)) = surface else {
+            return Ok(
+                json!({"enabled": true, "alive": false, "reason": "invalid_surface", "input": input}),
+            );
+        };
+        p.position = Some(position.to_array());
+        p.normal = Some(normal.to_array());
+    }
     let config = res::<SurfaceCacheTables>(world)?.config();
-    let patch = if let Some(ring_index) = p.ring {
+    let frame_cursor = res::<FramePool>(world)?.current_index();
+    let mut lookup = json!(null);
+    let patch = if let Some(position) = p.position {
+        let normal = Vec3::from_array(
+            p.normal
+                .ok_or_else(|| invalid_params("position 查表需要 normal"))?,
+        );
+        let position = Vec3::from_array(position);
+        if !position.is_finite() || !normal.is_finite() || normal.length_squared() < 1e-8 {
+            return Err(invalid_params("position/normal 必须有限，normal 不得为零"));
+        }
+        let mut tables = res_mut::<SurfaceCacheTables>(world)?;
+        let ubo = read_buffer(tables.ubo(slot), GI_UBO_SIZE as usize, "GI UBO 读失败")?;
+        let center = Vec3::new(f32_at(&ubo, 64)?, f32_at(&ubo, 68)?, f32_at(&ubo, 72)?);
+        lookup = json!({"ubo_slot": slot, "next_frame_slot": frame_cursor,
+            "frame_slots": crate::render::MAX_FRAMES_IN_FLIGHT,
+            "gi_frame_index": u32_at(&ubo, 240)?,
+            "center": center.to_array(), "voxel_min": config.voxel_min,
+            "res": config.res, "cascades": config.cascades});
+        let Some(cascade) = crate::render::gi_resolve_cascade(
+            center,
+            position,
+            config.voxel_min,
+            config.res,
+            config.cascades,
+        ) else {
+            return Ok(
+                json!({"enabled": true, "alive": false, "reason": "outside_volume", "lookup": lookup, "input": input}),
+            );
+        };
+        let base = 96 + cascade as usize * 16;
+        let offset = IVec3::new(
+            u32_at(&ubo, base)? as i32,
+            u32_at(&ubo, base + 4)? as i32,
+            u32_at(&ubo, base + 8)? as i32,
+        );
+        let voxel = gi_voxel_size(config.voxel_min, cascade);
+        let pv = crate::render::gi_volume_position(position, voxel, offset, config.res as i32);
+        let storage = crate::render::gi_volume_to_storage(pv, offset, config.res as i32);
+        let cell = crate::render::gi_cell_index(
+            cascade,
+            storage,
+            gi_direction_bucket(normal.normalize().to_array()),
+            config.res,
+        );
+        let mut raw = [0u8; 4];
+        tables
+            .cell_patch()
+            .read(u64::from(cell) * 4, &mut raw)
+            .map_err(internal_err("cell→patch 读失败"))?;
+        let patch = u32::from_le_bytes(raw);
+        if patch == INVALID_PATCH {
+            return Ok(
+                json!({"enabled": true, "alive": false, "cell": cell, "reason": "cache_miss", "lookup": lookup, "input": input}),
+            );
+        }
+        patch
+    } else if p.normal.is_some() {
+        return Err(invalid_params("normal 查表需要 position"));
+    } else if let Some(ring_index) = p.ring {
         let ring = {
             let mut tables = res_mut::<SurfaceCacheTables>(world)?;
             words(&read_buffer(
@@ -822,7 +1202,7 @@ pub(crate) fn gi_estimate_probe(In(params): In<Option<Value>>, world: &mut World
             config.capacity
         )));
     }
-    let (cell, geometry, statistics, irradiance0, irradiance1, parity) = {
+    let (cell, geometry, statistics, irradiance0, irradiance1, spatial, temporal, frame_index) = {
         let mut tables = res_mut::<SurfaceCacheTables>(world)?;
         let mut raw_cell = [0u8; 4];
         tables
@@ -849,6 +1229,16 @@ pub(crate) fn gi_estimate_probe(In(params): In<Option<Value>>, world: &mut World
             .patch_irradiance1()
             .read(u64::from(patch) * PATCH_IRRADIANCE_SIZE, &mut irradiance1)
             .map_err(internal_err("patch 辐照度 1 读失败"))?;
+        let mut spatial = [0u8; PATCH_IRRADIANCE_SIZE as usize];
+        tables
+            .filtered_irradiance0()
+            .read(u64::from(patch) * PATCH_IRRADIANCE_SIZE, &mut spatial)
+            .map_err(internal_err("patch 空间滤波读失败"))?;
+        let mut temporal = [0u8; PATCH_IRRADIANCE_SIZE as usize];
+        tables
+            .filtered_irradiance1()
+            .read(u64::from(patch) * PATCH_IRRADIANCE_SIZE, &mut temporal)
+            .map_err(internal_err("patch 时域滤波读失败"))?;
         let ubo = read_buffer(tables.ubo(slot), GI_UBO_SIZE as usize, "GI UBO 读失败")?;
         (
             u32::from_le_bytes(raw_cell),
@@ -856,16 +1246,45 @@ pub(crate) fn gi_estimate_probe(In(params): In<Option<Value>>, world: &mut World
             statistics,
             irradiance0,
             irradiance1,
-            u32_at(&ubo, 240)? & 1,
+            spatial,
+            temporal,
+            u32_at(&ubo, 240)?,
         )
     };
-    let irradiance_json = |raw: &[u8; PATCH_IRRADIANCE_SIZE as usize]| -> BrpResult {
-        Ok(json!({
-            "l0": [f32_at(raw, 0)?, f32_at(raw, 4)?, f32_at(raw, 8)?],
-            "l1x": [f32_at(raw, 16)?, f32_at(raw, 20)?, f32_at(raw, 24)?],
-            "l1y": [f32_at(raw, 32)?, f32_at(raw, 36)?, f32_at(raw, 40)?],
-            "l1z": [f32_at(raw, 48)?, f32_at(raw, 52)?, f32_at(raw, 56)?],
-        }))
+    if frame_index != submitted.frame_index {
+        return Err(internal_err("GI UBO 与提交快照帧号不一致")(
+            format!("UBO={frame_index}, submitted={}", submitted.frame_index),
+        ));
+    }
+    let normal = [
+        f32_at(&geometry, 16)?,
+        f32_at(&geometry, 20)?,
+        f32_at(&geometry, 24)?,
+    ];
+    let irradiance_json = |raw: &[u8; PATCH_IRRADIANCE_SIZE as usize],
+                           include_diagnostics: bool|
+     -> BrpResult {
+        let l0 = [f32_at(raw, 0)?, f32_at(raw, 4)?, f32_at(raw, 8)?];
+        let l1x = [f32_at(raw, 16)?, f32_at(raw, 20)?, f32_at(raw, 24)?];
+        let l1y = [f32_at(raw, 32)?, f32_at(raw, 36)?, f32_at(raw, 40)?];
+        let l1z = [f32_at(raw, 48)?, f32_at(raw, 52)?, f32_at(raw, 56)?];
+        let evaluated = [0, 1, 2].map(|i| {
+            (l0[i] + l1x[i] * normal[0] + l1y[i] * normal[1] + l1z[i] * normal[2]).max(0.0)
+        });
+        let mut value = json!({
+            "l0": l0, "l1x": l1x, "l1y": l1y, "l1z": l1z,
+            "evaluated": evaluated,
+            "evaluated_normal": normal,
+            "reserved": [f32_at(raw, 12)?, f32_at(raw, 28)?, f32_at(raw, 44)?, f32_at(raw, 60)?],
+        });
+        if include_diagnostics {
+            // 只有 raw 缓冲带未滤波的天空/命中拆分；滤波后的 b14/b15 的 .w 是帧戳。
+            value["diag"] = json!({
+                "sky_e": f32_at(raw, 12)?, "hit_e": f32_at(raw, 28)?,
+                "sky_frac": f32_at(raw, 44)?, "sun_visibility": f32_at(raw, 60)?,
+            });
+        }
+        Ok(value)
     };
     Ok(json!({
         "enabled": true,
@@ -885,12 +1304,19 @@ pub(crate) fn gi_estimate_probe(In(params): In<Option<Value>>, world: &mut World
             "update_count": u32_at(&statistics, 40)?,
             "heartbeat": u32_at(&statistics, 44)?,
         },
-        // 两份都给出：a = 第 0 份、b = 第 1 份。估计每帧只写其中一份（`frame&1`），
-        // 所以**必有一份与 `statistics.mean` 逐位相等**（那是最后一帧写入的 l0），
-        // 另一份是更早一帧的结果。`parity` 是 UBO 里的提示值，可能比最后一帧早一拍
-        //（UBO 按帧槽写、读的是当前槽），对账请以"与 mean 相等的那一份"为准。
-        "parity_hint": parity,
-        "irradiance_a": irradiance_json(&irradiance0)?,
-        "irradiance_b": irradiance_json(&irradiance1)?,
+        // raw 两份是方差引导的长时结果；statistics.mean 是短时均值，不承诺逐位相等。
+        // 版本来自最近实际 GI 提交，并已等待 GPU 完成；GI 帧号不是图形提交次数。
+        "ubo_slot": slot,
+        "gi_frame_index": frame_index,
+        "lookup": lookup,
+        "input": input,
+        "submission": submission,
+        "raw_current": submitted.has_estimation,
+        "raw_diagnostic_layout": "sky_hit_fraction_sun_v2",
+        "parity_hint": frame_index & 1,
+        "irradiance_a": irradiance_json(&irradiance0, true)?,
+        "irradiance_b": irradiance_json(&irradiance1, true)?,
+        "irradiance_spatial": irradiance_json(&spatial, false)?,
+        "irradiance_temporal": irradiance_json(&temporal, false)?,
     }))
 }

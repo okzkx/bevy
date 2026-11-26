@@ -21,7 +21,7 @@ struct SceneHit {
     instance_slot: u32,
     // 几何内的三角形序号（一网格一几何，直接是网格三角形号）。
     primitive: u32,
-    // 重心坐标 xy，第三分量 = 1 - x - y。
+    // Vulkan 三角形重心坐标：xy 是顶点 1/2 的权重，顶点 0 的权重 = 1 - x - y。
     bary: vec2f,
     front_face: bool,
     // 实例的 模型 → 世界 变换（ray query 自带，TLAS 实例记录里的 3×4）。
@@ -78,10 +78,12 @@ fn hit_geometry(instance_slot: u32, primitive: u32, bary: vec2f) -> HitGeometry 
     let uv1 = vec2f(vertices[o1 + 6u], vertices[o1 + 7u]);
     let uv2 = vec2f(vertices[o2 + 6u], vertices[o2 + 7u]);
     var g: HitGeometry;
-    g.position = p0 * bary.x + p1 * bary.y + p2 * w;
+    // OpRayQueryGetIntersectionBarycentricsKHR 原样返回顶点 1/2 的权重；位置、法线与 UV
+    // 必须共用 (1-x-y, x, y)。错位会让阴影与多跳查表访问同一三角形上的另一个位置。
+    g.position = p0 * w + p1 * bary.x + p2 * bary.y;
     // 插值后不归一化由调用方决定（法线插值本身就是近似的）
-    g.normal = n0 * bary.x + n1 * bary.y + n2 * w;
-    g.uv = uv0 * bary.x + uv1 * bary.y + uv2 * w;
+    g.normal = n0 * w + n1 * bary.x + n2 * bary.y;
+    g.uv = uv0 * w + uv1 * bary.x + uv2 * bary.y;
     g.material_index = rec.material_index;
     return g;
 }

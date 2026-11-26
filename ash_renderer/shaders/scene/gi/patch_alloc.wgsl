@@ -36,6 +36,7 @@
 @group(3) @binding(7) var<storage, read_write> ring: array<atomic<u32>, 12>;
 @group(3) @binding(8) var<storage, read_write> counters: array<atomic<u32>, 16>;
 @group(3) @binding(9) var<uniform> gi: GiUniforms;
+@group(3) @binding(15) var<storage, read_write> filtered_irradiance1: array<PatchIrradiance>;
 
 var<immediate> push: PushAlloc;
 struct PushAlloc {
@@ -127,6 +128,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
         return;
     }
     n = normalize(n);
+    // 与平面法线、IBL 与屏幕求值同一半球：双面几何背面也要朝可见侧播种。
+    if (dot(n, frame.camera_pos.xyz - p) < 0.0) {
+        n = -n;
+    }
 
     let center = gi.target_pos.xyz;
     let res = u32(gi.volume.y);
@@ -159,7 +164,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     }
 
     // —— 新 cell：同帧同 cell 只有一个线程拿到分配权（纪元标签仲裁）——
-    let epoch = push.frame_index | 1u;
+    // 标签必须是"每帧唯一且非 0"：`帧号 | 1` 会让相邻的偶数帧与奇数帧算出同一个标签，
+    // 于是奇数帧的分配全部被判成"已有人抢到"而直接 return，新 cell 只能隔帧建立。
+    // 静态场景里被回收的 cell 因此隔帧缺一次映射，屏幕 gather 的 1/4 块就在
+    // "有缓存 E"与"空"之间整块跳（实测 0 ↔ 600）。
+    let epoch = push.frame_index * 2u + 1u;
     let previous = atomicExchange(&cell_marks[cell], epoch);
     if (previous == epoch) {
         return;
@@ -177,6 +186,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     patch_geometry[slot].normal = vec4f(n, 0.0);
     patch_irradiance0[slot] = seed;
     patch_irradiance1[slot] = seed;
+    // b15 跟着 patch 身份复用，首次估计不能继承此槽上一条 patch 的历史。
+    filtered_irradiance1[slot] = seed;
+    filtered_irradiance1[slot].l0.w = 0.0;
     patch_statistics[slot].mean = vec4f(seed.l0.xyz, 0.0);
     patch_statistics[slot].variance = vec4f(0.0);
     patch_statistics[slot].state = 0u;

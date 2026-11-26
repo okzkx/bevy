@@ -1,7 +1,8 @@
 //! `ash_renderer/frame_dump`：把 LDR 后链目标（tonemap 之后、SMAA 之前的完整帧）
 //! 拷回宿主并写 PPM（P6）。PrintWindow/屏幕抓图在锁屏、DLP 遮挡或远程会话下会
 //! 拿到白图/桌面（见截图伪影清单），渲染器自身的回读不依赖桌面会话，是画面取证的
-//! 兜底通道。只进验证，不进绘制路径。
+//! 兜底通道。回读是 linear sRGB 的 UNORM 字节，视觉查看前须做 sRGB 编码；
+//! 不含最后的 SMAA 与 overlay。只进验证，不进绘制路径。
 
 use std::io::Write;
 
@@ -24,8 +25,8 @@ struct FrameDumpParams {
 }
 
 /// `ash_renderer/frame_dump`：读回 LDR 后链目标并写 PPM。帧内容 = 当前着色模式/
-/// 漫反射编码下的完整画面（含天空与 UI 之后的 SMAA 输入态），用来做 A/B 与视觉
-/// 验证的取证。
+/// 漫反射编码下的完整画面（含天空，SMAA 与 overlay 之前的线性输入态）。
+/// 保留原始值供数值 A/B；视觉查看须应用 sRGB 传递函数，不能直接当窗口截图。
 ///
 /// # Errors
 /// 参数缺失 / 槽号越界 / Vulkan 资源缺席 / 读回或写文件失败。
@@ -72,5 +73,9 @@ pub(crate) fn dump_ldr_frame(world: &mut World, path: &str, slot: usize) -> BrpR
         "height": height,
         "slot": slot,
         "bytes": ppm.len(),
+        "color_space": "linear_srgb",
+        "display_encoding": "srgb",
+        "includes_smaa": false,
+        "includes_overlay": false,
     }))
 }

@@ -4,8 +4,11 @@
 //
 // 口径（9.7 施工计划 §0.1/§0.2/§9.7.4）：
 // - 查表只在 1/4 分辨率做；全分辨率那一步（9.7.5）只做双边上采样与 SH 求值，不再查缓存；
-// - 样本规则照 Unity：**中心样本权重 0.01 且不查 rank**（只回答"这里有没有缓存"），其余样本
-//   只接受 `rank == 0` 且已估计过的 patch；
+// - 播种样本权重 0.01，参考几何独立取固定真实子像素；颜色只接受"已有真实估计"
+//   （update_count ≥ 1）的缓存条目，不看 rank——rank 1 的辐照度仍在每帧估计；
+// - **覆盖率只由参考几何决定**（有缓存 = 1、无 = 0），不进抖动样本的加权。抖动样本随帧旋转，
+//   落到无 patch 的格子时会把覆盖率压到 0.005，合成端于是在遮挡后的 SCGI 与未遮挡的 IBL 之间
+//   整块来回跳——那就是暗区的持续闪烁；
 // - 本段**不做** Chebyshev 软可见性或任何软阴影式权重——Unity 无此实现，加了就是没有出处的滤波面；
 // - Volume 外直接写 `a = 0`（合成端据此回 IBL 基线），不在这里求 9.3 的 probe。
 //
@@ -48,15 +51,20 @@ struct PushScreenGather {
 }
 var<immediate> push: PushScreenGather;
 
-// 中心样本的权重：只用来回答"这里有没有缓存"，几乎不影响颜色，但不查 rank。
-const CENTER_SAMPLE_WEIGHT: f32 = 0.01;
+// 本帧播种点的弱颜色权重；参考几何独立选择，颜色仍须满足 rank 0 门槛。
+const SEED_SAMPLE_WEIGHT: f32 = 0.01;
 
 // 一个样本的查表结果（RGBL1 四系数，各 vec3）。
 struct GatherSample {
     // 命中且可用（depth 有效、在 Volume 内、cell 有 patch）。
     valid: bool,
-    // 命中的 patch 是 rank 0 且已估计过（中心样本不要求这一条）。
-    rank_zero: bool,
+    // 可用于颜色和覆盖率：槽里已有真实估计（update_count ≥ 1）。**不看 rank**——rank 1 只是
+    // "不再被播种刷新"，estimation 仍每帧更新它，辐照度是活的；拿 rank 当门槛会让覆盖率随
+    // 采样相位整块翻转，合成端于是在遮挡后的 SCGI 与未遮挡的 IBL 之间来回跳。
+    usable: bool,
+    surface_valid: bool,
+    position: vec3f,
+    normal: vec3f,
     l0: vec3f,
     l1x: vec3f,
     l1y: vec3f,
@@ -67,7 +75,10 @@ struct GatherSample {
 fn gather_one(pixel: vec2u, n_source: u32) -> GatherSample {
     var out: GatherSample;
     out.valid = false;
-    out.rank_zero = false;
+    out.usable = false;
+    out.surface_valid = false;
+    out.position = vec3f(0.0);
+    out.normal = vec3f(0.0);
     out.l0 = vec3f(0.0);
     out.l1x = vec3f(0.0);
     out.l1y = vec3f(0.0);
@@ -108,7 +119,13 @@ fn gather_one(pixel: vec2u, n_source: u32) -> GatherSample {
     if (dot(n, n) < 1e-8) {
         return out;
     }
-    n = normalize(n);
+    n = scgi_face_normal(n, p, frame.camera_pos.xyz);
+    out.surface_valid = true;
+    out.position = p;
+    out.normal = scgi_stable_guide_normal(
+        depth_tex, coord, vec2u(push.full_w, push.full_h), p, depth,
+        n, frame.inv_view_proj, frame.camera_pos.xyz,
+    );
 
     let key = lookup_cell_key(
         p,
@@ -129,7 +146,7 @@ fn gather_one(pixel: vec2u, n_source: u32) -> GatherSample {
     let statistics = patch_statistics[patch_slot];
     let irr = filtered_irradiance1[patch_slot];
     out.valid = true;
-    out.rank_zero = (statistics.state & 0xFFu) == 0u && statistics.update_count >= 1u;
+    out.usable = statistics.update_count >= 1u;
     out.l0 = irr.l0.xyz;
     out.l1x = irr.l1x.xyz;
     out.l1y = irr.l1y.xyz;
@@ -145,30 +162,66 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     let low = vec2u(gid.x % push.low_w, gid.x / push.low_w);
     let offsets = gather_sample_offsets(push.frame_index);
     let sample_count = clamp(push.samples, 1u, GATHER_SAMPLE_COUNT);
+    let last_pixel = vec2u(push.full_w - 1u, push.full_h - 1u);
+    var guide_pixel = min(low_to_full(low, vec2u(1u, 1u)), last_pixel);
+    var guide_offset = guide_pixel - low * 4u;
+    var reference = gather_one(guide_pixel, push.normal_source);
+    // 几何身份不随采样抖动；中心无效时按固定次序选一个真实表面。
+    if (!reference.surface_valid) {
+        for (var phase = 0u; phase < 16u; phase = phase + 1u) {
+            let pixel = min(low_to_full(low, vec2u(phase % 4u, phase / 4u)), last_pixel);
+            let candidate = gather_one(pixel, push.normal_source);
+            if (candidate.surface_valid) {
+                reference = candidate;
+                guide_offset = pixel - low * 4u;
+                break;
+            }
+        }
+    }
+    // 覆盖率只看确定性参考几何：中心表面有缓存条目就算覆盖。跟着抖动样本走会让覆盖率
+    // 随采样相位在 0.005 与 1.0 之间翻（样本落到无 patch 的格子时），合成端于是在遮挡后的
+    // SCGI 与未遮挡的 IBL 之间来回跳——暗区就是用户看到的持续闪烁。
+    if (reference.surface_valid && !reference.usable) {
+        for (var phase = 0u; phase < 16u; phase = phase + 1u) {
+            let pixel = min(low_to_full(low, vec2u(phase % 4u, phase / 4u)), last_pixel);
+            let candidate = gather_one(pixel, push.normal_source);
+            if (candidate.surface_valid && candidate.usable) {
+                reference = candidate;
+                guide_offset = pixel - low * 4u;
+                break;
+            }
+        }
+    }
+    let guide_phase = f32(guide_offset.y * 4u + guide_offset.x) / 15.0;
+    if (!reference.surface_valid) {
+        let coord = vec2i(low);
+        textureStore(scgi_l0_out, coord, vec4f(0.0));
+        textureStore(scgi_l1_out, coord, vec4f(0.5, 0.5, 0.5, guide_phase));
+        return;
+    }
 
-    var acc_l0 = vec3f(0.0);
-    var acc_l1x = vec3f(0.0);
-    var acc_l1y = vec3f(0.0);
-    var acc_l1z = vec3f(0.0);
-    var weight_sum = 0.0;
-    var rank_zero_weight = 0.0;
-    var attempted_weight = 0.0;
+    // 参考几何本身就是一次确定性采样：先把它放进累加，抖动样本只作细化。
+    // 若只累加抖动样本，样本全落在未估计/刚回收的格子上时 weight_sum = 0，
+    // 块会被写成黑色（覆盖率却仍是 1），合成端于是在"正常 E"与"纯黑"之间来回跳
+    // （实测同一块在 0 与 600 之间翻转）。
+    var acc_l0 = reference.l0;
+    var acc_l1x = reference.l1x;
+    var acc_l1y = reference.l1y;
+    var acc_l1z = reference.l1z;
+    var weight_sum = 1.0;
 
     for (var i = 0u; i < sample_count; i = i + 1u) {
-        let pixel = low_to_full(low, offsets[i]);
-        if (pixel.x >= push.full_w || pixel.y >= push.full_h) {
-            continue;
-        }
-        // 中心样本（i == 0）权重 0.01 且不查 rank；其余只收 rank 0
-        let is_center = i == 0u;
-        let weight = select(1.0, CENTER_SAMPLE_WEIGHT, is_center);
+        let pixel = min(low_to_full(low, offsets[i]), vec2u(push.full_w - 1u, push.full_h - 1u));
+        // 首样本跟随播种相位（权重 0.01，只作弱引导，不主导颜色）。
+        let base_weight = select(1.0, SEED_SAMPLE_WEIGHT, i == 0u);
         let sample = gather_one(pixel, push.normal_source);
-        if (!sample.valid) {
+        if (!sample.surface_valid) {
             continue;
         }
-        attempted_weight = attempted_weight + weight;
-        if (!is_center && !sample.rank_zero) {
-            // 几何上命中了缓存，但那条 patch 只有 IBL 种子（rank 1 或还没估计过）
+        let weight = base_weight * scgi_geometry_weight(
+            reference.position, reference.normal, sample.position, sample.normal, frame.camera_pos.xyz,
+        );
+        if (!sample.usable || weight <= 0.0) {
             continue;
         }
         acc_l0 = acc_l0 + sample.l0 * weight;
@@ -176,29 +229,24 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
         acc_l1y = acc_l1y + sample.l1y * weight;
         acc_l1z = acc_l1z + sample.l1z * weight;
         weight_sum = weight_sum + weight;
-        if (sample.rank_zero) {
-            rank_zero_weight = rank_zero_weight + weight;
-        }
     }
 
     var out_l0 = vec3f(0.0);
     var ratio_x = 0.5;
     var ratio_y = 0.5;
     var ratio_z = 0.5;
-    // a = 命中 rank 0 的样本权重占比（Volume 外 / 无命中 = 0）。分母取"尝试过的样本权重"，
-    // Volume 边界处于是得到 0..1 的软过渡，合成端看到的就是一圈软边。
-    var coverage = 0.0;
+    // 覆盖率只由参考几何的缓存状态决定（0 或 1），不跟抖动样本走：那会随采样相位在
+    // 0.005 与 1.0 之间跳，合成端于是在遮挡后的 SCGI 与未遮挡的 IBL 之间来回闪。
+    // 参考还没估计过（刚分配、update_count = 0）时给 0，让合成端退回 IBL，而不是注入黑洞。
+    let coverage = select(0.0, 1.0, reference.usable);
     if (weight_sum > 0.0) {
         out_l0 = acc_l0 / weight_sum;
         ratio_x = l1_encode_axis(acc_l1x / weight_sum, out_l0);
         ratio_y = l1_encode_axis(acc_l1y / weight_sum, out_l0);
         ratio_z = l1_encode_axis(acc_l1z / weight_sum, out_l0);
     }
-    if (attempted_weight > 0.0) {
-        coverage = clamp(rank_zero_weight / attempted_weight, 0.0, 1.0);
-    }
 
     let coord = vec2i(i32(low.x), i32(low.y));
     textureStore(scgi_l0_out, coord, vec4f(out_l0, coverage));
-    textureStore(scgi_l1_out, coord, vec4f(ratio_x, ratio_y, ratio_z, 0.5));
+    textureStore(scgi_l1_out, coord, vec4f(ratio_x, ratio_y, ratio_z, guide_phase));
 }

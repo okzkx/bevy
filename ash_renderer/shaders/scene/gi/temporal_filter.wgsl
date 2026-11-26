@@ -7,8 +7,8 @@
 // （辐照度双份），本文件的 b14/b15 有固定角色（空间输出 / 时域输出），不参与那个奇偶——
 // 复用同一索引会读到"上一帧的上一帧"。
 //
-// 首次出现的 patch 直取 A：`update_count <= 1` 说明它本帧才刚拿到第一个估计值，b15 里那个
-// 槽还是上一条 patch（或全零）的残留，混合会把别人的历史抹进来。
+// 首次出现或屏幕链不连续时直取 A：b15.l0.w 是有限的 23-bit 帧戳，分配时清零，
+// 只有上一帧的已估计结果可作历史。预热会一次增加多次 update_count，不能据此判断首帧。
 //
 // 线程 = 池容量（每线程一条 patch，空槽直接返回）。
 //
@@ -57,18 +57,30 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     let source = filtered_irradiance0[slot];
     var out: PatchIrradiance = source;
     let statistics = patch_statistics[slot];
-    // 刚拿到第一个估计值的 patch 直取 A（b15 里是别人的历史）
-    if (push.enabled != 0u && statistics.update_count > 1u) {
+    // l0.w/l1x.w 分别存帧号低/高 16 位加 1，均为精确有限浮点值，不参加系数算术。
+    // 首次分配清零、跳过屏幕链则不连续；完整 32-bit 身份避免长暂停后的短帧戳碰撞。
+    // update_count 是等效样本更新次数，预热首帧可能已经是 4/8，不能拿 >1 判断历史有效。
+    let previous = filtered_irradiance1[slot];
+    let expected_frame = push.frame_index - 1u;
+    let history_valid = previous.l0.w == f32(expected_frame & 0xFFFFu) + 1.0
+        && previous.l1x.w == f32(expected_frame >> 16u) + 1.0;
+    if (push.enabled != 0u && statistics.update_count > 0u && history_valid) {
         let w = clamp(
             mix(TEMPORAL_WEIGHT_MIN, TEMPORAL_WEIGHT_MAX, push.smoothing),
             TEMPORAL_WEIGHT_MIN,
             TEMPORAL_WEIGHT_MAX,
         );
-        let previous = filtered_irradiance1[slot];
-        out.l0 = mix(source.l0, previous.l0, vec4f(w));
+        out.l0 = vec4f(mix(source.l0.xyz, previous.l0.xyz, vec3f(w)), 0.0);
         out.l1x = mix(source.l1x, previous.l1x, vec4f(w));
         out.l1y = mix(source.l1y, previous.l1y, vec4f(w));
         out.l1z = mix(source.l1z, previous.l1z, vec4f(w));
+    }
+    // 未估计的 IBL 种子不算可用历史；旁路时也记录已估计结果，打开滤波仍能连续。
+    out.l0.w = 0.0;
+    out.l1x.w = 0.0;
+    if (statistics.update_count > 0u) {
+        out.l0.w = f32(push.frame_index & 0xFFFFu) + 1.0;
+        out.l1x.w = f32(push.frame_index >> 16u) + 1.0;
     }
     filtered_irradiance1[slot] = out;
 }

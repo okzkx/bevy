@@ -47,9 +47,30 @@ pub(crate) fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, BrpError> {
         .ok_or_else(|| out_of_range(bytes, offset, 4))
 }
 
+/// `offset` 处的小端 IEEE half；越界报 internal。
+pub(crate) fn f16_at(bytes: &[u8], offset: usize) -> Result<f32, BrpError> {
+    let raw = bytes_at(bytes, offset, 2)?;
+    Ok(crate::render::half_to_f32(u16::from_le_bytes([
+        raw[0], raw[1],
+    ])))
+}
+
 /// `offset` 处的小端 f32；越界报 internal。
 pub(crate) fn f32_at(bytes: &[u8], offset: usize) -> Result<f32, BrpError> {
     u32_at(bytes, offset).map(f32::from_bits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn half_readback_is_little_endian_and_bounds_checked() {
+        assert_eq!(f16_at(&[0x00, 0x3c], 0).unwrap(), 1.0);
+        assert_eq!(f16_at(&[0x00, 0x00], 0).unwrap(), 0.0);
+        assert!(f16_at(&[0x00], 0).is_err());
+        assert!(f16_at(&[0x00, 0x3c], usize::MAX).is_err());
+    }
 }
 
 fn out_of_range(bytes: &[u8], offset: usize, len: usize) -> BrpError {

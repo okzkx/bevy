@@ -77,6 +77,7 @@ pub(crate) fn draw_frame(
     mut input: FrameInput,
     _main_thread: NonSendMarker,
 ) -> Result<(), BevyError> {
+    input.gi.tables.invalidate_frame_submission();
     // 已置位致命错误：上一帧可能停在"fence 已 reset 但未提交"之类的半状态，
     // 再进一帧会在 wait_for_slot 上永久阻塞，连 fatal_gate 写的 AppExit 都轮不到
     // runner 观察。退出链由 teardown_vulkan 负责。
@@ -160,15 +161,6 @@ pub(crate) fn draw_frame(
         ledger.is_empty(),
         logs,
     );
-    gpu.frame_uniform_table.write_frame_ubo(
-        slot,
-        &view,
-        &light,
-        render_mode,
-        &scene.sky,
-        &scene.ibl_settings,
-        gi.settings.scgi,
-    )?;
     // 环境光照烘焙计划：脏帧才重烘（sky_hash 含大气参数/太阳/100 m 量化海拔），
     // ibl_enabled=false 时只可能带"布局初始化"一次。判定只在这里做，录制层照单执行。
     // 天空是环境光的上游（9.2.8）：天空关掉时不捕获、环境项回退常量 ambient
@@ -228,6 +220,22 @@ pub(crate) fn draw_frame(
         gi_ray_set,
         indirect_count,
         &cluster.lights,
+    )?;
+    // 消费开关以本帧实际的全分辨率生产者为准：GI / estimation / 求交器停机或无实例时
+    // 不录上采样，合成必须回 IBL，不能读取上一帧或 resize 后尚未写过的目标。
+    // UBO 写入仍在本槽 fence 之后、提交之前；prepare_gi 只组装命令，不在 CPU 上读它。
+    let scgi_this_frame = scgi_consumer_enabled(
+        gi.settings.scgi,
+        gi_draw.as_ref().is_some_and(|draw| draw.upsample.is_some()),
+    );
+    gpu.frame_uniform_table.write_frame_ubo(
+        slot,
+        &view,
+        &light,
+        render_mode,
+        &scene.sky,
+        &scene.ibl_settings,
+        scgi_this_frame,
     )?;
 
     // 四环写入：模型增量 + 材质全量 + 在场全量 + LOD 表增量，都落本帧槽的环
@@ -373,6 +381,12 @@ pub(crate) fn draw_frame(
     };
     // 9.7.6：合成 pass 第 6 集恒绑 SCGI 辐照度（SCGI 关时着色器不读它）
     let scgi_set = gi.scgi.sample_set();
+    let has_gi = gi_draw.is_some();
+    let has_estimation = gi_draw
+        .as_ref()
+        .is_some_and(|draw| draw.estimation.is_some());
+    let has_scgi = gi_draw.as_ref().is_some_and(|draw| draw.upsample.is_some());
+    let submitted_normal_source = gi.settings.normal_source;
     let mut feature = RenderFeatures {
         // —— ① 帧首
         timer: timing.timer.enabled.then_some(&*timing.timer),
@@ -422,6 +436,18 @@ pub(crate) fn draw_frame(
         upload_wait: UploadWait::snapshot(&gpu.uploader),
     };
     gpu.frames.record_frame(&target, &mut feature, &res)?;
+    // queueSubmit 成功后发布本次实际生产者和 push 参数；失败/让路保持资格为空。
+    gi.tables.mark_frame_submitted(
+        slot,
+        has_gi,
+        submitted_normal_source,
+        has_estimation,
+        has_scgi,
+        extent,
+    );
+    if has_scgi {
+        gi.scgi.mark_written();
+    }
     watch.record_done();
 
     // —— present：OUT_OF_DATE 已在 present_digest 内标过时（下个帧首重建）；真失败
@@ -439,5 +465,54 @@ pub(crate) fn draw_frame(
     match present_failure {
         Some(e) => Err(fatal("present 失败，渲染链无法继续", e)),
         None => Ok(()),
+    }
+}
+
+/// 用户开关只表达请求；只有本帧真的写全分辨率辐照度，合成才能消费这张图。
+fn scgi_consumer_enabled(requested: bool, has_upsample: bool) -> bool {
+    requested && has_upsample
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scgi_consumer_enabled;
+
+    #[test]
+    fn scgi_initialization_is_published_only_after_successful_submission() {
+        let source = include_str!("frame.rs");
+        let submit = source.find("gpu.frames.record_frame(&target").unwrap();
+        let published = source.find("gi.scgi.mark_written();").unwrap();
+        assert!(published > submit);
+        assert!(!include_str!("frame/gi.rs").contains("mark_written()"));
+    }
+
+    #[test]
+    fn failed_attempts_clear_provenance_and_probes_use_submitted_passes() {
+        let source = include_str!("frame.rs");
+        let clear = source
+            .find("input.gi.tables.invalidate_frame_submission();")
+            .unwrap();
+        assert!(
+            clear
+                < source
+                    .find("if crate::common::error::fatal_pending()")
+                    .unwrap()
+        );
+        assert!(
+            source.find("mark_frame_submitted(").unwrap()
+                > source.find("gpu.frames.record_frame(&target").unwrap()
+        );
+        let probe = include_str!("../../remote/features/gi.rs");
+        assert!(probe.contains("pixel_input(world, slot, pixel, submitted.normal_source)"));
+        assert!(probe.contains("!submitted.has_estimation"));
+        assert!(!probe.contains("pixel_input(world, slot, pixel, settings.normal_source)"));
+    }
+
+    #[test]
+    fn scgi_consumer_requires_current_frame_upsample() {
+        assert!(!scgi_consumer_enabled(false, false));
+        assert!(!scgi_consumer_enabled(false, true));
+        assert!(!scgi_consumer_enabled(true, false));
+        assert!(scgi_consumer_enabled(true, true));
     }
 }

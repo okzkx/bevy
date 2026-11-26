@@ -219,7 +219,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     }
     // 9.7.6 SCGI 注入：只换 IBL 的**漫反射**项，高光原样；`a == 0`（Volume 外 / 无命中 /
     // SCGI 关）逐像素回 IBL 基线——`mix` 两边都已算好，不存在"把 IBL 一侧写成 0 再混"的整屏变暗。
-    // 乘 `ibl_intensity` 与 IBL 同域（计划 §5 的待决项，首次 A/B 后再定；见 9.7.6 施工记录）。
+    // 缓存 E 已是绝对辐照度：天空入口已乘 ibl_intensity，直接光与自发光弹射也不能再被它缩放。
     var scgi_diffuse = ibl.diffuse;
     if (frame.scgi.x != 0u && frame.ibl_enabled != 0u) {
         let irr = textureLoad(
@@ -227,7 +227,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
             vec2i(i32(in.clip.x), i32(in.clip.y)),
             0,
         );
-        let replacement = pixel.diffuseColor * Fd_Lambert() * irr.rgb * frame.ibl_intensity;
+        let replacement = pixel.diffuseColor * Fd_Lambert() * irr.rgb;
         scgi_diffuse = mix(ibl.diffuse, replacement, clamp(irr.a, 0.0, 1.0));
     }
     let ambient = albedo.rgb * frame.ambient_color.rgb;

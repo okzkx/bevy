@@ -82,6 +82,12 @@ pub const PATCH_GEOMETRY_SIZE: u64 = 32;
 pub const PATCH_IRRADIANCE_SIZE: u64 = 64;
 /// patch 统计记录：mean + variance + 4 个 u32。
 pub const PATCH_STATISTICS_SIZE: u64 = 48;
+
+/// 每槽全部 patch 表：几何、估计双份、空间与时域滤波各一份、统计、反向 cell 指针。
+const fn patch_table_bytes(capacity: u64) -> u64 {
+    capacity * (PATCH_GEOMETRY_SIZE + PATCH_IRRADIANCE_SIZE * 4 + PATCH_STATISTICS_SIZE + 4)
+}
+
 /// ring 配置的字数（flip / active / watermark / pad + 两份 4 字段配置）。
 pub const RING_CONFIG_WORDS: usize = 12;
 pub const RING_CONFIG_SIZE: u64 = RING_CONFIG_WORDS as u64 * 4;
@@ -112,6 +118,16 @@ pub const GI_BOUNCE_REQUEST_SIZE: u64 = 48;
 
 pub const GI_COUNTER_WORDS: usize = 16;
 pub const GI_COUNTERS_SIZE: u64 = GI_COUNTER_WORDS as u64 * 4;
+
+/// 固定容量的 ring、每帧槽参数/计数/光源/自发光/请求表；滤波表已归 patch 分类。
+const fn misc_table_bytes() -> u64 {
+    let per_frame = GI_COUNTERS_SIZE
+        + GI_UBO_SIZE
+        + GI_LIGHT_CAPACITY as u64 * GI_LIGHT_SAMPLE_SIZE * 2
+        + GI_EMISSIVE_CAPACITY as u64 * GI_EMISSIVE_TRIANGLE_SIZE
+        + GI_BOUNCE_REQUEST_CAPACITY as u64 * GI_BOUNCE_REQUEST_SIZE;
+    RING_CONFIG_SIZE + per_frame * MAX_FRAMES_IN_FLIGHT as u64
+}
 
 /// ring 配置字索引。
 pub const RING_FLIP: usize = 0;
@@ -268,6 +284,21 @@ pub fn pack_surface_cache_uniforms(d: &SurfaceCacheUniformsData) -> [u8; GI_UBO_
     out
 }
 
+/// Host-side provenance of the last submitted GI pass set (not a GPU completion token).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SubmittedGiFrame {
+    pub slot: usize,
+    pub frame_index: u32,
+    pub normal_source: u32,
+    pub has_estimation: bool,
+    pub has_scgi: bool,
+    pub extent: [u32; 2],
+}
+
+fn gi_frame_after_submission(frame: SubmittedGiFrame, has_gi: bool) -> Option<SubmittedGiFrame> {
+    has_gi.then_some(frame)
+}
+
 /// 默认种子 UBO（identity 矩阵、零体积参数）：首帧写入前被读到也是确定值。
 fn identity_uniforms() -> SurfaceCacheUniformsData {
     SurfaceCacheUniformsData {
@@ -381,6 +412,9 @@ pub struct SurfaceCacheTables {
     emissive_triangles: Vec<GpuBuffer>,
     /// 9.6.3 bounce 分配请求表（每帧槽一份，`b13`）。
     bounce_requests: Vec<GpuBuffer>,
+    /// 帧尝试失败/让路时清空；仅成功提交实际 GI 束后发布。
+    submitted_gi: Option<SubmittedGiFrame>,
+    prepared_frame_index: [u32; MAX_FRAMES_IN_FLIGHT],
     memory: SurfaceCacheMemory,
 }
 
@@ -406,8 +440,7 @@ impl SurfaceCacheTables {
         let contract = ctx.memory_contract();
         let cell_bytes = config.cell_count() * 4;
         let capacity = u64::from(config.capacity);
-        let patch_bytes = capacity
-            * (PATCH_GEOMETRY_SIZE + PATCH_IRRADIANCE_SIZE * 2 + PATCH_STATISTICS_SIZE + 4);
+        let patch_bytes = patch_table_bytes(capacity);
 
         let started = Instant::now();
         let mut cell_patch = GpuBuffer::create(device, contract, cell_bytes, BufferRole::Storage)?;
@@ -535,16 +568,12 @@ impl SurfaceCacheTables {
             light_samples,
             emissive_triangles,
             bounce_requests,
+            submitted_gi: None,
+            prepared_frame_index: [0; MAX_FRAMES_IN_FLIGHT],
             memory: SurfaceCacheMemory {
                 cell_bytes: cell_bytes * 2,
                 patch_bytes,
-                misc_bytes: RING_CONFIG_SIZE
-                    + GI_COUNTERS_SIZE * MAX_FRAMES_IN_FLIGHT as u64
-                    + GI_UBO_SIZE * MAX_FRAMES_IN_FLIGHT as u64
-                    + light_bytes * 2 * MAX_FRAMES_IN_FLIGHT as u64
-                    + emissive_bytes * MAX_FRAMES_IN_FLIGHT as u64
-                    + request_bytes * MAX_FRAMES_IN_FLIGHT as u64
-                    + capacity * PATCH_IRRADIANCE_SIZE * 2,
+                misc_bytes: misc_table_bytes(),
             },
         };
         this.build_sets(ctx)?;
@@ -626,6 +655,46 @@ impl SurfaceCacheTables {
         self.memory
     }
 
+    /// 成功提交的 GI 槽，不是下一复用槽；帧让路或失败后不允许读旧图。
+    /// 仍须等待 GPU，标记不是完成信号。
+    #[must_use]
+    pub(crate) fn submitted_gi_slot(&self) -> Option<usize> {
+        self.submitted_gi.map(|frame| frame.slot)
+    }
+
+    #[must_use]
+    pub(crate) fn submitted_gi_frame(&self) -> Option<SubmittedGiFrame> {
+        self.submitted_gi
+    }
+
+    /// 每次帧尝试开始即撤销资格：resize/让路/致命失败不得留下旧资源的有效标记。
+    pub(crate) fn invalidate_frame_submission(&mut self) {
+        self.submitted_gi = None;
+    }
+
+    /// 仅在 queueSubmit 成功后按实际录制束发布；normal_source 必须是本次 push 的值。
+    pub(crate) fn mark_frame_submitted(
+        &mut self,
+        slot: usize,
+        has_gi: bool,
+        normal_source: u32,
+        has_estimation: bool,
+        has_scgi: bool,
+        extent: vk::Extent2D,
+    ) {
+        self.submitted_gi = gi_frame_after_submission(
+            SubmittedGiFrame {
+                slot,
+                frame_index: self.prepared_frame_index[slot],
+                normal_source,
+                has_estimation,
+                has_scgi,
+                extent: [extent.width, extent.height],
+            },
+            has_gi,
+        );
+    }
+
     /// 第 `frame` 帧槽的 GI 集。
     #[must_use]
     pub fn set(&self, frame: usize) -> DescSet {
@@ -638,7 +707,9 @@ impl SurfaceCacheTables {
     /// 写入失败。
     pub fn write_uniforms(&mut self, frame: usize, data: &SurfaceCacheUniformsData) -> Result<()> {
         let bytes = pack_surface_cache_uniforms(data);
-        self.ubos[frame].write(0, &bytes)
+        self.ubos[frame].write(0, &bytes)?;
+        self.prepared_frame_index[frame] = data.frame_index;
+        Ok(())
     }
 
     /// 宿主清本槽计数器（wait_for_slot 之后调，上一轮 GPU 已用完本槽）。
@@ -700,16 +771,14 @@ impl SurfaceCacheTables {
         &mut self.patch_irradiance1
     }
 
-    /// 9.7.2 空间滤波输出表（只读访问，宿主不写）。
-    #[must_use]
-    pub fn filtered_irradiance0(&self) -> &GpuBuffer {
-        &self.filtered_irradiance0
+    /// 9.7.2 空间滤波输出表（BRP 在 GPU 排空后读回）。
+    pub fn filtered_irradiance0(&mut self) -> &mut GpuBuffer {
+        &mut self.filtered_irradiance0
     }
 
-    /// 9.7.3 时域滤波输出表（只读访问，宿主不写）。
-    #[must_use]
-    pub fn filtered_irradiance1(&self) -> &GpuBuffer {
-        &self.filtered_irradiance1
+    /// 9.7.3 时域滤波输出表（BRP 在 GPU 排空后读回）。
+    pub fn filtered_irradiance1(&mut self) -> &mut GpuBuffer {
+        &mut self.filtered_irradiance1
     }
 
     /// 9.6.2：第 `slot` 帧槽的光源紧凑表。
@@ -768,6 +837,66 @@ impl Drop for SurfaceCacheTables {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submitted_gi_marker_tracks_actual_graphics_submission() {
+        let frame = SubmittedGiFrame {
+            slot: 0,
+            frame_index: 12,
+            normal_source: 0,
+            has_estimation: true,
+            has_scgi: true,
+            extent: [1600, 900],
+        };
+        let mut submitted = gi_frame_after_submission(frame, true);
+        assert_eq!(submitted, Some(frame));
+        // UI changes do not alter the already submitted normal source.
+        let next = SubmittedGiFrame {
+            slot: 1,
+            frame_index: 13,
+            normal_source: 1,
+            has_estimation: false,
+            has_scgi: false,
+            ..frame
+        };
+        assert_eq!(submitted.unwrap().normal_source, 0);
+        submitted = gi_frame_after_submission(next, true);
+        assert_eq!(submitted, Some(next));
+        assert!(!submitted.unwrap().has_estimation);
+        // A skipped/cancelled attempt must clear the previous snapshot too.
+        submitted = None;
+        assert_eq!(submitted, None);
+        submitted = gi_frame_after_submission(frame, false);
+        assert_eq!(submitted, None);
+        submitted = gi_frame_after_submission(frame, true);
+        assert_eq!(submitted, Some(frame));
+    }
+
+    #[test]
+    fn patch_memory_includes_both_filter_tables() {
+        assert_eq!(patch_table_bytes(0), 0);
+        assert_eq!(patch_table_bytes(1), 32 + 4 * 64 + 48 + 4);
+        assert_eq!(patch_table_bytes(65_536), 22_282_240);
+    }
+
+    #[test]
+    fn aggregate_memory_counts_filtered_tables_once() {
+        let config = SurfaceCacheConfig {
+            voxel_min: 0.5,
+            res: 32,
+            cascades: 4,
+            capacity: 65_536,
+        };
+        let memory = SurfaceCacheMemory {
+            cell_bytes: config.cell_count() * 4 * 2,
+            patch_bytes: patch_table_bytes(u64::from(config.capacity)),
+            misc_bytes: misc_table_bytes(),
+        };
+        assert_eq!(memory.cell_bytes, 16_777_216);
+        assert_eq!(memory.patch_bytes, 22_282_240);
+        assert_eq!(memory.misc_bytes, 4_653_840);
+        assert_eq!(memory.total(), 43_713_296);
+    }
 
     /// UBO 打包偏移与字段值逐项对账（跨端布局的宿主侧锚点）。
     #[test]

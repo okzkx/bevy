@@ -180,19 +180,20 @@ fn no_sun() -> BrpError {
     BrpError::internal("方向光实体缺席——灯光装配未跑或实体被删")
 }
 
-/// `ash_renderer/sun_get`：方向光的 SunOrbit 球坐标与实际前向读数。
+/// `ash_renderer/sun_get`：方向光球坐标、实际前向与照度（lx）读数。
 ///
 /// # Errors
 /// 方向光实体缺席。
 #[system]
 pub(crate) fn sun_get(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
-    let mut q = world.query_filtered::<(&SunOrbit, &GlobalTransform), With<DirectionalLight>>();
-    let (orbit, tf) = q.iter(world).next().ok_or_else(no_sun)?;
+    let mut q = world.query::<(&SunOrbit, &GlobalTransform, &DirectionalLight)>();
+    let (orbit, tf, light) = q.iter(world).next().ok_or_else(no_sun)?;
     Ok(json!({
         "azimuth_deg": orbit.azimuth.to_degrees(),
         "elevation_deg": orbit.elevation.to_degrees(),
         "sun_dir": orbit.sun_dir().to_array(),
         "light_forward": tf.forward().to_array(),
+        "illuminance": light.illuminance,
     }))
 }
 
@@ -201,9 +202,10 @@ pub(crate) fn sun_get(In(_params): In<Option<Value>>, world: &mut World) -> BrpR
 struct SunSetParams {
     azimuth_deg: Option<f32>,
     elevation_deg: Option<f32>,
+    illuminance: Option<f32>,
 }
 
-/// `ash_renderer/sun_set`：按方位角/仰角（度）改太阳方向，缺省项保持原值。
+/// `ash_renderer/sun_set`：按方位角/仰角（度）及 illuminance（lx）改方向光，缺省项保持原值。
 /// 写路径与中键拖拽共用 [`apply_sun_rotation`] 与仰角限位（[`clamp_elevation`]），
 /// 两个入口不漂移；写后同帧生效。
 ///
@@ -217,8 +219,14 @@ pub(crate) fn sun_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRe
     {
         return Err(invalid_params("azimuth_deg/elevation_deg 必须是有限数值"));
     }
-    let mut q = world.query_filtered::<(&mut SunOrbit, &mut Transform), With<DirectionalLight>>();
-    let (orbit, tf) = q.iter_mut(world).next().ok_or_else(no_sun)?;
+    if p.illuminance.is_some_and(|v| !v.is_finite() || v < 0.0) {
+        return Err(invalid_params("illuminance 必须是非负有限照度（lx）"));
+    }
+    let mut q = world.query::<(&mut SunOrbit, &mut Transform, &mut DirectionalLight)>();
+    let (orbit, tf, mut light) = q.iter_mut(world).next().ok_or_else(no_sun)?;
+    if let Some(illuminance) = p.illuminance {
+        light.illuminance = illuminance;
+    }
     let orbit = orbit.into_inner();
     if let Some(az) = p.azimuth_deg {
         orbit.azimuth = az.to_radians();
@@ -231,5 +239,6 @@ pub(crate) fn sun_set(In(params): In<Option<Value>>, world: &mut World) -> BrpRe
         "azimuth_deg": orbit.azimuth.to_degrees(),
         "elevation_deg": orbit.elevation.to_degrees(),
         "sun_dir": orbit.sun_dir().to_array(),
+        "illuminance": light.illuminance,
     }))
 }

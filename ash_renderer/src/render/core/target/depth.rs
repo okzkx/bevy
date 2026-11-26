@@ -44,12 +44,19 @@ impl DepthTarget {
                 "深度格式 {format:?} 的 optimal tiling features {features:?} 不含 SAMPLED_IMAGE，Hi-Z 归约无法采样深度"
             )));
         }
+        if !features.contains(vk::FormatFeatureFlags::TRANSFER_SRC) {
+            return Err(VulkanError::Init(format!(
+                "深度格式 {format:?} 不支持 TRANSFER_SRC，深度像素对账无法建立"
+            )));
+        }
         // DEPTH aspect：D32_SFLOAT 没有 stencil 面
         let a = attachment::create(
             ctx,
             extent,
             format,
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC,
             vk::ImageAspectFlags::DEPTH,
         )?;
         info!(

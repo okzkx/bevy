@@ -5,7 +5,7 @@
 use ash::{vk, Device};
 
 use crate::common::error::{Result, VulkanError};
-use crate::render::core::record::barrier::MemoryBarrierDesc;
+use crate::render::core::record::barrier::{ImageBarrier, MemoryBarrierDesc};
 
 use super::context::Context;
 
@@ -41,6 +41,96 @@ pub(crate) fn readback_buffer(ctx: &Context, src: vk::Buffer, out: &mut [u8]) ->
         );
         readback.finish_and_read(ctx, out)
     }
+}
+
+/// 回读未压缩 2D 图像的 mip0/layer0 区域，提交结束前恢复原布局。
+/// 调用方须保证区域位于图像内、字节数符合格式，且图像具备 TRANSFER_SRC 用途。
+///
+/// # Errors
+/// 区域为空/长度溢出，或 staging 创建/提交/等待/映射失败。
+pub(crate) fn readback_image_region(
+    ctx: &Context,
+    image: vk::Image,
+    aspect: vk::ImageAspectFlags,
+    layout: vk::ImageLayout,
+    offset: vk::Offset2D,
+    extent: vk::Extent2D,
+    bytes_per_texel: u64,
+) -> Result<Vec<u8>> {
+    if offset.x < 0 || offset.y < 0 {
+        return Err(VulkanError::Init("图像回读区域偏移不得为负".to_owned()));
+    }
+    let len = image_region_len(extent, bytes_per_texel)?;
+    let mut bytes = vec![0u8; len];
+    unsafe {
+        let readback = OneShotReadback::begin(ctx, len as u64)?;
+        ImageBarrier::transition(
+            image,
+            aspect,
+            (layout, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+            (
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::PipelineStageFlags::TRANSFER,
+            ),
+            (
+                vk::AccessFlags::MEMORY_WRITE,
+                vk::AccessFlags::TRANSFER_READ,
+            ),
+        )
+        .record(&ctx.device, readback.cb);
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(aspect)
+                    .layer_count(1),
+            )
+            .image_offset(vk::Offset3D {
+                x: offset.x,
+                y: offset.y,
+                z: 0,
+            })
+            .image_extent(vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            });
+        ctx.device.cmd_copy_image_to_buffer(
+            readback.cb,
+            image,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            readback.staging,
+            std::slice::from_ref(&region),
+        );
+        ImageBarrier::transition(
+            image,
+            aspect,
+            (vk::ImageLayout::TRANSFER_SRC_OPTIMAL, layout),
+            (
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+            ),
+            (
+                vk::AccessFlags::TRANSFER_READ,
+                vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE,
+            ),
+        )
+        .record(&ctx.device, readback.cb);
+        readback.finish_and_read(ctx, &mut bytes)?;
+    }
+    Ok(bytes)
+}
+
+fn image_region_len(extent: vk::Extent2D, bytes_per_texel: u64) -> Result<usize> {
+    if extent.width == 0 || extent.height == 0 || bytes_per_texel == 0 {
+        return Err(VulkanError::Init(
+            "图像回读区域与像素字节数不得为零".to_owned(),
+        ));
+    }
+    u64::from(extent.width)
+        .checked_mul(u64::from(extent.height))
+        .and_then(|n| n.checked_mul(bytes_per_texel))
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| VulkanError::Init("图像回读区域字节数溢出".to_owned()))
 }
 
 /// 一次性诊断回读资源：staging（HOST_VISIBLE，HOST_COHERENT 优先）+ 命令池 +
@@ -152,6 +242,61 @@ impl<'a> OneShotReadback<'a> {
             device.unmap_memory(self.memory);
             invalidated.map_err(VulkanError::from)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_region_size_is_tightly_packed_and_checked() {
+        assert_eq!(
+            image_region_len(
+                vk::Extent2D {
+                    width: 3,
+                    height: 3
+                },
+                4
+            )
+            .unwrap(),
+            36
+        );
+        assert_eq!(
+            image_region_len(
+                vk::Extent2D {
+                    width: 1,
+                    height: 1
+                },
+                8
+            )
+            .unwrap(),
+            8
+        );
+        assert!(image_region_len(
+            vk::Extent2D {
+                width: 0,
+                height: 3
+            },
+            4
+        )
+        .is_err());
+        assert!(image_region_len(
+            vk::Extent2D {
+                width: 3,
+                height: 3
+            },
+            0
+        )
+        .is_err());
+        assert!(image_region_len(
+            vk::Extent2D {
+                width: u32::MAX,
+                height: u32::MAX
+            },
+            8
+        )
+        .is_err());
     }
 }
 

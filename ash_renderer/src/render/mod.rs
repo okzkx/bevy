@@ -44,7 +44,9 @@ pub use passes::visibility::hiz::{
 };
 pub use passes::visibility::hiz_frame::HizFrameDraw;
 // 诊断回读助手：BRP 读数方法族（remote/）与 render 内部共用，crate 级重出口。
-pub(crate) use self::core::device::readback::{readback_buffer, OneShotReadback};
+pub(crate) use self::core::device::readback::{
+    readback_buffer, readback_image_region, OneShotReadback,
+};
 pub(crate) use core::device::transfer::{block_bytes, Ticket};
 pub use core::device::transfer::{
     CopyRegion, ImageRelease, Release, StagingCopy, StagingImageCopy, UploadBatch, Uploader,
@@ -76,6 +78,7 @@ pub(crate) use resident::tables::frame_uniform_table::{
     FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_IBL_DIFFUSE, FRAME_MODE_IBL_SPECULAR,
     FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC, FRAME_MODE_NORMAL, FRAME_MODE_POSITION,
     FRAME_MODE_PROBE_BUCKETS, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
+    FRAME_UBO_SIZE,
 };
 pub use resident::tables::instance_table::{
     conservative_world_aabb, material_alpha_fields, material_is_transparent, pack_lod_entry,
@@ -135,6 +138,9 @@ pub use passes::gi::volume::{
     volume_position as gi_volume_position, volume_to_storage as gi_volume_to_storage,
     volume_world_center as gi_volume_world_center, voxel_size as gi_voxel_size, BUCKETS_PER_CELL,
     BUCKET_RESOLUTION, INVALID_PATCH, MAX_CASCADES,
+};
+pub(crate) use passes::gi::volume::{
+    flat_normal as gi_flat_normal, world_from_depth as gi_world_from_depth,
 };
 pub use passes::gi::{
     GiFrameDraw, GiPipelines, GiSettings, SurfaceCacheConfig, EVICT_AGE, UPDATE_MAX,

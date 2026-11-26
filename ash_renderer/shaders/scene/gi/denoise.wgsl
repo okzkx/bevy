@@ -1,15 +1,8 @@
-// 9.7.5a 1/4 目标去噪（compute）：一遍 3×3，步长由 push 给（{1,2,2,3}[k%4]）。
-//
-// 权重 = 高斯 × 法线相似度（点积的 8 次方）× 平面距离衰减：只在法线相近、且到中心像素的
-// 视空间平面距离小于阈值时才混，跨边不混（否则会把墙和地板糊在一起）。
-// 读 A 组、写 B 组（或反过来，由调用方给的描述符集决定），因此同一个 dispatch 内不存在
-// 边写边读同一张图的调度依赖。
-//
-// 线程 = 1/4 像素（每线程一个 1/4 目标像素）。
-//
-// 接口：set0 帧 UBO；set1 G-buffer（b1 normal / b3 depth，全分辨率，按 1/4 像素块心取样）；
-//       set2 目标（b0/b1 读、b2/b3 写）；push 24B。
+// 1/4 屏幕去噪：按参考子像素的真实几何加权，先解码系数再混合。
+// RGB 是有效覆盖上的条件辐照度；alpha 独立表示覆盖，不能把无效零值混入 RGB 后再乘 alpha。
+// L1.a 保存中心参考子像素编号，随去噪保留，供下一遍和上采样定位 G-buffer。
 // #import frame
+// #import gi_cell
 // #import gi_compression
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
@@ -20,39 +13,23 @@
 @group(2) @binding(2) var scgi_l0_out: texture_storage_2d<rgba16float, write>;
 @group(2) @binding(3) var scgi_l1_out: texture_storage_2d<rgba8unorm, write>;
 
-// push 布局与 `pack_denoise_push` 一一对应。
 struct PushDenoise {
     low_w: u32,
     low_h: u32,
     full_w: u32,
     full_h: u32,
-    // 3×3 的采样步长（1/4 目标像素单位）。
     step: u32,
-    // 保留（A/B 对照用）。
     reserved: u32,
 }
 var<immediate> push: PushDenoise;
 
-// 法线相似度的指数：点积的 8 次方（Unity 同量级）。
-const NORMAL_POWER: i32 = 8;
-// 平面距离衰减的尺度：以中心像素的视深为单位（0.05 = 5% 深度差）。
-const PLANAR_FALLOFF: f32 = 0.05;
+fn guide_pixel(low: vec2i, phase: f32) -> vec2i {
+    return clamp(low * 4 + scgi_guide_offset(phase), vec2i(0), vec2i(i32(push.full_w) - 1, i32(push.full_h) - 1));
+}
 
-// 邻域像素的接受权重：0 = 完全拒绝。
-fn neighbor_weight(center_depth: f32, center_normal: vec3f, neighbor_depth: f32, neighbor_normal: vec3f, offset: vec2i) -> f32 {
-    if (neighbor_depth <= 0.0 || center_depth <= 0.0) {
-        return 0.0;
-    }
-    // 高斯：按 3×3 的偏移量给（sigma ≈ 1 个 1/4 像素）
-    let r2 = f32(offset.x * offset.x + offset.y * offset.y);
-    let gauss = exp(-r2 / 2.0);
-    // 法线相似度：点积的 8 次方，跨边时接近 0
-    let nd = clamp(dot(center_normal, neighbor_normal), 0.0, 1.0);
-    let normal_w = pow(nd, f32(NORMAL_POWER));
-    // 平面距离：相对视深差超过 PLANAR_FALLOFF 就衰减
-    let rel = abs(neighbor_depth - center_depth) / max(center_depth, 1e-6);
-    let planar_w = exp(-rel / PLANAR_FALLOFF);
-    return gauss * normal_w * planar_w;
+fn guide_position(pixel: vec2i, depth: f32) -> vec3f {
+    let uv = (vec2f(pixel) + vec2f(0.5)) / vec2f(f32(push.full_w), f32(push.full_h));
+    return world_from_depth(uv, depth, frame.inv_view_proj);
 }
 
 @compute @workgroup_size(64)
@@ -61,46 +38,75 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
         return;
     }
     let low = vec2i(i32(gid.x % push.low_w), i32(gid.x / push.low_w));
-    let center_pixel = low * 4 + vec2i(2, 2);
+    let center_l1 = textureLoad(scgi_l1_in, low);
+    let center_pixel = guide_pixel(low, center_l1.w);
     let center_depth = textureLoad(depth_tex, center_pixel, 0).r;
-    let center_normal = textureLoad(normal_tex, center_pixel, 0).xyz;
-
+    let center_normal_raw = textureLoad(normal_tex, center_pixel, 0).xyz;
+    if (center_depth <= 0.0 || dot(center_normal_raw, center_normal_raw) < 1e-8) {
+        textureStore(scgi_l0_out, low, vec4f(0.0));
+        textureStore(scgi_l1_out, low, vec4f(0.5, 0.5, 0.5, center_l1.w));
+        return;
+    }
+    let center_position = guide_position(center_pixel, center_depth);
+    let center_normal = scgi_stable_guide_normal(
+        depth_tex, center_pixel, vec2u(push.full_w, push.full_h), center_position, center_depth,
+        center_normal_raw, frame.inv_view_proj, frame.camera_pos.xyz,
+    );
     var acc_l0 = vec3f(0.0);
-    var acc_ratio = vec3f(0.0);
-    var acc_alpha = 0.0;
-    var weight_sum = 0.0;
+    var acc_l1x = vec3f(0.0);
+    var acc_l1y = vec3f(0.0);
+    var acc_l1z = vec3f(0.0);
+    var valid_weight_sum = 0.0;
+    var attempted_weight = 0.0;
     let step = i32(max(push.step, 1u));
     for (var dy = -1; dy <= 1; dy = dy + 1) {
         for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let offset = vec2i(dx * step, dy * step);
-            let coord = low + offset;
+            let coord = low + vec2i(dx, dy) * step;
             if (coord.x < 0 || coord.y < 0 || coord.x >= i32(push.low_w) || coord.y >= i32(push.low_h)) {
                 continue;
             }
-            let pixel = coord * 4 + vec2i(2, 2);
+            let gauss = exp(-f32(dx * dx + dy * dy) / 2.0);
+            let sample_l0 = textureLoad(scgi_l0_in, coord);
+            let sample_l1 = textureLoad(scgi_l1_in, coord);
+            let pixel = guide_pixel(coord, sample_l1.w);
             let depth = textureLoad(depth_tex, pixel, 0).r;
-            let normal = textureLoad(normal_tex, pixel, 0).xyz;
-            let weight = neighbor_weight(center_depth, center_normal, depth, normal, offset);
+            let normal_raw = textureLoad(normal_tex, pixel, 0).xyz;
+            if (depth <= 0.0 || dot(normal_raw, normal_raw) < 1e-8) {
+                continue;
+            }
+            let position = guide_position(pixel, depth);
+            let normal = scgi_stable_guide_normal(
+                depth_tex, pixel, vec2u(push.full_w, push.full_h), position, depth,
+                normal_raw, frame.inv_view_proj, frame.camera_pos.xyz,
+            );
+            let geometry_weight = gauss * scgi_geometry_weight(
+                center_position, center_normal, position, normal, frame.camera_pos.xyz,
+            );
+            // 几何被拒不是缓存缺失；同表面 a=0 则仍须进入覆盖率分母。
+            attempted_weight = attempted_weight + geometry_weight;
+            let weight = geometry_weight * clamp(sample_l0.w, 0.0, 1.0);
             if (weight <= 0.0) {
                 continue;
             }
-            let sample_l0 = textureLoad(scgi_l0_in, coord);
-            let sample_l1 = textureLoad(scgi_l1_in, coord);
             acc_l0 = acc_l0 + sample_l0.xyz * weight;
-            acc_ratio = acc_ratio + sample_l1.xyz * weight;
-            acc_alpha = acc_alpha + sample_l0.w * weight;
-            weight_sum = weight_sum + weight;
+            acc_l1x = acc_l1x + l1_decode_axis(sample_l1.x, sample_l0.xyz) * weight;
+            acc_l1y = acc_l1y + l1_decode_axis(sample_l1.y, sample_l0.xyz) * weight;
+            acc_l1z = acc_l1z + l1_decode_axis(sample_l1.z, sample_l0.xyz) * weight;
+            valid_weight_sum = valid_weight_sum + weight;
         }
     }
-
     var out_l0 = vec3f(0.0);
     var out_ratio = vec3f(0.5);
-    var out_alpha = 0.0;
-    if (weight_sum > 0.0) {
-        out_l0 = acc_l0 / weight_sum;
-        out_ratio = acc_ratio / weight_sum;
-        out_alpha = acc_alpha / weight_sum;
+    var coverage = 0.0;
+    if (valid_weight_sum > 0.0) {
+        out_l0 = acc_l0 / valid_weight_sum;
+        out_ratio = vec3f(
+            l1_encode_axis(acc_l1x / valid_weight_sum, out_l0),
+            l1_encode_axis(acc_l1y / valid_weight_sum, out_l0),
+            l1_encode_axis(acc_l1z / valid_weight_sum, out_l0),
+        );
+        coverage = clamp(valid_weight_sum / attempted_weight, 0.0, 1.0);
     }
-    textureStore(scgi_l0_out, low, vec4f(out_l0, out_alpha));
-    textureStore(scgi_l1_out, low, vec4f(out_ratio, 0.5));
+    textureStore(scgi_l0_out, low, vec4f(out_l0, coverage));
+    textureStore(scgi_l1_out, low, vec4f(out_ratio, center_l1.w));
 }

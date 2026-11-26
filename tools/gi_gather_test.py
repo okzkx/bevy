@@ -34,12 +34,13 @@ except AttributeError:
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE = os.environ.get("ASH_HOST_EXE", os.path.join(REPO, "target", "debug", "ash_renderer.exe"))
-HOST_LOG = os.path.join(REPO, ".temp", "gi_gather_test_host.log")
+HOST_LOG = os.environ.get("ASH_HOST_LOG", os.path.join(REPO, ".temp", "gi_gather_test_host.log"))
 TMP = os.path.join(REPO, ".temp", "gi97")
 BRP_PORT = int(os.environ.get("ASH_BRP_PORT", "15702"))
 TEST_ORIGIN = (80.0, 0.0, 0.0)
 
 _results = []
+_field_entities = []
 
 
 def rpc(method, params=None, timeout=240):
@@ -120,7 +121,7 @@ def mean_and_diff(path_a, path_b):
         return ImageStat.Stat(ga).mean[0], ImageStat.Stat(gb).mean[0], ImageStat.Stat(diff).mean[0]
 
 
-def wait_sky_uniform(timeout=90.0):
+def wait_sky_uniform(timeout=90.0, luminance=1.0):
     """等 IBL 的常量天空捕获落定：`probe16.center_energy` ≈ π 才算就绪。
 
     坑：`sky_uniform` 只是改开关，环境 cube/SH 要等下一次捕获；不等待就直接取帧，
@@ -134,7 +135,7 @@ def wait_sky_uniform(timeout=90.0):
             last = st["probe16"]["center_energy"][0][0]
         except Exception:  # noqa: BLE001
             last = None
-        if last is not None and abs(last / math.pi - 1.0) <= 0.05:
+        if last is not None and abs(last / (math.pi * luminance) - 1.0) <= 0.05:
             return round(last, 4)
         time.sleep(0.5)
     return None
@@ -162,7 +163,7 @@ def build_field():
         dict(shape="cuboid", color=[0.02, 0.02, 0.02], scale=[12.0, 0.3, 12.0],
              translation=[ox - 8.0, oy + 2.4, oz + 16.0], name="gt_overhang"),
     ]:
-        rpc("ash_renderer/spawn_shape", shape)
+        _field_entities.append(rpc("ash_renderer/spawn_shape", shape)["entity"])
 
 
 CAMERAS = [
@@ -178,42 +179,57 @@ LIGHTS = [
 
 
 def anchor():
-    """① 干净锚（屏幕版）：常量天空 L=1 + 太阳压地平线，SCGI 与 IBL 的画面必须同量级。
+    """Pure sky anchor: isolated plane, actual zero sunlight, HDR E=pi*L.
 
-    为什么不比"缓存 L0 是否等于 π"：`scgi_irradiance` 是**求值后的 E(n)**，而它与视野里
-    究竟是哪个面朝向天空强相关（地板朝上、砖墙朝侧、箱体各个面都不一样）。屏幕比对没有这个
-    歧义，也正是判定线②的原话（"注入后的显示值与 IBL 基线在同一区间"）。E 的绝对值仍然打印
-    出来当读数留档，但不作断言。
+    A horizontal sun still fully lights vertical walls; the old whole-field LDR
+    comparison therefore included real bounced sunlight and was not a clean anchor.
+    L=1000 also avoids quantized black pixels hiding an energy error.
     """
-    rpc("ash_renderer/sky_uniform", {"enabled": True, "color": [1.0, 1.0, 1.0]})
-    rpc("ash_renderer/sky_set", {"enabled": True})
-    rpc("ash_renderer/ibl_set", {"enabled": True})
-    # 太阳压到地平线：直射几乎不进 NoL，两个路径都只剩天光
-    rpc("ash_renderer/sun_set", {"azimuth_deg": 0.0, "elevation_deg": 0.0})
-    ox, oy, oz = TEST_ORIGIN
-    rpc("ash_renderer/set_camera", {"target": [ox, 1.0, oz + 9.5], "yaw_deg": 0.0,
-                                    "pitch_deg": 14.0, "radius": 13.0})
-    rpc("ash_renderer/gi_set", {
-        "enabled": True, "view": 0, "estimation": True,
-        "spatial_filter": True, "temporal_filter": True, "scgi": False,
+    sun = rpc("ash_renderer/sun_get")
+    ox, _, oz = TEST_ORIGIN
+    target = [ox, 0.0, oz - 60.0]
+    fixture = rpc("ash_renderer/spawn_shape", {
+        "shape": "cuboid", "color": [0.8, 0.8, 0.8],
+        "scale": [30.0, 0.2, 30.0], "translation": [ox, -0.1, oz - 60.0],
+        "name": "gather_energy_anchor",
     })
-    time.sleep(10.0)
-    ready = wait_sky_uniform()
-    check("① 常量天空就绪：GlobalProbe 中心能量 ≈ π（±5%）", ready is not None,
-          f"center_energy={ready}")
-    p_ibl = dump("anchor_ibl")
-    rpc("ash_renderer/gi_set", {"scgi": True})
-    time.sleep(6.0)
-    p_scgi = dump("anchor_scgi")
-    m_ibl, m_scgi, diff = mean_and_diff(p_ibl, p_scgi)
-    ratio = m_scgi / m_ibl if m_ibl else 0.0
-    check(
-        "① 干净锚：常量天空 L=1 下 SCGI 与 IBL 同量级（±5%）",
-        abs(ratio - 1.0) <= 0.05,
-        f"IBL {m_ibl:.2f} / SCGI {m_scgi:.2f} → 比值 {ratio:.4f}",
-    )
-    rpc("ash_renderer/sky_uniform", {"enabled": False})
-    rpc("ash_renderer/sun_set", {"azimuth_deg": 45.0, "elevation_deg": 55.0})
+    luminance = 1000.0
+    try:
+        rpc("ash_renderer/sun_set", {"illuminance": 0.0})
+        rpc("ash_renderer/sky_uniform", {"enabled": True, "color": [luminance] * 3})
+        rpc("ash_renderer/sky_set", {"enabled": True})
+        rpc("ash_renderer/ibl_set", {"enabled": True, "intensity": 1.0})
+        rpc("ash_renderer/set_camera", {"target": target, "yaw_deg": 0.0,
+                                        "pitch_deg": 89.0, "radius": 6.0})
+        rpc("ash_renderer/gi_set", {
+            "enabled": True, "view": 0, "estimation": True,
+            "spatial_filter": True, "temporal_filter": True, "scgi": False,
+        })
+        time.sleep(10.0)
+        ready = wait_sky_uniform(luminance=luminance)
+        check("① 常量天空就绪：GlobalProbe 能量 ≈ πL（±5%）", ready is not None,
+              f"center_energy={ready}")
+        p_ibl = dump("anchor_ibl")
+        rpc("ash_renderer/gi_set", {"scgi": True})
+        time.sleep(6.0)
+        p_scgi = dump("anchor_scgi")
+        sc = rpc("ash_renderer/scgi_stats", {"stride": 4})
+        expected = math.pi * luminance
+        errors = [abs(v / expected - 1) for v in sc["l0_covered_mean"]]
+        check("① HDR 干净锚：E=πL（±5%），无非法/负辐照度",
+              max(errors) <= 0.05 and sc["coverage"] > 0.99
+              and sc["non_finite"] == 0 and sc["negative"] == 0,
+              f"E={sc['l0_covered_mean']}, expected={expected:.2f}")
+        m_ibl, m_scgi, _ = mean_and_diff(p_ibl, p_scgi)
+        ratio = m_scgi / m_ibl if m_ibl else 0.0
+        check("① 孤立平面 SCGI/IBL 显示同量级（±5%）", abs(ratio - 1.0) <= 0.05,
+              f"IBL {m_ibl:.2f} / SCGI {m_scgi:.2f} → {ratio:.4f}")
+    finally:
+        rpc("world.despawn_entity", {"entity": fixture["entity"]})
+        rpc("ash_renderer/sky_uniform", {"enabled": False})
+        rpc("ash_renderer/sun_set", {"azimuth_deg": sun["azimuth_deg"],
+                                    "elevation_deg": sun["elevation_deg"],
+                                    "illuminance": sun["illuminance"]})
 
 
 def off_matrix():
@@ -369,6 +385,9 @@ def main():
         check("③ 零 VUID / VK-ERROR", not errors, f"{len(errors)} 行")
         return 0 if all(ok for _, ok in _results) else 1
     finally:
+        for entity in _field_entities:
+            rpc("world.despawn_entity", {"entity": entity})
+        _field_entities.clear()
         if proc is not None and not args.no_close and not close_host(pid):
             proc.kill()
 

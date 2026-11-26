@@ -165,13 +165,14 @@ pub struct BloomSettings {
 
 impl Default for BloomSettings {
     fn default() -> Self {
-        // gain 1.667 对应 ACES_LEGACY 观感；1.0 是纯 ACES，实测画面偏暗（均值亮度约 17%）
+        // 预览曝光覆盖含真实遮挡的室内间接光；这只是全帧显示校准，不改变 GI 物理辐照度。
+        // GI 与 IBL 对照使用同一增益，不能随 SCGI 开关自动切曝光。BRP/面板仍可独立调节。
         Self {
             enabled: true,
             strength: 0.04,
             tonemap: true,
             curve: TonemapCurve::default(),
-            gain: 1.667,
+            gain: 8.0,
         }
     }
 }

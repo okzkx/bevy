@@ -180,8 +180,9 @@ fn depth_neighbor_ok(d0: f32, d: f32) -> bool {
     return d > 0.0 && abs(d - d0) <= DEPTH_EDGE_RELATIVE * d0;
 }
 
-// 深度一阶差分重建平面法线：4 邻域深度各自反投影，任一轴的两个 tap 都有效才取差；
-// 两轴都无效返回零向量（调用方跳过该样本，不播种）。法线统一翻到视向侧。
+// 深度差分重建平面法线：内部仍要求两侧 tap 有效；仅视口边缘用有效内侧的单边差分。
+// 不能把视口外 tap 当作背景导致边列永远无缓存，也不能把 clamped 深度当成真实外侧 tap。
+// 几何断层仍拒绝；差分退化返回零，法线统一翻到视向侧。
 fn flat_normal(
     p: vec3f,
     uv: vec2f,
@@ -196,20 +197,34 @@ fn flat_normal(
 ) -> vec3f {
     var t = vec3f(0.0);
     var b = vec3f(0.0);
-    if (depth_neighbor_ok(d0, d_left) && depth_neighbor_ok(d0, d_right)) {
+    if (uv.x >= texel.x && uv.x <= 1.0 - texel.x
+        && depth_neighbor_ok(d0, d_left) && depth_neighbor_ok(d0, d_right)) {
         let p_left = world_from_depth(uv - vec2f(texel.x, 0.0), d_left, inv_view_proj);
         let p_right = world_from_depth(uv + vec2f(texel.x, 0.0), d_right, inv_view_proj);
         t = p_right - p_left;
+    } else if (uv.x < texel.x && uv.x + texel.x <= 1.0 && depth_neighbor_ok(d0, d_right)) {
+        t = world_from_depth(uv + vec2f(texel.x, 0.0), d_right, inv_view_proj) - p;
+    } else if (uv.x > 1.0 - texel.x && uv.x - texel.x >= 0.0 && depth_neighbor_ok(d0, d_left)) {
+        t = p - world_from_depth(uv - vec2f(texel.x, 0.0), d_left, inv_view_proj);
     }
-    if (depth_neighbor_ok(d0, d_up) && depth_neighbor_ok(d0, d_down)) {
+    if (uv.y >= texel.y && uv.y <= 1.0 - texel.y
+        && depth_neighbor_ok(d0, d_up) && depth_neighbor_ok(d0, d_down)) {
         let p_up = world_from_depth(uv - vec2f(0.0, texel.y), d_up, inv_view_proj);
         let p_down = world_from_depth(uv + vec2f(0.0, texel.y), d_down, inv_view_proj);
         b = p_down - p_up;
+    } else if (uv.y < texel.y && uv.y + texel.y <= 1.0 && depth_neighbor_ok(d0, d_down)) {
+        b = world_from_depth(uv + vec2f(0.0, texel.y), d_down, inv_view_proj) - p;
+    } else if (uv.y > 1.0 - texel.y && uv.y - texel.y >= 0.0 && depth_neighbor_ok(d0, d_up)) {
+        b = p - world_from_depth(uv - vec2f(0.0, texel.y), d_up, inv_view_proj);
     }
     if (dot(t, t) < 1e-12 || dot(b, b) < 1e-12) {
         return vec3f(0.0);
     }
-    var n = normalize(cross(t, b));
+    let cross_normal = cross(t, b);
+    if (dot(cross_normal, cross_normal) < 1e-24) {
+        return vec3f(0.0);
+    }
+    var n = normalize(cross_normal);
     if (dot(n, camera_pos - p) < 0.0) {
         n = -n;
     }

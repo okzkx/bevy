@@ -5,7 +5,7 @@
 //! 两份实现必须逐式一致（同一取整语义、同一有符号正模）；改一处必须同步另一处。
 //! 口径推导见 9.5 施工计划 §0.1 与讲解《patch 池与格子系统讲解》。
 
-use bevy::math::{IVec3, Vec3};
+use bevy::math::{IVec3, Mat4, Vec2, Vec3, Vec4};
 
 use crate::render::passes::ibl::octahedral;
 
@@ -183,6 +183,57 @@ pub fn direction_bucket(normal: [f32; 3]) -> u32 {
     octahedral::direction_to_bucket(normal, BUCKET_RESOLUTION)
 }
 
+/// 与 `gi_cell.wgsl` 同式的 reverse-Z 深度反投影。
+pub(crate) fn world_from_depth(uv: Vec2, depth: f32, inv_view_proj: Mat4) -> Vec3 {
+    let world = inv_view_proj * Vec4::new(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    world.truncate() / world.w
+}
+
+/// 深度法线 CPU 镜像；depth 顺序为 center/left/right/down/up。
+/// 仅视口边缘允许内侧单边差分，内部断层与退化平面返回零。
+pub(crate) fn flat_normal(
+    uv: Vec2,
+    texel: Vec2,
+    depth: [f32; 5],
+    inv_view_proj: Mat4,
+    camera_pos: Vec3,
+) -> Vec3 {
+    let [d0, left, right, down, up] = depth;
+    let ok = |d: f32| d > 0.0 && (d - d0).abs() <= 0.05 * d0;
+    let world = |uv: Vec2, d: f32| world_from_depth(uv, d, inv_view_proj);
+    let p = world(uv, d0);
+    let dx = Vec2::new(texel.x, 0.0);
+    let dy = Vec2::new(0.0, texel.y);
+    let t = if uv.x >= texel.x && uv.x <= 1.0 - texel.x && ok(left) && ok(right) {
+        world(uv + dx, right) - world(uv - dx, left)
+    } else if uv.x < texel.x && uv.x + texel.x <= 1.0 && ok(right) {
+        world(uv + dx, right) - p
+    } else if uv.x > 1.0 - texel.x && uv.x - texel.x >= 0.0 && ok(left) {
+        p - world(uv - dx, left)
+    } else {
+        Vec3::ZERO
+    };
+    let b = if uv.y >= texel.y && uv.y <= 1.0 - texel.y && ok(up) && ok(down) {
+        world(uv + dy, down) - world(uv - dy, up)
+    } else if uv.y < texel.y && uv.y + texel.y <= 1.0 && ok(down) {
+        world(uv + dy, down) - p
+    } else if uv.y > 1.0 - texel.y && uv.y - texel.y >= 0.0 && ok(up) {
+        p - world(uv - dy, up)
+    } else {
+        Vec3::ZERO
+    };
+    let cross = t.cross(b);
+    if t.length_squared() < 1e-12 || b.length_squared() < 1e-12 || cross.length_squared() < 1e-24 {
+        return Vec3::ZERO;
+    }
+    let n = cross.normalize();
+    if n.dot(camera_pos - p) < 0.0 {
+        -n
+    } else {
+        n
+    }
+}
+
 /// 播种与 9.7 屏幕 gather 共用的 1/4 网格口径：本帧在 4×4 块内被播种的子像素（列, 行）。
 ///
 /// WGSL 同式见 `shaders/common/gi_lookup.wgsl` 的 `seed_subsample`：
@@ -230,6 +281,73 @@ mod tests {
     use super::*;
 
     const CONFIG: SurfaceCacheConfig = SurfaceCacheConfig::default();
+
+    #[test]
+    fn depth_reconstruction_uses_vulkan_uv_y_and_faces_camera() {
+        let p = world_from_depth(Vec2::new(0.25, 0.75), 0.4, Mat4::IDENTITY);
+        assert!((p - Vec3::new(-0.5, -0.5, 0.4)).length() < 1e-6);
+        let n = flat_normal(
+            Vec2::splat(0.5),
+            Vec2::splat(0.05),
+            [0.4; 5],
+            Mat4::IDENTITY,
+            Vec3::Z,
+        );
+        assert!((n - Vec3::Z).length() < 1e-6);
+        let n = flat_normal(
+            Vec2::splat(0.5),
+            Vec2::splat(0.05),
+            [0.4; 5],
+            Mat4::IDENTITY,
+            -Vec3::Z,
+        );
+        assert!((n + Vec3::Z).length() < 1e-6);
+    }
+
+    #[test]
+    fn depth_stencil_rejects_interior_edges_but_preserves_viewport_boundary() {
+        let depth = [0.4, 0.0, 0.4, 0.4, 0.4];
+        assert_eq!(
+            flat_normal(
+                Vec2::splat(0.5),
+                Vec2::splat(0.05),
+                depth,
+                Mat4::IDENTITY,
+                Vec3::Z
+            ),
+            Vec3::ZERO
+        );
+        let edge = flat_normal(
+            Vec2::new(0.025, 0.5),
+            Vec2::splat(0.05),
+            depth,
+            Mat4::IDENTITY,
+            Vec3::Z,
+        );
+        assert!((edge - Vec3::Z).length() < 1e-6);
+        let jump = [0.4, 0.6, 0.4, 0.4, 0.4];
+        assert_eq!(
+            flat_normal(
+                Vec2::splat(0.5),
+                Vec2::splat(0.05),
+                jump,
+                Mat4::IDENTITY,
+                Vec3::Z
+            ),
+            Vec3::ZERO
+        );
+        let collapsed = Mat4::from_scale(Vec3::new(0.0, 1.0, 1.0));
+        assert_eq!(
+            flat_normal(
+                Vec2::splat(0.5),
+                Vec2::splat(0.05),
+                [0.4; 5],
+                collapsed,
+                Vec3::Z
+            ),
+            Vec3::ZERO
+        );
+    }
 
     /// 正模：负输入的存储槽必须落在 [0, res)。
     #[test]
