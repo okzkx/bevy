@@ -84,7 +84,10 @@ impl ImageBarrier {
         }
     }
 
-    /// 颜色附件写完，转成片元着色器可采样。
+    /// 颜色附件写完，转成片元/计算着色器可采样。
+    ///
+    /// `dst_stage` 覆盖片元与计算两段：HDR 转只读之后，自动曝光的测光 compute 会立刻
+    /// 采样它（`EXPOSURE` 在 tonemap 之前录），只写 `FRAGMENT_SHADER` 会漏掉那一段。
     pub(crate) fn color_to_sampled(image: vk::Image) -> Self {
         Self {
             image,
@@ -93,7 +96,8 @@ impl ImageBarrier {
             new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             src_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             src_access: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER,
+            dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER
+                | vk::PipelineStageFlags::COMPUTE_SHADER,
             dst_access: vk::AccessFlags::SHADER_READ,
             base_mip: 0,
             level_count: 1,

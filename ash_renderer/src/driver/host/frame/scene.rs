@@ -144,6 +144,10 @@ impl FrameUniformTable {
     /// impl 留在 driver 层而非 frame_uniform_table.rs：方法消费帧侧私有的
     /// FrameView/FrameLight（scene/lighting 两文件），放 render 侧会反向依赖
     /// （同四环写入的落位理由）。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "帧 UBO 的输入就是这些设置结构体的借用，收结构体只会多一层解构"
+    )]
     pub(super) fn write_frame_ubo(
         &mut self,
         slot: usize,
@@ -152,6 +156,7 @@ impl FrameUniformTable {
         render_mode: RenderMode,
         sky: &SkySettings,
         ibl: &IblSettings,
+        scgi: bool,
     ) -> Result<(), BevyError> {
         self.ubo(slot)
             .write(
@@ -210,6 +215,8 @@ impl FrameUniformTable {
                         sky.uniform_radiance[2],
                         if sky.uniform_enabled { 1.0 } else { 0.0 },
                     ],
+                    // 9.7.6 SCGI 注入开关（与 gi.enabled 正交：生产者开、消费者另开）
+                    scgi: [u32::from(scgi), 0, 0, 0],
                 }),
             )
             .or_fatal("帧 UBO 写失败，渲染链无法继续")

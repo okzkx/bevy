@@ -8,11 +8,14 @@ use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayoutDesc;
 use crate::render::passes::gbuffer::gbuffer_pipeline::GBUFFER_WRITE_PIPELINE;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
+use crate::render::passes::gi::screen_gather::{SCGI_SAMPLE_SET_DESC, SCGI_TARGET_SET_DESC};
 use crate::render::passes::gi::{
-    BOUNCE_ALLOC_PIPELINE, DEFRAG_PIPELINE, EMISSIVE_BUILD_PIPELINE, ESTIMATION_PIPELINE,
-    EVICTION_PIPELINE, LIGHT_SAMPLING_PIPELINE, PATCH_ALLOC_PIPELINE, PATCH_MARKER_PIPELINE,
-    PATCH_VIEW_PIPELINE, SCROLLING_PIPELINE,
+    BOUNCE_ALLOC_PIPELINE, DEFRAG_PIPELINE, DENOISE_PIPELINE, EMISSIVE_BUILD_PIPELINE,
+    ESTIMATION_PIPELINE, EVICTION_PIPELINE, LIGHT_SAMPLING_PIPELINE, PATCH_ALLOC_PIPELINE,
+    PATCH_MARKER_PIPELINE, PATCH_VIEW_PIPELINE, SCREEN_GATHER_PIPELINE, SCROLLING_PIPELINE,
+    SPATIAL_FILTER_PIPELINE, TEMPORAL_FILTER_PIPELINE, UPSAMPLE_PIPELINE,
 };
+
 use crate::render::passes::ibl::{
     BRDF_LUT_PIPELINE, GLOBAL_PROBE_PIPELINE, IBL_CAPTURE_SET_DESC, IBL_DFG_SET_DESC,
     IBL_GLOBAL_PROBE_SET_DESC, IBL_PREFILTER_SET_DESC, IBL_SET_DESC, IBL_SH_CHECK_SET_DESC,
@@ -25,6 +28,9 @@ use crate::render::passes::overlay::overlay_pipeline::OVERLAY_PIPELINE;
 use crate::render::passes::post::bloom::{
     BLOOM_DOWN_PIPELINE, BLOOM_PREFILTER_PIPELINE, BLOOM_TEX_SET_DESC, BLOOM_UP_PIPELINE,
     BLOOM_UP_SET_DESC,
+};
+use crate::render::passes::post::exposure::{
+    EXPOSURE_ADAPT_PIPELINE, EXPOSURE_MEASURE_PIPELINE, EXPOSURE_SET_DESC, EXPOSURE_STATE_SET_DESC,
 };
 use crate::render::passes::post::present_tonemap_pipeline::PRESENT_TONEMAP_PIPELINE;
 use crate::render::passes::post::smaa::{
@@ -101,6 +107,15 @@ pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
     &LIGHT_SAMPLING_PIPELINE,
     &EMISSIVE_BUILD_PIPELINE,
     &BOUNCE_ALLOC_PIPELINE,
+    // 9.7 屏幕侧：空间/时域滤波（不受光线求交门控，恒建）
+    &SPATIAL_FILTER_PIPELINE,
+    &TEMPORAL_FILTER_PIPELINE,
+    &SCREEN_GATHER_PIPELINE,
+    &DENOISE_PIPELINE,
+    &UPSAMPLE_PIPELINE,
+    // 显示段：自动曝光（测光 + 适应），与 SCGI/IBL 无关
+    &EXPOSURE_MEASURE_PIPELINE,
+    &EXPOSURE_ADAPT_PIPELINE,
 ];
 
 /// 宿主声明并建出的全部 set 布局。
@@ -128,4 +143,11 @@ pub(crate) const ALL_SETS: &[&SetLayoutDesc] = &[
     &IBL_SET_DESC,
     &RAY_TRACING_SET_DESC,
     &GI_SET_DESC,
+    // 9.7.4 1/4 屏幕目标（两张图各双缓冲 + 全分辨率辐照度的五个 storage image 绑定）
+    &SCGI_TARGET_SET_DESC,
+    // 9.7.6 合成 pass 的采样集（单张全分辨率辐照度）
+    &SCGI_SAMPLE_SET_DESC,
+    // 显示段自动曝光：测光/适应共用集 + tonemap 读适应结果
+    &EXPOSURE_SET_DESC,
+    &EXPOSURE_STATE_SET_DESC,
 ];

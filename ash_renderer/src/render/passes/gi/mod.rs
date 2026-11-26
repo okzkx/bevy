@@ -12,6 +12,8 @@
 
 pub mod allocation;
 pub mod estimation;
+pub mod filtering;
+pub mod screen_gather;
 pub mod view;
 pub mod volume;
 
@@ -39,6 +41,8 @@ pub use self::allocation::GiAllocDraw;
 pub use self::estimation::{
     GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiLightSampleDraw,
 };
+pub use self::filtering::{GiSpatialFilterDraw, GiTemporalFilterDraw};
+pub use self::screen_gather::{GiDenoiseDraw, GiScreenGatherDraw, GiUpsampleDraw};
 pub use self::view::GiViewDraw;
 pub use self::volume::SurfaceCacheConfig;
 
@@ -82,6 +86,23 @@ pub struct GiSettings {
     pub emissive_intensity: f32,
     /// 9.6 光源侧采样清单长度（每帧从灯位向锥内采样的条数）。
     pub light_samples: u32,
+    /// 9.7.2 patch 级空间滤波开关（关 = 直拷 estimation 输出，A 与源逐位一致）。
+    pub spatial_filter: bool,
+    /// 9.7.2 切平面采样半径（该 patch 所在级联的体素边长倍数）。
+    pub spatial_radius: f32,
+    /// 9.7.3 patch 级时域后滤波开关（关 = 直拷空间滤波输出）。
+    pub temporal_filter: bool,
+    /// 9.7.3 时域平滑度 [0,1]：上一帧权重 = `lerp(0.9, 0.95, smoothing)`。
+    pub temporal_smoothing: f32,
+    /// 9.7.4 每 1/4 像素的查表样本数（1..3；默认 3 = 播种点 + 对角 + 块心）。
+    pub lookup_samples: u32,
+    /// 9.7.5 1/4 目标去噪遍数（0 = 不去噪；每遍 3×3，步长 `{1,2,2,3}`）。
+    pub denoise_passes: u32,
+    /// 9.7.5 上采样是否退回纯双线性（A/B 对照；默认双边）。
+    pub upsample_bilinear: bool,
+    /// 9.7.6 SCGI 注入开关：合成 pass 是否用 `scgi_irradiance` 替换 Volume 内不透明像素的
+    /// IBL 漫反射。与 `enabled`（生产者）正交；关 = 整条屏幕链不录、画面回 9.6 收官基线。
+    pub scgi: bool,
     /// Volume/池规格（只在关态改；改后重建表）。
     pub config: SurfaceCacheConfig,
 }
@@ -103,6 +124,17 @@ impl Default for GiSettings {
             budget: 262_144,
             emissive_intensity: 1.0,
             light_samples: 128,
+            // 9.7 的开关默认关：与 `ibl_enabled` / `estimation` 同纪律，A/B 时由 BRP 或面板开
+            spatial_filter: false,
+            // 场景验收调档（2026-11-24）：1.5 体素 + 1 遍去噪在大面积平面上仍看得出块状，
+            // 3.0 + 2 遍基本抹平且不糊掉几何（见 9.7.7 施工记录 §滤波调档）
+            spatial_radius: 3.0,
+            temporal_filter: false,
+            temporal_smoothing: 0.5,
+            lookup_samples: 3,
+            denoise_passes: 2,
+            upsample_bilinear: false,
+            scgi: false,
             config: SurfaceCacheConfig::default(),
         }
     }
@@ -151,6 +183,91 @@ pub(crate) static DEFRAG_PIPELINE: PipelineDesc = PipelineDesc {
     entries: &[c"cs_main"],
     sets: &[&GI_SET_DESC],
     push: None,
+    color_formats: &[],
+    depth_format: None,
+};
+
+/// 9.7.2 空间滤波（set0 帧 UBO / set1 GI + 24B push；线程 = 池容量）。
+///
+/// 与 9.6 那四条不同，它**不受光线求交门控**：只用 buffer 与 GI UBO，任何设备都能建。
+pub(crate) static SPATIAL_FILTER_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_spatial_filter",
+    shader: &shader_abi::SPATIAL_FILTER,
+    entries: &[c"cs_main"],
+    sets: &[&FRAME_UNIFORM_SET_DESC, &GI_SET_DESC],
+    push: Some(PushRange {
+        stages: COMPUTE,
+        size: filtering::GI_SPATIAL_FILTER_PUSH_SIZE,
+    }),
+    color_formats: &[],
+    depth_format: None,
+};
+
+/// 9.7.3 时域后滤波（set0 帧 UBO / set1 GI + 24B push；线程 = 池容量）。
+pub(crate) static TEMPORAL_FILTER_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_temporal_filter",
+    shader: &shader_abi::TEMPORAL_FILTER,
+    entries: &[c"cs_main"],
+    sets: &[&FRAME_UNIFORM_SET_DESC, &GI_SET_DESC],
+    push: Some(PushRange {
+        stages: COMPUTE,
+        size: filtering::GI_TEMPORAL_FILTER_PUSH_SIZE,
+    }),
+    color_formats: &[],
+    depth_format: None,
+};
+
+/// 9.7.4 1/4 屏幕查表（set0 帧 UBO / set1 GI / set2 G-buffer / set3 目标 + 32B push）。
+pub(crate) static SCREEN_GATHER_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_screen_gather",
+    shader: &shader_abi::SCREEN_GATHER,
+    entries: &[c"cs_main"],
+    sets: &[
+        &FRAME_UNIFORM_SET_DESC,
+        &GI_SET_DESC,
+        &GBUFFER_SAMPLED_SET_DESC,
+        &screen_gather::SCGI_TARGET_SET_DESC,
+    ],
+    push: Some(PushRange {
+        stages: COMPUTE,
+        size: screen_gather::GI_SCREEN_GATHER_PUSH_SIZE,
+    }),
+    color_formats: &[],
+    depth_format: None,
+};
+
+/// 9.7.5a 1/4 目标去噪（set0 帧 UBO / set1 G-buffer / set2 目标 + 24B push）。
+pub(crate) static DENOISE_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_denoise",
+    shader: &shader_abi::DENOISE,
+    entries: &[c"cs_main"],
+    sets: &[
+        &FRAME_UNIFORM_SET_DESC,
+        &GBUFFER_SAMPLED_SET_DESC,
+        &screen_gather::SCGI_TARGET_SET_DESC,
+    ],
+    push: Some(PushRange {
+        stages: COMPUTE,
+        size: screen_gather::GI_DENOISE_PUSH_SIZE,
+    }),
+    color_formats: &[],
+    depth_format: None,
+};
+
+/// 9.7.5b 全分辨率双边上采样（set0 帧 UBO / set1 G-buffer / set2 目标 + 24B push）。
+pub(crate) static UPSAMPLE_PIPELINE: PipelineDesc = PipelineDesc {
+    label: "gi_upsample",
+    shader: &shader_abi::UPSAMPLE,
+    entries: &[c"cs_main"],
+    sets: &[
+        &FRAME_UNIFORM_SET_DESC,
+        &GBUFFER_SAMPLED_SET_DESC,
+        &screen_gather::SCGI_TARGET_SET_DESC,
+    ],
+    push: Some(PushRange {
+        stages: COMPUTE,
+        size: screen_gather::GI_UPSAMPLE_PUSH_SIZE,
+    }),
     color_formats: &[],
     depth_format: None,
 };
@@ -263,6 +380,8 @@ pub(crate) static PATCH_VIEW_PIPELINE: PipelineDesc = PipelineDesc {
         &FRAME_UNIFORM_SET_DESC,
         &GBUFFER_SAMPLED_SET_DESC,
         &GI_SET_DESC,
+        // 9.7.7 视图 14/15 读 SCGI 全分辨率辐照度（与合成 pass 同一个采样集）
+        &screen_gather::SCGI_SAMPLE_SET_DESC,
     ],
     push: Some(PushRange {
         stages: crate::render::core::binding::set_layout::stages(&[
@@ -307,6 +426,11 @@ pub struct GiPipelines {
     light_sampling: Option<ComputePipeline>,
     emissive_build: Option<ComputePipeline>,
     bounce_alloc: Option<ComputePipeline>,
+    spatial_filter: ComputePipeline,
+    temporal_filter: ComputePipeline,
+    screen_gather: ComputePipeline,
+    denoise: ComputePipeline,
+    upsample: ComputePipeline,
     cover: FullscreenPipeline,
     marker: FullscreenPipeline,
 }
@@ -330,6 +454,11 @@ impl GiPipelines {
         let bounce_alloc = ray_tracing
             .then(|| ComputePipeline::new(ctx, &BOUNCE_ALLOC_PIPELINE, layouts))
             .transpose()?;
+        let spatial_filter = ComputePipeline::new(ctx, &SPATIAL_FILTER_PIPELINE, layouts)?;
+        let temporal_filter = ComputePipeline::new(ctx, &TEMPORAL_FILTER_PIPELINE, layouts)?;
+        let screen_gather = ComputePipeline::new(ctx, &SCREEN_GATHER_PIPELINE, layouts)?;
+        let denoise = ComputePipeline::new(ctx, &DENOISE_PIPELINE, layouts)?;
+        let upsample = ComputePipeline::new(ctx, &UPSAMPLE_PIPELINE, layouts)?;
         Ok(Self {
             scrolling: ComputePipeline::new(ctx, &SCROLLING_PIPELINE, layouts)?,
             eviction: ComputePipeline::new(ctx, &EVICTION_PIPELINE, layouts)?,
@@ -339,6 +468,11 @@ impl GiPipelines {
             light_sampling,
             emissive_build,
             bounce_alloc,
+            spatial_filter,
+            temporal_filter,
+            screen_gather,
+            denoise,
+            upsample,
             cover: FullscreenPipeline::new(ctx, &PATCH_VIEW_PIPELINE, layouts)?,
             marker: FullscreenPipeline::new(ctx, &PATCH_MARKER_PIPELINE, layouts)?,
         })
@@ -368,6 +502,36 @@ impl GiPipelines {
     #[must_use]
     pub fn estimation(&self) -> Option<ComputeHandles> {
         self.estimation.as_ref().map(ComputePipeline::handles)
+    }
+
+    /// 9.7.2 空间滤波的录制句柄（恒有：不依赖光线求交）。
+    #[must_use]
+    pub fn spatial_filter(&self) -> ComputeHandles {
+        self.spatial_filter.handles()
+    }
+
+    /// 9.7.3 时域后滤波的录制句柄（恒有：不依赖光线求交）。
+    #[must_use]
+    pub fn temporal_filter(&self) -> ComputeHandles {
+        self.temporal_filter.handles()
+    }
+
+    /// 9.7.4 1/4 屏幕查表的录制句柄（恒有：不依赖光线求交）。
+    #[must_use]
+    pub fn screen_gather(&self) -> ComputeHandles {
+        self.screen_gather.handles()
+    }
+
+    /// 9.7.5a 1/4 目标去噪的录制句柄。
+    #[must_use]
+    pub fn denoise(&self) -> ComputeHandles {
+        self.denoise.handles()
+    }
+
+    /// 9.7.5b 全分辨率上采样的录制句柄。
+    #[must_use]
+    pub fn upsample(&self) -> ComputeHandles {
+        self.upsample.handles()
     }
 
     /// 9.6.2 光源侧采样清单的录制句柄（None = 本机不支持光线求交）。
@@ -421,6 +585,16 @@ pub struct GiFrameDraw {
     pub estimation: Option<GiEstimationDraw>,
     /// 9.6.3 bounce 分配（估计关 / 多跳关 / 无光线求交的帧为 None）。
     pub bounce_alloc: Option<GiBounceAllocDraw>,
+    /// 9.7.2 空间滤波（估计关的帧为 None；开关关时仍在，push 置 0 做直拷）。
+    pub spatial_filter: Option<GiSpatialFilterDraw>,
+    /// 9.7.3 时域后滤波（跟空间滤波同生灭；开关关时仍在，push 置 0 做直拷）。
+    pub temporal_filter: Option<GiTemporalFilterDraw>,
+    /// 9.7.4 1/4 屏幕查表（时域滤波之后；目标还没建好或没有相机时为 None）。
+    pub screen_gather: Option<GiScreenGatherDraw>,
+    /// 9.7.5a 1/4 目标去噪（遍数 0 或没有查表时为 None；多遍按 A↔B 交替录）。
+    pub denoise: Vec<GiDenoiseDraw>,
+    /// 9.7.5b 全分辨率上采样（跟查表同生灭）。
+    pub upsample: Option<GiUpsampleDraw>,
     /// 本帧槽 GI 集（回收三件与播种共绑）。
     pub gi_set: DescSet,
     /// ⑧ 段调试视图（关 / 视图 0 为 None）。
@@ -475,6 +649,26 @@ impl GiFrameDraw {
         // 9.6.3：同帧消费 estimation 写下的分配请求（新 patch 下一帧起参与估计）
         if let Some(bounce_alloc) = &self.bounce_alloc {
             bounce_alloc.record(device, cb);
+        }
+        // 9.7.2：空间滤波读本帧 estimation 的输出，写独立的 filtered 表（不原地改）
+        if let Some(spatial_filter) = &self.spatial_filter {
+            spatial_filter.record(device, cb);
+        }
+        // 9.7.3：时域后滤波读 A（本帧空间输出）与上一帧的 B，写 B
+        if let Some(temporal_filter) = &self.temporal_filter {
+            temporal_filter.record(device, cb);
+        }
+        // 9.7.4：1/4 屏幕查表读 B，写两张 1/4 目标（P0 组）
+        if let Some(screen_gather) = &self.screen_gather {
+            screen_gather.record(device, cb);
+        }
+        // 9.7.5a：去噪多遍（每遍读一组写另一组，靠描述符集换方向）
+        for denoise in &self.denoise {
+            denoise.record(device, cb);
+        }
+        // 9.7.5b：全分辨率双边上采样 → `scgi_irradiance`
+        if let Some(upsample) = &self.upsample {
+            upsample.record(device, cb);
         }
         // 缓存表 compute 写 → ⑧ 段片元读（视图）与 9.7 的片元查表
         unsafe { Handoff::ComputeFragmentRead.barrier().record(device, cb) };

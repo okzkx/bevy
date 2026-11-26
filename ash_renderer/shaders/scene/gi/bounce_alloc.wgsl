@@ -27,6 +27,7 @@
 @group(0) @binding(8) var<storage, read_write> counters: array<atomic<u32>, 16>;
 @group(0) @binding(9) var<uniform> gi: GiUniforms;
 @group(0) @binding(13) var<storage, read> bounce_requests: array<BounceRequest>;
+@group(0) @binding(15) var<storage, read_write> filtered_irradiance1: array<PatchIrradiance>;
 
 @compute @workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
@@ -48,8 +49,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     if (!(normal_length > 0.0)) {
         return;
     }
-    // 同帧同 cell 仲裁：与播种共用同一个纪元标签（标签 = 帧号 | 1，免每帧清表）
-    let epoch = gi.frame.x | 1u;
+    // 同帧同 cell 仲裁：与播种共用同一个纪元标签（每帧唯一且非 0，见 patch_alloc.wgsl；
+    // 用 `帧号 | 1` 会让相邻偶数帧与奇数帧撞标签，奇数帧的分配全被跳过）
+    let epoch = gi.frame.x * 2u + 1u;
     let previous = atomicExchange(&cell_marks[cell], epoch);
     if (previous == epoch) {
         return;
@@ -71,6 +73,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     patch_geometry[slot].normal = vec4f(request.normal.xyz / normal_length, 0.0);
     patch_irradiance0[slot] = empty_irradiance;
     patch_irradiance1[slot] = empty_irradiance;
+    // 新身份清空 b15 和有效帧戳，避免回收槽的旧历史污染屏幕链。
+    filtered_irradiance1[slot] = empty_irradiance;
     patch_statistics[slot].mean = vec4f(0.0);
     patch_statistics[slot].variance = vec4f(0.0);
     // rank = 1（state 低 8 位）：bounce 出来的 patch 不参与再分配、也不享受预热

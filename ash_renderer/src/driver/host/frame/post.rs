@@ -7,8 +7,10 @@ use crate::{
     common::{bytes::put_f32s, syntax::ResultTierExt},
     render::{
         pack_bloom_params, BloomFrameDraw, BloomParamsData, BloomPipelines, BloomSettings,
-        BloomTargets, CompositePipeline, GBufferPipeline, GBufferTargets, PresentTonemapPipeline,
-        SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings, SmaaTargets,
+        BloomTargets, CompositePipeline, Context, ExposureDraw, ExposureParamsData,
+        ExposurePipelines, ExposureSettings, ExposureTargets, GBufferPipeline, GBufferTargets,
+        PresentTonemapPipeline, SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings,
+        SmaaTargets,
     },
 };
 
@@ -33,6 +35,12 @@ pub(super) struct PostInput<'w> {
     pub(super) smaa: ResMut<'w, SmaaTargets>,
     pub(super) smaa_pipelines: Res<'w, SmaaPipelines>,
     pub(super) smaa_settings: Res<'w, SmaaSettings>,
+    /// 自动曝光（独立显示段模块）：目标/管线/开关与时间步长。
+    pub(super) exposure: ResMut<'w, ExposureTargets>,
+    pub(super) exposure_pipelines: Res<'w, ExposurePipelines>,
+    pub(super) exposure_settings: Res<'w, ExposureSettings>,
+    pub(super) ctx: Res<'w, Context>,
+    pub(super) time: Res<'w, Time>,
 }
 
 impl PostInput<'_> {
@@ -72,7 +80,41 @@ impl PostInput<'_> {
         self.smaa
             .info_mut(slot)
             .write(0, &smaa_info)
-            .or_fatal("SmaaInfo UBO 写失败，渲染链无法继续")
+            .or_fatal("SmaaInfo UBO 写失败，渲染链无法继续")?;
+        // 自动曝光：参数 UBO + 本槽 HDR 描述符（HDR 随 resize 重建，故每帧按视图比对）
+        let settings = &self.exposure_settings;
+        let dt = self.time.delta_secs().clamp(1.0 / 240.0, 0.1);
+        self.exposure
+            .write_params(
+                slot,
+                &ExposureParamsData {
+                    mode: settings.mode.as_u32(),
+                    key: settings.key,
+                    min_scale: settings.min_scale,
+                    max_scale: settings.max_scale,
+                    rate_brighten: settings.rate_brighten,
+                    rate_darken: settings.rate_darken,
+                    dt,
+                },
+            )
+            .or_fatal("曝光参数 UBO 写失败，渲染链无法继续")?;
+        let hdr_view = self.gbuffer.targets.hdr_view(slot);
+        let ctx = &self.ctx;
+        self.exposure
+            .bind_hdr(ctx, slot, hdr_view)
+            .or_fatal("曝光描述符集写失败，渲染链无法继续")
+    }
+}
+
+/// 自动曝光的帧录制输入：测光 → 适应两条 dispatch + tonemap 读倍数的 set。
+/// 调试显示模式下 `None`（HDR 里是可视化直出，不该影响适应状态）。
+pub(super) fn exposure_draw(post: &PostInput, slot: usize) -> ExposureDraw {
+    let pipelines = &post.exposure_pipelines;
+    ExposureDraw {
+        measure: pipelines.measure(),
+        adapt: pipelines.adapt(),
+        set: post.exposure.set(slot),
+        state_set: post.exposure.state_set(slot),
     }
 }
 

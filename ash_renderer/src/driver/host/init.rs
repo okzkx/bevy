@@ -17,14 +17,15 @@ use crate::{
     common::syntax::ResultTierExt,
     render::{
         AtlasGpu, BindlessTextureTable, BloomPipelines, BloomTargets, ClusterBuildPass,
-        CompositePipeline, Context, CullPass, FramePool, FrameUniformTable, GBufferPipeline,
-        GBufferTargets, GiPipelines, GiSetLayout, GiSettings, GpuTimer, HizPyramid, IblEnvironment,
-        ImageCache, IndirectPass, InstanceTables, LightClusters, LightTable, LodPass, MeshPool,
-        OcclusionPass, OverlayPipeline, PresentTonemapPipeline, RayScene, RayTracingPipelines,
-        RayTracingSettings, RayTracingTargets, SetLayouts, ShadowBuildPass, ShadowPipeline,
-        ShadowTargets, SmaaPipelines, SmaaTargets, SurfaceCacheConfig, SurfaceCacheTables,
-        Swapchain, TransparentPasses, TransparentPipeline, TransparentTargets, UiVertexRing,
-        Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
+        CompositePipeline, Context, CullPass, ExposurePipelines, ExposureTargets, FramePool,
+        FrameUniformTable, GBufferPipeline, GBufferTargets, GiPipelines, GiSetLayout, GiSettings,
+        GpuTimer, HizPyramid, IblEnvironment, ImageCache, IndirectPass, InstanceTables,
+        LightClusters, LightTable, LodPass, MeshPool, OcclusionPass, OverlayPipeline,
+        PresentTonemapPipeline, RayScene, RayTracingPipelines, RayTracingSettings,
+        RayTracingTargets, ScgiTargets, SetLayouts, ShadowBuildPass, ShadowPipeline, ShadowTargets,
+        SmaaPipelines, SmaaTargets, SurfaceCacheConfig, SurfaceCacheTables, Swapchain,
+        TransparentPasses, TransparentPipeline, TransparentTargets, UiVertexRing, Uploader,
+        MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
 
@@ -147,6 +148,8 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     let transparent_targets = TransparentTargets::new(&ctx)?;
     let shadow_targets = ShadowTargets::new(&ctx)?;
     let bloom_targets = BloomTargets::new(&ctx, swapchain.extent)?;
+    // 自动曝光（独立显示段模块）：目标与 tonemap 的 set3 无关尺寸，只随帧槽
+    let exposure_targets = ExposureTargets::new(&ctx)?;
     // 会提交上传（构造内当场等完）：两张查找表贴图
     let smaa_targets = SmaaTargets::new(&ctx, &mut uploader, swapchain.extent)?;
     let depth_images: Vec<vk::Image> = (0..MAX_FRAMES_IN_FLIGHT)
@@ -160,6 +163,11 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     // ---- 管线：无状态，只借 GPU 表与渲染目标提供的描述符布局。各布局先登记进
     // SetLayouts，各管线按自己的布局配方取用并与 shader ABI 对账。声明的附件格式必须和实际
     // 渲染用的附件完全一致，否则验证层报 VUID-08914 ----
+    // 9.7.4 的 1/4 屏幕目标：它的描述符布局在这里建（与 GiSetLayout 同形，管线按它取用），
+    // 目标图在首次 `ensure` 时按 swapchain 尺寸建
+    let mut scgi_targets = ScgiTargets::new(&ctx)?;
+    // 启动就按初始尺寸建一次：合成 pass 每帧都绑这张采样图（SCGI 关时也不读，但布局必须合法）
+    scgi_targets.ensure(&ctx, swapchain.extent)?;
     let layouts = {
         let mut list = vec![
             tables.set_layout(),
@@ -171,11 +179,15 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             shadow_targets.set_layout(),
             bloom_targets.tex_layout(),
             bloom_targets.up_layout(),
+            exposure_targets.layouts()[0],
+            exposure_targets.layouts()[1],
             smaa_targets.layout_a(),
             smaa_targets.layout_b(),
             hiz.occlusion_layout(),
             ibl.set_layout(),
             gi_set_layout.set_layout(),
+            scgi_targets.set_layout(),
+            scgi_targets.sample_layout(),
         ];
         // 光线求交集布局只在 光线求交支持时存在（光线求交关没有可登记的句柄）
         if let Some(targets) = &ray_tracing_targets {
@@ -194,6 +206,8 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     let composite_pipeline = CompositePipeline::new(&ctx, &layouts)?;
     let bloom_pipelines = BloomPipelines::new(&ctx, &layouts)?;
     let smaa_pipelines = SmaaPipelines::new(&ctx, &layouts)?;
+    // 自动曝光的测光/适应两条 compute（要在 tonemap 之前录，布局已登记）
+    let exposure_pipelines = ExposurePipelines::new(&ctx, &layouts)?;
     // tonemap 输出存线性值，最后写屏幕时由 SRGB 视图做唯一一次 sRGB 编码
     let tonemap_pipeline = PresentTonemapPipeline::new(&ctx, &layouts)?;
     // Compute 管线（ComputePipeline）
@@ -241,6 +255,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             transparent_targets,
             shadow_targets,
             bloom_targets,
+            exposure_targets,
             smaa_targets,
             hiz,
             ibl,
@@ -250,6 +265,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             overlay_pipeline,
             composite_pipeline,
             bloom_pipelines,
+            exposure_pipelines,
             smaa_pipelines,
             tonemap_pipeline,
             cull_pass,
@@ -262,6 +278,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             gi_pipelines,
             surface_cache,
             gi_set_layout,
+            scgi_targets,
             // 表面缓存总开关恒插入（BRP gi_set/gi_stats 在关态也要回读数）
             gi_settings: GiSettings::default(),
             // 光线求交总开关恒插入（BRP ray_tracing_set/ray_tracing_stats 在 光线求交关时也要回读数）
@@ -332,6 +349,8 @@ init_chain! {
     PresentTonemapPipeline => tonemap_pipeline,
     BloomPipelines => bloom_pipelines,
     BloomTargets => bloom_targets,
+    ExposurePipelines => exposure_pipelines,
+    ExposureTargets => exposure_targets,
     SmaaPipelines => smaa_pipelines,
     SmaaTargets => smaa_targets,
     TransparentPipeline => transparent_pipeline,
@@ -343,6 +362,7 @@ init_chain! {
     GiPipelines => gi_pipelines,
     SurfaceCacheTables => surface_cache,
     GiSetLayout => gi_set_layout,
+    ScgiTargets => scgi_targets,
     GiSettings => gi_settings,
     GBufferTargets => gbuffer,
     FramePool => frames,

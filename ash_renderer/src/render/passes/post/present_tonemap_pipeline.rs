@@ -11,11 +11,12 @@ use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::record::graphics::PipelineRef;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
 use crate::render::passes::post::bloom::BLOOM_UP_SET_DESC;
+use crate::render::passes::post::exposure::EXPOSURE_STATE_SET_DESC;
 use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
 use crate::render::Context;
 
 /// set 依次为帧 UBO（调试模式旁路用）、G-buffer 采样集（取 HDR）、Bloom 升采样集
-///（取 Bloom 结果和参数）。
+///（取 Bloom 结果和参数）、自动曝光的适应状态（取全帧曝光倍数）。
 pub(crate) static PRESENT_TONEMAP_PIPELINE: PipelineDesc = PipelineDesc {
     label: "present_tonemap",
     shader: &shader_abi::PRESENT_TONEMAP,
@@ -24,6 +25,7 @@ pub(crate) static PRESENT_TONEMAP_PIPELINE: PipelineDesc = PipelineDesc {
         &FRAME_UNIFORM_SET_DESC,
         &GBUFFER_SAMPLED_SET_DESC,
         &BLOOM_UP_SET_DESC,
+        &EXPOSURE_STATE_SET_DESC,
     ],
     push: None,
     color_formats: &[vk::Format::R8G8B8A8_UNORM],

@@ -82,11 +82,11 @@ use self::{
         cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
         draw::{draw_stats, drawlist_verify_set},
         gap::{gap_census, gap_set, gap_stats},
-        gi::{gi_census, gi_dump, gi_estimate_probe, gi_set, gi_stats},
+        gi::{gi_census, gi_dump, gi_estimate_probe, gi_set, gi_stats, scgi_low_probe, scgi_stats},
         ibl::{ibl_census, ibl_set, ibl_stats},
         lod::{lod_census, lod_set_enabled, lod_set_params},
         ray_tracing::{ray_tracing_census, ray_tracing_dump, ray_tracing_set, ray_tracing_stats},
-        render_settings::{bloom_set, set_render_mode, smaa_set},
+        render_settings::{bloom_set, exposure_get, exposure_set, set_render_mode, smaa_set},
         residency::{residency_set, residency_stats},
         shadow::{shadow_set, shadow_stats},
         sky::{sky_set, sky_stats, sky_uniform},
@@ -159,6 +159,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/shadow_set", shadow_set)
                 .with_method_main("ash_renderer/bloom_set", bloom_set)
                 .with_method_main("ash_renderer/smaa_set", smaa_set)
+                .with_method_main("ash_renderer/exposure_set", exposure_set)
+                .with_method_main("ash_renderer/exposure_get", exposure_get)
                 .with_method_main("ash_renderer/shadow_stats", shadow_stats)
                 .with_method_main("ash_renderer/sky_set", sky_set)
                 .with_method_main("ash_renderer/sky_stats", sky_stats)
@@ -174,6 +176,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/gi_stats", gi_stats)
                 .with_method_main("ash_renderer/gi_dump", gi_dump)
                 .with_method_main("ash_renderer/gi_census", gi_census)
+                .with_method_main("ash_renderer/scgi_stats", scgi_stats)
+                .with_method_main("ash_renderer/scgi_low_probe", scgi_low_probe)
                 .with_method_main("ash_renderer/gi_estimate_probe", gi_estimate_probe)
                 .with_method_main("ash_renderer/frame_dump", frame_dump)
                 .with_method_main("ash_renderer/layout_contract", layout_contract),

@@ -24,6 +24,7 @@ enable wgpu_ray_query;
 enable wgpu_binding_array;
 // #import frame
 // #import gi_cell
+// #import gi_lookup
 // #import gi_sampling
 // #import gi_light_sample
 // #import gi_emissive
@@ -88,20 +89,21 @@ fn environment_radiance(dir: vec3f) -> vec3f {
 // ——光滑曲面上两者不同源，这里会有桶错位（9.5 §0.5 的已知例外），错位率用
 // `counters[8]`（命中）/`counters[15]`（落空）两个读数估。
 fn cache_evaluate(p: vec3f, n: vec3f, write_second: bool, can_allocate: bool) -> vec3f {
-    let center = gi.target_pos.xyz;
-    let res = u32(gi.volume.y);
-    let cascades = u32(gi.volume.z);
-    let voxel_min = gi.volume.x;
-    let cascade = resolve_cascade(center, p, voxel_min, res, cascades);
-    if (cascade == INVALID_PATCH) {
+    // 定位链走 common/gi_lookup.wgsl 的只读版（9.7.1 抽出）：这里只叠自己的两个副作用
+    // ——落空计数与 bounce 请求；算术与 9.6 逐位一致，别在本函数里另写一份取整。
+    let key = lookup_cell_key(
+        p,
+        n,
+        gi.target_pos.xyz,
+        gi.volume.x,
+        u32(gi.volume.y),
+        u32(gi.volume.z),
+        gi.cascade_offsets,
+    );
+    if (key.cascade == INVALID_PATCH) {
         return vec3f(0.0);
     }
-    let voxel = voxel_size(voxel_min, cascade);
-    let offset = gi.cascade_offsets[cascade].xyz;
-    let pv = volume_position(p, voxel, offset, i32(res));
-    let storage = volume_to_storage(pv, offset, i32(res));
-    let bucket = direction_to_bucket_index(n, BUCKET_RESOLUTION);
-    let cell = cell_index(cascade, storage, bucket, res);
+    let cell = key.cell;
     // 名字不用 patch：WGSL 把 patch 列为保留关键字
     let patch_index = cell_patch[cell];
     if (patch_index == INVALID_PATCH) {
@@ -127,20 +129,24 @@ fn cache_evaluate(p: vec3f, n: vec3f, write_second: bool, can_allocate: bool) ->
     } else {
         previous = patch_irradiance1[patch_index];
     }
-    return previous.l0.xyz
-        + previous.l1x.xyz * n.x
-        + previous.l1y.xyz * n.y
-        + previous.l1z.xyz * n.z;
+    // 求值也走公共片段（同一式：l0 + l1·n），免得屏幕侧另写一份
+    // 低阶 SH 负瓣不能当作负能量再次传递；有符号系数仅在求值前保留。
+    return max(lookup_eval(previous, n), vec3f(0.0));
 }
 
 // 命中点朝入射方向反射出去的辐亮度：albedo/π ·（方向光 · NoL · 阴影 + 多跳缓存 E）。
-fn hit_radiance(hit: SceneHit, light_dir: vec3f, write_second: bool, can_allocate: bool) -> vec3f {
+fn hit_radiance(hit: SceneHit, incident_dir: vec3f, light_dir: vec3f, write_second: bool, can_allocate: bool) -> vec3f {
     let geo = hit_geometry(hit.instance_slot, hit.primitive, hit.bary);
     let world_pos = (hit.object_to_world * vec4f(geo.position, 1.0)).xyz;
     var world_normal = (hit.object_to_world * vec4f(geo.normal, 0.0)).xyz;
     let len_n = length(world_normal);
     if (len_n > 0.0) {
         world_normal = world_normal / len_n;
+    }
+    // 当前光栅/IBL 对可见背面采用双面法线，射线命中必须采用同一入射半球。
+    // 否则薄板背面反弹查到另一侧的缓存，室内光传递会丢失或穿过面。
+    if (dot(world_normal, -incident_dir) < 0.0) {
+        world_normal = -world_normal;
     }
     let material = materials[geo.material_index];
     var albedo = material.base_color.rgb;
@@ -297,6 +303,14 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     if (patch_cell[patch_idx] == INVALID_PATCH) {
         return;
     }
+    let write_second = (gi.frame.x & 1u) == 1u;
+    // 每条活跃 patch 都维护本帧版本；跳过射线估计不能跳过 ping-pong 的历史传递。
+    // 否则偶数 stride 的 patch 永远只写同一份，下一帧查表会读回旧种子并丢掉已收敛能量。
+    if (write_second) {
+        patch_irradiance1[patch_idx] = patch_irradiance0[patch_idx];
+    } else {
+        patch_irradiance0[patch_idx] = patch_irradiance1[patch_idx];
+    }
     // 帧稀释（9.6.5）：样本档降到 1 还超预算时按"patch 哈希取模"跳帧，让超出的部分
     // 摊到后续帧——用哈希而不是池下标的取模，避免按池顺序成块跳档（那会看出条带）。
     let stride = max(gi.estimation_l.z, 1u);
@@ -334,11 +348,16 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     let origin = position + normal * (gi.volume.x * RAY_ORIGIN_OFFSET_RELATIVE
         + RAY_ORIGIN_OFFSET_ABSOLUTE);
     let light_dir = frame.dir_to_light.xyz;
-    // 本帧写哪一份、以及能否申请 bounce 分配（只有 rank 0 的 patch 可以，Unity 同款）
-    let write_second = (gi.frame.x & 1u) == 1u;
+    // 只有 rank 0 的 patch 可以申请 bounce 分配。
     let can_allocate = gi.frame.z != 0u && rank == 0u;
 
     var accumulator = gi_rgbl1_zero();
+    // 分段诊断通道：把"天空 miss 贡献"与"命中面贡献"分开积累，折叠后写进 raw 的 .w。
+    // raw 的 .w 不参与任何求值（滤波只读 xyz，b15 的 .w 另存帧戳），只供 BRP 探针
+    // （`gi_estimate_probe` 的 diag）核对能量分配，代价是每条射线两次额外累加。
+    var sky_acc = gi_rgbl1_zero();
+    var hit_acc = gi_rgbl1_zero();
+    var miss_count = 0u;
     var valid = 0u;
     for (var i = 0u; i < sample_count; i = i + 1u) {
         let u = gi_r2_sample2(rng, 0u);
@@ -346,11 +365,15 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
         gi_r2_next(&rng);
         let hit = trace_scene(origin, dir, 0.0, RAY_TMAX, RAY_MASK);
         if (hit.hit) {
-            let radiance = hit_radiance(hit, light_dir, write_second, can_allocate);
+            let radiance = hit_radiance(hit, dir, light_dir, write_second, can_allocate);
             gi_project_accumulate(&accumulator, radiance, dir);
+            gi_project_accumulate(&hit_acc, radiance, dir);
             atomicAdd(&counters[10], 1u);
         } else {
-            gi_project_accumulate(&accumulator, environment_radiance(dir), dir);
+            let sky = environment_radiance(dir);
+            gi_project_accumulate(&accumulator, sky, dir);
+            gi_project_accumulate(&sky_acc, sky, dir);
+            miss_count = miss_count + 1u;
         }
         valid = valid + 1u;
     }
@@ -454,11 +477,20 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
         update_max,
     );
 
+    // 诊断通道落盘：l0.w = 天空项 E、l1x.w = 命中项 E、l1y.w = 天空占比、
+    // l1z.w = 本 patch 自身的太阳可见度（CSM 低阶版本，与直射项同源）。
+    let inv = select(0.0, GI_TWO_PI / f32(valid), valid > 0u);
+    let sky_folded = gi_cosine_convolve_fold(gi_rgbl1_scale(sky_acc, inv));
+    let hit_folded = gi_cosine_convolve_fold(gi_rgbl1_scale(hit_acc, inv));
+    let sky_e = sky_folded.l0 + sky_folded.l1x * normal.x + sky_folded.l1y * normal.y
+        + sky_folded.l1z * normal.z;
+    let hit_e = hit_folded.l0 + hit_folded.l1x * normal.x + hit_folded.l1y * normal.y
+        + hit_folded.l1z * normal.z;
     var out: PatchIrradiance;
-    out.l0 = vec4f(blended.l0, 0.0);
-    out.l1x = vec4f(blended.l1x, 0.0);
-    out.l1y = vec4f(blended.l1y, 0.0);
-    out.l1z = vec4f(blended.l1z, 0.0);
+    out.l0 = vec4f(blended.l0, sky_e.x);
+    out.l1x = vec4f(blended.l1x, hit_e.x);
+    out.l1y = vec4f(blended.l1y, f32(miss_count) / f32(valid));
+    out.l1z = vec4f(blended.l1z, shadow_visibility_low(position, normal, light_dir));
     if (write_second) {
         patch_irradiance1[patch_idx] = out;
     } else {

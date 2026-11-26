@@ -14,15 +14,21 @@ use bevy::prelude::*;
 use crate::common::syntax::ResultTierExt;
 use crate::render::{
     alloc_grid, bounce_alloc_groups, emissive_build_groups, estimation_groups, eviction_groups,
-    gi_cascade_offsets, light_sampling_groups, pack_alloc_push, pack_emissive_build_push,
-    pack_light_sampling_push, pack_view_push, plan_estimation_budget, scrolling_groups, DescSet,
-    GiAllocDraw, GiBounceAllocDraw, GiEmissiveBuildDraw, GiEstimationDraw, GiFrameDraw,
-    GiLightSampleDraw, GiPipelines, GiSettings, GiViewDraw, LightRecord, LightTable,
-    SurfaceCacheTables, SurfaceCacheUniformsData, EVICT_AGE, GI_BOUNCE_REQUEST_CAPACITY,
-    MAX_CASCADES, UPDATE_MAX,
+    gi_cascade_offsets, light_sampling_groups, pack_alloc_push, pack_denoise_push,
+    pack_emissive_build_push, pack_light_sampling_push, pack_screen_gather_push,
+    pack_spatial_filter_push, pack_temporal_filter_push, pack_upsample_push, pack_view_push,
+    plan_estimation_budget, scrolling_groups, spatial_filter_groups, upsample_groups, DescSet,
+    GiAllocDraw, GiBounceAllocDraw, GiDenoiseDraw, GiEmissiveBuildDraw, GiEstimationDraw,
+    GiFrameDraw, GiLightSampleDraw, GiPipelines, GiScreenGatherDraw, GiSettings,
+    GiSpatialFilterDraw, GiTemporalFilterDraw, GiUpsampleDraw, GiViewDraw, LightRecord, LightTable,
+    ScgiTargets, SurfaceCacheTables, SurfaceCacheUniformsData, DENOISE_STEPS, EVICT_AGE,
+    GI_BOUNCE_REQUEST_CAPACITY, MAX_CASCADES, UPDATE_MAX,
 };
 
 use super::scene::FrameView;
+
+/// 9.7.2 空间滤波的抖动样本数（Unity `SpatialFiltering` 同款默认 4；9.7.7 若要 A/B 再抬成参数）。
+const SPATIAL_FILTER_TAPS: u32 = 4;
 
 /// draw_frame 的表面缓存取用束。
 #[derive(SystemParam)]
@@ -30,6 +36,8 @@ pub(super) struct GiInput<'w> {
     pub(super) settings: Res<'w, GiSettings>,
     pub(super) tables: ResMut<'w, SurfaceCacheTables>,
     pub(super) pipelines: Res<'w, GiPipelines>,
+    /// 9.7.4 的 1/4 屏幕目标（随 swapchain 尺寸懒重建）。
+    pub(super) scgi: ResMut<'w, ScgiTargets>,
 }
 
 /// draw_frame 的 GI 段跨帧状态。
@@ -96,6 +104,8 @@ pub(super) fn prepare_gi(
     let offsets_changed =
         !local.was_enabled || offsets[..cascades] != local.prev_offsets[..cascades];
     let frame_index = local.frame_index;
+    // GI 帧号在关态冻结，不能只凭相邻帧戳认定历史连续。
+    let history_contiguous = local.was_enabled;
 
     // 9.6.2：把活灯按紧凑顺序写进本帧槽的光源表（清单与 estimation 都按 0..light_count 索引）。
     // 每帧重写 16 KiB：比"变更检测 + 增量"简单，且环表的槽号是持久分配的、不能直接当紧凑下标。
@@ -129,6 +139,29 @@ pub(super) fn prepare_gi(
         ring_words[crate::render::RING_ACTIVE * 4 + 2],
         ring_words[crate::render::RING_ACTIVE * 4 + 3],
     ]);
+    // 9.5 整理的按需门控：读配置的区间长度 == 活跃数 ⇒ ring 里没有洞，整段跳过。
+    // 否则每帧都要重扫并重写整个 ring——稳态下 `defrag_moved` 会等于活跃池，
+    // 等于"每帧把全场搬一遍"（白烧带宽，并在补上 b14/b15 之前冲掉时域历史）。
+    let word = |index: usize| {
+        u32::from_le_bytes([
+            ring_words[index * 4],
+            ring_words[index * 4 + 1],
+            ring_words[index * 4 + 2],
+            ring_words[index * 4 + 3],
+        ])
+    };
+    let ring_flip = word(crate::render::RING_FLIP) as usize;
+    let ring_count = word(crate::render::RING_CONFIGS + ring_flip * 4 + 1);
+    // 空洞比例低于阈值就先不整理：槽位有效性由 cell↔patch 双表互指保证（陈旧槽只会被当死项
+    // 忽略），稀疏 12% 以内只是少量空槽，压紧的收益抵不过"每帧搬整场"的带宽。超过阈值才开波。
+    const DEFRAG_HOLE_PERCENT: u32 = 12;
+    let holes = ring_count.saturating_sub(active_patches);
+    // 双条件：空洞比例过阈值，或者 ring 区间已经涨到池容量的一半（安全阀——比例门控下
+    // 长期稀疏也只是浪费扫描范围，但区间一旦逼近容量就必须压紧，否则 `start + offset`
+    // 绕圈会把条目覆盖掉）。
+    let ring_holey = ring_count > 0
+        && (holes * 100 >= ring_count * DEFRAG_HOLE_PERCENT
+            || ring_count * 2 >= config.capacity.max(1));
     let budget_plan =
         plan_estimation_budget(active_patches, settings.samples.max(1), settings.budget);
 
@@ -174,7 +207,12 @@ pub(super) fn prepare_gi(
 
     let pipelines = &*gi.pipelines;
     let gi_set = gi.tables.set(slot);
-    let waves = settings.defrag_waves.min(16);
+    // 没有洞就一波都不录：整理只在"真的需要压紧"时才跑
+    let waves = if ring_holey {
+        settings.defrag_waves.min(16)
+    } else {
+        0
+    };
     let alloc = settings.seed.then(|| {
         let (low, groups) = alloc_grid(extent);
         GiAllocDraw {
@@ -251,6 +289,100 @@ pub(super) fn prepare_gi(
     } else {
         None
     };
+    // 9.7.2 空间滤波：9.7.6 起整条屏幕链由 `scgi` 把关——`scgi = 0` 时这里一条都不录，
+    // 于是"关 = 基线且零新增命令"成立。`scgi = 1` 时即使空间滤波开关关掉也**仍然录**，
+    // push 里 enabled=0 → shader 直拷，`filtered` 表因此永远是"本帧可消费的完整一份"。
+    let screen_chain = estimation.is_some() && settings.scgi;
+    let spatial_filter = screen_chain.then(|| GiSpatialFilterDraw {
+        pass: pipelines.spatial_filter(),
+        push: pack_spatial_filter_push(
+            settings.spatial_filter,
+            SPATIAL_FILTER_TAPS,
+            frame_index,
+            config.capacity,
+            settings.spatial_radius,
+        ),
+        groups: spatial_filter_groups(config.capacity),
+        frame_set,
+        gi_set,
+    });
+    // 9.7.3 时域后滤波：跟空间滤波同生灭（没有 A 就没有可混合的输入）。关态同样录，
+    // push 里 enabled=0 → B = A 直拷。
+    let temporal_filter = spatial_filter.as_ref().map(|_| GiTemporalFilterDraw {
+        pass: pipelines.temporal_filter(),
+        push: pack_temporal_filter_push(
+            settings.temporal_filter && history_contiguous,
+            config.capacity,
+            frame_index,
+            settings.temporal_smoothing,
+        ),
+        groups: spatial_filter_groups(config.capacity),
+        frame_set,
+        gi_set,
+    });
+    // 9.7.4 1/4 屏幕查表：时域滤波之后跑（读 B）。目标图已在帧首 ensure 过，尺寸为 0 说明
+    // 还没建（首帧前）——此时不录，下帧补上。
+    let screen_gather = temporal_filter.as_ref().and_then(|_| {
+        let low = gi.scgi.low_extent();
+        if low.width == 0 || low.height == 0 {
+            return None;
+        }
+        Some(GiScreenGatherDraw {
+            pass: pipelines.screen_gather(),
+            push: pack_screen_gather_push(
+                low,
+                extent,
+                frame_index,
+                settings.normal_source,
+                settings.lookup_samples,
+            ),
+            groups: alloc_grid(extent).1,
+            frame_set,
+            gi_set,
+            gbuffer_set,
+            target_set: gi.scgi.set(),
+        })
+    });
+    // 9.7.5 去噪与上采样：跟着查表走。去噪每遍换一次描述符集（P0→P1、P1→P0 交替），
+    // 遍数 0 时上采样直接读 P0。
+    let denoise = screen_gather.as_ref().map_or_else(Vec::new, |_| {
+        let low = gi.scgi.low_extent();
+        (0..settings.denoise_passes)
+            .map(|k| GiDenoiseDraw {
+                pass: pipelines.denoise(),
+                push: pack_denoise_push(
+                    low,
+                    extent,
+                    DENOISE_STEPS[k as usize % DENOISE_STEPS.len()],
+                ),
+                groups: alloc_grid(extent).1,
+                frame_set,
+                gbuffer_set,
+                target_set: if k % 2 == 0 {
+                    gi.scgi.set()
+                } else {
+                    gi.scgi.set_reverse()
+                },
+            })
+            .collect()
+    });
+    let upsample = screen_gather.as_ref().map(|_| {
+        let low = gi.scgi.low_extent();
+        // 去噪遍数为奇数时最终结果在 P1（反方向集），偶数时在 P0（主方向集）
+        let target_set = if settings.denoise_passes % 2 == 1 {
+            gi.scgi.set_reverse()
+        } else {
+            gi.scgi.set()
+        };
+        GiUpsampleDraw {
+            pass: pipelines.upsample(),
+            push: pack_upsample_push(low, extent, u32::from(settings.upsample_bilinear)),
+            groups: upsample_groups(extent),
+            frame_set,
+            gbuffer_set,
+            target_set,
+        }
+    });
     let marker = settings.markers_enabled().then(|| pipelines.marker());
     let view_draw = (cover.is_some() || marker.is_some()).then(|| GiViewDraw {
         cover,
@@ -259,6 +391,8 @@ pub(super) fn prepare_gi(
         frame_set,
         gbuffer_set,
         gi_set,
+        // 9.7.7：视图 14/15 读 SCGI 全分辨率辐照度
+        scgi_set: gi.scgi.sample_set(),
         capacity: config.capacity,
         ldr_view: ldr.0,
         ldr_image: ldr.1,
@@ -276,6 +410,11 @@ pub(super) fn prepare_gi(
         light_sampling,
         estimation,
         bounce_alloc,
+        spatial_filter,
+        temporal_filter,
+        screen_gather,
+        denoise,
+        upsample,
         gi_set,
         view: view_draw,
     }))

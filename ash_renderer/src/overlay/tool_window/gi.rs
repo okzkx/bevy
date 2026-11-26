@@ -26,6 +26,8 @@ const VIEWS: &[(u32, &str)] = &[
     (11, "方差（绿稳 / 红抖）"),
     (12, "更新次数（收敛程度）"),
     (13, "rank 分布（0 屏幕播种 / 1 bounce）"),
+    (14, "屏幕辐照度（SCGI 求值 × 曝光）"),
+    (15, "覆盖率 a（0 = 不接管 / 1 = 完全接管）"),
 ];
 
 /// 形态名（0 覆盖图 / 1 覆盖图+方片 / 2 只方片）。
@@ -133,6 +135,36 @@ impl GiPage<'_> {
                 .fixed_decimals(0),
         );
         ui.small("样本档会被射线预算自动降档（视图 9 看本帧实际档位与稀释）。");
+        ui.checkbox(&mut gi.spatial_filter, "空间滤波（切平面抖动 taps）");
+        ui.add(
+            egui::Slider::new(&mut gi.spatial_radius, 0.0..=8.0)
+                .text("空间滤波半径（体素倍数）")
+                .fixed_decimals(2),
+        );
+        ui.checkbox(
+            &mut gi.temporal_filter,
+            "时域后滤波（上一帧权重 0.9～0.95）",
+        );
+        ui.add(
+            egui::Slider::new(&mut gi.lookup_samples, 1..=3)
+                .text("1/4 查表样本数")
+                .fixed_decimals(0),
+        );
+        ui.add(
+            egui::Slider::new(&mut gi.denoise_passes, 0..=4)
+                .text("去噪遍数（3×3，步长 1/2/2/3）")
+                .fixed_decimals(0),
+        );
+        ui.checkbox(&mut gi.upsample_bilinear, "上采样退回纯双线性（A/B）");
+        ui.checkbox(
+            &mut gi.scgi,
+            "SCGI 注入（关 = 回 IBL 基线，整条屏幕链不录）",
+        );
+        ui.add(
+            egui::Slider::new(&mut gi.temporal_smoothing, 0.0..=1.0)
+                .text("时域平滑度")
+                .fixed_decimals(2),
+        );
         ui.add(
             egui::Slider::new(&mut gi.defrag_waves, 0..=16)
                 .text("每帧整理波数（每波 512 条）")

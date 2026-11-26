@@ -5,7 +5,7 @@
 //! 两份实现必须逐式一致（同一取整语义、同一有符号正模）；改一处必须同步另一处。
 //! 口径推导见 9.5 施工计划 §0.1 与讲解《patch 池与格子系统讲解》。
 
-use bevy::math::{IVec3, Vec3};
+use bevy::math::{IVec3, Mat4, Vec2, Vec3, Vec4};
 
 use crate::render::passes::ibl::octahedral;
 
@@ -183,6 +183,85 @@ pub fn direction_bucket(normal: [f32; 3]) -> u32 {
     octahedral::direction_to_bucket(normal, BUCKET_RESOLUTION)
 }
 
+/// 与 `gi_cell.wgsl` 同式的 reverse-Z 深度反投影。
+pub(crate) fn world_from_depth(uv: Vec2, depth: f32, inv_view_proj: Mat4) -> Vec3 {
+    let world = inv_view_proj * Vec4::new(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    world.truncate() / world.w
+}
+
+/// 深度法线 CPU 镜像；depth 顺序为 center/left/right/down/up。
+/// 仅视口边缘允许内侧单边差分，内部断层与退化平面返回零。
+pub(crate) fn flat_normal(
+    uv: Vec2,
+    texel: Vec2,
+    depth: [f32; 5],
+    inv_view_proj: Mat4,
+    camera_pos: Vec3,
+) -> Vec3 {
+    let [d0, left, right, down, up] = depth;
+    let ok = |d: f32| d > 0.0 && (d - d0).abs() <= 0.05 * d0;
+    let world = |uv: Vec2, d: f32| world_from_depth(uv, d, inv_view_proj);
+    let p = world(uv, d0);
+    let dx = Vec2::new(texel.x, 0.0);
+    let dy = Vec2::new(0.0, texel.y);
+    let t = if uv.x >= texel.x && uv.x <= 1.0 - texel.x && ok(left) && ok(right) {
+        world(uv + dx, right) - world(uv - dx, left)
+    } else if uv.x < texel.x && uv.x + texel.x <= 1.0 && ok(right) {
+        world(uv + dx, right) - p
+    } else if uv.x > 1.0 - texel.x && uv.x - texel.x >= 0.0 && ok(left) {
+        p - world(uv - dx, left)
+    } else {
+        Vec3::ZERO
+    };
+    let b = if uv.y >= texel.y && uv.y <= 1.0 - texel.y && ok(up) && ok(down) {
+        world(uv + dy, down) - world(uv - dy, up)
+    } else if uv.y < texel.y && uv.y + texel.y <= 1.0 && ok(down) {
+        world(uv + dy, down) - p
+    } else if uv.y > 1.0 - texel.y && uv.y - texel.y >= 0.0 && ok(up) {
+        p - world(uv - dy, up)
+    } else {
+        Vec3::ZERO
+    };
+    let cross = t.cross(b);
+    if t.length_squared() < 1e-12 || b.length_squared() < 1e-12 || cross.length_squared() < 1e-24 {
+        return Vec3::ZERO;
+    }
+    let n = cross.normalize();
+    if n.dot(camera_pos - p) < 0.0 {
+        -n
+    } else {
+        n
+    }
+}
+
+/// 播种与 9.7 屏幕 gather 共用的 1/4 网格口径：本帧在 4×4 块内被播种的子像素（列, 行）。
+///
+/// WGSL 同式见 `shaders/common/gi_lookup.wgsl` 的 `seed_subsample`：
+/// `sub = (frame·7) mod 16`，列 = `sub % 4`、行 = `sub / 4`。7 与 16 互质 → 16 帧走遍
+/// 整块且是双射（不是来回两点）。改动必须两边同步，否则 gather 的命中率读数不可信。
+#[allow(dead_code)] // 9.7.4 的 screen_gather 组装 push 时接入，本任务先落实现与单测
+pub fn seed_subsample(frame_index: u32) -> (u32, u32) {
+    let sub = frame_index.wrapping_mul(7) % 16;
+    (sub % 4, sub / 4)
+}
+
+/// 1/4 像素 + 块内偏移 → 全分辨率像素（与 `patch_alloc.wgsl` 的
+/// `full = low*4 + sub%4 / sub/4` 同式；两轴各自线性放大）。
+#[allow(dead_code)] // 同上：9.7.4 起被 screen_gather / 上采样口径复用
+pub fn low_to_full(low: (u32, u32), sub: (u32, u32)) -> (u32, u32) {
+    (low.0 * 4 + sub.0, low.1 * 4 + sub.1)
+}
+
+/// gather 的 3 个块内样本点：本帧播种点、它的对角、块心 `(1, 1)`。
+///
+/// 三点都落在同一个 4×4 块内（9.7 施工计划 §9.7.1）。块心取四个中心像素的左上那个，
+/// 与 `low_to_full` 的整数算术一致。
+#[allow(dead_code)] // 同上：9.7.4 的 3 点采样口径
+pub fn gather_sample_offsets(frame_index: u32) -> [(u32, u32); 3] {
+    let (sx, sy) = seed_subsample(frame_index);
+    [(sx, sy), (3 - sx, 3 - sy), (1, 1)]
+}
+
 /// 各级整数体素偏移：`offset_i = floor(focus / v_i + 0.5)`（按整个体素对齐；
 /// 相机在体素内部游移不改变偏移，跨过体素边界才变 1）。
 pub fn cascade_offsets(focus: Vec3, config: &SurfaceCacheConfig) -> [IVec3; MAX_CASCADES] {
@@ -202,6 +281,73 @@ mod tests {
     use super::*;
 
     const CONFIG: SurfaceCacheConfig = SurfaceCacheConfig::default();
+
+    #[test]
+    fn depth_reconstruction_uses_vulkan_uv_y_and_faces_camera() {
+        let p = world_from_depth(Vec2::new(0.25, 0.75), 0.4, Mat4::IDENTITY);
+        assert!((p - Vec3::new(-0.5, -0.5, 0.4)).length() < 1e-6);
+        let n = flat_normal(
+            Vec2::splat(0.5),
+            Vec2::splat(0.05),
+            [0.4; 5],
+            Mat4::IDENTITY,
+            Vec3::Z,
+        );
+        assert!((n - Vec3::Z).length() < 1e-6);
+        let n = flat_normal(
+            Vec2::splat(0.5),
+            Vec2::splat(0.05),
+            [0.4; 5],
+            Mat4::IDENTITY,
+            -Vec3::Z,
+        );
+        assert!((n + Vec3::Z).length() < 1e-6);
+    }
+
+    #[test]
+    fn depth_stencil_rejects_interior_edges_but_preserves_viewport_boundary() {
+        let depth = [0.4, 0.0, 0.4, 0.4, 0.4];
+        assert_eq!(
+            flat_normal(
+                Vec2::splat(0.5),
+                Vec2::splat(0.05),
+                depth,
+                Mat4::IDENTITY,
+                Vec3::Z
+            ),
+            Vec3::ZERO
+        );
+        let edge = flat_normal(
+            Vec2::new(0.025, 0.5),
+            Vec2::splat(0.05),
+            depth,
+            Mat4::IDENTITY,
+            Vec3::Z,
+        );
+        assert!((edge - Vec3::Z).length() < 1e-6);
+        let jump = [0.4, 0.6, 0.4, 0.4, 0.4];
+        assert_eq!(
+            flat_normal(
+                Vec2::splat(0.5),
+                Vec2::splat(0.05),
+                jump,
+                Mat4::IDENTITY,
+                Vec3::Z
+            ),
+            Vec3::ZERO
+        );
+        let collapsed = Mat4::from_scale(Vec3::new(0.0, 1.0, 1.0));
+        assert_eq!(
+            flat_normal(
+                Vec2::splat(0.5),
+                Vec2::splat(0.05),
+                [0.4; 5],
+                collapsed,
+                Vec3::Z
+            ),
+            Vec3::ZERO
+        );
+    }
 
     /// 正模：负输入的存储槽必须落在 [0, res)。
     #[test]
@@ -349,6 +495,60 @@ mod tests {
             assert!(
                 (0..res).contains(&pv.x) && (0..res).contains(&pv.y) && (0..res).contains(&pv.z)
             );
+        }
+    }
+
+    /// 9.7.1 闸门 3：1/4 网格口径——16 帧内子像素走遍 4×4 整块且不重复（双射）。
+    ///
+    /// 这条钉的正是 gather 与播种"必须同格"的前提：若 7 与 16 不互质（如改成 8），
+    /// 子像素会在两点间来回，gather 有一半的块查到本帧根本没播种的位置。
+    #[test]
+    fn seed_subsample_walks_whole_block_once() {
+        let mut seen = std::collections::BTreeSet::new();
+        for frame in 0..16u32 {
+            let (sx, sy) = seed_subsample(frame);
+            assert!(
+                sx < 4 && sy < 4,
+                "frame={frame} sub=({sx},{sy}) 越出 4×4 块"
+            );
+            seen.insert((sx, sy));
+        }
+        assert_eq!(seen.len(), 16, "16 帧应覆盖整块 16 个子像素");
+        // 周期性：第 16 帧回到第 0 帧
+        assert_eq!(seed_subsample(16), seed_subsample(0));
+        assert_eq!(seed_subsample(17), seed_subsample(1));
+    }
+
+    /// 9.7.1 闸门 3：`low_to_full` 与播种的 `full = low*4 + sub%4 / sub/4` 逐点同式。
+    ///
+    /// 这里把播种侧公式独立重写一遍（不调用 `low_to_full`），两种写法给出同一坐标才算同源。
+    #[test]
+    fn low_to_full_matches_seeding_formula() {
+        for frame in [0u32, 1, 3, 7, 15, 31, 1234] {
+            let sub_index = (frame.wrapping_mul(7)) % 16;
+            for low in [(0u32, 0u32), (1, 2), (479, 269), (10_000, 3)] {
+                let expected = (low.0 * 4 + sub_index % 4, low.1 * 4 + sub_index / 4);
+                let actual = low_to_full(low, seed_subsample(frame));
+                assert_eq!(actual, expected, "frame={frame} low={low:?}");
+            }
+        }
+    }
+
+    /// 9.7.1：三个 gather 样本点都在同一 4×4 块内，第一个是播种点、第二个是对角。
+    #[test]
+    fn gather_samples_stay_inside_block() {
+        for frame in 0..20u32 {
+            let (sx, sy) = seed_subsample(frame);
+            let points = gather_sample_offsets(frame);
+            assert_eq!(points[0], (sx, sy), "第一个样本必须与播种同格");
+            assert_eq!(points[1], (3 - sx, 3 - sy), "第二个样本是对角");
+            assert_eq!(points[2], (1, 1), "块心固定 (1,1)");
+            for (px, py) in points {
+                assert!(
+                    px < 4 && py < 4,
+                    "frame={frame} 样本 ({px},{py}) 越出 4×4 块"
+                );
+            }
         }
     }
 }

@@ -15,7 +15,8 @@
 //   死项忽略，绝不误伤整理后的活 patch。
 //
 // 接口：set0 b0 cell→patch / b2..b5 四张 patch 表 / b6 patch→cell / b7 ring /
-// b8 计数 / b9 GI UBO。dispatch 组数 = UBO ring.x（每帧波数），每组一个 workgroup。
+// b8 计数 / b9 GI UBO / b14+b15 时域滤波历史（跟着 patch 搬）。dispatch 组数 = UBO ring.x
+//（每帧波数），每组一个 workgroup。
 // #import gi_cell
 
 const DEFRAG_WAVE: u32 = 512u;
@@ -30,6 +31,11 @@ const DEFRAG_THREADS: u32 = 256u;
 @group(0) @binding(7) var<storage, read_write> ring: array<atomic<u32>, 12>;
 @group(0) @binding(8) var<storage, read_write> counters: array<atomic<u32>, 16>;
 @group(0) @binding(9) var<uniform> gi: GiUniforms;
+// 9.7.3 时域滤波的两张表**按槽位**存历史：搬 patch 时必须一起搬，否则新槽位上留着
+// 另一条 patch 的历史，指数滑动平均每帧都混进别人的值（实测会把屏幕侧能量压到 0.42 倍，
+// 并且逐帧抖动——见 9.7.3 施工记录 §补漏）。
+@group(0) @binding(14) var<storage, read_write> filtered_irradiance0: array<PatchIrradiance>;
+@group(0) @binding(15) var<storage, read_write> filtered_irradiance1: array<PatchIrradiance>;
 
 @compute @workgroup_size(256)
 fn cs_main(@builtin(local_invocation_index) lid: u32) {
@@ -56,6 +62,14 @@ fn cs_main(@builtin(local_invocation_index) lid: u32) {
     var irradiance1_b: PatchIrradiance;
     var statistics0: PatchStatistics;
     var statistics1: PatchStatistics;
+    // 时域滤波的两条历史（b14/b15）跟着 patch 走
+    var filtered0_a: PatchIrradiance;
+    var filtered1_a: PatchIrradiance;
+    var filtered0_b: PatchIrradiance;
+    var filtered1_b: PatchIrradiance;
+    // 源槽号：写相位用它判断"原地不动"（dst == src 时不必回写）
+    var slot0 = INVALID_PATCH;
+    var slot1 = INVALID_PATCH;
 
     if (offset0 < count) {
         let slot = (start + offset0) % capacity;
@@ -64,10 +78,13 @@ fn cs_main(@builtin(local_invocation_index) lid: u32) {
         if (cell != INVALID_PATCH && cell_patch[cell] == slot) {
             live0 = 1u;
             cell0 = cell;
+            slot0 = slot;
             geometry0 = patch_geometry[slot];
             irradiance0_a = patch_irradiance0[slot];
             irradiance1_a = patch_irradiance1[slot];
             statistics0 = patch_statistics[slot];
+            filtered0_a = filtered_irradiance0[slot];
+            filtered1_a = filtered_irradiance1[slot];
         }
     }
     if (offset1 < count) {
@@ -76,10 +93,13 @@ fn cs_main(@builtin(local_invocation_index) lid: u32) {
         if (cell != INVALID_PATCH && cell_patch[cell] == slot) {
             live1 = 1u;
             cell1 = cell;
+            slot1 = slot;
             geometry1 = patch_geometry[slot];
             irradiance0_b = patch_irradiance0[slot];
             irradiance1_b = patch_irradiance1[slot];
             statistics1 = patch_statistics[slot];
+            filtered0_b = filtered_irradiance0[slot];
+            filtered1_b = filtered_irradiance1[slot];
         }
     }
 
@@ -91,24 +111,36 @@ fn cs_main(@builtin(local_invocation_index) lid: u32) {
     if (live0 == 1u) {
         let dst_offset = atomicAdd(&ring[write_config + 1u], 1u);
         let dst = (start + dst_offset) % capacity;
-        patch_geometry[dst] = geometry0;
-        patch_irradiance0[dst] = irradiance0_a;
-        patch_irradiance1[dst] = irradiance1_a;
-        patch_statistics[dst] = statistics0;
-        patch_cell[dst] = cell0;
-        cell_patch[cell0] = dst;
-        atomicAdd(&counters[3], 1u);
+        // 领取号（上面的 atomicAdd）必须每条存活项都做——那是本轮的"存活数"累计；
+        // 但落到 dst == src 时这一条根本不用动：稳态（ring 没洞）下这是绝大多数"搬"。
+        // 跳过整块写回，`counters[3]` 也只在真的搬了才加，指标才反映实际搬运量。
+        if (dst != slot0) {
+            patch_geometry[dst] = geometry0;
+            patch_irradiance0[dst] = irradiance0_a;
+            patch_irradiance1[dst] = irradiance1_a;
+            patch_statistics[dst] = statistics0;
+            patch_cell[dst] = cell0;
+            cell_patch[cell0] = dst;
+            // 时域历史（b14/b15）跟着 patch 走
+            filtered_irradiance0[dst] = filtered0_a;
+            filtered_irradiance1[dst] = filtered1_a;
+            atomicAdd(&counters[3], 1u);
+        }
     }
     if (live1 == 1u) {
         let dst_offset = atomicAdd(&ring[write_config + 1u], 1u);
         let dst = (start + dst_offset) % capacity;
-        patch_geometry[dst] = geometry1;
-        patch_irradiance0[dst] = irradiance0_b;
-        patch_irradiance1[dst] = irradiance1_b;
-        patch_statistics[dst] = statistics1;
-        patch_cell[dst] = cell1;
-        cell_patch[cell1] = dst;
-        atomicAdd(&counters[3], 1u);
+        if (dst != slot1) {
+            patch_geometry[dst] = geometry1;
+            patch_irradiance0[dst] = irradiance0_b;
+            patch_irradiance1[dst] = irradiance1_b;
+            patch_statistics[dst] = statistics1;
+            patch_cell[dst] = cell1;
+            cell_patch[cell1] = dst;
+            filtered_irradiance0[dst] = filtered0_b;
+            filtered_irradiance1[dst] = filtered1_b;
+            atomicAdd(&counters[3], 1u);
+        }
     }
 
     workgroupBarrier();

@@ -1,9 +1,8 @@
 // 9.5 心跳淘汰（compute）：容量线程（不是活跃数——线程里先判槽是否在用）。心跳距离按
 // 模 65536 的最短距算（直接相减会在约 18 分钟处把全场同时淘汰）。
 //
-// 首版只做"无 bounce 直接释放"分支：bounce 的"先降 rank 1 再淘汰"留给 9.6（GI UBO 的
-// frame.z 位已留）。陈旧槽指针（整理搬走后残留的 patch→cell）只清自己，不碰 cell 侧
-// （cell 已指向新槽）。
+// multi-bounce 开启时，过期的 rank 0 先降到 rank 1，再给一个回收周期。
+// 陈旧槽指针（整理搬走后残留的 patch→cell）只清自己，不碰已指向新槽的 cell。
 //
 // 接口：set0 b0 cell→patch / b5 统计（心跳） / b6 patch→cell / b7 ring / b8 计数 / b9 UBO。
 // dispatch 线程 = 池容量。
@@ -31,7 +30,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
         patch_cell[slot] = INVALID_PATCH;
         return;
     }
-    // bounce 分支（9.6）：frame.z != 0 且 rank == 0 时先降 rank 1，下一轮再淘汰。
+    let age = heartbeat_age(gi.frame.x, patch_statistics[slot].heartbeat);
+    if (age <= gi.frame.y) {
+        return;
+    }
+    // 只有过期的可见 patch 才降为 bounce；近期 rank 0 跨播种相位保持有效。
     if (gi.frame.z != 0u) {
         let rank = patch_statistics[slot].state & 0xFFu;
         if (rank == 0u) {
@@ -39,10 +42,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
             patch_statistics[slot].heartbeat = gi.frame.x & 0xFFFFu;
             return;
         }
-    }
-    let age = heartbeat_age(gi.frame.x, patch_statistics[slot].heartbeat);
-    if (age <= gi.frame.y) {
-        return;
     }
     patch_cell[slot] = INVALID_PATCH;
     cell_patch[cell] = INVALID_PATCH;

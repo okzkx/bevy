@@ -306,6 +306,8 @@ impl FramePool {
                 feature.cluster.set,
                 feature.shadow.set,
                 feature.ibl.set,
+                // 9.7.6：SCGI 全分辨率辐照度（`frame.scgi.x == 0` 时不读，集恒绑保 layout 恒定）
+                feature.scgi_set,
             ],
         }
         .record(device, cb);
