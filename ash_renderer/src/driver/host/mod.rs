@@ -25,9 +25,11 @@ use bevy::{
 };
 
 use crate::render::{
-    BloomSettings, Context, CullDiagnostics, CullSettings, ExposureSettings, FrameSyncSettings,
-    IblSettings, IndirectStats, LodDiagnostics, LodSettings, OcclusionDiagnostics,
-    OcclusionSettings, PerfLedger, RenderMode, ShadowSettings, SkySettings, SmaaSettings,
+    BloomSettings, ColorScopeReader, ColorScopeSettings, Context, CullDiagnostics, CullSettings,
+    ExposureSettings,
+    FrameSyncSettings, IblSettings, IndirectStats, LodDiagnostics, LodSettings,
+    OcclusionDiagnostics, OcclusionSettings, PerfLedger, RenderMode, ShadowSettings, SkySettings,
+    SmaaSettings,
 };
 use crate::scene::DrawListVerify;
 use ash_macros::system;
@@ -71,6 +73,9 @@ impl Plugin for AshHostPlugin {
             .init_resource::<BloomSettings>()
             // 自动曝光（独立显示段模块）：BRP exposure_set 直达
             .init_resource::<ExposureSettings>()
+            // 颜色校验（9.9）：默认关，egui「颜色」页与 BRP color_scope_set 写同一份
+            .init_resource::<ColorScopeSettings>()
+            .init_resource::<ColorScopeReader>()
             // SMAA 开关：BRP smaa_set 直达
             .init_resource::<SmaaSettings>()
             // 程序化天空参数：天空面板与 BRP sky_set 写同一份

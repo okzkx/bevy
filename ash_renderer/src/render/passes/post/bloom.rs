@@ -106,6 +106,8 @@ pub struct BloomParamsData {
     pub curve: f32,
     /// 亮度增益：tonemap 前 AP1 颜色乘它（1.0 = 纯 ACES，1.667 = ACES_LEGACY 观感）。
     pub gain: f32,
+    /// 校色强度（9.9.8）：曲线末端的 `mix` 系数，0 = 曝光后线性钳位、1 = 完整曲线。
+    pub tonemap_strength: f32,
 }
 
 #[repr(C)]
@@ -115,7 +117,8 @@ struct BloomParamsLayout {
     tonemap: f32,
     curve: f32,
     gain: f32,
-    _pad: [f32; 3],
+    tonemap_strength: f32,
+    _pad: [f32; 2],
 }
 
 const _: () = {
@@ -131,6 +134,7 @@ pub fn pack_bloom_params(d: &BloomParamsData) -> [u8; BLOOM_PARAMS_SIZE as usize
     put_f32(&mut out, 8, d.tonemap);
     put_f32(&mut out, 12, d.curve);
     put_f32(&mut out, 16, d.gain);
+    put_f32(&mut out, 20, d.tonemap_strength);
     out
 }
 
@@ -161,18 +165,25 @@ pub struct BloomSettings {
     pub tonemap: bool,
     pub curve: TonemapCurve,
     pub gain: f32,
+    /// 校色强度（0…=1）：末端 `mix`，1.0 时与立案基线逐位一致。
+    pub tonemap_strength: f32,
 }
 
 impl Default for BloomSettings {
     fn default() -> Self {
         // 预览曝光覆盖含真实遮挡的室内间接光；这只是全帧显示校准，不改变 GI 物理辐照度。
         // GI 与 IBL 对照使用同一增益，不能随 SCGI 开关自动切曝光。BRP/面板仍可独立调节。
+        //
+        // 9.9.9：随曝光 key 0.01 → 0.01305 同步从 8.0 降到 6.13，保持 key × gain = 0.08
+        // 不变（未触下限的场景曲线输入不变，室内基线 C 域 p50 差 0.00%）；纯天空/日落
+        // 由新的 `min_scale = 0.05` 接管压暗，不再被固定增益送进曲线肩部。
         Self {
             enabled: true,
             strength: 0.04,
             tonemap: true,
             curve: TonemapCurve::default(),
-            gain: 8.0,
+            gain: 6.13,
+            tonemap_strength: 1.0,
         }
     }
 }
@@ -475,6 +486,18 @@ impl BloomTargets {
     #[must_use]
     pub fn up_image(&self, level: usize) -> vk::Image {
         self.up[level].image()
+    }
+
+    /// 第 `slot` 帧槽的 Bloom 参数 UBO（present set2 b3 与本管线同源）。
+    #[must_use]
+    pub fn params_buffer(&self, slot: usize) -> vk::Buffer {
+        self.ubos[slot].buffer()
+    }
+
+    /// Bloom 链自带的线性采样器（present set2 b2 与本管线同源）。
+    #[must_use]
+    pub fn sampler(&self) -> vk::Sampler {
+        self.sampler
     }
 }
 

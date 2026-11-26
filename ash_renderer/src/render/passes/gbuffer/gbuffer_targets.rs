@@ -171,6 +171,13 @@ impl GBufferTargets {
         self.slots[slot].hdr.view()
     }
 
+    /// 共享线性采样器（present 的 blit_sampler 就是它，颜色校验取样沿用同一个，
+    /// 保证 A 域与 present 采到同一批 texel）。
+    #[must_use]
+    pub fn sampler(&self) -> vk::Sampler {
+        self.sampler
+    }
+
     /// 第 `slot` 帧槽的 albedo image 句柄（布局屏障用）。
     #[must_use]
     pub fn albedo_image(&self, slot: usize) -> vk::Image {

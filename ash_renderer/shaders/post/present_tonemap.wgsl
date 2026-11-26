@@ -17,6 +17,7 @@
 // 调试显示模式（mode != 0）时 HDR 里是直出的可视化，跳过 bloom 与色调映射，免得失真。
 // #import frame
 // #import fullscreen
+// #import tonemap_shared
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(1) @binding(2) var hdr_tex: texture_2d<f32>;
@@ -25,14 +26,6 @@
 @group(2) @binding(2) var bloom_sampler: sampler;
 @group(2) @binding(3) var<uniform> bloom_params: BloomParams;
 @group(3) @binding(0) var<storage, read> exposure_state: array<vec4f>;
-
-struct BloomParams {
-    strength: f32,
-    enabled: f32,
-    tonemap: f32,
-    curve: f32,
-    gain: f32,
-}
 
 // Narkowicz ACES 拟合（线性进出）
 fn aces_narkowicz(x: vec3f) -> vec3f {
@@ -227,16 +220,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     }
     var bloom = vec3f(0.0);
     if (bloom_params.enabled > 0.5) {
-        bloom = textureSampleLevel(bloom_tex, bloom_sampler, in.uv, 0.0).rgb
-            * bloom_params.strength;
+        // 只取采样值：乘强度、加 hdr 的次序由 tonemap_shared 统一（与 9.9 抽取前一致）
+        bloom = textureSampleLevel(bloom_tex, bloom_sampler, in.uv, 0.0).rgb;
     }
-    // 自动曝光的全帧倍数（手动模式 / 尚未跑过曝光段时写 1.0，见 cs_adapt）
-    let exposure_scale = select(1.0, exposure_state[0].y, exposure_state[0].y > 0.0);
-    let color = (hdr + bloom) * exposure_scale;
+    // 自动曝光倍数 + Bloom 叠加都走公共片段：颜色校验面板的 B 域与这里同式
+    let color = tonemap_input_color(
+        hdr,
+        bloom,
+        bloom_params,
+        exposure_scale_of(exposure_state[0]),
+    );
+    var mapped: vec3f;
     if (bloom_params.curve < 0.5) {
-        return vec4f(aces_narkowicz(color), 1.0);
+        mapped = aces_narkowicz(color);
+    } else {
+        let rec2020 = SRGB_TO_REC2020 * color;
+        mapped = REC2020_TO_SRGB * ACES(rec2020, bloom_params.gain);
     }
-    let rec2020 = SRGB_TO_REC2020 * color;
-    let mapped = ACES(rec2020, bloom_params.gain);
-    return vec4f(REC2020_TO_SRGB * mapped, 1.0);
+    // 校色强度（9.9.8）：1.0（默认）时原样返回 mapped，与立案基线逐位一致
+    return vec4f(apply_tonemap_strength(color, mapped, bloom_params), 1.0);
 }

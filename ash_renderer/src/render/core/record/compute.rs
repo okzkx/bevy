@@ -90,11 +90,23 @@ impl ComputeHandles {
         groups: u32,
         handoff: Handoff,
     ) {
+        self.dispatch_grid(device, cb, push, (groups, 1), handoff);
+    }
+
+    /// 二维 dispatch（屏幕网格类 pass：`(x, y)` 两组数，z 恒 1）→ 交接屏障。
+    pub(crate) fn dispatch_grid(
+        &self,
+        device: &Device,
+        cb: vk::CommandBuffer,
+        push: &[u8],
+        groups: (u32, u32),
+        handoff: Handoff,
+    ) {
         unsafe {
             if !push.is_empty() {
                 device.cmd_push_constants(cb, self.layout, vk::ShaderStageFlags::COMPUTE, 0, push);
             }
-            device.cmd_dispatch(cb, groups, 1, 1);
+            device.cmd_dispatch(cb, groups.0, groups.1, 1);
             handoff.barrier().record(device, cb);
         }
     }
@@ -111,5 +123,19 @@ impl ComputeHandles {
     ) {
         self.bind(device, cb, sets);
         self.dispatch(device, cb, push, groups, handoff);
+    }
+
+    /// 二维网格版本的完整录制：[`Self::bind`] + [`Self::dispatch_grid`]。
+    pub(crate) fn record_grid(
+        &self,
+        device: &Device,
+        cb: vk::CommandBuffer,
+        sets: &[DescSet],
+        push: &[u8],
+        groups: (u32, u32),
+        handoff: Handoff,
+    ) {
+        self.bind(device, cb, sets);
+        self.dispatch_grid(device, cb, push, groups, handoff);
     }
 }

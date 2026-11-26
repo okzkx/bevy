@@ -44,7 +44,7 @@ impl PipelinePage<'_> {
                 });
                 if bloom.curve == TonemapCurve::FilamentAces {
                     ui.add(
-                        egui::Slider::new(&mut bloom.gain, 0.5..=2.5)
+                        egui::Slider::new(&mut bloom.gain, 0.5..=16.0)
                             .text("亮度增益")
                             .fixed_decimals(3),
                     );

@@ -4,6 +4,7 @@
 //! 与 SCGI/IBL 的物理量无关。
 
 pub(crate) mod bloom;
+pub(crate) mod color_scope;
 pub(crate) mod exposure;
 pub(crate) mod post_chain;
 pub(crate) mod present_tonemap_pipeline;

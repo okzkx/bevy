@@ -7,7 +7,8 @@ use crate::{
     common::{bytes::put_f32s, syntax::ResultTierExt},
     render::{
         pack_bloom_params, BloomFrameDraw, BloomParamsData, BloomPipelines, BloomSettings,
-        BloomTargets, CompositePipeline, Context, ExposureDraw, ExposureParamsData,
+        BloomTargets, ColorScopeBindings, ColorScopeDraw, ColorScopePipelines, ColorScopeSettings,
+        ColorScopeTargets, CompositePipeline, Context, ExposureDraw, ExposureParamsData,
         ExposurePipelines, ExposureSettings, ExposureTargets, GBufferPipeline, GBufferTargets,
         PresentTonemapPipeline, SmaaEdgeBlendDraw, SmaaNbDraw, SmaaPipelines, SmaaSettings,
         SmaaTargets,
@@ -39,6 +40,10 @@ pub(super) struct PostInput<'w> {
     pub(super) exposure: ResMut<'w, ExposureTargets>,
     pub(super) exposure_pipelines: Res<'w, ExposurePipelines>,
     pub(super) exposure_settings: Res<'w, ExposureSettings>,
+    /// 颜色校验采样（9.9）：三域直方图 bins、采样管线与开关。
+    pub(super) color_scope: ResMut<'w, ColorScopeTargets>,
+    pub(super) color_scope_pipelines: Res<'w, ColorScopePipelines>,
+    pub(super) color_scope_settings: ResMut<'w, ColorScopeSettings>,
     pub(super) ctx: Res<'w, Context>,
     pub(super) time: Res<'w, Time>,
 }
@@ -57,6 +62,7 @@ impl PostInput<'_> {
                     tonemap: f32::from(bloom.tonemap),
                     curve: bloom.curve.as_f32(),
                     gain: bloom.gain,
+                    tonemap_strength: bloom.tonemap_strength,
                 }),
             )
             .or_fatal("Bloom 参数 UBO 写失败，渲染链无法继续")?;
@@ -163,4 +169,54 @@ pub(super) fn smaa_draws(post: &PostInput, slot: usize) -> (Option<SmaaEdgeBlend
         ldr_extent: targets.ldr_extent(),
     };
     (edge_blend, nb)
+}
+
+/// 颜色校验采样录制输入（9.9）：开关开且 tonemap 链启用才录一条 dispatch。
+/// `chain_active` 由调用方按"非调试模式 + tonemap 开关"给出——调试直出时 LDR 里是
+/// 原始 HDR 可视化，C 域没有意义，面板显示"链未启用，无 C 域"。
+pub(super) fn color_scope_draw(
+    post: &mut PostInput,
+    slot: usize,
+    chain_active: bool,
+) -> Result<Option<ColorScopeDraw>, BevyError> {
+    let request_once = post.color_scope_settings.once;
+    if !(post.color_scope_settings.enabled || request_once) || !chain_active {
+        return Ok(None);
+    }
+    if request_once {
+        post.color_scope_settings.once = false;
+    }
+    let PostInput {
+        gbuffer,
+        bloom,
+        exposure,
+        smaa,
+        ctx,
+        color_scope,
+        color_scope_pipelines,
+        ..
+    } = post;
+    let extent = smaa.ldr_extent();
+    let frame_index = color_scope
+        .begin_frame(slot)
+        .or_fatal("颜色校验 bins 槽号越界，渲染链无法继续")?;
+    let bindings = ColorScopeBindings {
+        hdr: gbuffer.targets.hdr_view(slot),
+        blit_sampler: gbuffer.targets.sampler(),
+        bloom: bloom.up_view(0),
+        bloom_sampler: bloom.sampler(),
+        bloom_params: bloom.params_buffer(slot),
+        exposure_state: exposure.state_buffer(slot),
+        ldr: smaa.ldr_view(slot),
+    };
+    color_scope
+        .bind_resources(ctx, slot, &bindings)
+        .or_fatal("颜色校验描述符集写失败，渲染链无法继续")?;
+    Ok(Some(ColorScopeDraw::new(
+        color_scope_pipelines.handles(),
+        color_scope.set(slot),
+        extent,
+        frame_index as u32,
+        color_scope.bins(slot).buffer(),
+    )))
 }

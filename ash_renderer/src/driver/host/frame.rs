@@ -63,7 +63,7 @@ use self::input::{FrameInput, PassFrame};
 use self::lighting::FrameLight;
 use self::lod::create_lod_draw;
 use self::overlay::create_overlay_draw;
-use self::post::{bloom_draw, exposure_draw, smaa_draws};
+use self::post::{bloom_draw, color_scope_draw, exposure_draw, smaa_draws};
 use self::ray_tracing::prepare_ray_tracing;
 use self::resize_gate::rebuild_size_dependent;
 use self::scene::{scene_world_aabb, FrameView};
@@ -376,6 +376,14 @@ pub(crate) fn draw_frame(
         post.exposure.neutral_state_set()
     };
 
+    // 颜色校验采样（9.9）：开关开且 tonemap 链启用才录一条 dispatch。必须在这里取
+    // 可变借（`begin_frame` 要清零/写 bins 头），晚于下面 `res` 对 gbuffer 的不可变借。
+    let color_scope = color_scope_draw(
+        post,
+        slot,
+        render_mode == RenderMode::Lambert && post.bloom_settings.tonemap,
+    )?;
+
     // —— ④⑤ 场景资源与规格（feature 各束的共用底座，②⑤⑧ 复绑）
     let res = SceneResources {
         pipeline: post.gbuffer.pipeline.rec(),
@@ -439,6 +447,7 @@ pub(crate) fn draw_frame(
             bloom: bloom_draw(post, slot),
             smaa_edge_blend,
             smaa_nb,
+            color_scope,
         },
         // 图集整传 → 镶嵌 → 顶点环写入后才有 UI 产物；无 UI 跳过
         ui: ui.as_ref().map(|(paint, buffers)| UiDraw {

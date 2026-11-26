@@ -18,6 +18,7 @@
 //! | [`features::cluster`] | cluster 光照与透明层：灯表增删改读、cluster/透明排序对照 |
 //! | [`features::shadow`] | 阴影：开关 + 逐 cascade 标记对照 |
 //! | [`features::render_settings`] | 画面设置：Bloom/tonemap、SMAA、着色调试模式 |
+//! | [`features::color_scope`] | 颜色校验（9.9）：三域直方图开关/单帧采样（`color_scope_set`）与 bins 快照读数（`color_scope_get`） |
 //! | [`features::sky`] | 程序化天空：参数读写（`sky_set`/`sky_stats`）与常量天空自检开关（`sky_uniform`） |
 //! | [`features::ibl`] | 环境光照：开关/强度/漫反射编码（`ibl_set`）、SH-L2/自检/GlobalProbe 读数（`ibl_stats`）与 cubemap/DFG/桶全量读回（`ibl_census`） |
 //! | [`features::ray_tracing`] | 求交器：开关/调试图子视图（`ray_tracing_set`）、能力分位与 BLAS/TLAS/射线计数（`ray_tracing_stats`）、调试图 PPM 取证（`ray_tracing_dump`）、实例数组/地址表字节对照（`ray_tracing_census`） |
@@ -79,6 +80,7 @@ use self::{
             cluster_census, light_remove, light_spawn, light_stats, light_update,
             transparent_sort_check,
         },
+        color_scope::{color_scope_get, color_scope_set},
         cull::{cull_set_enabled, cull_stats, hiz_census, occlusion_probe, occlusion_set_enabled},
         draw::{draw_stats, drawlist_verify_set},
         gap::{gap_census, gap_set, gap_stats},
@@ -161,6 +163,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/smaa_set", smaa_set)
                 .with_method_main("ash_renderer/exposure_set", exposure_set)
                 .with_method_main("ash_renderer/exposure_get", exposure_get)
+                .with_method_main("ash_renderer/color_scope_set", color_scope_set)
+                .with_method_main("ash_renderer/color_scope_get", color_scope_get)
                 .with_method_main("ash_renderer/shadow_stats", shadow_stats)
                 .with_method_main("ash_renderer/sky_set", sky_set)
                 .with_method_main("ash_renderer/sky_stats", sky_stats)
