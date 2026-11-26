@@ -48,11 +48,19 @@ impl SlotAllocator {
         self.retired.push(slot);
     }
 
-    /// 把待回收的槽全部归还，返回归还数。调用方须先确认 GPU 已不再读这些槽。
+    /// 把待回收的槽全部归还，返回归还的槽号。调用方须先确认 GPU 已不再读这些槽。
+    ///
+    /// 返回槽号而不只是计数：对象表要在归还后把退役槽的 GPU 记录清零（否则全表扫描的
+    /// 消费者会把已删除对象的旧记录当成活对象，见 `InstanceTable::drain_graveyard`）。
+    pub(crate) fn drain_retired_slots(&mut self) -> Vec<u32> {
+        let slots = std::mem::take(&mut self.retired);
+        self.free.extend_from_slice(&slots);
+        slots
+    }
+
+    /// 同 [`Self::drain_retired_slots`]，只返回归还数（不需要槽号的调用方用）。
     pub(crate) fn drain_retired(&mut self) -> usize {
-        let count = self.retired.len();
-        self.free.append(&mut self.retired);
-        count
+        self.drain_retired_slots().len()
     }
 
     /// 分配过的最大槽号 + 1（含已回收的槽）。表的有效范围是 `0..high_water`。

@@ -207,7 +207,7 @@ fn punctual_bounce_radiance(sample_index: u32, position: vec3f, normal: vec3f, o
     let light_to_hit = record.hit_pos.xyz - light.pos_radius.xyz;
     let light_distance_squared = max(dot(light_to_hit, light_to_hit), 1e-6);
     let light_direction = light_to_hit / sqrt(light_distance_squared);
-    // 隐面点被这盏灯照亮的辐亮度：cos_bounce · 距离衰减（含 1/d² 与作用半径的平滑窗）
+    // 有效性门：命中点法线在采样时已翻到灯侧，cos_bounce 恒 ≥ 0；此处只兜住数值退化。
     let cos_bounce = max(dot(-light_direction, record.hit_normal.xyz), 0.0);
     if (cos_bounce <= 0.0) {
         return vec3f(0.0);
@@ -217,7 +217,10 @@ fn punctual_bounce_radiance(sample_index: u32, position: vec3f, normal: vec3f, o
     if (window <= 0.0) {
         return vec3f(0.0);
     }
-    let emitted = light.color_intensity.rgb * light.color_intensity.w * (window / light_distance_squared) * cos_bounce;
+    // 9.10 对照修正：Unity 的「命中点辐照度 I·window/d²·cos_b」与
+    // bounceAreaToLightSolidAngleJacobian（d²/cos_b）逐项相消，每样本只剩 I·window。
+    // 原先再乘 cos_b/d² 会把点光/聚光多跳压成 3 m 处约 1/9、10 m 处约 1/100。
+    let emitted = light.color_intensity.rgb * light.color_intensity.w * window;
     let reflected = record.albedo.rgb * (1.0 / PI) * emitted;
     // 面积测度 → patch 方向立体角：cos_rec / d²，再乘 1/pdf
     let cos_reconnection = max(dot(-direction, record.hit_normal.xyz), 0.0);
@@ -232,8 +235,17 @@ fn punctual_bounce_radiance(sample_index: u32, position: vec3f, normal: vec3f, o
 // 自发光面积采样（第三路）：均匀抽三角形 + 解析面积权重。
 // pdf（面积测度）= 1/(N·area_i)，所以 1/pdf = N·area_i；再乘面积→立体角的
 // Jacobian `cos/d²` 就是这条样本对方向积分的权重。定向光的可见性用一条阴影射线判。
+//
+// 9.10 对照修正：返回值同时带上"采样点相对 origin 的方向"。L1 投影轴必须用这个方向，
+// 不能用三角形顶点 p0 的方向——Unity PathTracing.hlsl:428 用的是采样点，面板越大两者的
+// 夹角越大，L1（方向性）会整块歪掉，而 l0 不受影响，所以只看亮度/能量回归发现不了。
+struct EmissiveSample {
+    radiance: vec3f,
+    direction: vec3f,
+};
+
 fn emissive_area_sample(triangle_index: u32, u_primary: vec2f, u_secondary: vec2f,
-    origin: vec3f) -> vec3f {
+    origin: vec3f) -> EmissiveSample {
     let record = emissive_triangles[triangle_index];
     // 均匀重心采样：r1 = sqrt(1-ξ1) 的常规参数化（两分量之和 ≤ 1）
     let r1 = sqrt(max(0.0, 1.0 - u_primary.y));
@@ -243,7 +255,7 @@ fn emissive_area_sample(triangle_index: u32, u_primary: vec2f, u_secondary: vec2
     let to_point = point - origin;
     let distance_squared = dot(to_point, to_point);
     if (distance_squared < 1e-8) {
-        return vec3f(0.0);
+        return EmissiveSample(vec3f(0.0), vec3f(0.0));
     }
     let distance = sqrt(distance_squared);
     let direction = to_point / distance;
@@ -251,19 +263,19 @@ fn emissive_area_sample(triangle_index: u32, u_primary: vec2f, u_secondary: vec2
     atomicAdd(&counters[9], 1u);
     let occluder = trace_scene(origin, direction, 0.0, distance - 0.02, RAY_MASK);
     if (occluder.hit) {
-        return vec3f(0.0);
+        return EmissiveSample(vec3f(0.0), vec3f(0.0));
     }
     let triangle_normal = cross(record.e1.xyz, record.e2.xyz);
     let normal_length = length(triangle_normal);
     if (!(normal_length > 0.0)) {
-        return vec3f(0.0);
+        return EmissiveSample(vec3f(0.0), vec3f(0.0));
     }
     // 双面自发光：取 |cos|，两面的贡献都算
     let cos_triangle = abs(dot(triangle_normal / normal_length, direction));
     if (!(cos_triangle > 0.0)) {
-        return vec3f(0.0);
+        return EmissiveSample(vec3f(0.0), vec3f(0.0));
     }
-    return record.emissive.rgb * (cos_triangle / distance_squared);
+    return EmissiveSample(record.emissive.rgb * (cos_triangle / distance_squared), direction);
 }
 
 // 方差引导的滞后（Unity `FilterTemporallyVarianceGuided`）：
@@ -419,13 +431,14 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
             gi_r2_next(&emissive_rng);
             let pick = min(u32(primary.x * f32(emissive_count)), emissive_count - 1u);
             let record = emissive_triangles[pick];
-            let radiance = emissive_area_sample(pick, primary, secondary, origin);
-            if (all(radiance == vec3f(0.0))) {
+            let sample = emissive_area_sample(pick, primary, secondary, origin);
+            if (all(sample.radiance == vec3f(0.0))) {
                 continue;
             }
             // 1/pdf = N · area（面积测度），再乘自发光强度与全局倍数
             let weight = f32(emissive_count) * record.p0.w * emissive_intensity;
-            gi_project_accumulate(&emissive_acc, radiance * weight, normalize(record.p0.xyz - origin));
+            // L1 投影轴用采样方向，不是顶点 p0 的方向（见 emissive_area_sample 头注）。
+            gi_project_accumulate(&emissive_acc, sample.radiance * weight, sample.direction);
         }
         gi_rgbl1_add_scaled(&total, emissive_acc, 1.0 / f32(sample_count));
     }

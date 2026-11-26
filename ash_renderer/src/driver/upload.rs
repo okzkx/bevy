@@ -239,7 +239,7 @@ fn flush_uploads(mut data: UploadData, mut state: Local<UploadState>) -> Result<
         state.last_lod_generation = lod_generation;
         state.blas_dirty = true;
     }
-    let drained_slots = drain_graveyards(&mut data)?;
+    let (drained_slots, cleared_object_slots) = drain_graveyards(&mut data)?;
     if reclaim_retired(&mut data, drained_slots) {
         state.blas_dirty = true;
     }
@@ -262,6 +262,18 @@ fn flush_uploads(mut data: UploadData, mut state: Local<UploadState>) -> Result<
             .or_fatal("图集待回收队列排空失败(双条件等待),上传链无法继续")?;
     }
     let mut scan = scan_dirty_rows(&mut data)?;
+    // 退役槽的 48B 对象记录必须清零：对象表是"写一次"的，不清理的话全表扫描的自发光重建
+    // （`emissive_build.wgsl` 每帧扫满 OBJECT_TABLE_CAPACITY 个槽）会把删掉/换绑掉的旧记录
+    // 当活对象继续展开，GI 里留下幽灵光源。清零副本排在本帧新记录之前——同一槽同帧被复用
+    // 时，命令缓冲里的写序保证最后落地的是新记录。
+    if !cleared_object_slots.is_empty() {
+        let mut staged: Vec<(u32, [u8; OBJECT_RECORD_SIZE as usize])> = cleared_object_slots
+            .into_iter()
+            .map(|slot| (slot, [0u8; OBJECT_RECORD_SIZE as usize]))
+            .collect();
+        staged.append(&mut scan.staged_records);
+        scan.staged_records = staged;
+    }
     // 脏集清空且账本非空 = 全部资产驻留,此后每帧盘点 0 行、上传 0B。必须放空批早退
     // 之前:清空脏集的那帧多半就是空批帧
     if data.ledger.dirty_count() == 0 && !data.ledger.is_empty() {
@@ -289,7 +301,7 @@ fn flush_uploads(mut data: UploadData, mut state: Local<UploadState>) -> Result<
 ///
 /// 对象表排空先于本帧槽位分配:复用槽的旧记录读者已全部收口,新记录写入无竞态。
 /// 返回归还的描述符槽数。
-fn drain_graveyards(data: &mut UploadData) -> Result<usize, BevyError> {
+fn drain_graveyards(data: &mut UploadData) -> Result<(usize, Vec<u32>), BevyError> {
     let UploadData {
         ledger,
         instance_tables,
@@ -314,7 +326,7 @@ fn drain_graveyards(data: &mut UploadData) -> Result<usize, BevyError> {
     for slot in ledger.take_freed_slots() {
         instance_tables.retire_object_slot(slot);
     }
-    instance_tables
+    let cleared_object_slots = instance_tables
         .drain_graveyard(&mut wait_draws)
         .or_fatal("对象表待回收队列排空失败(帧侧等待),上传链无法继续")?;
     // BLAS 停尸房同一等待点：旧 AS/scratch 在飞帧用完才拆
@@ -322,7 +334,7 @@ fn drain_graveyards(data: &mut UploadData) -> Result<usize, BevyError> {
         ray.drain(&mut wait_draws)
             .or_fatal("BLAS 停尸房排空失败(帧侧等待),上传链无法继续")?;
     }
-    Ok(drained_slots)
+    Ok((drained_slots, cleared_object_slots))
 }
 
 /// 卸载回收:待回收身份的驻留条目进停尸房(下帧排空),描述符槽进待回收账,失效凭据
