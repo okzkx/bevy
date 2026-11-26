@@ -480,6 +480,7 @@ mod tests {
 
     /// 球判据与体积坐标互证：级内样本的 pv 必在 [0, res)。
     #[test]
+    #[allow(clippy::disallowed_methods)] // 测试夹具需要三角函数，非渲染热路径
     fn inside_samples_map_inside_volume() {
         let center = Vec3::new(4.0, 2.0, -3.0);
         let offsets = cascade_offsets(center, &CONFIG);

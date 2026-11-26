@@ -131,8 +131,10 @@ mod tests {
         let push = pack_spatial_filter_push(true, 4, 77, 65_536, 1.5);
         assert_eq!(push.len(), 24);
         let words: Vec<u32> = push[0..16]
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect();
         assert_eq!(words, vec![1, 4, 77, 65_536]);
         let radius = f32::from_le_bytes([push[16], push[17], push[18], push[19]]);
@@ -153,8 +155,10 @@ mod tests {
         let push = pack_temporal_filter_push(true, 65_536, 9, 0.75);
         assert_eq!(push.len(), 24);
         let words: Vec<u32> = push[0..16]
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect();
         assert_eq!(words, vec![1, 65_536, 9, 0]);
         let smoothing = f32::from_le_bytes([push[16], push[17], push[18], push[19]]);

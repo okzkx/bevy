@@ -158,6 +158,7 @@ pub(crate) fn perf_samples(In(params): In<Option<Value>>, perf: Res<PerfLedger>)
                 "gpu_gbuffer_ms": s.gpu_gbuffer_ms,
                 "gpu_lighting_ms": s.gpu_lighting_ms,
                 "gpu_hiz_ms": s.gpu_hiz_ms,
+                "gpu_gi_ms": s.gpu_gi_ms,
                 "gpu_ibl_capture_ms": s.gpu_ibl_capture_ms,
                 "gpu_ray_tracing_tlas_ms": s.gpu_ray_tracing_tlas_ms,
                 "gpu_ray_tracing_rays_ms": s.gpu_ray_tracing_rays_ms,

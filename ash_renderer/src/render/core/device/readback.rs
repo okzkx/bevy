@@ -245,6 +245,18 @@ impl<'a> OneShotReadback<'a> {
     }
 }
 
+impl Drop for OneShotReadback<'_> {
+    fn drop(&mut self) {
+        // 逆创建序拆；命令缓冲随命令池回收
+        unsafe {
+            self.device.destroy_fence(self.fence, None);
+            self.device.destroy_command_pool(self.pool, None);
+            self.device.destroy_buffer(self.staging, None);
+            self.device.free_memory(self.memory, None);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,17 +309,5 @@ mod tests {
             8
         )
         .is_err());
-    }
-}
-
-impl Drop for OneShotReadback<'_> {
-    fn drop(&mut self) {
-        // 逆创建序拆；命令缓冲随命令池回收
-        unsafe {
-            self.device.destroy_fence(self.fence, None);
-            self.device.destroy_command_pool(self.pool, None);
-            self.device.destroy_buffer(self.staging, None);
-            self.device.free_memory(self.memory, None);
-        }
     }
 }
