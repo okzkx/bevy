@@ -751,17 +751,30 @@ impl InstanceTables {
     /// 等 GPU 用完（`wait_draws`）后把待回收的实例槽归还复用。由 flush_uploads 调用，
     /// 与网格/贴图的回收共用同一次等待；没有待回收槽时不等待。
     ///
+    /// 返回本次归还的槽号：调用方必须把这些槽的 48B 对象记录在 GPU 侧清零。对象表记录是
+    /// "写一次"的，退役槽不清理的话，全表扫描的消费者（自发光三角形重建
+    /// `emissive_build.wgsl` 每帧扫 `OBJECT_TABLE_CAPACITY` 个槽、只按 `index_count`/材质
+    /// 跳空）会把已删除对象的旧记录当成活对象继续展开——删掉自发光物体后 GI 里残留光源，
+    /// 换绑后旧几何继续发光。Unity 在 `RemoveSubmeshInstance` 时即摘除
+    /// （`SurfaceCacheWorld.cs:378/826`）。
+    ///
     /// # Errors
     /// 等待失败（待回收账保留，下帧重试）。
-    pub fn drain_graveyard(&mut self, wait_draws: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+    pub fn drain_graveyard(
+        &mut self,
+        wait_draws: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<u32>> {
         if self.object_slots.retired_count() == 0 {
-            return Ok(());
+            return Ok(Vec::new());
         }
         wait_draws()?;
-        let count = self.object_slots.drain_retired();
-        self.slots_retired_total += count as u64;
-        info!("对象表待回收队列排空:归还 {count} 个实例槽(图形最后使用已过,可复用)");
-        Ok(())
+        let slots = self.object_slots.drain_retired_slots();
+        self.slots_retired_total += slots.len() as u64;
+        info!(
+            "对象表待回收队列排空:归还 {} 个实例槽(图形最后使用已过,可复用;旧记录待清零)",
+            slots.len()
+        );
+        Ok(slots)
     }
 
     /// 取材质槽，没有就分配。槽跨帧稳定：材质内容变化由材质环每帧重写体现，

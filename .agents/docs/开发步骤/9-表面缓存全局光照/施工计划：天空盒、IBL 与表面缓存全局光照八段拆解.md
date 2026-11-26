@@ -328,6 +328,55 @@ shaders/common/gi_*.wgsl                 # SH、cell 地址、采样、压缩等
 
 **许可边界**：Unity 源码是 Unity Companion License——照抄用于本机学习与对照没问题，但不得随公开仓库分发；公开前把照抄段落替换为自写实现。Kajiya 是 Apache-2.0 / MIT 双许可（上游 README 明示），照抄段落保留版权与许可声明即可。
 
+
+### 8.2 9.10 补全版索引（2026-11-26，40 行）
+
+> 原表 12 行是立案期粗索引，保留不动；本表由 [9.10 对照审计](9.10-SCGI与Unity7对照审计/对照表.md) 逐文件读码产出，落点精确到 `file:line`，判定口径见该段 [审计报告](9.10-SCGI与Unity7对照审计/审计报告.md) §1。
+> 两处原表落点已订正：`SurfaceCache.cs` 的 `RecordPreparation` / `RecordUpdate` 实际不在 `passes/gi/allocation.rs` 与 `passes/gi/`，而在 `src/driver/host/frame/gi.rs` 的录制编排；`allocation.rs` 只做分配请求的组装。
+
+| # | Unity 源码（行数） | 本工程落点 | 段 | 判定 |
+| --- | --- | --- | --- | --- |
+| 1 | `AssemblyInfo.cs`（7） | 无对应 | 9.10 | 不适用 |
+| 2 | `Common.hlsl`（184） | `src/render/passes/gi/volume.rs:35-44`（常量）+ `shaders/common/gi_cell.wgsl:13-18` + `shaders/common/octahedral.wgsl:8-41` | 9.5 | 等价 |
+| 3 | `Defrag.compute`（98） | `shaders/scene/gi/defrag.wgsl:40-162` + `src/driver/host/frame/gi.rs:210-215` + `src/render/passes/gi/mod.rs:625-634` | 9.5 | 机制不同 |
+| 4 | `EmissiveTriangleAddition.compute`（44） | `shaders/scene/gi/emissive_build.wgsl:44-120` | 9.6 | 机制不同 |
+| 5 | `EmissiveTriangleRemoval.compute`（55） | 无对应 | 9.6 | 机制不同 |
+| 6 | `EmissiveTriangles.hlsl`（11） | `shaders/common/gi_emissive.wgsl:3-9` | 9.6 | 等价 |
+| 7 | `Estimation.compute`（463） | `shaders/scene/gi/estimation.wgsl:295`（`cs_main`）+ `:111-180`（命中重建/自查询）+ `:183-232`（光源路）+ `:235-273`（自发光路）+ `:362-431`（环境/方向光 + 投影）+ `shaders/common/gi_sampling.wgsl:163` | 9.6 | 等价 |
+| 8 | `Eviction.compute`（50） | `shaders/scene/gi/eviction.wgsl:18-50` | 9.5 | 等价 |
+| 9 | `GlobalProbe.compute`（50） | `shaders/scene/ibl/global_probe.wgsl:39` | 9.3 | 等价 |
+| 10 | `GlobalProbe.hlsl`（17） | `shaders/common/octahedral.wgsl:31` `direction_to_bucket_index` / `:38` `bucket_index_to_direction` | 9.3 | 等价 |
+| 11 | `IrradianceCompression.hlsl`（66） | `shaders/common/gi_compression.wgsl:70-93` | 9.7 | 机制不同 |
+| 12 | `PatchAllocation.compute`（75） | `shaders/scene/gi/bounce_alloc.wgsl:40-90` | 9.5 | 等价 |
+| 13 | `PatchAllocationRequest.hlsl`（12） | `shaders/common/gi_bounce.wgsl:3-9` | 9.6 | 等价 |
+| 14 | `PatchUtil.hlsl`（480） | `shaders/common/gi_cell.wgsl:92-167`（坐标/索引/级联/退化）+ `shaders/common/gi_ring.wgsl:8-26` + `patch_alloc.wgsl`/`eviction.wgsl`/`defrag.wgsl` | 9.5 | 等价 |
+| 15 | `PathTracing.hlsl`（602） | `shaders/scene/gi/estimation.wgsl:111-121`（环境）+ `:138-180`（命中辐照度）+ `:183-232`（点聚光多跳）+ `:235-273`（自发光）+ `:362-431`（方向光 + 投影） | 9.6 | 等价 |
+| 16 | `PunctualLightSampling.compute`（107） | `shaders/scene/gi/light_sampling.wgsl:60` | 9.6 | 机制不同 |
+| 17 | `PunctualLights.hlsl`（41） | `shaders/common/gi_light_sample.wgsl:3-13` | 9.6 | 等价 |
+| 18 | `RingBuffer.hlsl`（64） | `shaders/common/gi_ring.wgsl:8-26` + `src/render/resident/tables/surface_cache.rs:92-137` | 9.5 | 机制不同 |
+| 19 | `Scrolling.compute`（56） | `shaders/scene/gi/scrolling.wgsl:19-78` | 9.5 | 实现错误（已修） |
+| 20 | `SpatialFiltering.compute`（77） | `shaders/scene/gi/spatial_filter.wgsl:143` + `src/render/passes/gi/filtering.rs:52` | 9.7 | 等价 |
+| 21 | `SurfaceCache.cs`（1140） | `src/render/passes/gi/mod.rs:159-660`（常量/管线/设置）+ `src/driver/host/frame/gi.rs:100-260`（UBO/光照/录制）+ `src/render/frame/record.rs:288-292`（计时区间）+ `src/remote/features/gi.rs`（BRP） | 9.5–9.7 | 等价 |
+| 22 | `SurfaceCacheRenderPipelineResources.cs`（114） | `src/render/passes/gi/mod.rs:420-520`（`GiPipelines`）+ `src/render/resident/tables/surface_cache.rs:427-590`（绑定集） | 9.5 | 等价 |
+| 23 | `SurfaceCacheWorld.cs`（940） | scene 采集（`Changed<>`/资产事件）+ `src/render/resident/tables/*` + `src/render/ray_tracing/*` + `src/driver/upload.rs` | 9.4 | 机制不同 |
+| 24 | `TemporalFiltering.compute`（45） | `shaders/scene/gi/temporal_filter.wgsl:49` | 9.7 | 等价 |
+| 25 | `Unity.SurfaceCache.Runtime.asmdef`（35） | Cargo crate 划分 | — | 不适用 |
+| 26 | `VectorLogic.hlsl`（24） | WGSL 内建 | — | 不适用 |
+| 27 | `Debug.compute`（291） | `shaders/scene/gi/patch_view.wgsl:173` `fs_cover` / `:291` `fs_marker` + `shaders/common/gi_cell.wgsl:358` `estimate_view_color` / `:373` `view_color` | 9.7 | 等价 |
+| 28 | `FallbackMaterial.mat`（137） | 无对应 | — | 不适用 |
+| 29 | `FallbackMaterial.shader`（34） | 无对应 | 9.7 | 不适用 |
+| 30 | `FlatNormalResolution.compute`（129） | `shaders/common/gi_cell.wgsl:186` `flat_normal` + `shaders/common/gi_compression.wgsl:31` 内联 | 9.7 | 机制不同 |
+| 31 | `ObjectDispatcherChangeSource.cs`（144） | `src/scene/mechanism/assets/ledger.rs`（`Changed<>` 脏标记）+ `src/scene/mechanism/assets/asset_events.rs` | 9.4 | 机制不同 |
+| 32 | `PatchAllocation.compute`（217） | `shaders/scene/gi/patch_alloc.wgsl:86-203` + `src/render/passes/gi/allocation.rs:73-80` | 9.5 | 等价 |
+| 33 | `ScreenResolveDenoising.compute`（137） | `shaders/scene/gi/denoise.wgsl:36` | 9.7 | 等价 |
+| 34 | `ScreenResolveLookup.compute`（168） | `shaders/scene/gi/screen_gather.wgsl:158`（`cs_main`）+ `:78` `gather_one` | 9.7 | 等价 |
+| 35 | `ScreenResolveUpsampling.compute`（205） | `shaders/scene/gi/upsample.wgsl:35`（`cs_main`）+ `:83-89`（权重）+ `shaders/common/gi_compression.wgsl:53-59` | 9.7 | 实现错误（P2，不做） |
+| 36 | `SurfaceCacheEntityChangeBridge.cs`（387） | 无对应 | 9.4 | 机制不同 |
+| 37 | `SurfaceCacheEntityRecords.cs`（32） | `src/render/resident/tables/instance_table.rs` | 9.4 | 机制不同 |
+| 38 | `SurfaceCacheGIRendererFeature.cs`（1624） | `src/driver/host/frame/gi.rs:100-420`（录制编排）+ `src/render/passes/gi/screen_gather.rs:186/213/229/251`（相机链）+ `src/render/passes/gi/mod.rs`（管线/设置）+ `src/remote/features/gi.rs`（BRP）+ egui 面板 | 9.7/跨段 | 等价 |
+| 39 | `SurfaceCacheWorldAdapter.cs`（1509） | `src/scene/mechanism/assets/ledger.rs` + `src/driver/host/drawlist.rs` + `src/scene/mechanism/assets/assembly_cache.rs` + `src/scene/mechanism/assets/asset_events.rs` | 9.4 | 机制不同 |
+| 40 | `SurfaceCacheWorldChangeSet.cs`（39） | 无等价 DTO | 9.4 | 机制不同 |
+
 ## 9. 开工前置
 
 - 步骤 8 已收官（8.1～8.6）；步骤 5/6 的步骤级验收归档欠账不阻塞本步（沿用路线图当前位置）。

@@ -9,7 +9,11 @@
 //
 // 视图号（push.view）：0 关 / 1 覆盖 / 2 级联 / 3 桶 / 4 rank / 5 心跳 /
 // 6 池水位与失败计数（屏幕顶部 5% 条）/ 7 位置偏离（判定线 ① 的阈值视图）/ 8 cell 归属 /
-// 9 样本档与稀释 / 10 辐照度 E(n) / 11 方差 / 12 更新次数 / 13 rank 分布（9.6 的估计视图）。
+// 9 样本档与稀释 / 10 辐照度 E(n) / 11 方差 / 12 更新次数 / 13 rank 分布（9.6 的估计视图）/
+// 14 屏幕辐照度 / 15 覆盖率 / 16 cell 分类（命中 rank0 / 命中 rank1 / Volume 内无 patch / 背景）。
+// 视图 16 是 9.7 顺延项的核销：9.7 当初记"拒绝率聚合需要新计数槽，16 字已满"，
+// 但按语义拆开不需要聚合——逐像素看"这一格到底有没有 patch、是哪一级"，正是定位
+// "Volume 内某块没有 diffuse 注入"的判据（见 9.10 审计报告 §9.7）。
 // 只读不写：调试件不得改变被测状态（不刷心跳、不分配）。
 //
 // 接口：set0 帧 UBO / set1 G-buffer（b1 normal、b3 depth）/ set2 GI 表 + UBO；
@@ -196,6 +200,29 @@ fn fs_cover(in: VsOut) -> @location(0) vec4f {
             return vec4f(display_encode(VIEW_BACKGROUND), 1.0);
         }
         return vec4f(display_encode(hash_color(hit.cell / BUCKETS_PER_CELL) * 0.25), 1.0);
+    }
+
+    // 视图 16：cell 分类色（9.10 核销 9.7 顺延项）。四色直读，不做聚合统计：
+    // 命中 rank0（屏幕播种的活 patch）/ 命中 rank1（bounce 出来的 patch）/
+    // Volume 内无 patch（不该出现的空洞）/ Volume 外与背景按原配色。
+    if (push.view == 16u) {
+        let hit16 = resolve_surface(pixel, in.uv);
+        if (!hit16.valid) {
+            let color = select(VIEW_BACKGROUND, VIEW_OUTSIDE_VOLUME, hit16.outside_volume);
+            return vec4f(display_encode(color), 1.0);
+        }
+        let patch16 = cell_patch[hit16.cell];
+        if (patch16 == INVALID_PATCH) {
+            // Volume 内、但这一格没有 patch：9.10.4 里"某块没被注入"就落在这个颜色上
+            return vec4f(display_encode(vec3f(0.55, 0.12, 0.10)), 1.0);
+        }
+        let rank16 = patch_statistics[patch16].state & 0xFFu;
+        let color16 = select(
+            vec3f(0.18, 0.45, 0.95),
+            vec3f(0.70, 0.30, 0.92),
+            rank16 != 0u,
+        );
+        return vec4f(display_encode(color16), 1.0);
     }
 
     let hit = resolve_surface(pixel, in.uv);

@@ -295,6 +295,11 @@ def main():
     try:
         rpc("ash_renderer/sky_set", {"enabled": True})
         rpc("ash_renderer/ibl_set", {"enabled": True})
+        # 曝光必须钉 manual：① 的 IBL/SCGI 同量级判据与 ⑤ 的逐字节判据都依赖
+        # "场景不变 → 像素不变"。9.9.9 曝光重标定后，自动曝光在 3 s 等待里仍会漂移
+        # （实测 scale 0.131635→0.128574，见 9.10.4 探针），会把逐字节不变量打破，
+        # 而 manual 模式倍数恒 1（ash_renderer/src/remote/features/render_settings.rs）。
+        rpc("ash_renderer/exposure_set", {"mode": "manual"})
 
         build_field()
         anchor()
@@ -385,6 +390,10 @@ def main():
         check("③ 零 VUID / VK-ERROR", not errors, f"{len(errors)} 行")
         return 0 if all(ok for _, ok in _results) else 1
     finally:
+        try:
+            rpc("ash_renderer/exposure_set", {"mode": "auto"})
+        except Exception:  # 宿主已关时忽略
+            pass
         for entity in _field_entities:
             rpc("world.despawn_entity", {"entity": entity})
         _field_entities.clear()
