@@ -86,7 +86,7 @@ use self::{
         ibl::{ibl_census, ibl_set, ibl_stats},
         lod::{lod_census, lod_set_enabled, lod_set_params},
         ray_tracing::{ray_tracing_census, ray_tracing_dump, ray_tracing_set, ray_tracing_stats},
-        render_settings::{bloom_set, set_render_mode, smaa_set},
+        render_settings::{bloom_set, exposure_get, exposure_set, set_render_mode, smaa_set},
         residency::{residency_set, residency_stats},
         shadow::{shadow_set, shadow_stats},
         sky::{sky_set, sky_stats, sky_uniform},
@@ -159,6 +159,8 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/shadow_set", shadow_set)
                 .with_method_main("ash_renderer/bloom_set", bloom_set)
                 .with_method_main("ash_renderer/smaa_set", smaa_set)
+                .with_method_main("ash_renderer/exposure_set", exposure_set)
+                .with_method_main("ash_renderer/exposure_get", exposure_get)
                 .with_method_main("ash_renderer/shadow_stats", shadow_stats)
                 .with_method_main("ash_renderer/sky_set", sky_set)
                 .with_method_main("ash_renderer/sky_stats", sky_stats)

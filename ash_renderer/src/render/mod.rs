@@ -168,6 +168,10 @@ pub use passes::post::bloom::{
     pack_bloom_params, BloomFrameDraw, BloomParamsData, BloomPipelines, BloomSettings,
     BloomTargets, TonemapCurve,
 };
+pub use passes::post::exposure::{
+    pack_exposure_params, ExposureDraw, ExposureMode, ExposureParamsData, ExposurePipelines,
+    ExposureSettings, ExposureTargets, EXPOSURE_TILES_X, EXPOSURE_TILES_Y,
+};
 pub use passes::post::post_chain::PostChainDraw;
 pub use passes::post::present_tonemap_pipeline::PresentTonemapPipeline;
 pub use passes::post::smaa::LDR_FORMAT;

@@ -28,7 +28,7 @@ use crate::{
     common::syntax::{fatal, ResultTierExt},
     render::{
         ClusterFrameDraw, HizFrameDraw, IblBakeDraw, IblBakeInput, IblFrameDraw, PostChainDraw,
-        RenderFeatures, SceneResources, UiDraw, UploadWait,
+        RenderFeatures, RenderMode, SceneResources, UiDraw, UploadWait,
     },
     scene::InstanceLedger,
 };
@@ -63,7 +63,7 @@ use self::input::{FrameInput, PassFrame};
 use self::lighting::FrameLight;
 use self::lod::create_lod_draw;
 use self::overlay::create_overlay_draw;
-use self::post::{bloom_draw, smaa_draws};
+use self::post::{bloom_draw, exposure_draw, smaa_draws};
 use self::ray_tracing::prepare_ray_tracing;
 use self::resize_gate::rebuild_size_dependent;
 use self::scene::{scene_world_aabb, FrameView};
@@ -363,6 +363,18 @@ pub(crate) fn draw_frame(
         indirect_count,
     )?;
     let (smaa_edge_blend, smaa_nb) = smaa_draws(post, slot);
+    // 自动曝光只在正常渲染模式下测光；调试显示模式的 HDR 是可视化直出，不参与适应，
+    // 但 tonemap 仍会读 set3，所以必须显式写回中性倍数 1（否则沿用该槽上次 Lambert
+    // 帧的倍数，把 albedo/metallic 这类 0–1 的可视化结果再乘一遍）。
+    let exposure = (render_mode == RenderMode::Lambert).then(|| exposure_draw(post, slot));
+    // 调试显示模式的 HDR 是可视化直出（albedo/metallic 这类 0–1 值），不该被曝光倍数
+    // 再乘一遍；但它仍要过 tonemap，所以绑一张恒为 1 的中性状态集，而不是读帧槽状态
+    // （读帧槽会把上一次 Lambert 的倍数带过来）。调色模式下曝光不跑，也不需要清历史。
+    let exposure_state_set = if exposure.is_some() {
+        post.exposure.state_set(slot)
+    } else {
+        post.exposure.neutral_state_set()
+    };
 
     // —— ④⑤ 场景资源与规格（feature 各束的共用底座，②⑤⑧ 复绑）
     let res = SceneResources {
@@ -422,6 +434,8 @@ pub(crate) fn draw_frame(
         post: PostChainDraw {
             tonemap: post.tonemap.rec(),
             bloom_params_set: post.bloom.params_set(slot),
+            exposure_state_set,
+            exposure,
             bloom: bloom_draw(post, slot),
             smaa_edge_blend,
             smaa_nb,

@@ -10,6 +10,7 @@ use crate::render::core::record::graphics::{
     bind_graphics, color_attachment, full_rect, set_viewport_scissor, PipelineRef,
 };
 use crate::render::passes::post::bloom::BloomFrameDraw;
+use crate::render::passes::post::exposure::ExposureDraw;
 use crate::render::passes::post::smaa::{SmaaEdgeBlendDraw, SmaaNbDraw};
 
 /// ⑦⑧ 后链的录制输入（draw_frame 组装，`record_frame` 消费）。`bloom`/`smaa_edge_blend`
@@ -19,6 +20,10 @@ pub struct PostChainDraw {
     pub tonemap: PipelineRef,
     /// tonemap 的 bloom 参数集（总是绑；bloom 关闭时 shader 内不采样）。
     pub bloom_params_set: DescSet,
+    /// tonemap 读自动曝光倍数的 set（总是绑；手动模式 shader 内倍数恒 1）。
+    pub exposure_state_set: DescSet,
+    /// 自动曝光的两条 dispatch（测光 + 适应）。调试显示模式下为 `None`。
+    pub exposure: Option<ExposureDraw>,
     /// Bloom 链（关闭为 None）。
     pub bloom: Option<BloomFrameDraw>,
     /// SMAA edge/blend 两 pass（关闭为 None，neighborhood 直通）。
@@ -42,6 +47,13 @@ impl PostChainDraw {
         gbuffer_sampled: DescSet,
     ) {
         unsafe {
+            // 自动曝光：读 HDR（上一步已转 SHADER_READ_ONLY）、写全帧倍数；必须先于
+            // tonemap，后者在同一帧里通过 set3 读回倍数。手动模式下它仍会跑（写 1.0），
+            // 这样开关自动曝光不需要改命令序列。
+            if let Some(exposure) = &self.exposure {
+                exposure.record(device, cb);
+            }
+
             if let Some(bloom) = &self.bloom {
                 bloom.record(device, cb);
             }
@@ -66,7 +78,12 @@ impl PostChainDraw {
                 device,
                 cb,
                 &self.tonemap,
-                &[frame_set, gbuffer_sampled, self.bloom_params_set],
+                &[
+                    frame_set,
+                    gbuffer_sampled,
+                    self.bloom_params_set,
+                    self.exposure_state_set,
+                ],
             );
             set_viewport_scissor(device, cb, self.smaa_nb.ldr_extent);
             // 全屏三角形：3 个顶点、无顶点 buffer，VS 按 vertex_index 生成

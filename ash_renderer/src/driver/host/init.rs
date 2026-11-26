@@ -17,14 +17,15 @@ use crate::{
     common::syntax::ResultTierExt,
     render::{
         AtlasGpu, BindlessTextureTable, BloomPipelines, BloomTargets, ClusterBuildPass,
-        CompositePipeline, Context, CullPass, FramePool, FrameUniformTable, GBufferPipeline,
-        GBufferTargets, GiPipelines, GiSetLayout, GiSettings, GpuTimer, HizPyramid, IblEnvironment,
-        ImageCache, IndirectPass, InstanceTables, LightClusters, LightTable, LodPass, MeshPool,
-        OcclusionPass, OverlayPipeline, PresentTonemapPipeline, RayScene, RayTracingPipelines,
-        RayTracingSettings, RayTracingTargets, ScgiTargets, SetLayouts, ShadowBuildPass,
-        ShadowPipeline, ShadowTargets, SmaaPipelines, SmaaTargets, SurfaceCacheConfig,
-        SurfaceCacheTables, Swapchain, TransparentPasses, TransparentPipeline, TransparentTargets,
-        UiVertexRing, Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
+        CompositePipeline, Context, CullPass, ExposurePipelines, ExposureTargets, FramePool,
+        FrameUniformTable, GBufferPipeline, GBufferTargets, GiPipelines, GiSetLayout, GiSettings,
+        GpuTimer, HizPyramid, IblEnvironment, ImageCache, IndirectPass, InstanceTables,
+        LightClusters, LightTable, LodPass, MeshPool, OcclusionPass, OverlayPipeline,
+        PresentTonemapPipeline, RayScene, RayTracingPipelines, RayTracingSettings,
+        RayTracingTargets, ScgiTargets, SetLayouts, ShadowBuildPass, ShadowPipeline, ShadowTargets,
+        SmaaPipelines, SmaaTargets, SurfaceCacheConfig, SurfaceCacheTables, Swapchain,
+        TransparentPasses, TransparentPipeline, TransparentTargets, UiVertexRing, Uploader,
+        MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
 
@@ -147,6 +148,8 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     let transparent_targets = TransparentTargets::new(&ctx)?;
     let shadow_targets = ShadowTargets::new(&ctx)?;
     let bloom_targets = BloomTargets::new(&ctx, swapchain.extent)?;
+    // 自动曝光（独立显示段模块）：目标与 tonemap 的 set3 无关尺寸，只随帧槽
+    let exposure_targets = ExposureTargets::new(&ctx)?;
     // 会提交上传（构造内当场等完）：两张查找表贴图
     let smaa_targets = SmaaTargets::new(&ctx, &mut uploader, swapchain.extent)?;
     let depth_images: Vec<vk::Image> = (0..MAX_FRAMES_IN_FLIGHT)
@@ -176,6 +179,8 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             shadow_targets.set_layout(),
             bloom_targets.tex_layout(),
             bloom_targets.up_layout(),
+            exposure_targets.layouts()[0],
+            exposure_targets.layouts()[1],
             smaa_targets.layout_a(),
             smaa_targets.layout_b(),
             hiz.occlusion_layout(),
@@ -201,6 +206,8 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     let composite_pipeline = CompositePipeline::new(&ctx, &layouts)?;
     let bloom_pipelines = BloomPipelines::new(&ctx, &layouts)?;
     let smaa_pipelines = SmaaPipelines::new(&ctx, &layouts)?;
+    // 自动曝光的测光/适应两条 compute（要在 tonemap 之前录，布局已登记）
+    let exposure_pipelines = ExposurePipelines::new(&ctx, &layouts)?;
     // tonemap 输出存线性值，最后写屏幕时由 SRGB 视图做唯一一次 sRGB 编码
     let tonemap_pipeline = PresentTonemapPipeline::new(&ctx, &layouts)?;
     // Compute 管线（ComputePipeline）
@@ -248,6 +255,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             transparent_targets,
             shadow_targets,
             bloom_targets,
+            exposure_targets,
             smaa_targets,
             hiz,
             ibl,
@@ -257,6 +265,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             overlay_pipeline,
             composite_pipeline,
             bloom_pipelines,
+            exposure_pipelines,
             smaa_pipelines,
             tonemap_pipeline,
             cull_pass,
@@ -340,6 +349,8 @@ init_chain! {
     PresentTonemapPipeline => tonemap_pipeline,
     BloomPipelines => bloom_pipelines,
     BloomTargets => bloom_targets,
+    ExposurePipelines => exposure_pipelines,
+    ExposureTargets => exposure_targets,
     SmaaPipelines => smaa_pipelines,
     SmaaTargets => smaa_targets,
     TransparentPipeline => transparent_pipeline,

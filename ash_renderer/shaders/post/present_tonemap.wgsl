@@ -10,7 +10,10 @@
 // 观感），与曝光锚点（common/brdf.wgsl 的 EXPOSURE）分开调。
 //
 // 接口：set0 = 帧 UBO（读 mode）；set1 = G-buffer 采样集（b2 hdr）；set2 =
-// bloom 参数集（b0 up0 / b1 闲置 / b2 采样器 / b3 参数 UBO）。
+// bloom 参数集（b0 up0 / b1 闲置 / b2 采样器 / b3 参数 UBO）；set3 = 自动曝光的
+// 适应状态（b0 storage：x = 适应后的 log2 亮度，y = 全帧曝光倍数）。
+// 曝光是独立模块（shaders/post/exposure.wgsl），手动模式下倍数恒 1，本 shader
+// 与没有它时逐像素相同。
 // 调试显示模式（mode != 0）时 HDR 里是直出的可视化，跳过 bloom 与色调映射，免得失真。
 // #import frame
 // #import fullscreen
@@ -21,6 +24,7 @@
 @group(2) @binding(0) var bloom_tex: texture_2d<f32>;
 @group(2) @binding(2) var bloom_sampler: sampler;
 @group(2) @binding(3) var<uniform> bloom_params: BloomParams;
+@group(3) @binding(0) var<storage, read> exposure_state: array<vec4f>;
 
 struct BloomParams {
     strength: f32,
@@ -226,7 +230,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
         bloom = textureSampleLevel(bloom_tex, bloom_sampler, in.uv, 0.0).rgb
             * bloom_params.strength;
     }
-    let color = hdr + bloom;
+    // 自动曝光的全帧倍数（手动模式 / 尚未跑过曝光段时写 1.0，见 cs_adapt）
+    let exposure_scale = select(1.0, exposure_state[0].y, exposure_state[0].y > 0.0);
+    let color = (hdr + bloom) * exposure_scale;
     if (bloom_params.curve < 0.5) {
         return vec4f(aces_narkowicz(color), 1.0);
     }

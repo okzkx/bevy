@@ -29,6 +29,9 @@ use crate::render::passes::post::bloom::{
     BLOOM_DOWN_PIPELINE, BLOOM_PREFILTER_PIPELINE, BLOOM_TEX_SET_DESC, BLOOM_UP_PIPELINE,
     BLOOM_UP_SET_DESC,
 };
+use crate::render::passes::post::exposure::{
+    EXPOSURE_ADAPT_PIPELINE, EXPOSURE_MEASURE_PIPELINE, EXPOSURE_SET_DESC, EXPOSURE_STATE_SET_DESC,
+};
 use crate::render::passes::post::present_tonemap_pipeline::PRESENT_TONEMAP_PIPELINE;
 use crate::render::passes::post::smaa::{
     SMAA_A_SET_DESC, SMAA_BLEND_PIPELINE, SMAA_B_SET_DESC, SMAA_EDGE_PIPELINE,
@@ -110,6 +113,9 @@ pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
     &SCREEN_GATHER_PIPELINE,
     &DENOISE_PIPELINE,
     &UPSAMPLE_PIPELINE,
+    // 显示段：自动曝光（测光 + 适应），与 SCGI/IBL 无关
+    &EXPOSURE_MEASURE_PIPELINE,
+    &EXPOSURE_ADAPT_PIPELINE,
 ];
 
 /// 宿主声明并建出的全部 set 布局。
@@ -141,4 +147,7 @@ pub(crate) const ALL_SETS: &[&SetLayoutDesc] = &[
     &SCGI_TARGET_SET_DESC,
     // 9.7.6 合成 pass 的采样集（单张全分辨率辐照度）
     &SCGI_SAMPLE_SET_DESC,
+    // 显示段自动曝光：测光/适应共用集 + tonemap 读适应结果
+    &EXPOSURE_SET_DESC,
+    &EXPOSURE_STATE_SET_DESC,
 ];
