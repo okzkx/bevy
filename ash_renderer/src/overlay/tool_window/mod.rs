@@ -29,7 +29,7 @@ use crate::render::{
     CullDiagnostics, CullSettings, ExposureSettings, FrameSyncSettings, GiSettings, IblSettings,
     ImageCache, IndirectStats, LodDiagnostics, LodSettings, MeshPool, MonitorHistory,
     OcclusionDiagnostics, OcclusionSettings, PerfLedger, RenderMode, ShadowSettings, SkySettings,
-    SmaaSettings,
+    SmaaSettings, SsaoSettings,
 };
 use crate::scene::{TransformEditQueue, WorkloadSettings};
 use color::{ColorPage, ColorPageState};
@@ -267,6 +267,8 @@ pub(in crate::overlay) struct ToolWindowParams<'w, 's> {
     ibl_settings: ResMut<'w, IblSettings>,
     /// 表面缓存（9.5）：开关/视图/形态/播种/整理（draw_frame 读，BRP gi_set 同源）
     gi_settings: ResMut<'w, GiSettings>,
+    /// 屏幕空间环境光遮蔽（10.2）：开关/半径/偏置/强度/步数（BRP ssao_set 同源）
+    ssao_settings: ResMut<'w, SsaoSettings>,
     /// 颜色校验（9.9）：采样开关（draw_frame 读，BRP color_scope_get 同源）
     color_scope_settings: ResMut<'w, ColorScopeSettings>,
     /// 颜色校验 bins 的 8 Hz 回读节流器
@@ -339,6 +341,7 @@ impl ToolWindowParams<'_, '_> {
             .show(body),
             ToolPage::Gi => GiPage {
                 gi: &mut self.gi_settings,
+                ssao: &mut self.ssao_settings,
             }
             .show(body),
             ToolPage::Color => ColorPage {

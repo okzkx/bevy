@@ -15,3 +15,4 @@ pub(crate) mod render_settings;
 pub(crate) mod residency;
 pub(crate) mod shadow;
 pub(crate) mod sky;
+pub(crate) mod ssao;

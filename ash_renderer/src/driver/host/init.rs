@@ -23,8 +23,9 @@ use crate::{
         ImageCache, IndirectPass, InstanceTables, LightClusters, LightTable, LodPass, MeshPool,
         OcclusionPass, OverlayPipeline, PresentTonemapPipeline, RayScene, RayTracingPipelines,
         RayTracingSettings, RayTracingTargets, ScgiTargets, SetLayouts, ShadowBuildPass,
-        ShadowPipeline, ShadowTargets, SmaaPipelines, SmaaTargets, SurfaceCacheConfig,
-        SurfaceCacheTables, Swapchain, TransparentPasses, TransparentPipeline, TransparentTargets,
+        ShadowPipeline, ShadowTargets, SmaaPipelines, SmaaTargets, SsaoPipelines, SsaoSettings,
+        SsaoTargets, SurfaceCacheConfig, SurfaceCacheTables, Swapchain, TransparentPasses,
+        TransparentPipeline, TransparentTargets,
         UiVertexRing, Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
 };
@@ -170,6 +171,10 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     let mut scgi_targets = ScgiTargets::new(&ctx)?;
     // 启动就按初始尺寸建一次：合成 pass 每帧都绑这张采样图（SCGI 关时也不读，但布局必须合法）
     scgi_targets.ensure(&ctx, swapchain.extent)?;
+    // 10.2 SSAO：半/全分辨率 AO 目标随 swapchain 尺寸懒重建（布局与描述符池只建一次）。
+    // 启动就建一次：合成 pass 每帧都要绑全分辨率 AO（关档绑 dummy，但布局必须合法）
+    let mut ssao_targets = SsaoTargets::new(&ctx)?;
+    ssao_targets.ensure(&ctx, swapchain.extent)?;
     let layouts = {
         let mut list = vec![
             tables.set_layout(),
@@ -191,6 +196,8 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             gi_set_layout.set_layout(),
             scgi_targets.set_layout(),
             scgi_targets.sample_layout(),
+            ssao_targets.storage_layout(),
+            ssao_targets.sample_layout(),
         ];
         // 光线求交集布局只在 光线求交支持时存在（光线求交关没有可登记的句柄）
         if let Some(targets) = &ray_tracing_targets {
@@ -207,6 +214,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     let overlay_pipeline = OverlayPipeline::new(&ctx, &layouts)?;
     // 全屏管线（FullscreenPipeline）
     let composite_pipeline = CompositePipeline::new(&ctx, &layouts)?;
+    let ssao_pipelines = SsaoPipelines::new(&ctx, &layouts)?;
     let bloom_pipelines = BloomPipelines::new(&ctx, &layouts)?;
     let smaa_pipelines = SmaaPipelines::new(&ctx, &layouts)?;
     // 自动曝光的测光/适应两条 compute（要在 tonemap 之前录，布局已登记）
@@ -270,6 +278,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             transparent_pipeline,
             overlay_pipeline,
             composite_pipeline,
+            ssao_pipelines,
             bloom_pipelines,
             exposure_pipelines,
             color_scope_pipelines,
@@ -286,8 +295,10 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             surface_cache,
             gi_set_layout,
             scgi_targets,
+            ssao_targets,
             // 表面缓存总开关恒插入（BRP gi_set/gi_stats 在关态也要回读数）
             gi_settings: GiSettings::default(),
+            ssao_settings: SsaoSettings::default(),
             // 光线求交总开关恒插入（BRP ray_tracing_set/ray_tracing_stats 在 光线求交关时也要回读数）
             ray_tracing_settings: RayTracingSettings {
                 enabled: ray_tracing.is_some(),
@@ -354,6 +365,7 @@ init_chain! {
     HizPyramid => hiz,
     IblEnvironment => ibl,
     CompositePipeline => composite_pipeline,
+    SsaoPipelines => ssao_pipelines,
     PresentTonemapPipeline => tonemap_pipeline,
     BloomPipelines => bloom_pipelines,
     BloomTargets => bloom_targets,
@@ -373,7 +385,9 @@ init_chain! {
     SurfaceCacheTables => surface_cache,
     GiSetLayout => gi_set_layout,
     ScgiTargets => scgi_targets,
+    SsaoTargets => ssao_targets,
     GiSettings => gi_settings,
+    SsaoSettings => ssao_settings,
     GBufferTargets => gbuffer,
     FramePool => frames,
     UiVertexRing => ui_ring,

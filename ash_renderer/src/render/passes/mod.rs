@@ -15,7 +15,9 @@
 //! | `ray_tracing` | 求交器调试面：光线求交描述符集、RGBA16F 调试图、TLAS 组装与主射线两条 compute |
 //! | `gi` | 表面缓存（9.5）：Volume/cell 格子系统、patch 池与分配回收、patch 调试视图 |
 //! | `overlay` | UI：overlay 管线、字体图集、UI 顶点环 |
+//! | `ambient` | 环境光遮蔽（10.2）：半分辨率 SSAO、深度感知上采样与 AO 目标（AO 只乘环境项） |
 
+pub(crate) mod ambient;
 pub(crate) mod gbuffer;
 pub(crate) mod gi;
 pub(crate) mod ibl;

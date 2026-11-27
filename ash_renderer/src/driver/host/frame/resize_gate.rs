@@ -6,7 +6,7 @@ use bevy::{prelude::*, window::WindowResized};
 
 use crate::{
     common::syntax::ResultTierExt,
-    render::{Context, HizPyramid, MAX_FRAMES_IN_FLIGHT},
+    render::{Context, HizPyramid, SsaoTargets, MAX_FRAMES_IN_FLIGHT},
 };
 
 use super::{cluster::ClusterInput, input::FrameGpuInput, input::RayTracingInput, post::PostInput};
@@ -71,6 +71,7 @@ pub(super) fn rebuild_size_dependent(
     post: &mut PostInput,
     cluster: &mut ClusterInput,
     ray_tracing: &mut RayTracingInput<'_>,
+    ssao_targets: &mut SsaoTargets,
 ) -> Result<(), BevyError> {
     let ctx: &Context = &gpu.ctx;
     gpu.swapchain
@@ -105,7 +106,11 @@ pub(super) fn rebuild_size_dependent(
     // tonemap/edge/blend 的 renderArea 与附件尺寸必须同帧对齐
     post.smaa
         .rebuild(ctx, extent)
-        .or_fatal("SMAA 三目标重建失败，渲染链无法继续")
+        .or_fatal("SMAA 三目标重建失败，渲染链无法继续")?;
+    // 10.2：AO 目标（半/全分辨率图随尺寸换，1×1 dummy 不变）
+    ssao_targets
+        .ensure(ctx, extent)
+        .or_fatal("SSAO 目标重建失败，渲染链无法继续")
 }
 
 /// 逐帧槽收集（重建入参：深度 image/view、光源环 buffer）。

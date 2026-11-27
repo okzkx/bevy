@@ -8,7 +8,7 @@
 //! BRP 侧保持"view>0 才画"的原样语义。Volume/池规格（Size/Res/级联/容量）只能在关态改，
 //! 面板不提供，走 BRP `gi_set`。
 
-use crate::render::GiSettings;
+use crate::render::{GiSettings, SsaoSettings};
 
 /// 视图号 → 名称（与 `gi_cell.wgsl` 的 `view_color` 编号一致）。
 const VIEWS: &[(u32, &str)] = &[
@@ -36,11 +36,13 @@ const FORMS: &[(u32, &str)] = &[(0, "覆盖图"), (1, "覆盖图 + 方片"), (2,
 /// 表面缓存页的一次构建输入（控件就地写资源）。
 pub(in crate::overlay) struct GiPage<'a> {
     pub(in crate::overlay) gi: &'a mut GiSettings,
+    /// 屏幕空间环境光遮蔽（10.2）：与 BRP `ssao_set` 同源。
+    pub(in crate::overlay) ssao: &'a mut SsaoSettings,
 }
 
 impl GiPage<'_> {
     pub(in crate::overlay) fn show(self, ui: &mut egui::Ui) {
-        let Self { gi } = self;
+        let Self { gi, ssao } = self;
         let was_enabled = gi.enabled;
         let was_estimating = gi.estimation;
         ui.checkbox(&mut gi.enabled, "表面缓存 GI（gi_enabled）");
@@ -183,5 +185,34 @@ impl GiPage<'_> {
             config.capacity,
         ));
         ui.small("改规格只能在关态：BRP gi_set {\"enabled\":false, \"size\":…, \"cascades\":…}");
+        ui.separator();
+
+        ui.strong("环境光遮蔽（SSAO，10.2）");
+        ui.checkbox(&mut ssao.enabled, "屏幕空间环境光遮蔽（ssao_enabled）");
+        ui.monospace("BRP: ash_renderer/ssao_set / ssao_stats");
+        ui.small("关 = 不录 SSAO 段、合成绑 1×1 白图，画面与 10.1 逐字节一致。");
+        ui.add_enabled_ui(ssao.enabled, |ui| {
+            ui.add(
+                egui::Slider::new(&mut ssao.radius_m, 0.05..=2.0)
+                    .text("采样半径（米）")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut ssao.bias, 0.0..=0.2)
+                    .text("深度偏置（米）")
+                    .fixed_decimals(3),
+            );
+            ui.add(
+                egui::Slider::new(&mut ssao.intensity, 0.0..=2.0)
+                    .text("强度")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut ssao.steps, 1..=16)
+                    .text("每方向步数")
+                    .fixed_decimals(0),
+            );
+        });
+        ui.small("AO 只乘环境项（IBL 漫反射 + 常量 ambient），不乘直射、不乘 SCGI 替换项。");
     }
 }

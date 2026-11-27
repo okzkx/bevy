@@ -3,6 +3,7 @@
 
 use super::frame_pool::UploadWait;
 use crate::render::core::binding::set_layout::DescSet;
+use crate::render::passes::ambient::ssao_pass::SsaoFrameDraw;
 use crate::render::passes::gi::GiFrameDraw;
 use crate::render::passes::ibl::IblFrameDraw;
 use crate::render::passes::lighting::cluster::ClusterFrameDraw;
@@ -48,6 +49,12 @@ pub struct RenderFeatures<'a> {
     /// 表面缓存（9.5）：④.5 段回收三件 + 屏幕播种，⑧ 段 patch 调试视图；GI 关为 None，
     /// 整段跳过（GI 关 = 与 9.3 逐位一致）。
     pub gi: Option<GiFrameDraw>,
+    /// 环境光遮蔽（10.2）：④.6 段两段 dispatch（半分辨率 AO → 全分辨率 AO）；关档为 None，
+    /// 整段跳过（零命令零屏障），合成段仍绑 1×1 白 dummy 采样集乘 1.0。
+    pub ssao: Option<SsaoFrameDraw>,
+    /// 10.2 合成 pass 第 7 集：SSAO 全分辨率 AO；关档绑 1×1 白图（乘 1.0 恒等），
+    /// 所以无论开关都恒绑，pipeline layout 不变。
+    pub ssao_set: DescSet,
     /// 9.7.6 合成 pass 第 6 集：SCGI 全分辨率辐照度（`frame.scgi.x == 0` 时着色器不读它，
     /// 但集恒绑——pipeline layout 恒定，"关 = 基线"才不用重建管线）。
     pub scgi_set: DescSet,

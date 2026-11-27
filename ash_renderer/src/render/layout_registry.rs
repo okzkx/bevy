@@ -6,6 +6,8 @@
 
 use crate::render::core::binding::pipeline_layout::PipelineDesc;
 use crate::render::core::binding::set_layout::SetLayoutDesc;
+use crate::render::passes::ambient::ssao_pass::{SSAO_PIPELINE, SSAO_UPSAMPLE_PIPELINE};
+use crate::render::passes::ambient::ssao_targets::{SSAO_SAMPLE_SET_DESC, SSAO_STORAGE_SET_DESC};
 use crate::render::passes::gbuffer::gbuffer_pipeline::GBUFFER_WRITE_PIPELINE;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
 use crate::render::passes::gi::screen_gather::{SCGI_SAMPLE_SET_DESC, SCGI_TARGET_SET_DESC};
@@ -119,6 +121,9 @@ pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
     &EXPOSURE_ADAPT_PIPELINE,
     // 9.9 颜色校验：三域直方图采样
     &COLOR_SCOPE_PIPELINE,
+    // 10.2 SSAO：半分辨率 AO + 深度感知上采样（两条 compute）
+    &SSAO_PIPELINE,
+    &SSAO_UPSAMPLE_PIPELINE,
 ];
 
 /// 宿主声明并建出的全部 set 布局。
@@ -155,4 +160,7 @@ pub(crate) const ALL_SETS: &[&SetLayoutDesc] = &[
     &EXPOSURE_STATE_SET_DESC,
     // 9.9 颜色校验采样集
     &COLOR_SCOPE_SET_DESC,
+    // 10.2 SSAO：compute 写目标（半/全分辨率）与合成采样集（关档绑 dummy）
+    &SSAO_STORAGE_SET_DESC,
+    &SSAO_SAMPLE_SET_DESC,
 ];

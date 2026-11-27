@@ -159,6 +159,9 @@ pub use passes::lighting::cluster::{
     cluster_reference, pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, ClusterFrameDraw,
     ClusterGrid, LightClusters,
 };
+pub use passes::ambient::ssao_pass::{SsaoFrameDraw, SsaoPipelines};
+pub use passes::ambient::ssao_targets::{SsaoTargets, SSAO_FORMAT};
+pub use passes::ambient::SsaoSettings;
 pub use passes::lighting::composite_pipeline::CompositePipeline;
 pub use passes::overlay::atlas_gpu::AtlasGpu;
 pub use passes::overlay::overlay_pipeline::{OverlayPipeline, UiDraw, UiDrawCall, UiPaint};

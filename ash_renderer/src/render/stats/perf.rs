@@ -1,5 +1,6 @@
-//! GPU timestamp 计时与帧样本账。每帧槽一只 TIMESTAMP query pool（[`QUERIES_PER_FRAME`] = 12 位），
-//! 帧内写 12 个 timestamp，下一轮该槽 fence 等完后取回。
+//! GPU timestamp 计时与帧样本账。每帧槽一只 TIMESTAMP query pool（[`QUERIES_PER_FRAME`] = 13 位），
+//! 帧内写 13 个 timestamp（T0–T12），下一轮该槽 fence 等完后取回。池位宽必须等于实际写入数：
+//! reset 过但没写的查询位会让 `get_query_pool_results` 报 NOT_READY，整槽读数全丢（踩过）。
 //!
 //! 采样阶段：T0 用 TOP_OF_PIPE；其余用 BOTTOM_OF_PIPE，等记录序之前的命令全部走完才写。
 //! 坑：段界若用 TOP_OF_PIPE，timestamp 不等前面的工作，段间屏障也约束不到它，读数会系统性
@@ -19,6 +20,7 @@
 //! | T9 | end_command_buffer 前 | 尾段（不入账）；全帧取 T0→T9 |
 //! | T10 | ② 段 TLAS 组装/构建 + 屏障后 | 光线求交 TLAS（T10 单列，`fetch_ray_tracing` 取） |
 //! | T11 | ② 段调试图主射线后 | 光线求交射线（T11 单列，`fetch_ray_tracing` 取） |
+//! | T12 | 屏幕空间环境光遮蔽 dispatch 后 | SSAO（T5→T12 单列，`fetch` 第 10 维） |
 //!
 //! timestamp 只用于诊断：队列族 `timestamp_valid_bits == 0` 时降级停用（warn 一次），不阻断渲染。
 //!
@@ -39,8 +41,8 @@ fn wrapping_timestamp_delta(start: u64, end: u64, mask: u64) -> u64 {
     end.wrapping_sub(start) & mask
 }
 
-/// 每帧槽查询位数（T0..T11，见模块注释）。
-pub(crate) const QUERIES_PER_FRAME: u32 = 12;
+/// 每帧槽查询位数（= 实际写入的 T0..T12 数；见模块注释的位宽约束）。
+pub(crate) const QUERIES_PER_FRAME: u32 = 13;
 
 /// timestamp 采样点位：变体名 = 该点收尾的段，数值 = query pool 内槽位号。
 /// 各点位在录制体里的落位见模块注释表。
@@ -70,6 +72,8 @@ pub enum TimestampPoint {
     RayTracingTlas = 10,
     /// ② 段光线求交：调试图主射线 dispatch 结束（光线求交关的帧 ≈ RayTracingTlas）。
     RayTracingRays = 11,
+    /// 屏幕空间环境光遮蔽（半分辨率 dispatch + 全分辨率上采样）结束；SSAO 关的帧 ≈ SurfaceCache。
+    Ssao = 12,
 }
 
 /// 一帧的计量样本：CPU 分段 + GPU 区间 + 规模读数，全部毫秒。
@@ -109,6 +113,8 @@ pub struct FrameSample {
     pub gpu_hiz_ms: f32,
     /// ④.5 段表面缓存（滚动/淘汰/整理/播种）；GI 关的帧 ≈ 0。
     pub gpu_gi_ms: f32,
+    /// 屏幕空间环境光遮蔽两 dispatch；SSAO 关的帧 ≈ 0。
+    pub gpu_ssao_ms: f32,
     /// IBL 烘焙（捕获 + SH 投影/归约/自检 + 预滤波）；不烘焙的帧 ≈ 0。
     pub gpu_ibl_capture_ms: f32,
     /// ② 段 TLAS 组装/构建（含屏障）；光线求交关的帧 ≈ 0。
@@ -339,7 +345,7 @@ impl GpuTimer {
     ///
     /// # Errors
     /// 取结果失败（如设备丢失）。
-    pub fn fetch(&mut self, slot: usize) -> Result<Option<[f32; 9]>> {
+    pub fn fetch(&mut self, slot: usize) -> Result<Option<[f32; 10]>> {
         if !self.enabled || !self.recorded[slot].load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -379,6 +385,7 @@ impl GpuTimer {
             seg(PostUi, FrameEnd),
             seg(FrameStart, FrameEnd),
             seg(FrameStart, IblCapture),
+            seg(SurfaceCache, Ssao),
         ]))
     }
 
