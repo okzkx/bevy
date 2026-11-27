@@ -103,8 +103,18 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     let origin = world + n * 0.02;
     let t_min = 0.25;
     let steps = max(push.steps, 1u);
+    // 对数步进：近处步密（薄物体/近场反射不发虚），远处步疏（一根 16 m 的射线不必每 25 cm 采一次）。
+    // 均匀步进在同样的步数下要么漏薄物体、要么把 max_t 吃掉。
+    let max_t = max(push.max_t, t_min * 1.01);
+    let ratio = exp(log(max_t / t_min) / f32(steps));
 
     var prev_t = t_min;
+    let prev_clip = frame.view_proj * vec4f(origin + dir * t_min, 1.0);
+    var prev_w = clip_w(prev_clip);
+    // 上一个「明确在几何之前」的采样点（delta < 0）。命中细化必须从这对前后夹逼开始，
+    // 否则 bracket 落在几何内部，二分收敛到错误的交点，表现为掠射处一圈圈台阶带。
+    var front_t = t_min;
+    var has_front = false;
     var hit_t = t_min;
     var hit_uv = uv;
     var found = false;
@@ -113,7 +123,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
         if (i >= steps) {
             break;
         }
-        let t = t_min + (push.max_t - t_min) * f32(i + 1u) / f32(steps);
+        let t = t_min * pow(ratio, f32(i + 1u));
         let p = origin + dir * t;
         let clip = frame.view_proj * vec4f(p, 1.0);
         if (clip.w <= 0.0) {
@@ -135,7 +145,14 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
                 // 不能拿步长当容差——掠射地面时会产生整片假命中）③命中面朝向来向
                 // （掠射同一平面时法线与射线同向，dot >= 0，直接排除自反射假命中）
                 let hit_n = normalize(textureLoad(normal_tex, spix, 0).xyz);
-                if (delta > 0.0 && delta < push.thickness && dot(hit_n, dir) < -0.05) {
+                // 容差 = 材质厚度 + 本步的视深增量。掠射时射线横向走很远而视深几乎不变，
+                // 固定容差会把「擦过表面」的射线判成没碰到——正是偏轴机位整片为 0 的原因。
+                let tol = push.thickness + min(abs(clip.w - prev_w), push.thickness);
+                if (delta < 0.0) {
+                    front_t = t;
+                    has_front = true;
+                }
+                if (delta > 0.0 && delta < tol && dot(hit_n, dir) < -0.05) {
                     hit_t = t;
                     hit_uv = suv;
                     found = true;
@@ -143,6 +160,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
                 }
             }
         }
+        prev_w = clip.w;
         prev_t = t;
         i = i + 1u;
     }
@@ -151,8 +169,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
         return;
     }
 
-    // 二分细化：t0 在几何前面、t1 在后面，4 次把命中点收敛到像素级
-    var t0 = max(prev_t, t_min);
+    // 二分细化：t0 在几何前面、t1 在后面，4 次把命中点收敛到像素级。
+    // t0 取「最后一个 delta < 0 的采样点」而不是上一个采样点——掠射时上一个采样点往往
+    // 已经在几何内部，那样二分区间不含真实交点。
+    var t0 = select(max(prev_t, t_min), front_t, has_front);
     var t1 = hit_t;
     for (var k = 0u; k < 4u; k = k + 1u) {
         let tm = 0.5 * (t0 + t1);
