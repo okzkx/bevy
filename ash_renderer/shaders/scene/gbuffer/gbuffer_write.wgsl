@@ -77,6 +77,14 @@ fn fs_main(in: VsOut) -> GBufferOut {
     // 坑：TBN 用 dpdx/dpdy，必须在一致控制流里算（所以放在 if 外）；放进分支会因
     // helper invocation 分歧得到未定义值（画面黑/白紊乱）。
     let tbn = cotangent_frame(safe_normalize(in.world_normal, vec3f(0.0, 1.0, 0.0)), in.world_pos, in.uv);
+    // —— 透明行（BLEND 族）不进 G-buffer：颜色与深度都不写，交给透明前向层混合。
+    // 坑：早前此处不判，blend 表面先以不透明写进 G-buffer、透明层再叠一层，结果
+    // Blend 材质看起来完全不透明（Khronos AlphaBlendModeTest 的 Blend 面板即证据）。
+    // 判定复用 material_is_transparent（与透明层收集端同口径，两边不会漂移）。
+    // 同样放在 TBN 导数之后：discard 会破坏 helper invocation。
+    if (material_is_transparent(mat)) {
+        discard;
+    }
     // —— alpha 裁切（MASK）：采样 alpha = 贴图 a × factor a，低于阈值丢弃镂空片元。
     // 放在 TBN 导数之后：discard 会破坏 helper invocation，导数此前已算完。
     if (mat.alpha_mode == ALPHA_MODE_MASK && surf.albedo.a < mat.alpha_cutoff) {
