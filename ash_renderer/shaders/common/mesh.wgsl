@@ -14,6 +14,7 @@ struct VsOut {
     @location(1) uv: vec2f,
     @location(2) @interpolate(flat) material: u32,
     @location(3) world_pos: vec3f,
+    @location(4) color: vec4f,
 }
 
 // 模型的法线矩阵（cofactor 形态）：与逆转置只差行列式倒数这一标量，normalize
@@ -28,7 +29,13 @@ fn normal_cofactor(m: mat4x4f) -> mat3x3f {
 // 实例槽 = @builtin(instance_index)：indirect 命令的 firstInstance 携带槽号
 //（instanceCount=1 时 instance_index == firstInstance），按槽读 set2 常驻表。
 // 正高度 viewport 直出，Y 翻转由 naga ADJUST_COORDINATE_SPACE 注入。
-fn mesh_vertex(position: vec3f, normal: vec3f, uv: vec2f, instance_index: u32) -> VsOut {
+fn mesh_vertex(
+    position: vec3f,
+    normal: vec3f,
+    uv: vec2f,
+    color: vec4f,
+    instance_index: u32,
+) -> VsOut {
     let obj = objects[instance_index];
     let model = models[instance_index];
     var out: VsOut;
@@ -38,6 +45,7 @@ fn mesh_vertex(position: vec3f, normal: vec3f, uv: vec2f, instance_index: u32) -
     out.world_normal = normal_cofactor(model) * normal;
     out.uv = uv;
     out.material = obj.material_index;
+    out.color = color;
     return out;
 }
 

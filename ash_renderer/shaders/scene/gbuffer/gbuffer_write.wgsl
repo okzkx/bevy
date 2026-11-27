@@ -51,9 +51,10 @@ fn vs_main(
     @location(0) position: vec3f,
     @location(1) normal: vec3f,
     @location(2) uv: vec2f,
+    @location(3) color: vec4f,
     @builtin(instance_index) instance_index: u32,
 ) -> VsOut {
-    return mesh_vertex(position, normal, uv, instance_index);
+    return mesh_vertex(position, normal, uv, color, instance_index);
 }
 
 struct GBufferOut {
@@ -66,7 +67,9 @@ struct GBufferOut {
 @fragment
 fn fs_main(in: VsOut) -> GBufferOut {
     let mat = materials[in.material];
-    let surf = sample_surface(mat, in.uv);
+    // 顶点色（COLOR_0）是线性乘子、含 alpha：乘在 alpha 裁切之前（glTF 语义）
+    var surf = sample_surface(mat, in.uv);
+    surf.albedo = surf.albedo * in.color;
 
     // —— 法线：几何法线为底，normal map 经 TBN 扰动。法线贴图只采 XY 重建 Z
     // （BC5 块压缩只有双通道；RGBA8 归一化切线法线的 z≥0 时重建值相同）：

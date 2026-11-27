@@ -57,7 +57,7 @@ impl TransparentPipeline {
         layout: vk::PipelineLayout,
         stages: &[vk::PipelineShaderStageCreateInfo<'_>],
     ) -> Result<Self> {
-        // 顶点格式与场景管线一致：位置 12B + 法线 12B + UV 8B，共 32B
+        // 顶点格式与场景管线一致：位置 12B + 法线 12B + UV 8B + 顶点色 4B，共 36B
         let vertex_binding = [vk::VertexInputBindingDescription::default()
             .binding(0)
             .stride(crate::render::VERTEX_STRIDE as u32)
@@ -78,6 +78,11 @@ impl TransparentPipeline {
                 .binding(0)
                 .format(vk::Format::R32G32_SFLOAT)
                 .offset(24),
+            vk::VertexInputAttributeDescription::default()
+                .location(3)
+                .binding(0)
+                .format(vk::Format::R8G8B8A8_UNORM)
+                .offset(32),
         ];
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&vertex_binding)

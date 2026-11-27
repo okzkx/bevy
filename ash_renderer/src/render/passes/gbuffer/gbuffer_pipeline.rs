@@ -90,6 +90,11 @@ impl GBufferPipeline {
                 .binding(0)
                 .format(vk::Format::R32G32_SFLOAT)
                 .offset(24),
+            vk::VertexInputAttributeDescription::default()
+                .location(3)
+                .binding(0)
+                .format(vk::Format::R8G8B8A8_UNORM)
+                .offset(32),
         ];
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&vertex_binding)

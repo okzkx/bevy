@@ -38,9 +38,10 @@ fn vs_main(
     @location(0) position: vec3f,
     @location(1) normal: vec3f,
     @location(2) uv: vec2f,
+    @location(3) color: vec4f,
     @builtin(instance_index) instance_index: u32,
 ) -> VsOut {
-    return mesh_vertex(position, normal, uv, instance_index);
+    return mesh_vertex(position, normal, uv, color, instance_index);
 }
 
 @fragment
@@ -48,7 +49,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     // forward 直读材质记录（不透明层经 G-buffer 中转，两侧换算同源同域）
     let mat = materials[in.material];
     let surf = sample_surface(mat, in.uv);
-    let albedo = surf.albedo;
+    // 顶点色（COLOR_0）：线性乘子，alpha 一并乘（影响混合输出）
+    let albedo = surf.albedo * in.color;
     // 零法线兜底（同不透明 G-buffer 写入口径）：退化面片不让 NaN 进光照
     let n = safe_normalize(in.world_normal, vec3f(0.0, 1.0, 0.0));
     let pixel = getStandardPixelParams(albedo.rgb, surf.metallic, surf.perceptual_roughness, mat.reflectance);

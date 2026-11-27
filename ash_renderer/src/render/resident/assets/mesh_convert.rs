@@ -1,4 +1,4 @@
-//! 网格转换：`bevy::mesh::Mesh` → 交错 32B 顶点 + U32 索引。纯 CPU 字节整形，不调 Vulkan；
+//! 网格转换：`bevy::mesh::Mesh` → 交错 36B 顶点 + U32 索引。纯 CPU 字节整形，不调 Vulkan；
 //! 产出由 [`super::pool`] 与 `core::device::transfer` 上传。
 //!
 //! 顶点布局（本模块是唯一生产点，与图形管线的 vertex-input 状态是同一份约定）：
@@ -8,8 +8,12 @@
 //! | POSITION | 0 | 12B(`[f32;3]`) | `Mesh::ATTRIBUTE_POSITION`,缺即拒收 |
 //! | NORMAL | 12 | 12B(`[f32;3]`) | `Mesh::ATTRIBUTE_NORMAL`,缺则全 0 |
 //! | UV_0 | 24 | 8B(`[f32;2]`) | `Mesh::ATTRIBUTE_UV_0`,缺则全 0 |
+//! | COLOR_0 | 32 | 4B(`unorm8x4`) | `Mesh::ATTRIBUTE_COLOR`,缺则全白 |
 //!
-//! 顶点数据只走 vertex-input，不进描述符；交错 32B 未经验证不得当作 WGSL storage struct 复用。
+//! 顶点数据只走 vertex-input，不进描述符；交错 36B 未经验证不得当作 WGSL storage struct 复用。
+//!
+//! 顶点色按 `R8G8B8A8_UNORM` 收：glTF 的 COLOR_0 是 [0,1] 线性乘子（含 alpha），8 位
+//! 量化到 1/255 对反照率乘子无可测差异，换来 4B/顶点（stride 32→36）。
 //!
 //! 索引：U16/U32 一律输出 U32（`vk::IndexType::UINT32`），只留一条路径，不为省内存保留 U16；
 //! 无索引网格输出顺序索引 0..n。
@@ -21,7 +25,8 @@
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 
 /// 交错顶点的 stride（字节），上传与 vertex-input 共用。
-pub const VERTEX_STRIDE: u64 = 32;
+/// 位置 12B + 法线 12B + UV 8B + 顶点色 4B = 36B（管线 vertex-input 与本值必须同步）。
+pub const VERTEX_STRIDE: u64 = 36;
 
 /// 转换拒收的原因。
 #[derive(Debug, thiserror::Error)]
@@ -108,6 +113,38 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
         Err(_) => None,
     };
 
+    // 顶点色：Float32x4 四舍五入到 unorm8；Unorm8x4 直接拷。缺失/长度不符/其他类型
+    // 都按全白继续（与 NORMAL/UV 的"缺则填保守值"同策略），只 warn 不拒收。
+    let colors: Option<Vec<[u8; 4]>> = match mesh.try_attribute(Mesh::ATTRIBUTE_COLOR) {
+        Ok(VertexAttributeValues::Float32x4(list)) if list.len() == vertex_count => Some(
+            list.iter()
+                .map(|v| v.map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8))
+                .collect(),
+        ),
+        Ok(VertexAttributeValues::Unorm8x4(list)) if list.len() == vertex_count => {
+            Some(list.clone())
+        }
+        Ok(VertexAttributeValues::Float32x4(list)) => {
+            bevy::log::warn!(
+                "COLOR_0 长度 {} 与顶点数 {vertex_count} 不符,按全白填充",
+                list.len()
+            );
+            None
+        }
+        Ok(VertexAttributeValues::Unorm8x4(list)) => {
+            bevy::log::warn!(
+                "COLOR_0 长度 {} 与顶点数 {vertex_count} 不符,按全白填充",
+                list.len()
+            );
+            None
+        }
+        Ok(other) => {
+            bevy::log::warn!("COLOR_0 是 {other:?} 而非 Float32x4/Unorm8x4,按全白填充");
+            None
+        }
+        Err(_) => None,
+    };
+
     // 逐顶点按 f32 小端展开（to_le_bytes 不依赖平台字节序），同一遍扫出包围盒
     let mut vertices = Vec::with_capacity(vertex_count * VERTEX_STRIDE as usize);
     let mut aabb_min = [f32::INFINITY; 3];
@@ -135,6 +172,10 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<ConvertedMesh, MeshConvertError> {
                 }
             }
             None => vertices.extend_from_slice(&[0u8; 8]), // 无 UV：8B 全 0
+        }
+        match colors.as_deref() {
+            Some(color) => vertices.extend_from_slice(&color[i]),
+            None => vertices.extend_from_slice(&[255, 255, 255, 255]), // 无顶点色：白
         }
     }
 
