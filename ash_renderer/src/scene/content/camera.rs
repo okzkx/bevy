@@ -7,6 +7,7 @@
 
 use bevy::{
     camera::{Camera, Projection},
+    mesh::{Mesh, Mesh3d, VertexAttributeValues},
     prelude::*,
     window::PrimaryWindow,
 };
@@ -14,7 +15,7 @@ use bevy::{
 use ash_macros::system;
 
 use super::fmt_vec3;
-use crate::scene::mechanism::CameraOrbit;
+use crate::scene::mechanism::{CameraOrbit, CameraOrbitCommand, apply_orbit_command};
 
 /// 相机取景参数：Sponza 中庭机位（彩旗拱廊狮头喷泉全景）。Sponza 世界 AABB ≈
 /// 30×12.4×18.3 米（节点 scale 0.008），中庭中心 ≈ (0, 3, 0)：机位在
@@ -88,5 +89,97 @@ pub(super) fn report_camera_setup(cameras: Query<(&GlobalTransform, &Projection)
         "相机就位：1 台 @ {} 前向 {} 与位置→注视点夹角 {deviation:.4}°（looking_at 语义），{aspect}",
         fmt_vec3(cam_tf.translation()),
         fmt_vec3(*cam_tf.forward()),
+    );
+}
+
+/// `--scene` 覆盖时的自动机位状态：进场请求时由 `load_scene` 置位，摆完即清。
+///
+/// 为什么需要：默认机位按 Sponza 中庭反解（target 3 m 高、radius 5 m），对 0.6 m
+/// 量级的材质测试场景会直接飞到天上；这里按实际进场几何的包围盒重新取景。
+#[derive(Resource, Default)]
+pub(super) struct SceneAutoFrame {
+    pending: bool,
+    /// 上一帧的 primitive 数：等实体树稳定一帧再算包围盒（WorldAsset 是一次
+    /// 反射展开，通常一帧到齐，留一帧余量防半成品）。
+    last_count: usize,
+}
+
+impl SceneAutoFrame {
+    /// 请求一次自动取景（只在 `--scene` 覆盖时调用）。
+    pub(super) fn request() -> Self {
+        Self {
+            pending: true,
+            last_count: 0,
+        }
+    }
+}
+
+/// 测试场景自动机位（Update）：等 primitive 数量稳定后按世界包围盒摆轨道机位。
+///
+/// 取景口径：中心 = 包围盒中心；距离 = 包围球半径 / tan(fov_y/2) × 1.25 余量；
+/// 俯角 30°、yaw 0（与官方材质测试场景的阅读方向一致）。Sponza 默认机位不走这里。
+#[system]
+pub(super) fn auto_frame_scene(
+    mut state: ResMut<SceneAutoFrame>,
+    meshes: Res<Assets<Mesh>>,
+    primitives: Query<(&GlobalTransform, &Mesh3d)>,
+    mut cameras: Query<(&mut Transform, &mut CameraOrbit, &Camera, &Projection)>,
+) {
+    if !state.pending {
+        return;
+    }
+    let count = primitives.iter().count();
+    if count == 0 || count != state.last_count {
+        state.last_count = count;
+        return;
+    }
+    let Ok((mut transform, mut orbit, _camera, projection)) = cameras.single_mut() else {
+        warn!("测试场景自动机位未摆：相机不是恰好 1 台");
+        state.pending = false;
+        return;
+    };
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for (tf, mesh3d) in &primitives {
+        let Some(mesh) = meshes.get(&mesh3d.0) else {
+            continue;
+        };
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            continue;
+        };
+        for p in positions {
+            let world = tf.transform_point(Vec3::from_array(*p));
+            min = min.min(world);
+            max = max.max(world);
+        }
+    }
+    if !min.is_finite() || !max.is_finite() {
+        warn!("测试场景自动机位未摆：进场几何没有可用 POSITION");
+        state.pending = false;
+        return;
+    }
+    let center = (min + max) * 0.5;
+    let diagonal = (max - min).length();
+    let fov_y = match projection {
+        Projection::Perspective(persp) => persp.fov,
+        _ => 45.0_f32.to_radians(),
+    };
+    let radius = (0.5 * diagonal / (fov_y * 0.5).tan()).max(0.05) * 1.25;
+    let cmd = CameraOrbitCommand {
+        target: Some(center),
+        yaw_deg: Some(0.0),
+        pitch_deg: Some(30.0),
+        radius: Some(radius),
+        zoom: None,
+    };
+    apply_orbit_command(&mut transform, &mut orbit, &cmd);
+    state.pending = false;
+    info!(
+        "测试场景自动机位：包围盒 {} → {}（对角线 {diagonal:.3} m），target {} radius {radius:.3}",
+        fmt_vec3(min),
+        fmt_vec3(max),
+        fmt_vec3(center),
     );
 }

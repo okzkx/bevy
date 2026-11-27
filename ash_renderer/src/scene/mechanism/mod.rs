@@ -40,7 +40,9 @@ pub use generation::{
 pub use host::{
     AshCameraAspectPlugin, AshCameraGuardPlugin, AshMaterialHookPlugin, AshVisibilityExemptPlugin,
 };
-pub(crate) use interaction::{apply_camera_command, CameraCommandError, CameraOrbitCommand};
+pub(crate) use interaction::{
+    CameraCommandError, CameraOrbitCommand, apply_camera_command, apply_orbit_command,
+};
 pub use interaction::{
     apply_sun_rotation, clamp_elevation, AshCameraControlPlugin, AshLightControlPlugin,
     CameraOrbit, PointerCapture, PointerCaptureSet, SunOrbit,

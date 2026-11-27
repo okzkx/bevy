@@ -53,7 +53,12 @@ pub(super) fn load_scene(mut commands: Commands, server: Res<AssetServer>) {
             server.load(GltfAssetLabel::Scene(0).from_asset(SPONZA))
         }
     };
+    let overridden = path != SPONZA;
     commands.spawn(WorldAssetRoot(scene));
+    if overridden {
+        // 非默认场景：实体到齐后按包围盒自动取景（默认机位是按 Sponza 中庭反解的）。
+        commands.insert_resource(super::camera::SceneAutoFrame::request());
+    }
     info!("场景进场：已请求 {path}#Scene0，实体树待依赖就绪后异步展开");
 }
 

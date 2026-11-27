@@ -20,7 +20,8 @@ pub struct SceneEntryPlugin;
 
 impl Plugin for SceneEntryPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<camera::SceneAutoFrame>()
+            .add_systems(
             Startup,
             (
                 world_asset::load_scene,
@@ -32,6 +33,7 @@ impl Plugin for SceneEntryPlugin {
             Update,
             (
                 world_asset::report_scene_arrival,
+                camera::auto_frame_scene,
                 camera::report_camera_setup.run_if(run_once),
                 lights::report_lights_setup.run_if(run_once),
             ),

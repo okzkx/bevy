@@ -167,7 +167,7 @@ pub fn apply_camera_command(
 }
 
 /// 应用命令到已选中的相机。
-fn apply_orbit_command(
+pub(crate) fn apply_orbit_command(
     transform: &mut Transform,
     orbit: &mut CameraOrbit,
     cmd: &CameraOrbitCommand,
