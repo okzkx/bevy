@@ -32,6 +32,9 @@ pub struct RayTracingSettings {
     pub enabled: bool,
     /// 调试图子视图：0 = 命中距离 t，1 = 世界法线，2 = 实例槽 hash（`ray_tracing_dump` 按它解码）。
     pub view: u32,
+    /// 调试图开关（默认 false）：只有它为 true 时才录全屏调试图；BRP `ray_tracing_set` 显式打开，
+    /// 取证后关回。TLAS 仍随 `enabled` 运行，`debug` 只门控调试图 dispatch。
+    pub debug: bool,
 }
 
 /// 求交器宿主入口：BLAS 注册表 + 每帧 TLAS + 设备能力/属性快照。

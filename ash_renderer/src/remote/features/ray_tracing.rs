@@ -18,13 +18,16 @@ use crate::render::{
     TLAS_INSTANCE_SIZE,
 };
 
-/// `ash_renderer/ray_tracing_set`：求交器总开关 + 调试图子视图（0 距离 / 1 法线 / 2 槽 hash）。
-/// 请求 `{"enabled": bool, "view"?: 0|1|2}`；`view` 缺省保留当前值。回写生效值。
+/// `ash_renderer/ray_tracing_set`：求交器总开关 + 调试图开关 + 调试图子视图
+///（0 距离 / 1 法线 / 2 槽 hash）。
+/// 请求 `{"enabled": bool, "view"?: 0|1|2, "debug"?: bool}`；`view`/`debug` 缺省保留当前值。回写生效值。
 #[derive(serde::Deserialize)]
 struct RayTracingSetParams {
     enabled: bool,
     #[serde(default)]
     view: Option<u32>,
+    #[serde(default)]
+    debug: Option<bool>,
 }
 
 /// # Errors
@@ -43,14 +46,20 @@ pub(crate) fn ray_tracing_set(In(params): In<Option<Value>>, world: &mut World) 
     let supported = res::<Context>(world)?.ray_tracing_support().enabled();
     let mut settings = res_mut::<RayTracingSettings>(world)?;
     let previous = settings.enabled;
+    let previous_debug = settings.debug;
     settings.enabled = p.enabled;
     if let Some(view) = p.view {
         settings.view = view;
+    }
+    if let Some(debug) = p.debug {
+        settings.debug = debug;
     }
     Ok(json!({
         "enabled": settings.enabled,
         "previous": previous,
         "view": settings.view,
+        "debug": settings.debug,
+        "previous_debug": previous_debug,
         "supported": supported,
     }))
 }
@@ -105,8 +114,20 @@ pub(crate) fn ray_tracing_stats(In(_params): In<Option<Value>>, world: &mut Worl
             .into(),
         None => (0.0, 0.0),
     };
-    let hit_rate = if rays > 0 {
-        f64::from(hits) / f64::from(rays)
+    let debug_active = supported && settings.enabled && settings.debug;
+    let (rays, hits, hit_rate, last_rays_ms) = if debug_active {
+        let rate = if rays > 0 {
+            f64::from(hits) / f64::from(rays)
+        } else {
+            0.0
+        };
+        (rays, hits, rate, ray_tracing_rays_ms)
+    } else {
+        (0, 0, 0.0, 0.0)
+    };
+    // TLAS 随 enabled 运行；调试图关掉时只清 Rays 段，保留 TLAS 读数。
+    let last_tlas_ms = if settings.enabled {
+        ray_tracing_tlas_ms
     } else {
         0.0
     };
@@ -127,11 +148,12 @@ pub(crate) fn ray_tracing_stats(In(_params): In<Option<Value>>, world: &mut Worl
         "blas": { "count": blas_count, "pending": blas_pending, "bytes": blas_bytes },
         "tlas": { "instances": instances, "capacity": tlas_capacity, "bytes": tlas_bytes },
         "debug": {
+            "enabled": debug_active,
             "rays": rays,
             "hits": hits,
             "hit_rate": hit_rate,
-            "last_tlas_ms": ray_tracing_tlas_ms,
-            "last_rays_ms": ray_tracing_rays_ms,
+            "last_tlas_ms": last_tlas_ms,
+            "last_rays_ms": last_rays_ms,
         },
     }))
 }
@@ -165,6 +187,11 @@ pub(crate) fn ray_tracing_dump(In(params): In<Option<Value>>, world: &mut World)
     if !settings.enabled || !ctx.ray_tracing_support().enabled() {
         return Err(invalid_params(
             "光线求交当前关闭（ray_tracing_set enabled=false 或设备不支持）——没有调试图可读",
+        ));
+    }
+    if !settings.debug {
+        return Err(invalid_params(
+            "调试图未开启——先 ray_tracing_set {\"debug\":true}，等至少一帧后再 dump",
         ));
     }
     let Some(targets) = world.get_resource::<RayTracingTargets>() else {

@@ -82,8 +82,16 @@ pub struct FrameSample {
     pub acquire_ms: f32,
     /// DrawList 组装（`drawlist::assemble`）。
     pub assemble_ms: f32,
-    /// 模型环增量 + 材质环全量写入。
+    /// 帧准备 rings 四段之和（装配前置 → model/material/presence/lod 四环写入）。
     pub rings_ms: f32,
+    /// 环段第一段：装配日志/光源 gather/IBL/AABB/shadow UBO（含前置准备）。
+    pub rings_shadow_ms: f32,
+    /// 环段第二段：post UBO 与 cluster 写入。
+    pub rings_cluster_ms: f32,
+    /// 环段第三段：transparent 清理、GI 准备与 frame UBO。
+    pub rings_prepare_gi_ms: f32,
+    /// 环段第四段：model/material/presence/lod 四环写入。
+    pub rings_tables_ms: f32,
     /// 录制 + 提交（`record_frame` 全程）。
     pub record_submit_ms: f32,
     /// present 调用本身（不等于上屏时刻）。
