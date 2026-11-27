@@ -76,7 +76,7 @@ fn ssao_push(full: vk::Extent2D, settings: &SsaoSettings, frame_index: u32) -> [
     push[20..24].copy_from_slice(&settings.steps.max(1).to_ne_bytes());
     push[24..28].copy_from_slice(&frame_index.to_ne_bytes());
     // flags bit0 = 全分辨率诊断模式（见 `ssao.wgsl` 的 `PushSsao`）。
-    let flags = u32::from(settings.full_res);
+    let flags = u32::from(settings.full_res) | (u32::from(settings.freeze_rotation) << 1);
     push[28..32].copy_from_slice(&flags.to_ne_bytes());
     push
 }

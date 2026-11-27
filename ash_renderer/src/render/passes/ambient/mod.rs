@@ -26,12 +26,20 @@ pub struct SsaoSettings {
     /// 强度：`ao = saturate(1.0 - intensity * occlusion)`。
     pub intensity: f32,
     /// 半球内的步数（4 个方向 × steps 个样本）。
+    ///
+    /// 默认 3（12 样本）是 release 实测下的预算选择：默认机位 RTX 2060 上
+    /// `ssao_ms` p50 0.279（判定线 6a ≤0.3）；给到 4 会到 0.317、超出预算，
+    /// 但画质差异很小（整帧 mean_ao 0.9267 vs 0.9267、dark 10.2% vs 9.9%），
+    /// 想更干净可以在面板/BRP 里调到 4~8 自己承担帧时间。
     pub steps: u32,
     /// 全分辨率诊断模式：AO 直接按全分辨率算、跳过上采样。
     ///
     /// 只给判定线 4 的「半 vs 全分辨率」对照与读图取证用；默认关，正常渲染走
     /// 半分辨率 + 双边上采样。关档时该项无意义。
     pub full_res: bool,
+    /// 冻结旋转核（诊断）：所有像素都用同一相位，半/全两种模式在偶数像素上的采样
+    /// 方向就完全一致，从而把「上采样误差」与「IGN 抖动噪声」分开（判定线 4 用）。
+    pub freeze_rotation: bool,
 }
 
 impl Default for SsaoSettings {
@@ -41,8 +49,9 @@ impl Default for SsaoSettings {
             radius_m: 0.5,
             bias: 0.02,
             intensity: 1.0,
-            steps: 4,
+            steps: 3,
             full_res: false,
+            freeze_rotation: false,
         }
     }
 }

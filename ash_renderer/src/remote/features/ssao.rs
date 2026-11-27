@@ -40,6 +40,7 @@ struct SetParams {
     steps: Option<u32>,
     /// 全分辨率诊断模式（判定线 4 对照用），缺省不改。
     full_res: Option<bool>,
+    freeze_rotation: Option<bool>,
 }
 
 /// `ssao_stats` 的可省字段。
@@ -71,9 +72,10 @@ pub(crate) fn ssao_set(In(params): In<Option<Value>>, world: &mut World) -> BrpR
         && p.intensity.is_none()
         && p.steps.is_none()
         && p.full_res.is_none()
+        && p.freeze_rotation.is_none()
     {
         return Err(invalid_params(
-            "params 缺失：需要 enabled / radius_m / bias / intensity / steps / full_res 之一",
+            "params 缺失：需要 enabled / radius_m / bias / intensity / steps / full_res / freeze_rotation 之一",
         ));
     }
     let mut settings = res_mut::<SsaoSettings>(world)?;
@@ -116,6 +118,9 @@ pub(crate) fn ssao_set(In(params): In<Option<Value>>, world: &mut World) -> BrpR
     if let Some(v) = p.full_res {
         settings.full_res = v;
     }
+    if let Some(v) = p.freeze_rotation {
+        settings.freeze_rotation = v;
+    }
     Ok(json!({
         "enabled": settings.enabled,
         "radius_m": settings.radius_m,
@@ -123,6 +128,7 @@ pub(crate) fn ssao_set(In(params): In<Option<Value>>, world: &mut World) -> BrpR
         "intensity": settings.intensity,
         "steps": settings.steps,
         "full_res": settings.full_res,
+        "freeze_rotation": settings.freeze_rotation,
     }))
 }
 
@@ -142,13 +148,14 @@ pub(crate) fn ssao_stats(In(params): In<Option<Value>>, world: &mut World) -> Br
     let extent = targets.full_extent();
     let written = targets.written_slot();
     let slot = p.slot.map_or_else(|| written.unwrap_or(0), |s| s as usize);
-    let (enabled, radius_m, bias, intensity, steps, full_res) = (
+    let (enabled, radius_m, bias, intensity, steps, full_res, freeze_rotation) = (
         settings.enabled,
         settings.radius_m,
         settings.bias,
         settings.intensity,
         settings.steps,
         settings.full_res,
+        settings.freeze_rotation,
     );
     let ssao_ms = res::<PerfLedger>(world)?
         .percentile(0.5, |s| s.gpu_ssao_ms)
@@ -163,6 +170,7 @@ pub(crate) fn ssao_stats(In(params): In<Option<Value>>, world: &mut World) -> Br
             "intensity": intensity,
             "steps": steps,
             "full_res": full_res,
+            "freeze_rotation": freeze_rotation,
             "ssao_ms": ssao_ms,
             "mean_ao": Value::Null,
             "min_ao": Value::Null,
@@ -217,6 +225,7 @@ pub(crate) fn ssao_stats(In(params): In<Option<Value>>, world: &mut World) -> Br
         "intensity": intensity,
         "steps": steps,
         "full_res": full_res,
+        "freeze_rotation": freeze_rotation,
         "ssao_ms": ssao_ms,
         "mean_ao": mean_ao,
         "min_ao": min_ao,

@@ -49,8 +49,16 @@ fn world_from_depth(uv: vec2f, depth: f32) -> vec3f {
 }
 
 // 视深：透视投影下 clip.w 就是沿视线方向的正距离（与调试图 MODE_DEPTH 同口径）。
-fn view_depth(world: vec3f) -> f32 {
-    return (frame.view_proj * vec4f(world, 1.0)).w;
+// 直接取投影矩阵第 4 行的点积，省掉「反投影回世界再投影」的两次 mat4 乘——
+// 这是每个采样点都要付的代价，实测是 release 下最大的一笔（判定线 6a）。
+fn clip_w(clip: vec4f) -> f32 {
+    let row = vec4f(
+        frame.view_proj[0].w,
+        frame.view_proj[1].w,
+        frame.view_proj[2].w,
+        frame.view_proj[3].w,
+    );
+    return dot(row, clip);
 }
 
 // Interleaved Gradient Noise：同帧内相邻像素的旋转角不同，把 4 方向×steps 的采样
@@ -88,7 +96,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
     let world = world_from_depth(uv, depth);
     let n = normalize(textureLoad(normal_tex, vec2i(pix), 0).xyz);
     let basis = basis_from_normal(n);
-    let seed = ign(gid.xy, push.frame) * 2.0 * PI;
+    // 旋转相位：正常按帧号轮换；诊断模式（flags bit1）冻结到 0，且用 pix/2 索引，
+    // 让半分辨率像素 (x,y) 与全分辨率像素 (2x,2y) 拿到同一组采样方向（判定线 4 的对照口径）。
+    let frozen = (push.flags & 2u) != 0u;
+    let seed_index = select(push.frame, 0u, frozen);
+    let seed = ign(pix / 2u, seed_index) * 2.0 * PI;
     let steps = max(push.steps, 1u);
 
     var occluded = 0u;
@@ -118,8 +130,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
             if (sd <= 1e-6) {
                 continue;
             }
-            let scene_world = world_from_depth((vec2f(spix) + vec2f(0.5)) / vec2f(full), sd);
-            let sdepth = view_depth(scene_world);
+            let sndc = vec3f(
+                (f32(spix.x) + 0.5) / f32(push.full_w) * 2.0 - 1.0,
+                1.0 - (f32(spix.y) + 0.5) / f32(push.full_h) * 2.0,
+                sd,
+            );
+            let sdepth = clip_w(vec4f(sndc, 1.0));
             let delta = clip.w - sdepth;
             if (delta > push.bias && delta < 2.0 * push.radius_m) {
                 occluded = occluded + 1u;
