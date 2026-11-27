@@ -10,8 +10,10 @@
      最近命中永远不是它，测不到跟随。
   ③ 流送无悬空：despawn 该立方体 → 等驻留回收 → blas_count 回落且进程零 VUID/VK-ERROR；
      之后连续 60 帧（≥1.5s）无新增 VUID。
-  ④ 降级路径：光线求交开时 frame_dump 两次（稳定性基线）+ ray_tracing_set enabled=false 后 frame_dump 一次
-     ——关档帧与开档帧逐字节一致（光线求交关 = 9.3 收官态）；ray_tracing_stats 报 enabled:false；ray_tracing_dump 拒绝。
+  ④ 降级路径：先切 manual 曝光（auto 眼适应跨状态稳定帧会差 1 LSB，改前基线即如此），
+     再对 debug 开/关、光线求交开/关各取连续两帧一致的稳定帧——同状态开关前后逐字节一致；
+     关调试图后 stats.debug.enabled=false 且 rays==0、ray_tracing_dump 拒绝并提示 debug；
+     关光线求交后 stats 报 enabled:false、ray_tracing_dump 拒绝；收尾恢复原曝光模式。
 ⑤ 回归五脚本（hiz_test / scene_lod / scene_stream / scene_fine / scene_sponza）由外部逐个跑，
    本脚本不重复。
 
@@ -200,6 +202,21 @@ def frame_dump(path):
     return rpc("ash_renderer/frame_dump", {"path": path, "slot": 0})
 
 
+def stable_frame_dump(prefix, interval=2.0, attempts=12):
+    """连续两次逐字节一致的 LDR 帧。曝光/时序收敛需要数秒，稳定后再做开关 A/B。"""
+    previous = None
+    previous_path = None
+    for i in range(attempts):
+        settle(interval)
+        path = os.path.join(TMP, f"ray_tracing_test_{prefix}_{i}.ppm")
+        frame_dump(path)
+        current = read_ppm(path)[2]
+        if previous == current:
+            return path, current
+        previous, previous_path = current, path
+    raise RuntimeError(f"{prefix}: {attempts} 次采样仍不稳定（最后 {previous_path}）")
+
+
 def stats():
     return rpc("ash_renderer/ray_tracing_stats")
 
@@ -226,28 +243,46 @@ def main():
 
     try:
         # ---- ① 求交正确：读数 + 三个子视图落图 ----
+        # 调试图默认关闭：先验新进程默认（未调用 set），再显式打开。
+        s_default = stats()
+        check(
+            "① 新进程默认调试图关（debug.enabled=false 且 rays==0/hits==0）",
+            s_default["debug"]["enabled"] is False
+            and s_default["debug"]["rays"] == 0
+            and s_default["debug"]["hits"] == 0,
+            f"debug={s_default['debug']}",
+        )
+        rpc("ash_renderer/ray_tracing_set", {"enabled": True, "debug": True})
         settle(4.0)
+        probe = os.path.join(TMP, "ray_tracing_test_frame_size.ppm")
+        size = frame_dump(probe)
+        width, height = size["width"], size["height"]
         s0 = stats()
         check(
             "① 光线求交就绪（支持 + 总开关 + 能力分位全开）",
             s0["supported"] and s0["enabled"] and s0["support"]["missing"] == "",
             f"enabled={s0['enabled']} missing='{s0['support']['missing']}'",
         )
+        check(
+            "① 调试图门控已开（debug.enabled=true）",
+            s0["debug"]["enabled"] is True,
+            f"debug={s0['debug']}",
+        )
         rays, hits = s0["debug"]["rays"], s0["debug"]["hits"]
         check(
             "① 射线数 = 像素数且命中率在 (0,1]",
-            rays > 0 and 0 < hits <= rays,
-            f"rays={rays} hits={hits} rate={s0['debug']['hit_rate']:.3f}",
+            rays == width * height and 0 < hits <= rays,
+            f"rays={rays} pixels={width}×{height}={width * height} hits={hits} rate={s0['debug']['hit_rate']:.3f}",
         )
         s1 = stats()
         check(
             "① 射线数稳定（两次读数一致，无陈旧/漂移）",
-            s1["debug"]["rays"] == rays,
+            s1["debug"]["enabled"] is True and s1["debug"]["rays"] == rays,
             f"{rays} → {s1['debug']['rays']}",
         )
         dumps = {}
         for view in (0, 1, 2):
-            rpc("ash_renderer/ray_tracing_set", {"enabled": True, "view": view})
+            rpc("ash_renderer/ray_tracing_set", {"enabled": True, "debug": True, "view": view})
             settle(1.0)
             path = os.path.join(TMP, f"ray_tracing_test_view{view}.ppm")
             ray_tracing_dump(path, view=view)
@@ -260,7 +295,7 @@ def main():
         check("① 法线图非单色（命中重建给出逐面朝向）", distinct > 8, f"{distinct} 种颜色")
 
         # ---- ② 移动跟随：巨型立方体罩住相机 → 移出视野 ----
-        rpc("ash_renderer/ray_tracing_set", {"enabled": True, "view": 2})
+        rpc("ash_renderer/ray_tracing_set", {"enabled": True, "debug": True, "view": 2})
         settle(1.0)
         before = os.path.join(TMP, "ray_tracing_test_move_before.ppm")
         ray_tracing_dump(before, view=2)
@@ -331,23 +366,42 @@ def main():
             f"基线 {vuid_base} → 现 {log_vuid_count()}",
         )
 
-        # ---- ④ 降级路径：光线求交关与 9.3 收官态逐字节一致 ----
-        rpc("ash_renderer/ray_tracing_set", {"enabled": True})
-        settle(1.0)
-        on1 = os.path.join(TMP, "ray_tracing_test_frame_on1.ppm")
-        frame_dump(on1)
-        settle(1.0)
-        on2 = os.path.join(TMP, "ray_tracing_test_frame_on2.ppm")
-        frame_dump(on2)
-        stable = read_ppm(on1)[2] == read_ppm(on2)[2]
-        rpc("ash_renderer/ray_tracing_set", {"enabled": False})
-        settle(1.0)
-        off = os.path.join(TMP, "ray_tracing_test_frame_off.ppm")
-        frame_dump(off)
+        # ---- ④ 降级路径：调试图 / 光线求交开关都不改 LDR 画面 ----
+        # 手动曝光：auto 眼适应每帧仍在收敛，跨状态稳定帧会差 1 LSB（改前基线即如此）；
+        # manual 旁路曝光后同机位帧逐字节可复现，开关 A/B 才有硬判定意义。
+        exposure_before = rpc("ash_renderer/exposure_get")
+        rpc("ash_renderer/exposure_set", {"mode": "manual"})
+        settle(2.0)
+        # 曝光/时序收敛需要数秒：先取连续两帧逐字节一致的稳定基线，再做开关 A/B。
+        rpc("ash_renderer/ray_tracing_set", {"enabled": True, "debug": True})
+        on_path, on_bytes = stable_frame_dump("frame_on")
+        rpc("ash_renderer/ray_tracing_set", {"enabled": True, "debug": False})
+        dbg_off_path, dbg_off_bytes = stable_frame_dump("frame_debug_off")
+        check(
+            "④ 调试图开→关：LDR 帧逐字节一致（调试图不进 LDR 链）",
+            on_bytes == dbg_off_bytes,
+            f"{on_path} vs {dbg_off_path}",
+        )
+        s_dbg_off = stats()
+        check(
+            "④ 调试图关：stats.debug.enabled=false 且 rays==0",
+            s_dbg_off["debug"]["enabled"] is False and s_dbg_off["debug"]["rays"] == 0,
+            f"debug={s_dbg_off['debug']}",
+        )
+        rejected = ray_tracing_dump(
+            os.path.join(TMP, "ray_tracing_test_debug_should_fail.ppm"), expect_error=True
+        )
+        check(
+            "④ 调试图关：ray_tracing_dump 被拒（提示开 debug）",
+            "rejected" in rejected and "debug" in rejected["rejected"],
+            str(rejected),
+        )
+        rpc("ash_renderer/ray_tracing_set", {"enabled": False, "debug": False})
+        off_path, off_bytes = stable_frame_dump("frame_off")
         check(
             "④ 光线求交开→关：LDR 帧逐字节一致（降级不改画面）",
-            read_ppm(on2)[2] == read_ppm(off)[2],
-            "同帧态对比" + ("" if stable else "（警告：开档两帧也不一致，画面非静止）"),
+            on_bytes == off_bytes,
+            f"{on_path} vs {off_path}",
         )
         s_off = stats()
         check(
@@ -357,7 +411,8 @@ def main():
         )
         rejected = ray_tracing_dump(os.path.join(TMP, "ray_tracing_test_should_fail.ppm"), expect_error=True)
         check("④ 关档 ray_tracing_dump 被拒（无调试图可读）", "rejected" in rejected)
-        rpc("ash_renderer/ray_tracing_set", {"enabled": True})
+        rpc("ash_renderer/ray_tracing_set", {"enabled": True, "debug": False})
+        rpc("ash_renderer/exposure_set", {"mode": exposure_before["mode"]})
     finally:
         if proc is not None and not args.no_close:
             close_host(proc.pid)
