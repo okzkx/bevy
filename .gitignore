@@ -61,3 +61,5 @@ ash_renderer/.smoke375
 
 # BCn 烘焙缓存（运行时惰性烘焙的磁盘缓存，按内容哈希寻址）
 assets/bcn_cache/
+# 本地 glTF PBR 材质测试资产（不入库：来源站点未声明许可证，仅作本机实测）
+assets/gltf-pbr-material/
