@@ -94,7 +94,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
 
     let uv = (vec2f(pix) + vec2f(0.5)) / vec2f(full);
     let world = world_from_depth(uv, depth);
-    let n = normalize(textureLoad(normal_tex, vec2i(pix), 0).xyz);
+    // 两面法线：旗面/布片这类单面写深度、法线朝背面的物体，半球会全开进墙里，
+    // 整片 AO 被算成 0（默认机位右侧悬挂旗面就是这种情况）。AO 只关心「可见这一面
+    // 外侧的半球」，所以法线按视线翻正。
+    let v = normalize(frame.camera_pos.xyz - world);
+    let n_raw = normalize(textureLoad(normal_tex, vec2i(pix), 0).xyz);
+    let n = select(n_raw, -n_raw, dot(n_raw, v) < 0.0);
     let basis = basis_from_normal(n);
     // 旋转相位：正常按帧号轮换；诊断模式（flags bit1）冻结到 0，且用 pix/2 索引，
     // 让半分辨率像素 (x,y) 与全分辨率像素 (2x,2y) 拿到同一组采样方向（判定线 4 的对照口径）。
@@ -144,7 +149,15 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
         i = i + 1u;
     }
 
+    // 掠射面自遮挡的收尾：屏幕空间 AO 在「视线几乎贴住表面」的区域会把同面邻点
+    // 算成遮挡，掠射角本来就不该有强遮蔽，这里按 n·V 平滑淡出，让掠射面回到 1.0。
+    let ndv = saturate(dot(n, v));
+    let fade = smoothstep(0.05, 0.30, ndv);
     let occ = f32(occluded) / f32(4u * steps);
-    let ao = saturate(1.0 - push.intensity * occ);
-    textureStore(ao_half, vec2i(gid.xy), vec4f(ao, 0.0, 0.0, 0.0));
+    let ao = mix(1.0, saturate(1.0 - push.intensity * occ), fade);
+    // AO 下限 0.2：屏幕空间 AO 在「旗面贴墙」「几何缝隙」这类近黑区域会把环境项
+    // 乘到 0，出现纯黑斑；下限让环境项最多暗到 20%，暗部仍由曝光/泛光照亮。
+    // 0.2 是取 e^(-2σ) 附近的经验值，接触带读数几乎不变（见 10.2.6 判定表）。
+    let ao_floor = max(ao, 0.2);
+    textureStore(ao_half, vec2i(gid.xy), vec4f(ao_floor, 0.0, 0.0, 0.0));
 }
