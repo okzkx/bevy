@@ -174,8 +174,10 @@ pub(crate) fn draw_frame(
     });
     let scene_aabb = scene_world_aabb(ledger, &scene.pool);
     shadow.write_ubo(slot, &view, &light, scene_aabb)?;
+    watch.rings_shadow_done();
     post.write_slot_ubos(slot)?;
     cluster.write_slot(slot, &view, extent)?;
+    watch.rings_cluster_done();
     transparent.clear_slot_count(slot)?;
 
     // —— 表面缓存（9.5）：Volume 跟随 → 写 GI UBO / 清计数 → 组装 ④.5 段束。
@@ -237,6 +239,7 @@ pub(crate) fn draw_frame(
         &scene.ibl_settings,
         scgi_this_frame,
     )?;
+    watch.rings_prepare_gi_done();
 
     // 四环写入：模型增量 + 材质全量 + 在场全量 + LOD 表增量，都落本帧槽的环
     // （wait_for_slot 之后，fence 证据同本帧 UBO）。

@@ -10,7 +10,7 @@ ray query 主后端（本机 RTX 2060 已核实）；BLAS 挂 6.x 驻留资产�
 **一句话说明**：CPU 只建 BLAS、写地址表、录 dispatch；射线在 compute 线程里生灭，命中只
 回三角形编号，属性回网格池取。
 
-**当前状态：✅ 收官（2026-11-24）。** 任务 9.4.1～9.4.7 全部落地；判定线 15 项
+**当前状态：✅ 收官（2026-11-24）。** 任务 9.4.1～9.4.7 全部落地；判定线 20 项（2026-11-27 10.1 扩项：15→20）
 （`tools/ray_tracing_test.py`）+ 五脚本回归（hiz_test / scene_lod / scene_stream / scene_fine /
 scene_sponza）全过；库测试 102 项、clippy 全净、`cargo fmt --check` 全绿、零 VUID。功能流程
 走读见[求交器流程：从驻留事件到射线命中重建](求交器流程：从驻留事件到射线命中重建.md)。
@@ -45,7 +45,7 @@ scene_sponza）全过；库测试 102 项、clippy 全净、`cargo fmt --check` 
 - `ash_renderer/build.rs`：校验 caps 加 `RAY_QUERY`、ABI 反射补 `AccelerationStructure`、
   `TlasInstance` 进跨端布局门。
 - `shaders/common/raytracing.wgsl`（新）、`shaders/scene/ray_tracing/{tlas_build,ray_debug}.wgsl`（新）。
-- `tools/ray_tracing_test.py`（新）：判定线一键驱动（15 项）。
+- `tools/ray_tracing_test.py`（新）：判定线一键驱动（20 项；2026-11-27 10.1 扩项：15→20）。
 
 ## 任务面板
 
@@ -57,7 +57,7 @@ scene_sponza）全过；库测试 102 项、clippy 全净、`cargo fmt --check` 
 | 9.4.4 命中取数与射线抽象 | `raytracing.wgsl`（`trace_scene`/命中重建）；光线求交集；`RayScene`；build.rs 两处接线 | ✅ [记录](9.4.4-命中几何取数与射线抽象：raytracing片段与光线求交描述符集.md) |
 | 9.4.5 TLAS 每帧构建 | `tlas_build.wgsl`；`TlasFrame` 帧槽分家；② 段插入；空场景不打射线 | ✅ [记录](9.4.5-TLAS每帧构建：实例数组、构建命令与帧槽分家.md) |
 | 9.4.6 调试视图与 BRP | `ray_debug.wgsl` 三子视图；`ray_tracing_set/ray_tracing_stats/ray_tracing_dump/ray_tracing_census`；T9/T10 计时 | ✅ [记录](9.4.6-调试视图与BRP：调试图、统计与PPM取证.md) |
-| 9.4.7 判定线与计量 | `tools/ray_tracing_test.py` 15 项 + 五脚本回归 + 读图取证；计量口径 | ✅ [记录](9.4.7-判定线与计量：ray_tracing_test十五项与五脚本回归.md) |
+| 9.4.7 判定线与计量 | `tools/ray_tracing_test.py` 20 项（2026-11-27 扩项）+ 五脚本回归 + 读图取证；计量口径 | ✅ [记录](9.4.7-判定线与计量：ray_tracing_test十五项与五脚本回归.md) |
 
 ## 材料清单
 

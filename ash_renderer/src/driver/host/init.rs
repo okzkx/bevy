@@ -292,6 +292,7 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             ray_tracing_settings: RayTracingSettings {
                 enabled: ray_tracing.is_some(),
                 view: 0,
+                debug: false,
             },
         },
         ray_tracing,

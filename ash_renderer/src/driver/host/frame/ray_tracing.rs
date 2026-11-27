@@ -93,7 +93,7 @@ pub(super) fn prepare_ray_tracing<'a>(
     let tlas_build = tlas_build_draw(pipelines.tlas_build(), instance_count, instance_address);
     // 空场景（0 实例）不录 TLAS 构建，也绝不能打射线：TLAS 从未构建时 ray query 读它是
     // 未定义行为（空场的"没东西可撞"由宿主侧判定，不靠 0 长度命令的边角合法性）
-    let debug = (instance_count > 0).then(|| {
+    let debug = (instance_count > 0 && settings.debug).then(|| {
         ray_debug_draw(
             pipelines.ray_debug(),
             targets.set(slot),

@@ -21,6 +21,10 @@ pub(super) struct FrameStopwatch {
     acquire_ms: f32,
     assemble_ms: f32,
     rings_ms: f32,
+    rings_shadow_ms: f32,
+    rings_cluster_ms: f32,
+    rings_prepare_gi_ms: f32,
+    rings_tables_ms: f32,
     record_submit_ms: f32,
     present_ms: f32,
     /// GPU 各段毫秒（本槽两帧前的提交，稳态下与当前帧同构；停用时恒 0）。
@@ -41,6 +45,10 @@ impl FrameStopwatch {
             acquire_ms: 0.0,
             assemble_ms: 0.0,
             rings_ms: 0.0,
+            rings_shadow_ms: 0.0,
+            rings_cluster_ms: 0.0,
+            rings_prepare_gi_ms: 0.0,
+            rings_tables_ms: 0.0,
             record_submit_ms: 0.0,
             present_ms: 0.0,
             gpu_sections: [0.0; 9],
@@ -81,9 +89,28 @@ impl FrameStopwatch {
         self.assemble_ms = self.lap();
     }
 
-    /// 帧槽环写入段收口。
+    /// 环段第一段（装配日志/光源/IBL/AABB/shadow UBO）收口。
+    pub(super) fn rings_shadow_done(&mut self) {
+        self.rings_shadow_ms = self.lap();
+    }
+
+    /// 环段第二段（post UBO/cluster）收口。
+    pub(super) fn rings_cluster_done(&mut self) {
+        self.rings_cluster_ms = self.lap();
+    }
+
+    /// 环段第三段（transparent/GI 准备/frame UBO）收口。
+    pub(super) fn rings_prepare_gi_done(&mut self) {
+        self.rings_prepare_gi_ms = self.lap();
+    }
+
+    /// 帧槽环写入段收口：第四段 + 四段求和。
     pub(super) fn rings_done(&mut self) {
-        self.rings_ms = self.lap();
+        self.rings_tables_ms = self.lap();
+        self.rings_ms = self.rings_shadow_ms
+            + self.rings_cluster_ms
+            + self.rings_prepare_gi_ms
+            + self.rings_tables_ms;
     }
 
     /// 录制/提交段收口。
@@ -110,6 +137,10 @@ impl FrameStopwatch {
             acquire_ms: self.acquire_ms,
             assemble_ms: self.assemble_ms,
             rings_ms: self.rings_ms,
+            rings_shadow_ms: self.rings_shadow_ms,
+            rings_cluster_ms: self.rings_cluster_ms,
+            rings_prepare_gi_ms: self.rings_prepare_gi_ms,
+            rings_tables_ms: self.rings_tables_ms,
             record_submit_ms: self.record_submit_ms,
             present_ms: self.present_ms,
             cpu_total_ms,
