@@ -40,6 +40,12 @@ use crate::render::passes::post::smaa::{
     SMAA_A_SET_DESC, SMAA_BLEND_PIPELINE, SMAA_B_SET_DESC, SMAA_EDGE_PIPELINE,
     SMAA_NEIGHBORHOOD_PIPELINE,
 };
+use crate::render::passes::reflection::composite_pipeline::REFLECTION_COMPOSITE_PIPELINE;
+use crate::render::passes::reflection::copy_pipeline::REFLECTION_COPY_PIPELINE;
+use crate::render::passes::reflection::ssr_pass::SSR_PIPELINE;
+use crate::render::passes::reflection::targets::{
+    REFLECTION_SAMPLE_SET_DESC, REFLECTION_STORAGE_SET_DESC,
+};
 use crate::render::passes::ray_tracing::{
     RAY_DEBUG_PIPELINE, RAY_TRACING_SET_DESC, TLAS_BUILD_PIPELINE,
 };
@@ -124,6 +130,10 @@ pub(crate) const ALL_PIPELINES: &[&PipelineDesc] = &[
     // 10.2 SSAO：半分辨率 AO + 深度感知上采样（两条 compute）
     &SSAO_PIPELINE,
     &SSAO_UPSAMPLE_PIPELINE,
+    // 10.3 SSR：HDR 拷贝、半分辨率步进、全分辨率反射合成
+    &REFLECTION_COPY_PIPELINE,
+    &SSR_PIPELINE,
+    &REFLECTION_COMPOSITE_PIPELINE,
 ];
 
 /// 宿主声明并建出的全部 set 布局。
@@ -163,4 +173,7 @@ pub(crate) const ALL_SETS: &[&SetLayoutDesc] = &[
     // 10.2 SSAO：compute 写目标（半/全分辨率）与合成采样集（关档绑 dummy）
     &SSAO_STORAGE_SET_DESC,
     &SSAO_SAMPLE_SET_DESC,
+    // 10.3 SSR：步进写目标（半分辨率反射图）与合成采样集（反射图 + HDR 拷贝）
+    &REFLECTION_STORAGE_SET_DESC,
+    &REFLECTION_SAMPLE_SET_DESC,
 ];

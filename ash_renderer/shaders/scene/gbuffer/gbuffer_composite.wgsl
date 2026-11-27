@@ -132,10 +132,10 @@ fn ibl_environmental(
     terms.diffuse = pixel.diffuseColor * Fd_Lambert() * irradiance
         * frame.ibl_intensity;
     // 坑：粗糙度必须用 perceptualRoughness（matparam.b），pixel.roughness 是 α = p²，
-    // 直接喂 mip 会把粗糙面算得过锐
-    terms.specular = ibl_specular(
-        env_cube, ibl_sampler, dfg_lut, n, v, no_v, pixel.f0, p_ibl, IBL_MAX_MIP)
-        * frame.ibl_intensity;
+    // 直接喂 mip 会把粗糙面算得过锐。
+    // 10.3：抽成 `ibl_specular_from`（common/ibl.wgsl）与 SSR 合成 pass 共用，式子逐字节不变。
+    terms.specular = ibl_specular_from(
+        env_cube, ibl_sampler, dfg_lut, n, v, no_v, p_ibl, pixel.f0, frame.ibl_intensity);
     return terms;
 }
 

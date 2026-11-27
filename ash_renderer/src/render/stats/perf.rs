@@ -1,5 +1,5 @@
-//! GPU timestamp 计时与帧样本账。每帧槽一只 TIMESTAMP query pool（[`QUERIES_PER_FRAME`] = 13 位），
-//! 帧内写 13 个 timestamp（T0–T12），下一轮该槽 fence 等完后取回。池位宽必须等于实际写入数：
+//! GPU timestamp 计时与帧样本账。每帧槽一只 TIMESTAMP query pool（[`QUERIES_PER_FRAME`] = 15 位），
+//! 帧内写 15 个 timestamp（T0–T14），下一轮该槽 fence 等完后取回。池位宽必须等于实际写入数：
 //! reset 过但没写的查询位会让 `get_query_pool_results` 报 NOT_READY，整槽读数全丢（踩过）。
 //!
 //! 采样阶段：T0 用 TOP_OF_PIPE；其余用 BOTTOM_OF_PIPE，等记录序之前的命令全部走完才写。
@@ -21,6 +21,8 @@
 //! | T10 | ② 段 TLAS 组装/构建 + 屏障后 | 光线求交 TLAS（T10 单列，`fetch_ray_tracing` 取） |
 //! | T11 | ② 段调试图主射线后 | 光线求交射线（T11 单列，`fetch_ray_tracing` 取） |
 //! | T12 | 屏幕空间环境光遮蔽 dispatch 后 | SSAO（T5→T12 单列，`fetch` 第 10 维） |
+//! | T13 | 合成 pass（不含透明层）后 | 合成（T5→T13，供 SSR 段独立成段） |
+//! | T14 | 屏幕空间反射（拷贝 + 步进 + 反光合成）后 | SSR（T13→T14 单列，`fetch` 第 11 维） |
 //!
 //! timestamp 只用于诊断：队列族 `timestamp_valid_bits == 0` 时降级停用（warn 一次），不阻断渲染。
 //!
@@ -42,7 +44,7 @@ fn wrapping_timestamp_delta(start: u64, end: u64, mask: u64) -> u64 {
 }
 
 /// 每帧槽查询位数（= 实际写入的 T0..T12 数；见模块注释的位宽约束）。
-pub(crate) const QUERIES_PER_FRAME: u32 = 13;
+pub(crate) const QUERIES_PER_FRAME: u32 = 15;
 
 /// timestamp 采样点位：变体名 = 该点收尾的段，数值 = query pool 内槽位号。
 /// 各点位在录制体里的落位见模块注释表。
@@ -74,6 +76,10 @@ pub enum TimestampPoint {
     RayTracingRays = 11,
     /// 屏幕空间环境光遮蔽（半分辨率 dispatch + 全分辨率上采样）结束；SSAO 关的帧 ≈ SurfaceCache。
     Ssao = 12,
+    /// 合成 pass（G-buffer 光照写 HDR）结束、透明层之前。
+    Composite = 13,
+    /// 屏幕空间反射（HDR 拷贝 + 半分辨率步进 + 反光合成）结束；SSR 关的帧 ≈ Composite。
+    Ssr = 14,
 }
 
 /// 一帧的计量样本：CPU 分段 + GPU 区间 + 规模读数，全部毫秒。
@@ -115,6 +121,8 @@ pub struct FrameSample {
     pub gpu_gi_ms: f32,
     /// 屏幕空间环境光遮蔽两 dispatch；SSAO 关的帧 ≈ 0。
     pub gpu_ssao_ms: f32,
+    /// 屏幕空间反射（HDR 拷贝 + 步进 + 反光合成）；SSR 关的帧 ≈ 0。
+    pub gpu_ssr_ms: f32,
     /// IBL 烘焙（捕获 + SH 投影/归约/自检 + 预滤波）；不烘焙的帧 ≈ 0。
     pub gpu_ibl_capture_ms: f32,
     /// ② 段 TLAS 组装/构建（含屏障）；光线求交关的帧 ≈ 0。
@@ -340,12 +348,13 @@ impl GpuTimer {
     }
 
     /// 取本槽上一轮的时间戳，换算成 7 段（T0→T2 … T8→T9）+ 全帧 T0→T9 + IBL 捕获
-    /// （T0→T1），共 9 项毫秒。表面缓存段（T4→T5）单列在 [`Self::fetch_gi`]。须在本槽 fence 等完后调用（`wait_for_slot` 之后）。
+    /// （T0→T1）+ SSAO（T5→T12）+ SSR（T13→T14），共 11 项毫秒。表面缓存段（T4→T5）单列在
+    /// [`Self::fetch_gi`]。须在本槽 fence 等完后调用（`wait_for_slot` 之后）。
     /// 停用、该槽没录过或结果未就绪返回 None。
     ///
     /// # Errors
     /// 取结果失败（如设备丢失）。
-    pub fn fetch(&mut self, slot: usize) -> Result<Option<[f32; 10]>> {
+    pub fn fetch(&mut self, slot: usize) -> Result<Option<[f32; 11]>> {
         if !self.enabled || !self.recorded[slot].load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -386,6 +395,7 @@ impl GpuTimer {
             seg(FrameStart, FrameEnd),
             seg(FrameStart, IblCapture),
             seg(SurfaceCache, Ssao),
+            seg(Composite, Ssr),
         ]))
     }
 

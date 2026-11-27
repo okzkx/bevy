@@ -181,3 +181,23 @@ fn ibl_specular(
     let ab = ibl_dfg(dfg, samp, no_v, perceptual_roughness);
     return pre * (f0 * ab.x + vec3f(ab.y));
 }
+
+/// IBL 高光的**纯表达式抽取**（10.3）：入参是调用方已算好的 `n` / `no_v` / `p_ibl`，
+/// 本函数只做「预滤波查表 × 强度」，不碰法线翻正与粗糙度撑开——
+/// 那两步的调用点在合成端，抽出去会让导数口径（`dpdx/dpdy`）跟着搬家。
+///
+/// SSR 合成 pass 用它重算「这个像素原本加过多少 IBL 高光」，再把这一项减掉换成命中色，
+/// 所以两处必须逐字节同式：合成端 [`ibl_environmental`] 与本函数共用它。
+fn ibl_specular_from(
+    env: texture_cube<f32>,
+    samp: sampler,
+    dfg: texture_2d<f32>,
+    n: vec3f,
+    v: vec3f,
+    no_v: f32,
+    p_ibl: f32,
+    f0: vec3f,
+    intensity: f32,
+) -> vec3f {
+    return ibl_specular(env, samp, dfg, n, v, no_v, f0, p_ibl, IBL_MAX_MIP) * intensity;
+}

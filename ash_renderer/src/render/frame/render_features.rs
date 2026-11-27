@@ -10,6 +10,7 @@ use crate::render::passes::lighting::cluster::ClusterFrameDraw;
 use crate::render::passes::overlay::overlay_pipeline::UiDraw;
 use crate::render::passes::post::post_chain::PostChainDraw;
 use crate::render::passes::ray_tracing::RayTracingFrameDraw;
+use crate::render::passes::reflection::frame_draw::ReflectionFrameDraw;
 use crate::render::passes::shadow::shadow_frame::ShadowFrameDraw;
 use crate::render::passes::transparent::TransparentFrame;
 use crate::render::passes::visibility::cull::CullDraw;
@@ -55,6 +56,9 @@ pub struct RenderFeatures<'a> {
     /// 10.2 合成 pass 第 7 集：SSAO 全分辨率 AO；关档绑 1×1 白图（乘 1.0 恒等），
     /// 所以无论开关都恒绑，pipeline layout 不变。
     pub ssao_set: DescSet,
+    /// 屏幕空间反射（10.3）：④.7 段「HDR 拷贝 → 半分辨率步进 → 反光合成」，插在合成与
+    /// 透明层之间；关档或非 Lambert 调试模式为 None，整段跳过（零命令零屏障）。
+    pub reflection: Option<ReflectionFrameDraw>,
     /// 9.7.6 合成 pass 第 6 集：SCGI 全分辨率辐照度（`frame.scgi.x == 0` 时着色器不读它，
     /// 但集恒绑——pipeline layout 恒定，"关 = 基线"才不用重建管线）。
     pub scgi_set: DescSet,
