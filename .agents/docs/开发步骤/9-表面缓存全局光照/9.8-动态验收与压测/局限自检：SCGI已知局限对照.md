@@ -9,7 +9,7 @@
 | --- | --- | --- | --- |
 | 1 | 只做间接漫反射 | 已证实 | 金属球（metallic=1，roughness=0.05）只反射天空/地面 IBL，红色柱与白箱不进入球面；PNG `diffuse_only_metal.png` |
 | 2 | 透明层不参与 SCGI | 代码举证，未做像素对照 | `shaders/scene/transparent/transparent_forward.wgsl:83` 只用 `sh_irradiance`；SCGI 注入只在 `shaders/scene/gbuffer/gbuffer_composite.wgsl:220-238` 的不透明合成里。Sponza 没有 BLEND 资产，无法就地 A/B |
-| 3 | 无 SSR/局部反射 | 已证实 | 同上金属球：球面无红柱/白箱倒影，只有 IBL 环境反射 |
+| 3 | 无 SSR/局部反射 | 已收窄（2026-11-27 由 10.3 接续） | 本条原为「无 SSR」；10.3 落地后收窄为「只有屏幕空间、单次命中的场景内反射：离屏物体、透明层、屏幕边缘外仍不可见，回退 IBL 环境反射」。见[10.3 段 README](../../10-表现与使用体验优化/10.3-SSR/README.md) |
 | 4 | 无天空遮挡，室内漏光 | 已知接受 | Sponza 室内整体偏亮，SCGI 只补间接漫反射、不判断天空可见性；本段不做 AO/天空遮挡，室内观感接受 |
 | 5 | alpha 裁切首版按不透明 | 已知接受 | 栅格侧支持 `ALPHA_MODE_MASK`（`instance_table.rs:101,116-125`）；GI 射线命中无 alpha 判定。Sponza 有 3 个 `alphaMode=MASK` 材质（`assets/sponza/glTF/Sponza.gltf:6938,6993,7319`），本段未做裁切前后像素对照 |
 | 6 | CSM 覆盖不足 | 已量化并接受 | 广角低太阳（仰角 8°）下关阴影，只有 0.48% 像素变化 >16（bbox [686,290,1168,473]，mean 0.325/p99 2/max 127）；即阴影只覆盖画面一小块，远处地面/墙面没有屏幕外遮挡 |
