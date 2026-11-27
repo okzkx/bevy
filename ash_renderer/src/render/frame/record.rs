@@ -291,6 +291,14 @@ impl FramePool {
         }
         mark.mark(TimestampPoint::SurfaceCache);
 
+        // ---- ④.6 屏幕空间环境光遮蔽（10.2）：GI 之后、合成之前 ----
+        // 半分辨率 AO → 2×2 双边上采样；关档 = None 整段跳过（零命令、零屏障）。
+        // 段末的 compute→片元屏障在 SsaoFrameDraw::record 内，合成段直接读全分辨率 AO。
+        if let Some(ssao) = feature.ssao.as_ref() {
+            ssao.record(device, cb);
+        }
+        mark.mark(TimestampPoint::Ssao);
+
         // 合成 pass（全屏，无深度附件）：读 G-buffer 算光照写 HDR 目标；depth==0（reverse-Z
         // 远平面）的像素当背景。set0 帧 UBO（与场景管线 set1 同一 layout）、set1 G-buffer 采样集、
         // set2 光源分簇、set3 shadow。
@@ -308,6 +316,8 @@ impl FramePool {
                 feature.ibl.set,
                 // 9.7.6：SCGI 全分辨率辐照度（`frame.scgi.x == 0` 时不读，集恒绑保 layout 恒定）
                 feature.scgi_set,
+                // 10.2：SSAO 全分辨率 AO（关档绑 1×1 白图，乘 1.0 恒等；集恒绑保 layout 恒定）
+                feature.ssao_set,
             ],
         }
         .record(device, cb);

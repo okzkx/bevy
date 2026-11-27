@@ -77,8 +77,8 @@ pub use resident::tables::frame_uniform_table::{
 pub(crate) use resident::tables::frame_uniform_table::{
     FRAME_MODE_AO, FRAME_MODE_DEPTH, FRAME_MODE_IBL_DIFFUSE, FRAME_MODE_IBL_SPECULAR,
     FRAME_MODE_LAMBERT, FRAME_MODE_METALLIC, FRAME_MODE_NORMAL, FRAME_MODE_POSITION,
-    FRAME_MODE_PROBE_BUCKETS, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_UNLIT,
-    FRAME_UBO_SIZE,
+    FRAME_MODE_PROBE_BUCKETS, FRAME_MODE_REFLECTANCE, FRAME_MODE_ROUGHNESS, FRAME_MODE_SSAO,
+    FRAME_MODE_UNLIT, FRAME_UBO_SIZE,
 };
 pub use resident::tables::instance_table::{
     conservative_world_aabb, material_alpha_fields, material_is_transparent, pack_lod_entry,
@@ -159,6 +159,9 @@ pub use passes::lighting::cluster::{
     cluster_reference, pack_cluster_uniforms, ClusterBuildDraw, ClusterBuildPass, ClusterFrameDraw,
     ClusterGrid, LightClusters,
 };
+pub use passes::ambient::ssao_pass::{SsaoFrameDraw, SsaoPipelines};
+pub use passes::ambient::ssao_targets::{SsaoTargets, SSAO_FORMAT};
+pub use passes::ambient::SsaoSettings;
 pub use passes::lighting::composite_pipeline::CompositePipeline;
 pub use passes::overlay::atlas_gpu::AtlasGpu;
 pub use passes::overlay::overlay_pipeline::{OverlayPipeline, UiDraw, UiDrawCall, UiPaint};

@@ -23,6 +23,7 @@
 //! | [`features::ibl`] | 环境光照：开关/强度/漫反射编码（`ibl_set`）、SH-L2/自检/GlobalProbe 读数（`ibl_stats`）与 cubemap/DFG/桶全量读回（`ibl_census`） |
 //! | [`features::ray_tracing`] | 求交器：开关/调试图子视图（`ray_tracing_set`）、能力分位与 BLAS/TLAS/射线计数（`ray_tracing_stats`）、调试图 PPM 取证（`ray_tracing_dump`）、实例数组/地址表字节对照（`ray_tracing_census`） |
 //! | [`features::gi`] | 表面缓存（9.5/9.6）：开关/视图/规格/估计参数（`gi_set`）、池水位与计数与 `gi_ms`（`gi_stats`）、视图 PPM 取证（`gi_dump`）、cell↔patch 对账（`gi_census`）、单 patch 辐照度对账（`gi_estimate_probe`） |
+//! | [`features::ssao`] | 屏幕空间环境光遮蔽（10.2）：开关与参数（`ssao_set`），帧计时与 AO 均值/暗部占比（`ssao_stats`），AO 图原样导出（`ssao_dump`，判定线取证用） |
 //! | [`features::draw`] | indirect 闭环读数与组装对照开关 |
 //! | [`features::residency`] | 驻留管理器读数与设置 |
 //! | [`features::gap`] | GPU 缺口请求读数与模式 |
@@ -92,6 +93,7 @@ use self::{
         residency::{residency_set, residency_stats},
         shadow::{shadow_set, shadow_stats},
         sky::{sky_set, sky_stats, sky_uniform},
+        ssao::{ssao_dump, ssao_set, ssao_stats},
     },
 };
 
@@ -177,6 +179,9 @@ impl Plugin for AshRemotePlugin {
                 .with_method_main("ash_renderer/ray_tracing_dump", ray_tracing_dump)
                 .with_method_main("ash_renderer/ray_tracing_census", ray_tracing_census)
                 .with_method_main("ash_renderer/gi_set", gi_set)
+                .with_method_main("ash_renderer/ssao_set", ssao_set)
+                .with_method_main("ash_renderer/ssao_stats", ssao_stats)
+                .with_method_main("ash_renderer/ssao_dump", ssao_dump)
                 .with_method_main("ash_renderer/gi_stats", gi_stats)
                 .with_method_main("ash_renderer/gi_dump", gi_dump)
                 .with_method_main("ash_renderer/gi_census", gi_census)

@@ -52,6 +52,9 @@ enable wgpu_binding_array;
 // 9.7.6 SCGI：全分辨率辐照度（9.7.5 的上采样产物）。按像素 `textureLoad`，不走采样器——
 // 上采样已经做完，这里只要"这一像素的那一项"。`a` = 覆盖率（0 = 不接管，回 IBL 基线）。
 @group(5) @binding(0) var scgi_irradiance: texture_2d<f32>;
+// 10.2 SSAO：全分辨率环境光遮蔽（半分辨率 AO 已经过 2×2 双边上采样）。关档时绑 1×1
+// 白图，乘 1.0 是 IEEE 精确恒等，所以这里不判开关、无条件乘——管线布局恒定（R5/R6）。
+@group(6) @binding(0) var ssao_ao: texture_2d<f32>;
 
 const MODE_SHADING: u32 = 0u;   // 宿主侧名为 FRAME_MODE_LAMBERT
 const MODE_UNLIT: u32 = 1u;
@@ -65,6 +68,7 @@ const MODE_DEPTH: u32 = 8u;
 const MODE_IBL_DIFFUSE: u32 = 9u;
 const MODE_IBL_SPECULAR: u32 = 10u;
 const MODE_PROBE_BUCKETS: u32 = 11u;
+const MODE_SSAO: u32 = 12u;
 
 // 清屏色（线性域），须与宿主侧 CLEAR_COLOR 同值
 const CLEAR_COLOR: vec3f = vec3f(0.02, 0.06, 0.14);
@@ -73,6 +77,14 @@ const CLEAR_COLOR: vec3f = vec3f(0.02, 0.06, 0.14);
 // 选级联、法线抬升投影、出盒退级、级间淡出、PCSS 与低档 5 tap PCF 都在那一份里；
 // 本入口只声明 shadow UBO 与四张级联图（见下方 set3），调用时把光方向传进去。
 
+
+// SSAO 采样（10.2）：坐标必须按贴图尺寸钳制——关档绑的是 1×1 白图，
+// `textureLoad` 越界读回 0（不是钳边），不钳会把整屏环境项乘成 0 变黑。
+fn ssao_at(pixel: vec2i) -> f32 {
+    let size = vec2i(vec2u(textureDimensions(ssao_ao)));
+    let coord = clamp(pixel, vec2i(0), size - vec2i(1));
+    return textureLoad(ssao_ao, coord, 0).r;
+}
 
 // 深度反投影：uv → shader-NDC（uv.y = 0.5 - 0.5·ndc.y 的逆变换）→ clip → world
 fn world_from_depth(uv: vec2f, depth: f32) -> vec3f {
@@ -167,6 +179,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
             m.a, frame.mode == MODE_REFLECTANCE);
         return vec4f(vec3f(c), 1.0);
     }
+    if frame.mode == MODE_SSAO {
+        // 10.2 调试视图：屏幕空间 AO 灰度直出（含双边上采样）；关档是白 dummy，整屏白。
+        return vec4f(vec3f(ssao_at(vec2i(i32(in.clip.x), i32(in.clip.y)))), 1.0);
+    }
     if frame.mode == MODE_DEPTH {
         // reverse-Z 深度线性化。坑：片段阶段 @builtin(position).w = 1/clip.w，不能直接
         // 当视深——先反投影重建世界位置，再经 view_proj 取 clip.w（透视下即正的视深），
@@ -217,10 +233,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
         let center = bucket_index_to_direction(direction_to_bucket_index(n, 4u), 4u);
         return vec4f(center * 0.5 + vec3f(0.5), 1.0);
     }
+    // 10.2 SSAO：AO 只乘环境项（IBL 漫反射 + 常量 ambient），不乘直射阴影与高光——
+    // 直射一侧已有 `matparam.g` 材质 AO（R1），两条语义分开、互不漂移。
+    // 坐标必须按贴图尺寸钳制：关档绑的是 1×1 白图，`textureLoad` 越界读回 0（不是钳边），
+    // 会让整屏环境项乘 0 变黑。正常全分辨率 AO 上钳制是恒等，不引入额外分支。
+    let ao = ssao_at(vec2i(i32(in.clip.x), i32(in.clip.y)));
     // 9.7.6 SCGI 注入：只换 IBL 的**漫反射**项，高光原样；`a == 0`（Volume 外 / 无命中 /
     // SCGI 关）逐像素回 IBL 基线——`mix` 两边都已算好，不存在"把 IBL 一侧写成 0 再混"的整屏变暗。
     // 缓存 E 已是绝对辐照度：天空入口已乘 ibl_intensity，直接光与自发光弹射也不能再被它缩放。
-    var scgi_diffuse = ibl.diffuse;
+    // SSAO 乘在 IBL 一侧、不乘 replacement：SCGI 缓存自带遮挡，双计会与 9.10 标定冲突。
+    var scgi_diffuse = ibl.diffuse * ao;
     if (frame.scgi.x != 0u && frame.ibl_enabled != 0u) {
         let irr = textureLoad(
             scgi_irradiance,
@@ -228,9 +250,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
             0,
         );
         let replacement = pixel.diffuseColor * Fd_Lambert() * irr.rgb;
-        scgi_diffuse = mix(ibl.diffuse, replacement, clamp(irr.a, 0.0, 1.0));
+        scgi_diffuse = mix(ibl.diffuse * ao, replacement, clamp(irr.a, 0.0, 1.0));
     }
-    let ambient = albedo.rgb * frame.ambient_color.rgb;
+    let ambient = albedo.rgb * frame.ambient_color.rgb * ao;
     let environment = select(
         ambient,
         scgi_diffuse + ibl.specular,

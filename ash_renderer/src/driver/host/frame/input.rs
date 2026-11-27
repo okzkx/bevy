@@ -7,7 +7,8 @@ use bevy::{ecs::system::SystemParam, prelude::*, window::WindowResized};
 use crate::{
     render::{
         BindlessTextureTable, Context, FramePool, FrameUniformTable, GpuTimer, PerfLedger,
-        RayScene, RayTracingPipelines, RayTracingSettings, RayTracingTargets, Swapchain, Uploader,
+        RayScene, RayTracingPipelines, RayTracingSettings, RayTracingTargets, SsaoTargets,
+        Swapchain, Uploader,
     },
     scene::GapSnapshot,
 };
@@ -24,6 +25,7 @@ use super::ray_tracing::RayTracingFrameLocal;
 use super::resize_gate::ResizeGate;
 use super::scene::SceneInput;
 use super::shadow::ShadowInput;
+use super::ssao::{SsaoFrameLocal, SsaoInput};
 use super::transparent::TransparentInput;
 
 /// draw_frame 的参数束：按特性分子束，系统签名只剩本束 + 主线程标记。
@@ -53,6 +55,12 @@ pub(crate) struct FrameInput<'w, 's> {
     /// 表面缓存（9.5）：设置 + 常驻表 + 六条管线。
     pub(super) gi: GiInput<'w>,
     pub(super) gi_local: Local<'s, GiFrameLocal>,
+    /// 环境光遮蔽（10.2）：半/全分辨率 AO 目标与关档 dummy（resize 级）。
+    pub(super) ssao_targets: ResMut<'w, SsaoTargets>,
+    /// 环境光遮蔽（10.2）：设置 + 两条 compute 管线。
+    pub(super) ssao: SsaoInput<'w>,
+    /// SSAO 的帧号（IGN 旋转的扰动源，不做时域累积）。
+    pub(super) ssao_local: Local<'s, SsaoFrameLocal>,
 }
 
 /// 求交器取用束：资源只在 光线求交支持且初始化链插入时存在，其余情况按 None 跳过整段。

@@ -6,6 +6,7 @@ use crate::render::core::binding::set_layout::SetLayouts;
 use crate::render::core::binding::shader_abi;
 use crate::render::core::pipeline::fullscreen::FullscreenPipeline;
 use crate::render::core::record::graphics::PipelineRef;
+use crate::render::passes::ambient::ssao_targets::SSAO_SAMPLE_SET_DESC;
 use crate::render::passes::gbuffer::gbuffer_targets::GBUFFER_SAMPLED_SET_DESC;
 use crate::render::passes::gi::screen_gather::SCGI_SAMPLE_SET_DESC;
 use crate::render::passes::ibl::IBL_SET_DESC;
@@ -14,7 +15,8 @@ use crate::render::passes::shadow::shadow_map::SHADOW_SET_DESC;
 use crate::render::resident::tables::frame_uniform_table::FRAME_UNIFORM_SET_DESC;
 use crate::render::Context;
 
-/// set 依次为帧 UBO、G-buffer 采样集、光源分簇集、阴影集、IBL 集、SCGI 辐照度（9.7.6）。
+/// set 依次为帧 UBO、G-buffer 采样集、光源分簇集、阴影集、IBL 集、SCGI 辐照度（9.7.6）、
+/// SSAO 全分辨率 AO（10.2）。
 pub(crate) static GBUFFER_COMPOSITE_PIPELINE: PipelineDesc = PipelineDesc {
     label: "gbuffer_composite",
     shader: &shader_abi::GBUFFER_COMPOSITE,
@@ -27,6 +29,8 @@ pub(crate) static GBUFFER_COMPOSITE_PIPELINE: PipelineDesc = PipelineDesc {
         &IBL_SET_DESC,
         // 9.7.6：第 6 集 = SCGI 全分辨率辐照度（按像素 `textureLoad`，不走采样器）
         &SCGI_SAMPLE_SET_DESC,
+        // 10.2：第 7 集 = SSAO 全分辨率 AO（关档绑 1×1 白图，乘 1.0 恒等；集恒绑保 layout 恒定）
+        &SSAO_SAMPLE_SET_DESC,
     ],
     push: None,
     color_formats: &[crate::render::HDR_FORMAT],

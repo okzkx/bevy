@@ -51,6 +51,7 @@ mod resize_gate;
 mod ring;
 mod scene;
 mod shadow;
+mod ssao;
 mod stopwatch;
 mod transparent;
 
@@ -68,6 +69,7 @@ use self::ray_tracing::prepare_ray_tracing;
 use self::resize_gate::rebuild_size_dependent;
 use self::scene::{scene_world_aabb, FrameView};
 use self::shadow::shadow_frame_draw;
+use self::ssao::prepare_ssao;
 use self::stopwatch::FrameStopwatch;
 use self::transparent::transparent_draw;
 
@@ -105,6 +107,9 @@ pub(crate) fn draw_frame(
         ray_tracing_local,
         gi,
         gi_local,
+        ssao_targets,
+        ssao,
+        ssao_local,
     } = &mut input;
 
     // —— 帧首：最小化让路 + 挂起重建（尺寸相关资源随新 extent 重建，幂等；pending
@@ -113,7 +118,14 @@ pub(crate) fn draw_frame(
         return Ok(());
     }
     gate.rebuild_if_pending(gpu.swapchain.pending_rebuild(), || {
-        rebuild_size_dependent(gpu, &mut occlusion.hiz, post, cluster, ray_tracing)
+        rebuild_size_dependent(
+            gpu,
+            &mut occlusion.hiz,
+            post,
+            cluster,
+            ray_tracing,
+            ssao_targets,
+        )
     })?;
 
     // —— 等本槽位上一轮提交完成 + 重置命令缓冲（fence 的重置在提交前一刻）。
@@ -206,6 +218,27 @@ pub(crate) fn draw_frame(
     gi.scgi
         .ensure(&gpu.ctx, extent)
         .or_fatal("SCGI 1/4 目标重建失败，渲染链无法继续")?;
+    // 10.2：AO 目标随 swapchain 尺寸懒重建（布局与描述符池只建一次）
+    ssao_targets
+        .ensure(&gpu.ctx, extent)
+        .or_fatal("SSAO 目标重建失败，渲染链无法继续")?;
+    // 10.2：SSAO 录段（关档 = None，零命令零屏障）；帧号只扰动 IGN 旋转，不做时域累积。
+    let ssao_draw = prepare_ssao(
+        ssao_targets,
+        &ssao.settings,
+        &ssao.pipelines,
+        slot,
+        ssao_local.frame_index,
+        gpu.frame_uniform_table.frame_set(slot),
+        gbuffer_sampled_set,
+    );
+    ssao_local.frame_index = ssao_local.frame_index.wrapping_add(1);
+    // 10.2：合成第 7 集恒绑——开到本槽全分辨率 AO，关绑 1×1 白图（乘 1.0 恒等）。
+    let ssao_set = if ssao.settings.enabled {
+        ssao_targets.sample_set(slot)
+    } else {
+        ssao_targets.dummy_sample_set()
+    };
     let gi_draw = prepare_gi(
         gi,
         gi_local,
@@ -441,6 +474,9 @@ pub(crate) fn draw_frame(
         ray_tracing: ray_tracing_draw,
         // —— ④.5 表面缓存：回收三件 + 播种 + ⑧ 段视图（GI 关 = None）
         gi: gi_draw,
+        // —— ④.6 屏幕空间环境光遮蔽（10.2）：GI 后、合成前（关档 = None）
+        ssao: ssao_draw,
+        ssao_set,
         // —— ⑦⑧ 后链 + UI
         post: PostChainDraw {
             tonemap: post.tonemap.rec(),
@@ -473,6 +509,10 @@ pub(crate) fn draw_frame(
     );
     if has_scgi {
         gi.scgi.mark_written();
+    }
+    // SSAO 同样只在提交成功后发布"本槽 AO 已写完"，ssao_stats 据此判读回新鲜度。
+    if feature.ssao.is_some() {
+        ssao_targets.mark_written(slot);
     }
     watch.record_done();
 

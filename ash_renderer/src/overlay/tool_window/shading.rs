@@ -19,6 +19,9 @@ const GROUPS: &[(&str, &[RenderMode])] = &[
             RenderMode::Reflectance,
         ],
     ),
+    // 10.2：材质 AO（上面那档）是 G-buffer 原值，本场景无 occlusion 贴图时全白；
+    // 这一档才是屏幕空间算出来的 AO，接触带深浅在这里看。
+    ("环境光遮蔽（10.2）", &[RenderMode::Ssao]),
 ];
 
 /// 着色模式页的一次构建输入。
@@ -37,7 +40,14 @@ impl ShadingPage<'_> {
             ui.strong(*title);
             ui.horizontal_wrapped(|ui| {
                 for &m in *modes {
-                    ui.selectable_value(mode, m, m.label());
+                    // 调试页的显示名比 BRP 名称表更具体：材质 AO 与屏幕空间 AO 是两件事，
+                    // 前者是 G-buffer 原值（本场景无 occlusion 贴图时全白），后者是 10.2 算出来的。
+                    let text = match m {
+                        RenderMode::AmbientOcclusion => "ao（材质）",
+                        RenderMode::Ssao => "ssao（屏幕空间）",
+                        _ => m.label(),
+                    };
+                    ui.selectable_value(mode, m, text);
                 }
             });
         }
