@@ -16,6 +16,7 @@
 //! | `gi` | 表面缓存（9.5）：Volume/cell 格子系统、patch 池与分配回收、patch 调试视图 |
 //! | `overlay` | UI：overlay 管线、字体图集、UI 顶点环 |
 //! | `ambient` | 环境光遮蔽（10.2）：半分辨率 SSAO、深度感知上采样与 AO 目标（AO 只乘环境项） |
+//! | `reflection` | 屏幕空间反射（10.3）：HDR 拷贝、半分辨率世界空间步进、扣 IBL 高光的反射合成 |
 
 pub(crate) mod ambient;
 pub(crate) mod gbuffer;
@@ -25,6 +26,7 @@ pub(crate) mod lighting;
 pub(crate) mod overlay;
 pub(crate) mod post;
 pub(crate) mod ray_tracing;
+pub(crate) mod reflection;
 pub(crate) mod shadow;
 pub(crate) mod sky;
 pub(crate) mod transparent;

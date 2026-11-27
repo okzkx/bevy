@@ -16,3 +16,4 @@ pub(crate) mod residency;
 pub(crate) mod shadow;
 pub(crate) mod sky;
 pub(crate) mod ssao;
+pub(crate) mod ssr;

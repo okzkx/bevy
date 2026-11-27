@@ -51,6 +51,7 @@ mod resize_gate;
 mod ring;
 mod scene;
 mod shadow;
+mod reflection;
 mod ssao;
 mod stopwatch;
 mod transparent;
@@ -69,6 +70,7 @@ use self::ray_tracing::prepare_ray_tracing;
 use self::resize_gate::rebuild_size_dependent;
 use self::scene::{scene_world_aabb, FrameView};
 use self::shadow::shadow_frame_draw;
+use self::reflection::prepare_reflection;
 use self::ssao::prepare_ssao;
 use self::stopwatch::FrameStopwatch;
 use self::transparent::transparent_draw;
@@ -110,6 +112,8 @@ pub(crate) fn draw_frame(
         ssao_targets,
         ssao,
         ssao_local,
+        reflection_targets,
+        reflection,
     } = &mut input;
 
     // —— 帧首：最小化让路 + 挂起重建（尺寸相关资源随新 extent 重建，幂等；pending
@@ -125,6 +129,7 @@ pub(crate) fn draw_frame(
             cluster,
             ray_tracing,
             ssao_targets,
+            reflection_targets,
         )
     })?;
 
@@ -239,6 +244,23 @@ pub(crate) fn draw_frame(
     } else {
         ssao_targets.dummy_sample_set()
     };
+    // 10.3：HDR 拷贝与半分辨率反射图随尺寸懒重建（布局与描述符池只建一次）
+    reflection_targets
+        .ensure(&gpu.ctx, extent)
+        .or_fatal("反射目标重建失败，渲染链无法继续")?;
+    // 10.3：反射录段（关档 / 调试视图 = None，零命令零屏障）：合成之后、透明层之前
+    let reflection_draw = prepare_reflection(
+        reflection_targets,
+        reflection,
+        render_mode,
+        slot,
+        extent,
+        post.gbuffer.targets.hdr_image(slot),
+        post.gbuffer.targets.hdr_view(slot),
+        gpu.frame_uniform_table.frame_set(slot),
+        gbuffer_sampled_set,
+        scene.ibl_env.frame_set(),
+    );
     let gi_draw = prepare_gi(
         gi,
         gi_local,
@@ -477,6 +499,8 @@ pub(crate) fn draw_frame(
         // —— ④.6 屏幕空间环境光遮蔽（10.2）：GI 后、合成前（关档 = None）
         ssao: ssao_draw,
         ssao_set,
+        // —— ④.7 屏幕空间反射（10.3）：合成后、透明层前（关档 / 调试视图 = None）
+        reflection: reflection_draw,
         // —— ⑦⑧ 后链 + UI
         post: PostChainDraw {
             tonemap: post.tonemap.rec(),
@@ -513,6 +537,10 @@ pub(crate) fn draw_frame(
     // SSAO 同样只在提交成功后发布"本槽 AO 已写完"，ssao_stats 据此判读回新鲜度。
     if feature.ssao.is_some() {
         ssao_targets.mark_written(slot);
+    }
+    // 反射图同样只在提交成功后发布"本槽已写完"，ssr_stats 据此判读回新鲜度。
+    if feature.reflection.is_some() {
+        reflection_targets.mark_written(slot);
     }
     watch.record_done();
 

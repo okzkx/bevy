@@ -28,8 +28,8 @@ use crate::render::{
     BloomSettings, ColorScopeReader, ColorScopeSettings, ColorScopeTargets, Context,
     CullDiagnostics, CullSettings, ExposureSettings, FrameSyncSettings, GiSettings, IblSettings,
     ImageCache, IndirectStats, LodDiagnostics, LodSettings, MeshPool, MonitorHistory,
-    OcclusionDiagnostics, OcclusionSettings, PerfLedger, RenderMode, ShadowSettings, SkySettings,
-    SmaaSettings, SsaoSettings,
+    OcclusionDiagnostics, OcclusionSettings, PerfLedger, ReflectionSettings, RenderMode,
+    ShadowSettings, SkySettings, SmaaSettings, SsaoSettings,
 };
 use crate::scene::{TransformEditQueue, WorkloadSettings};
 use color::{ColorPage, ColorPageState};
@@ -269,6 +269,8 @@ pub(in crate::overlay) struct ToolWindowParams<'w, 's> {
     gi_settings: ResMut<'w, GiSettings>,
     /// 屏幕空间环境光遮蔽（10.2）：开关/半径/偏置/强度/步数（BRP ssao_set 同源）
     ssao_settings: ResMut<'w, SsaoSettings>,
+    /// 屏幕空间反射（10.3）：开关/步数/距离/厚度/门控/强度（BRP ssr_set 同源）
+    reflection_settings: ResMut<'w, ReflectionSettings>,
     /// 颜色校验（9.9）：采样开关（draw_frame 读，BRP color_scope_get 同源）
     color_scope_settings: ResMut<'w, ColorScopeSettings>,
     /// 颜色校验 bins 的 8 Hz 回读节流器
@@ -337,6 +339,7 @@ impl ToolWindowParams<'_, '_> {
             .show(body),
             ToolPage::Ibl => IblPage {
                 ibl: &mut self.ibl_settings,
+                reflection: &mut self.reflection_settings,
             }
             .show(body),
             ToolPage::Gi => GiPage {

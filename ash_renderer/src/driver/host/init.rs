@@ -22,9 +22,11 @@ use crate::{
         GBufferTargets, GiPipelines, GiSetLayout, GiSettings, GpuTimer, HizPyramid, IblEnvironment,
         ImageCache, IndirectPass, InstanceTables, LightClusters, LightTable, LodPass, MeshPool,
         OcclusionPass, OverlayPipeline, PresentTonemapPipeline, RayScene, RayTracingPipelines,
-        RayTracingSettings, RayTracingTargets, ScgiTargets, SetLayouts, ShadowBuildPass,
+        RayTracingSettings, RayTracingTargets, ReflectionCompositePipeline, ReflectionCopyPipeline,
+        ReflectionSettings, ReflectionTargets, ScgiTargets, SetLayouts, ShadowBuildPass,
         ShadowPipeline, ShadowTargets, SmaaPipelines, SmaaTargets, SsaoPipelines, SsaoSettings,
-        SsaoTargets, SurfaceCacheConfig, SurfaceCacheTables, Swapchain, TransparentPasses,
+        SsaoTargets, SsrPipelines, SurfaceCacheConfig, SurfaceCacheTables, Swapchain,
+        TransparentPasses,
         TransparentPipeline, TransparentTargets,
         UiVertexRing, Uploader, MAX_FRAMES_IN_FLIGHT, TABLE_CAPACITY,
     },
@@ -175,6 +177,10 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     // 启动就建一次：合成 pass 每帧都要绑全分辨率 AO（关档绑 dummy，但布局必须合法）
     let mut ssao_targets = SsaoTargets::new(&ctx)?;
     ssao_targets.ensure(&ctx, swapchain.extent)?;
+    // 10.3 SSR：本帧槽的 HDR 拷贝与半分辨率反射图随尺寸懒重建（布局与池只建一次）。
+    // 启动就建一次：三段都按尺寸取视图，关档时目标不参与录制但描述符集必须存在
+    let mut reflection_targets = ReflectionTargets::new(&ctx)?;
+    reflection_targets.ensure(&ctx, swapchain.extent)?;
     let layouts = {
         let mut list = vec![
             tables.set_layout(),
@@ -198,6 +204,8 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             scgi_targets.sample_layout(),
             ssao_targets.storage_layout(),
             ssao_targets.sample_layout(),
+            reflection_targets.storage_layout(),
+            reflection_targets.sample_layout(),
         ];
         // 光线求交集布局只在 光线求交支持时存在（光线求交关没有可登记的句柄）
         if let Some(targets) = &ray_tracing_targets {
@@ -215,6 +223,10 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
     // 全屏管线（FullscreenPipeline）
     let composite_pipeline = CompositePipeline::new(&ctx, &layouts)?;
     let ssao_pipelines = SsaoPipelines::new(&ctx, &layouts)?;
+    // 10.3 SSR：拷贝（全屏）、步进（compute）、反射合成（全屏）三条
+    let reflection_copy_pipeline = ReflectionCopyPipeline::new(&ctx, &layouts)?;
+    let reflection_pipelines = SsrPipelines::new(&ctx, &layouts)?;
+    let reflection_composite_pipeline = ReflectionCompositePipeline::new(&ctx, &layouts)?;
     let bloom_pipelines = BloomPipelines::new(&ctx, &layouts)?;
     let smaa_pipelines = SmaaPipelines::new(&ctx, &layouts)?;
     // 自动曝光的测光/适应两条 compute（要在 tonemap 之前录，布局已登记）
@@ -279,6 +291,9 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             overlay_pipeline,
             composite_pipeline,
             ssao_pipelines,
+            reflection_copy_pipeline,
+            reflection_pipelines,
+            reflection_composite_pipeline,
             bloom_pipelines,
             exposure_pipelines,
             color_scope_pipelines,
@@ -296,9 +311,11 @@ fn try_init_vulkan(wrapper: &RawHandleWrapper) -> Result<VulkanBundle> {
             gi_set_layout,
             scgi_targets,
             ssao_targets,
+            reflection_targets,
             // 表面缓存总开关恒插入（BRP gi_set/gi_stats 在关态也要回读数）
             gi_settings: GiSettings::default(),
             ssao_settings: SsaoSettings::default(),
+            reflection_settings: ReflectionSettings::default(),
             // 光线求交总开关恒插入（BRP ray_tracing_set/ray_tracing_stats 在 光线求交关时也要回读数）
             ray_tracing_settings: RayTracingSettings {
                 enabled: ray_tracing.is_some(),
@@ -366,6 +383,9 @@ init_chain! {
     IblEnvironment => ibl,
     CompositePipeline => composite_pipeline,
     SsaoPipelines => ssao_pipelines,
+    ReflectionCopyPipeline => reflection_copy_pipeline,
+    SsrPipelines => reflection_pipelines,
+    ReflectionCompositePipeline => reflection_composite_pipeline,
     PresentTonemapPipeline => tonemap_pipeline,
     BloomPipelines => bloom_pipelines,
     BloomTargets => bloom_targets,
@@ -386,8 +406,10 @@ init_chain! {
     GiSetLayout => gi_set_layout,
     ScgiTargets => scgi_targets,
     SsaoTargets => ssao_targets,
+    ReflectionTargets => reflection_targets,
     GiSettings => gi_settings,
     SsaoSettings => ssao_settings,
+    ReflectionSettings => reflection_settings,
     GBufferTargets => gbuffer,
     FramePool => frames,
     UiVertexRing => ui_ring,

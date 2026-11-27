@@ -115,6 +115,48 @@ impl ColorTarget {
             view: a.view,
         })
     }
+
+    /// 建「storage 写 + sampled 读」目标：compute 以 storage image 写，片元 pass 再采样读，
+    /// 另加 TRANSFER_SRC 给 BRP 回读。10.3 的半分辨率反射图用这条路径（步进 compute 写、
+    /// 合成 pass 读），既有两条构造都给不出这个组合。
+    ///
+    /// # Errors
+    /// 格式不支持 STORAGE_IMAGE/SAMPLED_IMAGE/TRANSFER_SRC，或 Vulkan 创建/分配/绑定失败。
+    pub(crate) fn new_storage_sampled(
+        ctx: &Context,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        role: &str,
+    ) -> Result<Self> {
+        let features = unsafe {
+            ctx.instance
+                .get_physical_device_format_properties(ctx.physical_device, format)
+        }
+        .optimal_tiling_features;
+        let required = vk::FormatFeatureFlags::STORAGE_IMAGE
+            | vk::FormatFeatureFlags::SAMPLED_IMAGE
+            | vk::FormatFeatureFlags::TRANSFER_SRC;
+        if !features.contains(required) {
+            return Err(VulkanError::Init(format!(
+                "{role} 格式 {format:?} 的 optimal tiling features 不含 {required:?}——该设备不支持「storage 写 + sampled 读」的同一张图"
+            )));
+        }
+        let a = attachment::create(
+            ctx,
+            extent,
+            format,
+            vk::ImageUsageFlags::STORAGE
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC,
+            vk::ImageAspectFlags::COLOR,
+        )?;
+        Ok(Self {
+            device: ctx.device.clone(),
+            image: a.image,
+            memory: a.memory,
+            view: a.view,
+        })
+    }
 }
 
 impl Drop for ColorTarget {

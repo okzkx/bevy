@@ -7,8 +7,8 @@ use bevy::{ecs::system::SystemParam, prelude::*, window::WindowResized};
 use crate::{
     render::{
         BindlessTextureTable, Context, FramePool, FrameUniformTable, GpuTimer, PerfLedger,
-        RayScene, RayTracingPipelines, RayTracingSettings, RayTracingTargets, SsaoTargets,
-        Swapchain, Uploader,
+        RayScene, RayTracingPipelines, RayTracingSettings, RayTracingTargets, ReflectionTargets,
+        SsaoTargets, Swapchain, Uploader,
     },
     scene::GapSnapshot,
 };
@@ -22,6 +22,7 @@ use super::lod::LodInput;
 use super::overlay::OverlayInput;
 use super::post::PostInput;
 use super::ray_tracing::RayTracingFrameLocal;
+use super::reflection::ReflectionInput;
 use super::resize_gate::ResizeGate;
 use super::scene::SceneInput;
 use super::shadow::ShadowInput;
@@ -61,6 +62,10 @@ pub(crate) struct FrameInput<'w, 's> {
     pub(super) ssao: SsaoInput<'w>,
     /// SSAO 的帧号（IGN 旋转的扰动源，不做时域累积）。
     pub(super) ssao_local: Local<'s, SsaoFrameLocal>,
+    /// 屏幕空间反射（10.3）：HDR 拷贝与半分辨率反射图（resize 级）。
+    pub(super) reflection_targets: ResMut<'w, ReflectionTargets>,
+    /// 屏幕空间反射（10.3）：设置 + 三条管线。
+    pub(super) reflection: ReflectionInput<'w>,
 }
 
 /// 求交器取用束：资源只在 光线求交支持且初始化链插入时存在，其余情况按 None 跳过整段。

@@ -6,7 +6,7 @@ use bevy::{prelude::*, window::WindowResized};
 
 use crate::{
     common::syntax::ResultTierExt,
-    render::{Context, HizPyramid, SsaoTargets, MAX_FRAMES_IN_FLIGHT},
+    render::{Context, HizPyramid, ReflectionTargets, SsaoTargets, MAX_FRAMES_IN_FLIGHT},
 };
 
 use super::{cluster::ClusterInput, input::FrameGpuInput, input::RayTracingInput, post::PostInput};
@@ -72,6 +72,7 @@ pub(super) fn rebuild_size_dependent(
     cluster: &mut ClusterInput,
     ray_tracing: &mut RayTracingInput<'_>,
     ssao_targets: &mut SsaoTargets,
+    reflection_targets: &mut ReflectionTargets,
 ) -> Result<(), BevyError> {
     let ctx: &Context = &gpu.ctx;
     gpu.swapchain
@@ -110,7 +111,11 @@ pub(super) fn rebuild_size_dependent(
     // 10.2：AO 目标（半/全分辨率图随尺寸换，1×1 dummy 不变）
     ssao_targets
         .ensure(ctx, extent)
-        .or_fatal("SSAO 目标重建失败，渲染链无法继续")
+        .or_fatal("SSAO 目标重建失败，渲染链无法继续")?;
+    // 10.3：反射目标（HDR 拷贝换尺寸、半分辨率反射图重算一半尺寸）
+    reflection_targets
+        .ensure(ctx, extent)
+        .or_fatal("反射目标重建失败，渲染链无法继续")
 }
 
 /// 逐帧槽收集（重建入参：深度 image/view、光源环 buffer）。

@@ -321,6 +321,17 @@ impl FramePool {
             ],
         }
         .record(device, cb);
+        mark.mark(TimestampPoint::Composite);
+
+        // ---- ④.7 屏幕空间反射（10.3）：合成之后、透明层之前 ----
+        // 拷贝 → 步进 → 反光合成，三步的屏障都在 ReflectionFrameDraw::record 里：HDR 转只读、
+        // hdr_copy 写成可采样、步进后 compute|片元读、HDR 丢弃旧内容转回附件。关档或非 Lambert
+        // 调试视图 = None 整段跳过（零命令零屏障）。必须在透明层之前——否则透明像素也会被反射
+        // 改写且没有 mask 区分；本段结束 HDR 停在 COLOR_ATTACHMENT_OPTIMAL，正好接透明层 LOAD。
+        if let Some(ssr) = feature.reflection.as_ref() {
+            ssr.record(device, cb);
+        }
+        mark.mark(TimestampPoint::Ssr);
 
         // 透明前向层：合成之后在同一 HDR 目标上 LOAD + 混合。两次动态渲染之间没有光栅
         // 序保证，合成写 HDR → 透明混合读写必须显式内存屏障；深度在本段转回附件（只测
