@@ -166,7 +166,8 @@ pub(super) fn auto_frame_scene(
         Projection::Perspective(persp) => persp.fov,
         _ => 45.0_f32.to_radians(),
     };
-    let radius = (0.5 * diagonal / (fov_y * 0.5).tan()).max(0.05) * 1.25;
+    // `f32::tan` 被 clippy.toml 的 disallowed-methods 拦下（libm 确定性），统一走 bevy_math::ops。
+    let radius = (0.5 * diagonal / bevy::math::ops::tan(fov_y * 0.5)).max(0.05) * 1.25;
     let cmd = CameraOrbitCommand {
         target: Some(center),
         yaw_deg: Some(0.0),

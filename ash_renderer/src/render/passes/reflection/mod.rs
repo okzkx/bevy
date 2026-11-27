@@ -51,8 +51,8 @@ impl Default for ReflectionSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            steps: 64,
-            max_distance_m: 16.0,
+            steps: 96,
+            max_distance_m: 24.0,
             thickness_m: 0.35,
             roughness_cutoff: 0.35,
             edge_fade: 0.10,
